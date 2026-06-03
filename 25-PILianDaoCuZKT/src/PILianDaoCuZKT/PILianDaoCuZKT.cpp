@@ -29,6 +29,7 @@
 #include <NXOpen/DisplayableObject.hxx>
 #include <NXOpen/Drawings_BaseView.hxx>
 #include <NXOpen/Drawings_BaseViewBuilder.hxx>
+#include <NXOpen/Drawings_DraftingComponentSelectionBuilder.hxx>
 #include <NXOpen/Drawings_DraftingBody.hxx>
 #include <NXOpen/Drawings_DraftingBodyCollection.hxx>
 #include <NXOpen/Drawings_DraftingCurve.hxx>
@@ -43,6 +44,7 @@
 #include <NXOpen/Drawings_SelectModelViewBuilder.hxx>
 #include <NXOpen/Drawings_ViewPlacementBuilder.hxx>
 #include <NXOpen/Drawings_ViewScaleBuilder.hxx>
+#include <NXOpen/Drawings_ViewStyleBaseBuilder.hxx>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/Expression.hxx>
 #include <NXOpen/ExpressionCollection.hxx>
@@ -1512,6 +1514,45 @@ static NXOpen::Drawings::BaseView* CreateFlatBaseView(NXOpen::Part* workPart, co
         builder = workPart->DraftingViews()->CreateBaseViewBuilder(nullView);
         builder->Scale()->SetNumerator(1.0);
         builder->Scale()->SetDenominator(options.viewScaleDenominator);
+        try
+        {
+            builder->SecondaryComponents()->SetObjectType(NXOpen::Drawings::DraftingComponentSelectionBuilder::GeometryPrimaryGeometry);
+            if (item.part != NULL)
+            {
+                builder->SecondaryComponents()->SetPart(item.part);
+            }
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogLine("[CreateFlatBaseView] set secondary/primary component style ignored code="
+                + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message()));
+        }
+        catch (...)
+        {
+            LogLine("[CreateFlatBaseView] set secondary/primary component style ignored");
+        }
+
+        if (item.part != NULL)
+        {
+            try
+            {
+                builder->Style()->ViewStyleBase()->SetPart(item.part);
+                builder->Style()->ViewStyleBase()->SetPartName(NXOpen::NXString(item.partKey.c_str(), NXOpen::NXString::UTF8));
+                builder->Style()->ViewStyleBase()->Arrangement()->SetSelectedArrangement(NULL);
+                builder->Style()->ViewStyleBase()->Arrangement()->SetInheritArrangementFromParent(false);
+                LogLine("[CreateFlatBaseView] view style part set to child part=" + item.partKey);
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                LogLine("[CreateFlatBaseView] set view style part NXException code=" + std::to_string(ex.ErrorCode())
+                    + " message=" + std::string(ex.Message())
+                    + " part=" + item.partKey);
+            }
+            catch (...)
+            {
+                LogLine("[CreateFlatBaseView] set view style part exception part=" + item.partKey);
+            }
+        }
 
         NXOpen::ModelingView* modelView = FindModelingView(item.part, item.viewName);
         if (modelView != NULL)
