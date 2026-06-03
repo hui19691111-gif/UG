@@ -27,6 +27,8 @@
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
 #include <NXOpen/DisplayableObject.hxx>
+#include <NXOpen/Drafting_BaseEditSettingsBuilder.hxx>
+#include <NXOpen/Drafting_SettingsManager.hxx>
 #include <NXOpen/Drawings_BaseView.hxx>
 #include <NXOpen/Drawings_BaseViewBuilder.hxx>
 #include <NXOpen/Drawings_DraftingComponentSelectionBuilder.hxx>
@@ -41,10 +43,13 @@
 #include <NXOpen/Drawings_DraftingViewCollection.hxx>
 #include <NXOpen/Drawings_DrawingSheet.hxx>
 #include <NXOpen/Drawings_DrawingSheetCollection.hxx>
+#include <NXOpen/Drawings_EditViewSettingsBuilder.hxx>
 #include <NXOpen/Drawings_SelectModelViewBuilder.hxx>
 #include <NXOpen/Drawings_ViewPlacementBuilder.hxx>
 #include <NXOpen/Drawings_ViewScaleBuilder.hxx>
 #include <NXOpen/Drawings_ViewStyleBaseBuilder.hxx>
+#include <NXOpen/Drawings_ViewStyleBuilder.hxx>
+#include <NXOpen/Drawings_ViewStyleFPCurvesBuilder.hxx>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/Expression.hxx>
 #include <NXOpen/ExpressionCollection.hxx>
@@ -66,6 +71,7 @@
 #include <NXOpen/SelectDisplayableObject.hxx>
 #include <NXOpen/SelectNXObject.hxx>
 #include <NXOpen/Session.hxx>
+#include <NXOpen/SheetMetal_FlatPatternSettings.hxx>
 #include <NXOpen/Unit.hxx>
 #include <NXOpen/UnitCollection.hxx>
 #include <NXOpen/View.hxx>
@@ -97,11 +103,30 @@
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
 
+extern "C" __declspec(dllimport) int __stdcall MultiByteToWideChar(
+    unsigned int CodePage,
+    unsigned long dwFlags,
+    const char* lpMultiByteStr,
+    int cbMultiByte,
+    wchar_t* lpWideCharStr,
+    int cchWideChar);
+extern "C" __declspec(dllimport) int __stdcall WideCharToMultiByte(
+    unsigned int CodePage,
+    unsigned long dwFlags,
+    const wchar_t* lpWideCharStr,
+    int cchWideChar,
+    char* lpMultiByteStr,
+    int cbMultiByte,
+    const char* lpDefaultChar,
+    int* lpUsedDefaultChar);
+
 Session* PILianDaoCuZKTDialog::theSession = NULL;
 UI* PILianDaoCuZKTDialog::theUI = NULL;
 
 namespace
 {
+static const unsigned int kCodePageAcp = 0;
+static const unsigned int kCodePageUtf8 = 65001;
 static const char* kDefaultBodyNoteFormat = "{\xE7\xBC\x96\xE5\x8F\xB7=}{\xE6\x9D\x90\xE6\x96\x99} T={\xE5\x8E\x9A\xE5\xBA\xA6} {\xE6\x95\xB0\xE9\x87\x8F}PCS{\xE9\x95\x9C\xE5\x83\x8F}";
 struct CommandOptions
 {
@@ -276,6 +301,72 @@ static std::string RemoveUtf8Bom(const std::string& value)
         return value.substr(3);
     }
     return value;
+}
+
+static std::string ConvertCodePage(const std::string& text, unsigned int fromCodePage, unsigned int toCodePage)
+{
+    if (text.empty())
+    {
+        return "";
+    }
+
+    const int wideLength = MultiByteToWideChar(
+        fromCodePage,
+        0,
+        text.c_str(),
+        static_cast<int>(text.size()),
+        NULL,
+        0);
+    if (wideLength <= 0)
+    {
+        return text;
+    }
+
+    std::wstring wideText(static_cast<size_t>(wideLength), L'\0');
+    if (MultiByteToWideChar(
+        fromCodePage,
+        0,
+        text.c_str(),
+        static_cast<int>(text.size()),
+        &wideText[0],
+        wideLength) <= 0)
+    {
+        return text;
+    }
+
+    const int targetLength = WideCharToMultiByte(
+        toCodePage,
+        0,
+        wideText.c_str(),
+        wideLength,
+        NULL,
+        0,
+        NULL,
+        NULL);
+    if (targetLength <= 0)
+    {
+        return text;
+    }
+
+    std::string converted(static_cast<size_t>(targetLength), '\0');
+    if (WideCharToMultiByte(
+        toCodePage,
+        0,
+        wideText.c_str(),
+        wideLength,
+        &converted[0],
+        targetLength,
+        NULL,
+        NULL) <= 0)
+    {
+        return text;
+    }
+    return converted;
+}
+
+static std::string Utf8ToLocaleEncoding(const std::string& text)
+{
+    return ConvertCodePage(text, kCodePageUtf8, kCodePageAcp);
 }
 
 static std::wstring PluginDirectory()
@@ -696,6 +787,96 @@ static std::string BuildBodyNoteText(NXOpen::Part* part, NXOpen::Body* body, int
     return note;
 }
 
+static std::string BuildBodyNoteStaticSkeletonText()
+{
+    std::string text = LoadBodyNoteFormat();
+    ReplaceAllText(text, "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}", "");
+    ReplaceAllText(text, "{\xE7\xBC\x96\xE5\x8F\xB7=}", "");
+    ReplaceAllText(text, "{\xE7\xBC\x96\xE5\x8F\xB7}", "");
+    ReplaceAllText(text, "{\xE6\x9D\x90\xE6\x96\x99}", "");
+    ReplaceAllText(text, "{\xE5\x8E\x9A\xE5\xBA\xA6}", "");
+    ReplaceAllText(text, "{\xE6\x95\xB0\xE9\x87\x8F}", "");
+    ReplaceAllText(text, "{\xE9\x95\x9C\xE5\x83\x8F}", "");
+    text = Trim(text);
+    return text.empty() ? " " : text;
+}
+
+static std::string BodyNoteTokenValueForUf(
+    const std::string& token,
+    NXOpen::Part* part,
+    NXOpen::Body* body,
+    int occurrenceQuantity)
+{
+    if (token == "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}")
+    {
+        return ReadPartFileName(part);
+    }
+    if (token == "{\xE7\xBC\x96\xE5\x8F\xB7=}")
+    {
+        const std::string number = ReadAttributeText(body, "bianhao");
+        return number.empty() ? "" : number + "=";
+    }
+    if (token == "{\xE7\xBC\x96\xE5\x8F\xB7}")
+    {
+        return ReadAttributeText(body, "bianhao");
+    }
+    if (token == "{\xE6\x9D\x90\xE6\x96\x99}")
+    {
+        return BodyMaterialText(part, body);
+    }
+    if (token == "{\xE5\x8E\x9A\xE5\xBA\xA6}")
+    {
+        return BodyThicknessText(part, body);
+    }
+    if (token == "{\xE6\x95\xB0\xE9\x87\x8F}")
+    {
+        const std::string quantity = ReadQuantityText(part, body, occurrenceQuantity);
+        return quantity.empty() ? "1" : quantity;
+    }
+    if (token == "{\xE9\x95\x9C\xE5\x83\x8F}")
+    {
+        return ReadAttributeText(body, "MIRR");
+    }
+    return "";
+}
+
+static bool MatchBodyNoteToken(const std::string& format, size_t offset, std::string& token);
+
+static std::string BuildBodyNoteTextForUf(
+    NXOpen::Part* part,
+    NXOpen::Body* body,
+    int occurrenceQuantity)
+{
+    const std::string format = LoadBodyNoteFormat();
+    std::string result;
+    std::string staticText;
+    for (size_t i = 0; i < format.size();)
+    {
+        std::string token;
+        if (MatchBodyNoteToken(format, i, token))
+        {
+            if (!staticText.empty())
+            {
+                result += Utf8ToLocaleEncoding(staticText);
+                staticText.clear();
+            }
+            result += BodyNoteTokenValueForUf(token, part, body, occurrenceQuantity);
+            i += token.size();
+            continue;
+        }
+
+        staticText += format[i];
+        ++i;
+    }
+
+    if (!staticText.empty())
+    {
+        result += Utf8ToLocaleEncoding(staticText);
+    }
+    result = Trim(result);
+    return result.empty() ? "FLAT PATTERN" : result;
+}
+
 static std::vector<NXOpen::NXString> MakeNoteLines(const std::string& noteText)
 {
     std::vector<NXOpen::NXString> lines;
@@ -1058,6 +1239,57 @@ static bool FeatureTypeEquals(NXOpen::Features::Feature* feature, const char* ty
     {
         return false;
     }
+}
+
+static std::string AskUfFeatureTypeText(tag_t featureTag)
+{
+    if (featureTag == NULL_TAG)
+    {
+        return "";
+    }
+
+    char* featureType = NULL;
+    if (UF_MODL_ask_feat_type(featureTag, &featureType) != 0 || featureType == NULL)
+    {
+        return "";
+    }
+
+    std::string text(featureType);
+    UF_free(featureType);
+    return text;
+}
+
+static bool TextContainsCaseInsensitive(const std::string& text, const std::string& expected)
+{
+    if (expected.empty())
+    {
+        return false;
+    }
+
+    std::string loweredText = text;
+    std::string loweredExpected = expected;
+    for (size_t i = 0; i < loweredText.size(); ++i)
+    {
+        if (loweredText[i] >= 'A' && loweredText[i] <= 'Z')
+        {
+            loweredText[i] = static_cast<char>(loweredText[i] - 'A' + 'a');
+        }
+    }
+    for (size_t i = 0; i < loweredExpected.size(); ++i)
+    {
+        if (loweredExpected[i] >= 'A' && loweredExpected[i] <= 'Z')
+        {
+            loweredExpected[i] = static_cast<char>(loweredExpected[i] - 'A' + 'a');
+        }
+    }
+    return loweredText.find(loweredExpected) != std::string::npos;
+}
+
+static bool TextLooksLikeBendReference(const std::string& text)
+{
+    return TextContainsCaseInsensitive(text, "bend") ||
+        TextContainsCaseInsensitive(text, "joggle") ||
+        text.find("\xE6\x8A\x98\xE5\xBC\xAF") != std::string::npos;
 }
 
 static bool IsSolidBody(NXOpen::Body* body)
@@ -1537,7 +1769,7 @@ static NXOpen::Drawings::BaseView* CreateFlatBaseView(NXOpen::Part* workPart, co
             try
             {
                 builder->Style()->ViewStyleBase()->SetPart(item.part);
-                builder->Style()->ViewStyleBase()->SetPartName(NXOpen::NXString(item.partKey.c_str(), NXOpen::NXString::UTF8));
+                builder->Style()->ViewStyleBase()->SetPartName(item.part->FullPath());
                 builder->Style()->ViewStyleBase()->Arrangement()->SetSelectedArrangement(NULL);
                 builder->Style()->ViewStyleBase()->Arrangement()->SetInheritArrangementFromParent(false);
                 LogLine("[CreateFlatBaseView] view style part set to child part=" + item.partKey);
@@ -1991,12 +2223,13 @@ static void CreateBodyNote(NXOpen::Part* workPart, const FlatPatternItem& item, 
     try
     {
         std::string text = BuildBodyNoteText(item.part, item.body, item.quantity);
+        std::string ufInitialText = BuildBodyNoteTextForUf(item.part, item.body, item.quantity);
         const NXOpen::Point3d adjustedPoint = AdjustBodyNotePointForLineCount(point, textSize);
         std::vector<std::string> lineTexts;
         std::string current;
-        for (size_t i = 0; i < text.size(); ++i)
+        for (size_t i = 0; i < ufInitialText.size(); ++i)
         {
-            const char ch = text[i];
+            const char ch = ufInitialText[i];
             if (ch == '\r')
             {
                 continue;
@@ -2009,11 +2242,14 @@ static void CreateBodyNote(NXOpen::Part* workPart, const FlatPatternItem& item, 
             }
             current += ch;
         }
-        lineTexts.push_back(current.empty() ? text : current);
+        lineTexts.push_back(current.empty() ? ufInitialText : current);
+        std::vector<std::string> localeLineTexts;
+        localeLineTexts.reserve(lineTexts.size());
         std::vector<char*> linePointers;
         for (size_t i = 0; i < lineTexts.size(); ++i)
         {
-            linePointers.push_back(lineTexts[i].empty() ? const_cast<char*>(" ") : const_cast<char*>(lineTexts[i].c_str()));
+            localeLineTexts.push_back(lineTexts[i].empty() ? std::string(" ") : lineTexts[i]);
+            linePointers.push_back(const_cast<char*>(localeLineTexts.back().c_str()));
         }
         double origin[3] = { adjustedPoint.X, adjustedPoint.Y, adjustedPoint.Z };
         tag_t createdTag = NULL_TAG;
@@ -2055,7 +2291,6 @@ static void CreateBodyNote(NXOpen::Part* workPart, const FlatPatternItem& item, 
                     catch (...)
                     {
                     }
-                    linkedText = SetLinkedBodyNoteText(editBuilder->Text()->TextBlock(), item.part, item.body, item.quantity);
                     NXOpen::NXObject* edited = editBuilder->Commit();
                     editStatus = edited != NULL ? 0 : 1;
                     editBuilder->Destroy();
@@ -2097,6 +2332,7 @@ static void CreateBodyNote(NXOpen::Part* workPart, const FlatPatternItem& item, 
             + " linkedText=" + std::to_string(linkedText ? 1 : 0)
             + " editStatus=" + std::to_string(editStatus)
             + " text=" + text
+            + " ufInitialText=" + ufInitialText
             + " point=(" + FormatReal(adjustedPoint.X) + "," + FormatReal(adjustedPoint.Y) + ")");
     }
     catch (const NXOpen::NXException& ex)
@@ -2137,6 +2373,248 @@ static std::vector<NXOpen::Drawings::DraftingCurve*> CollectDraftingCurves(NXOpe
     {
     }
     return curves;
+}
+
+static bool IsBendDraftingCurve(NXOpen::Drawings::DraftingCurve* curve, std::string& reason)
+{
+    reason.clear();
+    if (curve == NULL)
+    {
+        return false;
+    }
+
+    try
+    {
+        if (curve->IsReference())
+        {
+            reason = "draftingCurveReference";
+            return true;
+        }
+    }
+    catch (...)
+    {
+    }
+
+    try
+    {
+        const NXOpen::DisplayableObject::ObjectFont font = curve->LineFont();
+        if (font != NXOpen::DisplayableObject::ObjectFontSolid)
+        {
+            reason = "lineFont=" + std::to_string(static_cast<int>(font));
+            return true;
+        }
+    }
+    catch (...)
+    {
+    }
+
+    try
+    {
+        NXOpen::Drawings::DraftingCurveInfo* info = curve->GetDraftingCurveInfo();
+        if (info != NULL)
+        {
+            std::vector<NXOpen::NXObject*> parents = info->GetParents();
+            for (size_t i = 0; i < parents.size(); ++i)
+            {
+                NXOpen::NXObject* parent = parents[i];
+                if (parent == NULL)
+                {
+                    continue;
+                }
+
+                const std::string parentName = LocaleText(parent->Name());
+                if (TextLooksLikeBendReference(parentName))
+                {
+                    reason = "nxParentName=" + parentName;
+                    return true;
+                }
+
+                tag_t featureTag = NULL_TAG;
+                if (UF_MODL_ask_object_feat(parent->Tag(), &featureTag) == 0 && featureTag != NULL_TAG)
+                {
+                    const std::string featureType = AskUfFeatureTypeText(featureTag);
+                    if (TextLooksLikeBendReference(featureType))
+                    {
+                        reason = "nxParentFeatureType=" + featureType;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+
+    int parentCount = 0;
+    tag_t* parentTags = NULL;
+    if (UF_DRAW_ask_drafting_curve_parents(curve->Tag(), &parentCount, &parentTags) == 0 && parentTags != NULL)
+    {
+        bool found = false;
+        for (int i = 0; i < parentCount && !found; ++i)
+        {
+            tag_t featureTag = NULL_TAG;
+            if (parentTags[i] != NULL_TAG &&
+                UF_MODL_ask_object_feat(parentTags[i], &featureTag) == 0 &&
+                featureTag != NULL_TAG)
+            {
+                const std::string featureType = AskUfFeatureTypeText(featureTag);
+                if (TextLooksLikeBendReference(featureType))
+                {
+                    reason = "ufParentFeatureType=" + featureType;
+                    found = true;
+                }
+            }
+        }
+        UF_free(parentTags);
+        if (found)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void ApplyBendLineVisibility(NXOpen::Drawings::BaseView* view, bool showBendLines)
+{
+    std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(view);
+    int bendCount = 0;
+    int hiddenCount = 0;
+    for (size_t i = 0; i < curves.size(); ++i)
+    {
+        NXOpen::Drawings::DraftingCurve* curve = curves[i];
+        std::string reason;
+        if (!IsBendDraftingCurve(curve, reason))
+        {
+            continue;
+        }
+
+        ++bendCount;
+        if (!showBendLines)
+        {
+            try
+            {
+                curve->Blank();
+                ++hiddenCount;
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                LogLine("[ApplyBendLineVisibility] blank bend curve NXException code="
+                    + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message())
+                    + " reason=" + reason);
+            }
+            catch (...)
+            {
+                LogLine("[ApplyBendLineVisibility] blank bend curve exception reason=" + reason);
+            }
+        }
+    }
+    LogLine("[ApplyBendLineVisibility] show=" + std::to_string(showBendLines ? 1 : 0)
+        + " curveCount=" + std::to_string(curves.size())
+        + " bendCount=" + std::to_string(bendCount)
+        + " hiddenCount=" + std::to_string(hiddenCount));
+}
+
+static void SetFlatPatternCurveState(
+    NXOpen::Drawings::EditViewSettingsBuilder* builder,
+    NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectType objectType,
+    bool state,
+    const std::string& label)
+{
+    if (builder == NULL)
+    {
+        return;
+    }
+
+    try
+    {
+        NXOpen::Drawings::ViewStyleFPCurvesBuilder* curveBuilder =
+            builder->ViewStyle()->GetViewStyleFPCurve(objectType);
+        if (curveBuilder == NULL)
+        {
+            LogLine("[ApplyFlatPatternBendCurveVisibility] " + label + " builder is null");
+            return;
+        }
+
+        const bool oldState = curveBuilder->State();
+        curveBuilder->SetState(state);
+        LogLine("[ApplyFlatPatternBendCurveVisibility] " + label
+            + " old=" + std::to_string(oldState ? 1 : 0)
+            + " new=" + std::to_string(state ? 1 : 0));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[ApplyFlatPatternBendCurveVisibility] " + label
+            + " NXException code=" + std::to_string(ex.ErrorCode())
+            + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[ApplyFlatPatternBendCurveVisibility] " + label + " exception");
+    }
+}
+
+static void ApplyFlatPatternBendCurveVisibility(
+    NXOpen::Part* workPart,
+    NXOpen::Drawings::BaseView* view,
+    bool showBendLines)
+{
+    if (workPart == NULL || view == NULL)
+    {
+        LogLine("[ApplyFlatPatternBendCurveVisibility] skip null workPart/view");
+        return;
+    }
+
+    NXOpen::Drawings::EditViewSettingsBuilder* builder = NULL;
+    try
+    {
+        std::vector<NXOpen::View*> views(1);
+        views[0] = view;
+        builder = workPart->SettingsManager()->CreateDrawingEditViewSettingsBuilder(views);
+
+        std::vector<NXOpen::Drafting::BaseEditSettingsBuilder*> editBuilders(1);
+        editBuilders[0] = builder;
+        workPart->SettingsManager()->ProcessForMultipleObjectsSettings(editBuilders);
+
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendCenterLine,
+            showBendLines,
+            "BendCenterLine");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendUpCenterLine,
+            showBendLines,
+            "BendUpCenterLine");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendDownCenterLine,
+            showBendLines,
+            "BendDownCenterLine");
+
+        builder->Commit();
+        builder->Destroy();
+        builder = NULL;
+
+        LogLine("[ApplyFlatPatternBendCurveVisibility] committed show="
+            + std::to_string(showBendLines ? 1 : 0)
+            + " viewTag=" + std::to_string(view->Tag()));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[ApplyFlatPatternBendCurveVisibility] NXException code="
+            + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message()));
+        if (builder != NULL)
+        {
+            try { builder->Destroy(); } catch (...) {}
+        }
+    }
+    catch (...)
+    {
+        LogLine("[ApplyFlatPatternBendCurveVisibility] exception");
+        if (builder != NULL)
+        {
+            try { builder->Destroy(); } catch (...) {}
+        }
+    }
 }
 
 struct CurveAssocCandidate
@@ -2717,6 +3195,14 @@ static void LayoutAndAnnotateViews(NXOpen::Part* workPart, const std::vector<Fla
     }
     DoUpdateNow("PILianDaoCuZKT center views before layout");
 
+    LogLine("[LayoutAndAnnotateViews] phase1c apply bend line visibility show="
+        + std::to_string(options.showBendLines ? 1 : 0));
+    for (size_t i = 0; i < createdViews.size(); ++i)
+    {
+        ApplyFlatPatternBendCurveVisibility(workPart, createdViews[i].view, options.showBendLines);
+    }
+    DoUpdateNow("PILianDaoCuZKT apply bend line visibility");
+
     LogLine("[LayoutAndAnnotateViews] phase2 measure view rectangles");
     for (size_t i = 0; i < createdViews.size(); ++i)
     {
@@ -2863,6 +3349,17 @@ static void LayoutAndAnnotateViews(NXOpen::Part* workPart, const std::vector<Fla
     }
 
     DoUpdateNow("PILianDaoCuZKT layout views");
+
+    LogLine("[LayoutAndAnnotateViews] phase3b reapply bend line visibility after layout show="
+        + std::to_string(options.showBendLines ? 1 : 0));
+    for (size_t i = 0; i < createdViews.size(); ++i)
+    {
+        if (createdViews[i].placed)
+        {
+            ApplyFlatPatternBendCurveVisibility(workPart, createdViews[i].view, options.showBendLines);
+        }
+    }
+    DoUpdateNow("PILianDaoCuZKT reapply bend line visibility");
 
     LogLine("[LayoutAndAnnotateViews] phase4 annotate and dimension after final layout");
     for (size_t i = 0; i < createdViews.size(); ++i)
@@ -3102,6 +3599,15 @@ int PILianDaoCuZKTDialog::ok_cb()
         options.rowSpacing = ClampPositive(GetDoubleValue(row_spacing, 20.0), 20.0);
         options.noteTextSize = ClampPositive(GetDoubleValue(note_text_size, 3.5), 3.5);
         options.viewScaleDenominator = ClampPositive(GetDoubleValue(dimension_global_scale, 1.0), 1.0);
+        LogLine("[ok_cb] options categoryLayout=" + std::to_string(options.categoryLayout ? 1 : 0)
+            + " annotateMaxDimension=" + std::to_string(options.annotateMaxDimension ? 1 : 0)
+            + " showBendLines=" + std::to_string(options.showBendLines ? 1 : 0)
+            + " sheetWidth=" + FormatReal(options.sheetWidth)
+            + " sheetHeight=" + FormatReal(options.sheetHeight)
+            + " viewSpacing=" + FormatReal(options.viewSpacing)
+            + " rowSpacing=" + FormatReal(options.rowSpacing)
+            + " noteTextSize=" + FormatReal(options.noteTextSize)
+            + " viewScaleDenominator=" + FormatReal(options.viewScaleDenominator));
 
         RunBatchFlatPatternDrawing(options);
         PILianDaoCuZKTDialog::theUI->NXMessageBox()->Show("PILianDaoCuZKT", NXOpen::NXMessageBox::DialogTypeInformation, "批量展开图出图完成。");
