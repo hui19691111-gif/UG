@@ -52,7 +52,7 @@
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <SetChecksum>true</SetChecksum>
       <AdditionalLibraryDirectories>D:\Program Files\Siemens\NX2412\UGOPEN;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libufun.lib;libnxopencpp.lib;libnxopencpp_assemblies.lib;libnxopencpp_annotations.lib;libnxopencpp_drafting.lib;libnxopencpp_drawings.lib;libnxopencpp_features.lib;libnxopenuicpp.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libufun.lib;libnxopencpp.lib;libnxopencpp_assemblies.lib;libnxopencpp_annotations.lib;libnxopencpp_drafting.lib;libnxopencpp_drawings.lib;libnxopencpp_features.lib;libnxopencpp_preferences.lib;libnxopenuicpp.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

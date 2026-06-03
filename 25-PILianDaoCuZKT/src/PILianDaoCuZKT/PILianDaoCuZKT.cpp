@@ -10,6 +10,7 @@
 #include <NXOpen/Annotations_DimensionStyleBuilder.hxx>
 #include <NXOpen/Annotations_DraftingNoteBuilder.hxx>
 #include <NXOpen/Annotations_LetteringStyleBuilder.hxx>
+#include <NXOpen/Annotations_LineArrowStyleBuilder.hxx>
 #include <NXOpen/Annotations_Note.hxx>
 #include <NXOpen/Annotations_OriginBuilder.hxx>
 #include <NXOpen/Annotations_PlaneBuilder.hxx>
@@ -20,6 +21,7 @@
 #include <NXOpen/Annotations_TextWithSymbolsBuilder.hxx>
 #include <NXOpen/Assemblies_Component.hxx>
 #include <NXOpen/Assemblies_ComponentAssembly.hxx>
+#include <NXOpen/BasePart.hxx>
 #include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/Builder.hxx>
@@ -28,6 +30,7 @@
 #include <NXOpen/DirectionCollection.hxx>
 #include <NXOpen/DisplayableObject.hxx>
 #include <NXOpen/Drafting_BaseEditSettingsBuilder.hxx>
+#include <NXOpen/Drafting_PreferencesBuilder.hxx>
 #include <NXOpen/Drafting_SettingsManager.hxx>
 #include <NXOpen/Drawings_BaseView.hxx>
 #include <NXOpen/Drawings_BaseViewBuilder.hxx>
@@ -49,6 +52,8 @@
 #include <NXOpen/Drawings_ViewScaleBuilder.hxx>
 #include <NXOpen/Drawings_ViewStyleBaseBuilder.hxx>
 #include <NXOpen/Drawings_ViewStyleBuilder.hxx>
+#include <NXOpen/Drawings_ViewStyleFPCalloutConfigBuilder.hxx>
+#include <NXOpen/Drawings_ViewStyleFPCalloutsBuilder.hxx>
 #include <NXOpen/Drawings_ViewStyleFPCurvesBuilder.hxx>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/Expression.hxx>
@@ -65,6 +70,8 @@
 #include <NXOpen/NXObjectManager.hxx>
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
+#include <NXOpen/Preferences_PartDrafting.hxx>
+#include <NXOpen/Preferences_PartPreferences.hxx>
 #include <NXOpen/DraftingManager.hxx>
 #include <NXOpen/SelectEdge.hxx>
 #include <NXOpen/SelectFace.hxx>
@@ -88,8 +95,10 @@
 #include <uf_view.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <io.h>
@@ -127,7 +136,10 @@ namespace
 {
 static const unsigned int kCodePageAcp = 0;
 static const unsigned int kCodePageUtf8 = 65001;
+static const char* kPluginSheetNamePrefix = "PILianDaoCuZKT";
 static const char* kDefaultBodyNoteFormat = "{\xE7\xBC\x96\xE5\x8F\xB7=}{\xE6\x9D\x90\xE6\x96\x99} T={\xE5\x8E\x9A\xE5\xBA\xA6} {\xE6\x95\xB0\xE9\x87\x8F}PCS{\xE9\x95\x9C\xE5\x83\x8F}";
+static const double kSheetMargin = 40.0;
+static const double kDimensionPlacementGap = 7.0;
 struct CommandOptions
 {
     bool categoryLayout;
@@ -141,6 +153,55 @@ struct CommandOptions
     double viewScaleDenominator;
 };
 
+struct FlatPatternCreateFailure
+{
+    std::string partKey;
+    std::string viewName;
+};
+
+struct DrawingRunSummary
+{
+    size_t totalCount;
+    size_t createdCount;
+    size_t sheetCount;
+    std::vector<FlatPatternCreateFailure> failures;
+
+    DrawingRunSummary()
+        : totalCount(0),
+          createdCount(0),
+          sheetCount(0)
+    {
+    }
+};
+
+static std::string FileNameOnly(const std::string& path)
+{
+    const size_t pos = path.find_last_of("\\/");
+    return pos == std::string::npos ? path : path.substr(pos + 1);
+}
+
+static std::string BuildRunSummaryMessage(const DrawingRunSummary& summary)
+{
+    std::ostringstream oss;
+    oss << "批量展开图出图完成。\n"
+        << "展开图总数: " << summary.totalCount << "\n"
+        << "成功创建: " << summary.createdCount << "\n"
+        << "失败: " << summary.failures.size() << "\n"
+        << "图纸页: " << summary.sheetCount;
+
+    if (!summary.failures.empty())
+    {
+        oss << "\n\n失败列表:";
+        for (size_t i = 0; i < summary.failures.size(); ++i)
+        {
+            oss << "\n" << (i + 1) << ". 文件: " << FileNameOnly(summary.failures[i].partKey)
+                << "  展开: " << summary.failures[i].viewName;
+        }
+    }
+
+    return oss.str();
+}
+
 struct FlatPatternItem
 {
     NXOpen::Part* part;
@@ -149,7 +210,16 @@ struct FlatPatternItem
     NXOpen::Face* upwardFace;
     std::string viewName;
     std::string partKey;
+    std::string material;
+    std::string thickness;
+    std::string layoutKey;
+    std::string noteText;
+    std::string ufNoteText;
     int quantity;
+    double flatWidth;
+    double flatHeight;
+    double flatArea;
+    bool hasFlatSize;
 };
 
 struct DraftRect
@@ -168,34 +238,12 @@ static std::string LocaleText(const NXOpen::NXString& value)
 
 static void LogLine(const std::string& text)
 {
-    try
-    {
-        std::time_t rawTime = std::time(NULL);
-        std::tm localTime = {};
-        localtime_s(&localTime, &rawTime);
-        char prefix[128] = {};
-        sprintf(prefix, "%04d-%02d-%02d %02d:%02d:%02d ",
-            localTime.tm_year + 1900, localTime.tm_mon + 1, localTime.tm_mday,
-            localTime.tm_hour, localTime.tm_min, localTime.tm_sec);
-        std::ofstream file("C:\\PILianDaoCuZKT_debug.log", std::ios::app);
-        file << prefix << text << std::endl;
-    }
-    catch (...)
-    {
-    }
+    (void)text;
+}
 
-    try
-    {
-        ListingWindow* lw = Session::GetSession()->ListingWindow();
-        if (!lw->IsOpen())
-        {
-            lw->Open();
-        }
-        lw->WriteLine(text.c_str());
-    }
-    catch (...)
-    {
-    }
+static long long ElapsedMilliseconds(const std::chrono::steady_clock::time_point& start)
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
 }
 
 static double ClampPositive(double value, double fallback)
@@ -563,6 +611,144 @@ static std::string ReadFirstAttribute(NXOpen::NXObject* first, NXOpen::NXObject*
     return "";
 }
 
+static std::vector<double> ParsePositiveNumbers(const std::string& text)
+{
+    std::string normalized = text;
+    for (size_t i = 0; i < normalized.size(); ++i)
+    {
+        char c = normalized[i];
+        if (c == ',')
+        {
+            normalized[i] = '.';
+        }
+        else if (!((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E'))
+        {
+            normalized[i] = ' ';
+        }
+    }
+
+    std::vector<double> values;
+    std::stringstream stream(normalized);
+    std::string token;
+    while (stream >> token)
+    {
+        char* endPtr = NULL;
+        const double value = std::strtod(token.c_str(), &endPtr);
+        if (endPtr != token.c_str() && value > 1.0e-6)
+        {
+            values.push_back(value);
+        }
+    }
+    return values;
+}
+
+static bool TryParseRealText(const std::string& text, double& value)
+{
+    const std::vector<double> values = ParsePositiveNumbers(text);
+    if (values.empty())
+    {
+        return false;
+    }
+    value = values[0];
+    return true;
+}
+
+static bool TryParseSizePairText(const std::string& text, double& width, double& height)
+{
+    const std::vector<double> values = ParsePositiveNumbers(text);
+    if (values.size() < 2)
+    {
+        return false;
+    }
+    width = values[0];
+    height = values[1];
+    return width > 1.0e-6 && height > 1.0e-6;
+}
+
+static bool ReadRealAttributeFromTitles(NXOpen::NXObject* first, NXOpen::NXObject* second, const char* const* titles, size_t count, double& value)
+{
+    for (size_t i = 0; i < count; ++i)
+    {
+        std::string text = ReadAttributeText(first, titles[i]);
+        if (!text.empty() && TryParseRealText(text, value))
+        {
+            return true;
+        }
+        text = ReadAttributeText(second, titles[i]);
+        if (!text.empty() && TryParseRealText(text, value))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ReadSizePairAttributeFromTitles(NXOpen::NXObject* first, NXOpen::NXObject* second, const char* const* titles, size_t count, double& width, double& height)
+{
+    for (size_t i = 0; i < count; ++i)
+    {
+        std::string text = ReadAttributeText(first, titles[i]);
+        if (!text.empty() && TryParseSizePairText(text, width, height))
+        {
+            return true;
+        }
+        text = ReadAttributeText(second, titles[i]);
+        if (!text.empty() && TryParseSizePairText(text, width, height))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ReadFlatPatternSizeFromAttributes(NXOpen::Features::Feature* feature, NXOpen::Body* body, double& width, double& height)
+{
+    width = 0.0;
+    height = 0.0;
+
+    static const char* const widthTitles[] = {
+        "Minimum X", "MinimumX", "MINIMUM X", "Min X", "MIN X",
+        "WIDTH", "Width", "width", "W", "w", "X", "x",
+        "FLAT_WIDTH", "flat_width", "FlatWidth", "Kuan", "kuan",
+        "\xE5\xB1\x95\xE5\xBC\x80\xE5\xAE\xBD\xE5\xBA\xA6",
+        "\xE5\xAE\xBD\xE5\xBA\xA6",
+        "\xE5\xAE\xBD",
+        "\xE5\xB1\x95\xE5\xBC\x80\xE5\x9B\xBE\xE5\xAE\xBD\xE5\xBA\xA6",
+        "\xE4\xB8\x8B\xE6\x96\x99\xE5\xAE\xBD\xE5\xBA\xA6"
+    };
+    static const char* const heightTitles[] = {
+        "Minimum Y", "MinimumY", "MINIMUM Y", "Min Y", "MIN Y",
+        "HEIGHT", "Height", "height", "H", "h", "Y", "y", "L", "l",
+        "LENGTH", "Length", "length", "FLAT_LENGTH", "flat_length", "FlatLength", "Chang", "chang",
+        "\xE5\xB1\x95\xE5\xBC\x80\xE9\x95\xBF\xE5\xBA\xA6",
+        "\xE9\x95\xBF\xE5\xBA\xA6",
+        "\xE9\x95\xBF",
+        "\xE5\xB1\x95\xE5\xBC\x80\xE5\x9B\xBE\xE9\x95\xBF\xE5\xBA\xA6",
+        "\xE4\xB8\x8B\xE6\x96\x99\xE9\x95\xBF\xE5\xBA\xA6"
+    };
+    static const char* const sizeTitles[] = {
+        "SIZE", "Size", "size", "DIM", "Dim", "dim", "FLAT_SIZE", "flat_size", "FlatSize",
+        "\xE8\xA7\x84\xE6\xA0\xBC",
+        "\xE5\xB0\xBA\xE5\xAF\xB8",
+        "\xE5\xB1\x95\xE5\xBC\x80\xE5\xB0\xBA\xE5\xAF\xB8",
+        "\xE5\xB1\x95\xE5\xBC\x80\xE5\x9B\xBE\xE5\xB0\xBA\xE5\xAF\xB8"
+    };
+
+    const bool hasWidth = ReadRealAttributeFromTitles(feature, body, widthTitles, sizeof(widthTitles) / sizeof(widthTitles[0]), width);
+    const bool hasHeight = ReadRealAttributeFromTitles(feature, body, heightTitles, sizeof(heightTitles) / sizeof(heightTitles[0]), height);
+    if (hasWidth && hasHeight)
+    {
+        return true;
+    }
+
+    if (ReadSizePairAttributeFromTitles(feature, body, sizeTitles, sizeof(sizeTitles) / sizeof(sizeTitles[0]), width, height))
+    {
+        return true;
+    }
+
+    return false;
+}
+
 static std::string ReadPartFileName(NXOpen::Part* part)
 {
     if (part == NULL)
@@ -673,9 +859,15 @@ static std::string LoadBodyNoteFormat()
     return kDefaultBodyNoteFormat;
 }
 
+static const std::string& CachedBodyNoteFormat()
+{
+    static const std::string format = LoadBodyNoteFormat();
+    return format;
+}
+
 static int BodyNoteFormatLineCount()
 {
-    const std::string format = LoadBodyNoteFormat();
+    const std::string& format = CachedBodyNoteFormat();
     int lineCount = 1;
     for (size_t i = 0; i < format.size(); ++i)
     {
@@ -712,6 +904,30 @@ static std::string BodyMaterialText(NXOpen::Part* part, NXOpen::Body* body)
         "\xE6\x9D\x90\xE8\xB4\xA8"
     };
     return ReadFirstAttribute(body, part, materialTitles, sizeof(materialTitles) / sizeof(materialTitles[0]));
+}
+
+static bool PartHasRequiredAssemblyExportAttributes(NXOpen::Part* part, std::string& material, std::string& quantity)
+{
+    material.clear();
+    quantity.clear();
+    if (part == NULL)
+    {
+        return false;
+    }
+
+    const char* materialTitles[] = {
+        "cailiao",
+        "\xE6\x9D\x90\xE6\x96\x99",
+        "\xE6\x9D\x90\xE8\xB4\xA8"
+    };
+    const char* quantityTitles[] = {
+        "sulian",
+        "\xE6\x95\xB0\xE9\x87\x8F"
+    };
+
+    material = ReadFirstAttribute(part, NULL, materialTitles, sizeof(materialTitles) / sizeof(materialTitles[0]));
+    quantity = ReadFirstAttribute(part, NULL, quantityTitles, sizeof(quantityTitles) / sizeof(quantityTitles[0]));
+    return !Trim(material).empty() && !Trim(quantity).empty();
 }
 
 static std::string BodyThicknessText(NXOpen::Part* part, NXOpen::Body* body)
@@ -762,7 +978,7 @@ static std::string BuildBodyNoteText(NXOpen::Part* part, NXOpen::Body* body, int
     const std::string mirror = ReadAttributeText(body, "MIRR");
     const std::string number = ReadAttributeText(body, "bianhao");
 
-    std::string note = LoadBodyNoteFormat();
+    std::string note = CachedBodyNoteFormat();
     ReplaceAllText(note, "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}", ReadPartFileName(part));
     ReplaceAllText(note, "{\xE7\xBC\x96\xE5\x8F\xB7=}", number.empty() ? "" : number + "=");
     ReplaceAllText(note, "{\xE7\xBC\x96\xE5\x8F\xB7}", number);
@@ -789,7 +1005,7 @@ static std::string BuildBodyNoteText(NXOpen::Part* part, NXOpen::Body* body, int
 
 static std::string BuildBodyNoteStaticSkeletonText()
 {
-    std::string text = LoadBodyNoteFormat();
+    std::string text = CachedBodyNoteFormat();
     ReplaceAllText(text, "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}", "");
     ReplaceAllText(text, "{\xE7\xBC\x96\xE5\x8F\xB7=}", "");
     ReplaceAllText(text, "{\xE7\xBC\x96\xE5\x8F\xB7}", "");
@@ -847,7 +1063,7 @@ static std::string BuildBodyNoteTextForUf(
     NXOpen::Body* body,
     int occurrenceQuantity)
 {
-    const std::string format = LoadBodyNoteFormat();
+    const std::string& format = CachedBodyNoteFormat();
     std::string result;
     std::string staticText;
     for (size_t i = 0; i < format.size();)
@@ -1477,9 +1693,29 @@ static std::vector<FlatPatternItem> CollectPartFlatPatterns(NXOpen::Part* part, 
             item.viewName = viewName;
             item.partKey = LocaleText(part->FullPath());
             item.quantity = quantity;
+            item.material = BodyMaterialText(part, item.body);
+            item.thickness = BodyThicknessText(part, item.body);
+            item.layoutKey = BodyLayoutKey(item.material, item.thickness);
+            item.noteText = BuildBodyNoteText(part, item.body, item.quantity);
+            item.ufNoteText = BuildBodyNoteTextForUf(part, item.body, item.quantity);
+            item.flatWidth = 0.0;
+            item.flatHeight = 0.0;
+            item.flatArea = 0.0;
+            item.hasFlatSize = ReadFlatPatternSizeFromAttributes(feature, item.body, item.flatWidth, item.flatHeight);
+            if (item.hasFlatSize)
+            {
+                item.flatArea = item.flatWidth * item.flatHeight;
+            }
             items.push_back(item);
             LogLine("[CollectPartFlatPatterns] accepted view=" + item.viewName
-                + " bodyTag=" + std::to_string(static_cast<unsigned long long>(item.body != NULL ? item.body->Tag() : NULL_TAG)));
+                + " bodyTag=" + std::to_string(static_cast<unsigned long long>(item.body != NULL ? item.body->Tag() : NULL_TAG))
+                + " material=" + item.material
+                + " thickness=" + item.thickness
+                + " layoutKey=" + item.layoutKey
+                + " hasFlatSize=" + std::to_string(item.hasFlatSize ? 1 : 0)
+                + " flatWidth=" + FormatReal(item.flatWidth)
+                + " flatHeight=" + FormatReal(item.flatHeight)
+                + " flatArea=" + FormatReal(item.flatArea));
 
             if (builder != NULL)
             {
@@ -1521,11 +1757,18 @@ static bool IsAssemblyPart(NXOpen::Part* part)
     }
 }
 
-static void EnsurePartFullyLoaded(NXOpen::Part* part)
+struct AssemblyPartCountInfo
+{
+    NXOpen::Part* part;
+    int count;
+    bool loadedByPlugin;
+};
+
+static bool EnsurePartFullyLoaded(NXOpen::Part* part)
 {
     if (part == NULL)
     {
-        return;
+        return false;
     }
     try
     {
@@ -1538,6 +1781,7 @@ static void EnsurePartFullyLoaded(NXOpen::Part* part)
             {
                 delete status;
             }
+            return true;
         }
     }
     catch (const NXOpen::NXException& ex)
@@ -1550,9 +1794,40 @@ static void EnsurePartFullyLoaded(NXOpen::Part* part)
     {
         LogLine("[EnsurePartFullyLoaded] exception part=" + LocaleText(part->Name()));
     }
+    return false;
 }
 
-static void AddAssemblyPrototypePartCount(NXOpen::Assemblies::Component* component, std::map<tag_t, std::pair<NXOpen::Part*, int> >& counts)
+static void ClosePluginLoadedPartIfUnused(NXOpen::Part* part, const std::string& reason)
+{
+    if (part == NULL)
+    {
+        return;
+    }
+
+    try
+    {
+        part->Close(
+            NXOpen::BasePart::CloseWholeTreeFalse,
+            NXOpen::BasePart::CloseModifiedDontCloseModified,
+            NULL);
+        LogLine("[ClosePluginLoadedPartIfUnused] closed part=" + LocaleText(part->Name())
+            + " reason=" + reason);
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[ClosePluginLoadedPartIfUnused] NXException part=" + LocaleText(part->Name())
+            + " reason=" + reason
+            + " code=" + std::to_string(ex.ErrorCode())
+            + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[ClosePluginLoadedPartIfUnused] exception part=" + LocaleText(part->Name())
+            + " reason=" + reason);
+    }
+}
+
+static void AddAssemblyPrototypePartCount(NXOpen::Assemblies::Component* component, std::map<tag_t, AssemblyPartCountInfo>& counts)
 {
     if (component == NULL)
     {
@@ -1563,12 +1838,48 @@ static void AddAssemblyPrototypePartCount(NXOpen::Assemblies::Component* compone
         NXOpen::Part* part = dynamic_cast<NXOpen::Part*>(component->Prototype());
         if (part != NULL)
         {
-            EnsurePartFullyLoaded(part);
-            std::pair<NXOpen::Part*, int>& entry = counts[part->Tag()];
-            entry.first = part;
-            entry.second += 1;
+            try
+            {
+                if (!component->GetChildren().empty())
+                {
+                    LogLine("[AddAssemblyPrototypePartCount] skip assembly component before load part="
+                        + LocaleText(part->Name()));
+                    return;
+                }
+            }
+            catch (...)
+            {
+            }
+
+            if (IsAssemblyPart(part))
+            {
+                LogLine("[AddAssemblyPrototypePartCount] skip assembly component part="
+                    + LocaleText(part->Name()));
+                return;
+            }
+
+            std::string material;
+            std::string quantity;
+            if (!PartHasRequiredAssemblyExportAttributes(part, material, quantity))
+            {
+                LogLine("[AddAssemblyPrototypePartCount] skip part without required part attributes part="
+                    + LocaleText(part->Name())
+                    + " material=" + material
+                    + " quantity=" + quantity);
+                return;
+            }
+
+            const bool loadedByPlugin = EnsurePartFullyLoaded(part);
+
+            AssemblyPartCountInfo& entry = counts[part->Tag()];
+            entry.part = part;
+            entry.count += 1;
+            entry.loadedByPlugin = entry.loadedByPlugin || loadedByPlugin;
             LogLine("[AddAssemblyPrototypePartCount] part=" + LocaleText(part->Name())
-                + " count=" + std::to_string(entry.second));
+                + " count=" + std::to_string(entry.count)
+                + " material=" + material
+                + " quantity=" + quantity
+                + " loadedByPlugin=" + std::to_string(entry.loadedByPlugin ? 1 : 0));
         }
     }
     catch (const NXOpen::NXException& ex)
@@ -1582,7 +1893,7 @@ static void AddAssemblyPrototypePartCount(NXOpen::Assemblies::Component* compone
     }
 }
 
-static void CollectAssemblyPartCounts(NXOpen::Assemblies::Component* component, std::map<tag_t, std::pair<NXOpen::Part*, int> >& counts)
+static void CollectAssemblyPartCounts(NXOpen::Assemblies::Component* component, std::map<tag_t, AssemblyPartCountInfo>& counts)
 {
     if (component == NULL)
     {
@@ -1619,7 +1930,7 @@ static std::vector<FlatPatternItem> CollectFlatPatternItems(NXOpen::Part* displa
     }
 
     LogLine("[CollectFlatPatternItems] displayPart=" + LocaleText(displayPart->Name()));
-    std::map<tag_t, std::pair<NXOpen::Part*, int> > partCounts;
+    std::map<tag_t, AssemblyPartCountInfo> partCounts;
     try
     {
         NXOpen::Assemblies::Component* root = displayPart->ComponentAssembly()->RootComponent();
@@ -1634,14 +1945,21 @@ static std::vector<FlatPatternItem> CollectFlatPatternItems(NXOpen::Part* displa
 
     if (partCounts.empty())
     {
-        partCounts[displayPart->Tag()] = std::make_pair(displayPart, 1);
+        AssemblyPartCountInfo& displayEntry = partCounts[displayPart->Tag()];
+        displayEntry.part = displayPart;
+        displayEntry.count = 1;
+        displayEntry.loadedByPlugin = false;
         LogLine("[CollectFlatPatternItems] no assembly leaf counts, use display part");
     }
 
     LogLine("[CollectFlatPatternItems] unique part count=" + std::to_string(partCounts.size()));
-    for (std::map<tag_t, std::pair<NXOpen::Part*, int> >::iterator it = partCounts.begin(); it != partCounts.end(); ++it)
+    for (std::map<tag_t, AssemblyPartCountInfo>::iterator it = partCounts.begin(); it != partCounts.end(); ++it)
     {
-        std::vector<FlatPatternItem> partItems = CollectPartFlatPatterns(it->second.first, it->second.second);
+        std::vector<FlatPatternItem> partItems = CollectPartFlatPatterns(it->second.part, it->second.count);
+        if (partItems.empty() && it->second.loadedByPlugin && it->second.part != displayPart)
+        {
+            ClosePluginLoadedPartIfUnused(it->second.part, "no flat pattern after candidate scan");
+        }
         result.insert(result.end(), partItems.begin(), partItems.end());
     }
     LogLine("[CollectFlatPatternItems] flat pattern item count=" + std::to_string(result.size()));
@@ -1676,10 +1994,11 @@ static NXOpen::ModelingView* FindModelingView(NXOpen::Part* part, const std::str
     return NULL;
 }
 
-static NXOpen::Drawings::DraftingDrawingSheet* CreateCustomSheet(NXOpen::Part* part, const CommandOptions& options)
+static NXOpen::Drawings::DraftingDrawingSheet* CreateCustomSheet(NXOpen::Part* part, const CommandOptions& options, const std::string& sheetName)
 {
     LogLine("[CreateCustomSheet] begin width=" + FormatReal(options.sheetWidth)
-        + " height=" + FormatReal(options.sheetHeight));
+        + " height=" + FormatReal(options.sheetHeight)
+        + " name=" + sheetName);
     NXOpen::Drawings::DraftingDrawingSheet* nullSheet = NULL;
     NXOpen::Drawings::DraftingDrawingSheetBuilder* builder =
         part->DraftingDrawingSheets()->CreateDraftingDrawingSheetBuilder(nullSheet);
@@ -1688,7 +2007,7 @@ static NXOpen::Drawings::DraftingDrawingSheet* CreateCustomSheet(NXOpen::Part* p
     builder->SetUnits(NXOpen::Drawings::DrawingSheetBuilder::SheetUnitsMetric);
     builder->SetLength(options.sheetWidth);
     builder->SetHeight(options.sheetHeight);
-    builder->SetName("PILianDaoCuZKT");
+    builder->SetName(sheetName.c_str());
     builder->SetProjectionAngle(NXOpen::Drawings::DrawingSheetBuilder::SheetProjectionAngleFirst);
     builder->SetStandardMetricScale(NXOpen::Drawings::DrawingSheetBuilder::SheetStandardMetricScaleCustom);
     builder->SetScaleNumerator(1.0);
@@ -1728,12 +2047,173 @@ static NXOpen::Drawings::DraftingDrawingSheet* CreateCustomSheet(NXOpen::Part* p
     return sheet;
 }
 
+static void DeleteExistingPluginSheets(NXOpen::Part* part)
+{
+    if (part == NULL || part->DraftingDrawingSheets() == NULL)
+    {
+        return;
+    }
+
+    std::vector<NXOpen::TaggedObject*> deleteObjects;
+    try
+    {
+        NXOpen::Drawings::DraftingDrawingSheetCollection* sheets = part->DraftingDrawingSheets();
+        for (NXOpen::Drawings::DraftingDrawingSheetCollection::iterator it = sheets->begin(); it != sheets->end(); ++it)
+        {
+            NXOpen::Drawings::DraftingDrawingSheet* sheet = *it;
+            if (sheet == NULL)
+            {
+                continue;
+            }
+
+            const std::string sheetName = LocaleText(sheet->Name());
+            const std::string prefix(kPluginSheetNamePrefix);
+            if (sheetName == prefix ||
+                (sheetName.size() > prefix.size() &&
+                 sheetName.compare(0, prefix.size(), prefix) == 0 &&
+                 sheetName[prefix.size()] == '_'))
+            {
+                deleteObjects.push_back(sheet);
+                LogLine("[DeleteExistingPluginSheets] queued sheet name=" + sheetName
+                    + " tag=" + std::to_string(static_cast<unsigned long long>(sheet->Tag())));
+            }
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[DeleteExistingPluginSheets] collect NXException code="
+            + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[DeleteExistingPluginSheets] collect exception");
+    }
+
+    if (deleteObjects.empty())
+    {
+        LogLine("[DeleteExistingPluginSheets] no old plugin sheets");
+        return;
+    }
+
+    try
+    {
+        Session* session = Session::GetSession();
+        NXOpen::Update* update = session->UpdateManager();
+        update->ClearDeleteList();
+        const int addErrors = update->AddObjectsToDeleteList(deleteObjects);
+        Session::UndoMarkId mark = session->SetUndoMark(Session::MarkVisibilityInvisible, "PILianDaoCuZKT delete old sheets");
+        const int updateErrors = update->DoUpdate(mark);
+        LogLine("[DeleteExistingPluginSheets] deleted count=" + std::to_string(deleteObjects.size())
+            + " addErrors=" + std::to_string(addErrors)
+            + " updateErrors=" + std::to_string(updateErrors));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[DeleteExistingPluginSheets] delete NXException code="
+            + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[DeleteExistingPluginSheets] delete exception");
+    }
+}
+
+static std::string PluginSheetName(size_t pageIndex)
+{
+    char name[64] = {};
+    sprintf(name, "%s_%03u", kPluginSheetNamePrefix, static_cast<unsigned int>(pageIndex + 1));
+    return std::string(name);
+}
+
+static std::string FlatPatternPartGroupKey(const FlatPatternItem& item)
+{
+    if (!item.partKey.empty())
+    {
+        return item.partKey;
+    }
+    if (item.part != NULL)
+    {
+        return std::to_string(static_cast<unsigned long long>(item.part->Tag()));
+    }
+    return item.viewName;
+}
+
+static double FlatPatternSortArea(const FlatPatternItem& item)
+{
+    if (item.hasFlatSize && item.flatArea > 1.0e-6)
+    {
+        return item.flatArea;
+    }
+    if (item.hasFlatSize && item.flatWidth > 1.0e-6 && item.flatHeight > 1.0e-6)
+    {
+        return item.flatWidth * item.flatHeight;
+    }
+    return 0.0;
+}
+
+static double FlatPatternSortMaxSize(const FlatPatternItem& item)
+{
+    if (item.hasFlatSize)
+    {
+        return std::max(item.flatWidth, item.flatHeight);
+    }
+    return 0.0;
+}
+
+static void SortFlatPatternItemsForClassBatches(std::vector<FlatPatternItem>& items)
+{
+    std::stable_sort(items.begin(), items.end(), [](const FlatPatternItem& a, const FlatPatternItem& b) {
+        if (a.layoutKey != b.layoutKey)
+        {
+            return a.layoutKey < b.layoutKey;
+        }
+        if (a.hasFlatSize != b.hasFlatSize)
+        {
+            return a.hasFlatSize;
+        }
+
+        if (fabs(a.flatHeight - b.flatHeight) > 1.0e-6)
+        {
+            return a.flatHeight > b.flatHeight;
+        }
+
+        if (fabs(a.flatWidth - b.flatWidth) > 1.0e-6)
+        {
+            return a.flatWidth > b.flatWidth;
+        }
+
+        if (a.partKey != b.partKey)
+        {
+            return a.partKey < b.partKey;
+        }
+        return a.viewName < b.viewName;
+    });
+
+    size_t classCount = 0;
+    std::string lastKey;
+    for (size_t i = 0; i < items.size(); ++i)
+    {
+        if (i == 0 || items[i].layoutKey != lastKey)
+        {
+            ++classCount;
+            lastKey = items[i].layoutKey;
+        }
+    }
+    LogLine("[SortFlatPatternItemsForClassBatches] sorted classCount=" + std::to_string(classCount)
+        + " itemCount=" + std::to_string(items.size())
+        + " batchMode=whole-class"
+        + " classOrder=layoutKey,MinimumY desc,MinimumX desc");
+}
+
 static NXOpen::Drawings::BaseView* CreateFlatBaseView(NXOpen::Part* workPart, const FlatPatternItem& item, const CommandOptions& options, const NXOpen::Point3d& point)
 {
+    const std::chrono::steady_clock::time_point totalStart = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point stepStart = totalStart;
     LogLine("[CreateFlatBaseView] begin part=" + LocaleText(item.part != NULL ? item.part->Name() : NXOpen::NXString(""))
         + " viewName=" + item.viewName
         + " workPart=" + LocaleText(workPart != NULL ? workPart->Name() : NXOpen::NXString(""))
-        + " scaleDenominator=" + FormatReal(options.viewScaleDenominator));
+        + " viewScale=1"
+        + " dimensionScale=" + FormatReal(options.viewScaleDenominator));
     NXOpen::Drawings::BaseView* nullView = NULL;
     NXOpen::Drawings::BaseViewBuilder* builder = NULL;
     try
@@ -1743,67 +2223,102 @@ static NXOpen::Drawings::BaseView* CreateFlatBaseView(NXOpen::Part* workPart, co
             return NULL;
         }
 
+        stepStart = std::chrono::steady_clock::now();
         builder = workPart->DraftingViews()->CreateBaseViewBuilder(nullView);
+        const long long builderCreateMs = ElapsedMilliseconds(stepStart);
+        stepStart = std::chrono::steady_clock::now();
         builder->Scale()->SetNumerator(1.0);
-        builder->Scale()->SetDenominator(options.viewScaleDenominator);
+        builder->Scale()->SetDenominator(1.0);
+        const long long scaleMs = ElapsedMilliseconds(stepStart);
+        long long secondaryMs = 0;
         try
         {
+            stepStart = std::chrono::steady_clock::now();
             builder->SecondaryComponents()->SetObjectType(NXOpen::Drawings::DraftingComponentSelectionBuilder::GeometryPrimaryGeometry);
             if (item.part != NULL)
             {
                 builder->SecondaryComponents()->SetPart(item.part);
             }
+            secondaryMs = ElapsedMilliseconds(stepStart);
         }
         catch (const NXOpen::NXException& ex)
         {
+            secondaryMs = ElapsedMilliseconds(stepStart);
             LogLine("[CreateFlatBaseView] set secondary/primary component style ignored code="
                 + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message()));
         }
         catch (...)
         {
+            secondaryMs = ElapsedMilliseconds(stepStart);
             LogLine("[CreateFlatBaseView] set secondary/primary component style ignored");
         }
 
+        long long viewStylePartMs = 0;
         if (item.part != NULL)
         {
             try
             {
+                stepStart = std::chrono::steady_clock::now();
                 builder->Style()->ViewStyleBase()->SetPart(item.part);
                 builder->Style()->ViewStyleBase()->SetPartName(item.part->FullPath());
                 builder->Style()->ViewStyleBase()->Arrangement()->SetSelectedArrangement(NULL);
                 builder->Style()->ViewStyleBase()->Arrangement()->SetInheritArrangementFromParent(false);
+                viewStylePartMs = ElapsedMilliseconds(stepStart);
                 LogLine("[CreateFlatBaseView] view style part set to child part=" + item.partKey);
             }
             catch (const NXOpen::NXException& ex)
             {
+                viewStylePartMs = ElapsedMilliseconds(stepStart);
                 LogLine("[CreateFlatBaseView] set view style part NXException code=" + std::to_string(ex.ErrorCode())
                     + " message=" + std::string(ex.Message())
                     + " part=" + item.partKey);
             }
             catch (...)
             {
+                viewStylePartMs = ElapsedMilliseconds(stepStart);
                 LogLine("[CreateFlatBaseView] set view style part exception part=" + item.partKey);
             }
         }
 
+        stepStart = std::chrono::steady_clock::now();
         NXOpen::ModelingView* modelView = FindModelingView(item.part, item.viewName);
+        const long long findModelViewMs = ElapsedMilliseconds(stepStart);
+        long long selectModelViewMs = 0;
         if (modelView != NULL)
         {
             LogLine("[CreateFlatBaseView] selected model view=" + item.viewName
                 + " sourcePart=" + LocaleText(item.part != NULL ? item.part->Name() : NXOpen::NXString("")));
+            stepStart = std::chrono::steady_clock::now();
             builder->SelectModelView()->SetSelectedView(modelView);
+            selectModelViewMs = ElapsedMilliseconds(stepStart);
         }
         else
         {
             LogLine("[CreateFlatBaseView] model view not found, commit with default");
         }
 
+        stepStart = std::chrono::steady_clock::now();
         builder->Placement()->Placement()->SetValue(NULL, workPart->Views()->WorkView(), point);
+        const long long placementMs = ElapsedMilliseconds(stepStart);
+        stepStart = std::chrono::steady_clock::now();
         NXOpen::NXObject* object = builder->Commit();
+        const long long commitMs = ElapsedMilliseconds(stepStart);
+        stepStart = std::chrono::steady_clock::now();
         builder->Destroy();
+        const long long destroyMs = ElapsedMilliseconds(stepStart);
         builder = NULL;
         NXOpen::Drawings::BaseView* view = dynamic_cast<NXOpen::Drawings::BaseView*>(object);
-        LogLine(std::string("[CreateFlatBaseView] commit ") + (view != NULL ? "ok" : "returned null"));
+        LogLine(std::string("[CreateFlatBaseView] commit ") + (view != NULL ? "ok" : "returned null")
+            + " builderCreateMs=" + std::to_string(builderCreateMs)
+            + " scaleMs=" + std::to_string(scaleMs)
+            + " secondaryMs=" + std::to_string(secondaryMs)
+            + " viewStylePartMs=" + std::to_string(viewStylePartMs)
+            + " findModelViewMs=" + std::to_string(findModelViewMs)
+            + " selectModelViewMs=" + std::to_string(selectModelViewMs)
+            + " placementMs=" + std::to_string(placementMs)
+            + " commitMs=" + std::to_string(commitMs)
+            + " destroyMs=" + std::to_string(destroyMs)
+            + " totalMs=" + std::to_string(ElapsedMilliseconds(totalStart)));
         return view;
     }
     catch (const NXOpen::NXException& ex)
@@ -2066,6 +2581,14 @@ static NXOpen::Point3d RectCenterPoint(const DraftRect& rect)
     return NXOpen::Point3d((rect.minX + rect.maxX) * 0.5, (rect.minY + rect.maxY) * 0.5, 0.0);
 }
 
+static void TranslateRect(DraftRect& rect, double dx, double dy)
+{
+    rect.minX += dx;
+    rect.maxX += dx;
+    rect.minY += dy;
+    rect.maxY += dy;
+}
+
 static bool MapModelToDrawing(NXOpen::Drawings::BaseView* view, const double modelPoint[3], double drawingPoint[2]);
 static std::vector<NXOpen::Drawings::DraftingCurve*> CollectDraftingCurves(NXOpen::Drawings::BaseView* view);
 
@@ -2129,8 +2652,13 @@ static bool ExpandRectWithCurveInDrawing(NXOpen::Drawings::BaseView* view, NXOpe
 
 static bool RectFromMappedVisibleCurves(NXOpen::Drawings::BaseView* view, DraftRect& rect)
 {
+    const std::chrono::steady_clock::time_point totalStart = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point stepStart = totalStart;
     std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(view);
+    const long long collectMs = ElapsedMilliseconds(stepStart);
+    stepStart = std::chrono::steady_clock::now();
     bool initialized = false;
+    size_t visibleCurveCount = 0;
     for (size_t i = 0; i < curves.size(); ++i)
     {
         NXOpen::DisplayableObject* displayableCurve = dynamic_cast<NXOpen::DisplayableObject*>(curves[i]);
@@ -2138,8 +2666,10 @@ static bool RectFromMappedVisibleCurves(NXOpen::Drawings::BaseView* view, DraftR
         {
             continue;
         }
+        ++visibleCurveCount;
         ExpandRectWithCurveInDrawing(view, curves[i], rect, initialized);
     }
+    const long long scanMs = ElapsedMilliseconds(stepStart);
 
     if (initialized)
     {
@@ -2147,11 +2677,21 @@ static bool RectFromMappedVisibleCurves(NXOpen::Drawings::BaseView* view, DraftR
             + FormatReal(rect.minX) + "," + FormatReal(rect.minY) + ") max=("
             + FormatReal(rect.maxX) + "," + FormatReal(rect.maxY)
             + ") width=" + FormatReal(RectWidth(rect))
-            + " height=" + FormatReal(RectHeight(rect)));
+            + " height=" + FormatReal(RectHeight(rect))
+            + " curveCount=" + std::to_string(curves.size())
+            + " visibleCurveCount=" + std::to_string(visibleCurveCount)
+            + " collectMs=" + std::to_string(collectMs)
+            + " scanMs=" + std::to_string(scanMs)
+            + " totalMs=" + std::to_string(ElapsedMilliseconds(totalStart)));
     }
     else
     {
-        LogLine("[RectFromMappedVisibleCurves] no visible curve points");
+        LogLine("[RectFromMappedVisibleCurves] no visible curve points"
+            + std::string(" curveCount=") + std::to_string(curves.size())
+            + " visibleCurveCount=" + std::to_string(visibleCurveCount)
+            + " collectMs=" + std::to_string(collectMs)
+            + " scanMs=" + std::to_string(scanMs)
+            + " totalMs=" + std::to_string(ElapsedMilliseconds(totalStart)));
     }
     return initialized;
 }
@@ -2208,6 +2748,57 @@ static void MoveViewBoundaryCenterTo(NXOpen::Drawings::BaseView* view, const NXO
     }
 }
 
+static bool MoveViewKnownBoundaryCenterTo(NXOpen::Drawings::BaseView* view, const DraftRect& rect, const NXOpen::Point3d& target, DraftRect* movedRect)
+{
+    NXOpen::Drawings::DraftingView* draftingView = dynamic_cast<NXOpen::Drawings::DraftingView*>(view);
+    if (draftingView == NULL)
+    {
+        return false;
+    }
+
+    NXOpen::Point3d boundaryCenter = RectCenterPoint(rect);
+    NXOpen::Point3d currentReference = draftingView->GetDrawingReferencePoint();
+    const double dx = target.X - boundaryCenter.X;
+    const double dy = target.Y - boundaryCenter.Y;
+    NXOpen::Point3d newReference(
+        currentReference.X + dx,
+        currentReference.Y + dy,
+        currentReference.Z);
+    double ufReference[2] = { newReference.X, newReference.Y };
+    const int moveStatus = UF_DRAW_move_view(view->Tag(), ufReference);
+    if (moveStatus != 0)
+    {
+        LogLine("[MoveViewKnownBoundaryCenterTo] UF_DRAW_move_view failed status=" + std::to_string(moveStatus));
+        try
+        {
+            draftingView->MoveView(newReference);
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogLine("[MoveViewKnownBoundaryCenterTo] MoveView failed: " + LocaleText(ex.Message()));
+            return false;
+        }
+        catch (...)
+        {
+            LogLine("[MoveViewKnownBoundaryCenterTo] MoveView failed");
+            return false;
+        }
+    }
+
+    if (movedRect != NULL)
+    {
+        *movedRect = rect;
+        TranslateRect(*movedRect, dx, dy);
+    }
+
+    LogLine("[MoveViewKnownBoundaryCenterTo] boundaryCenter=("
+        + FormatReal(boundaryCenter.X) + "," + FormatReal(boundaryCenter.Y)
+        + ") target=(" + FormatReal(target.X) + "," + FormatReal(target.Y)
+        + ") delta=(" + FormatReal(dx) + "," + FormatReal(dy)
+        + ") newReference=(" + FormatReal(newReference.X) + "," + FormatReal(newReference.Y) + ")");
+    return true;
+}
+
 static NXOpen::Point3d ViewCenter(NXOpen::Drawings::BaseView* view)
 {
     NXOpen::Drawings::DraftingView* draftingView = dynamic_cast<NXOpen::Drawings::DraftingView*>(view);
@@ -2222,8 +2813,10 @@ static void CreateBodyNote(NXOpen::Part* workPart, const FlatPatternItem& item, 
 {
     try
     {
-        std::string text = BuildBodyNoteText(item.part, item.body, item.quantity);
-        std::string ufInitialText = BuildBodyNoteTextForUf(item.part, item.body, item.quantity);
+        const std::chrono::steady_clock::time_point totalStart = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point stepStart = totalStart;
+        std::string text = item.noteText.empty() ? BuildBodyNoteText(item.part, item.body, item.quantity) : item.noteText;
+        std::string ufInitialText = item.ufNoteText.empty() ? BuildBodyNoteTextForUf(item.part, item.body, item.quantity) : item.ufNoteText;
         const NXOpen::Point3d adjustedPoint = AdjustBodyNotePointForLineCount(point, textSize);
         std::vector<std::string> lineTexts;
         std::string current;
@@ -2253,35 +2846,54 @@ static void CreateBodyNote(NXOpen::Part* workPart, const FlatPatternItem& item, 
         }
         double origin[3] = { adjustedPoint.X, adjustedPoint.Y, adjustedPoint.Z };
         tag_t createdTag = NULL_TAG;
+        const long long prepareMs = ElapsedMilliseconds(stepStart);
+        stepStart = std::chrono::steady_clock::now();
         const int createStatus = UF_DRF_create_note(
             static_cast<int>(linePointers.size()),
             linePointers.data(),
             origin,
             0,
             &createdTag);
+        const long long createNoteMs = ElapsedMilliseconds(stepStart);
         int type = -1;
         int subtype = -1;
         int attachStatus = -1;
         tag_t attachedViewTag = NULL_TAG;
         bool linkedText = false;
         int editStatus = -1;
+        long long typeMs = 0;
+        long long attachMs = 0;
+        long long managerGetMs = 0;
+        long long builderCreateMs = 0;
+        long long builderStyleMs = 0;
+        long long builderCommitMs = 0;
+        long long builderDestroyMs = 0;
+        long long displayMs = 0;
         if (createdTag != NULL_TAG)
         {
+            stepStart = std::chrono::steady_clock::now();
             UF_OBJ_ask_type_and_subtype(createdTag, &type, &subtype);
+            typeMs = ElapsedMilliseconds(stepStart);
             if (view != NULL)
             {
+                stepStart = std::chrono::steady_clock::now();
                 attachStatus = UF_DRAW_attach_note_to_view(createdTag, view->Tag());
                 UF_DRAW_ask_view_of_note(createdTag, &attachedViewTag);
+                attachMs = ElapsedMilliseconds(stepStart);
             }
+            stepStart = std::chrono::steady_clock::now();
             NXOpen::TaggedObject* tagged = NXOpen::NXObjectManager::Get(createdTag);
-            NXOpen::DisplayableObject* displayable = dynamic_cast<NXOpen::DisplayableObject*>(tagged);
+            managerGetMs = ElapsedMilliseconds(stepStart);
             NXOpen::Annotations::SimpleDraftingAid* draftingAid = dynamic_cast<NXOpen::Annotations::SimpleDraftingAid*>(tagged);
             if (draftingAid != NULL)
             {
                 NXOpen::Annotations::DraftingNoteBuilder* editBuilder = NULL;
                 try
                 {
+                    stepStart = std::chrono::steady_clock::now();
                     editBuilder = workPart->Annotations()->CreateDraftingNoteBuilder(draftingAid);
+                    builderCreateMs = ElapsedMilliseconds(stepStart);
+                    stepStart = std::chrono::steady_clock::now();
                     editBuilder->Style()->LetteringStyle()->SetGeneralTextSize(textSize);
                     editBuilder->Style()->LetteringStyle()->SetGeneralTextLineSpaceFactor(1.5);
                     try
@@ -2291,9 +2903,14 @@ static void CreateBodyNote(NXOpen::Part* workPart, const FlatPatternItem& item, 
                     catch (...)
                     {
                     }
+                    builderStyleMs = ElapsedMilliseconds(stepStart);
+                    stepStart = std::chrono::steady_clock::now();
                     NXOpen::NXObject* edited = editBuilder->Commit();
+                    builderCommitMs = ElapsedMilliseconds(stepStart);
                     editStatus = edited != NULL ? 0 : 1;
+                    stepStart = std::chrono::steady_clock::now();
                     editBuilder->Destroy();
+                    builderDestroyMs = ElapsedMilliseconds(stepStart);
                     editBuilder = NULL;
                 }
                 catch (const NXOpen::NXException& ex)
@@ -2316,11 +2933,11 @@ static void CreateBodyNote(NXOpen::Part* workPart, const FlatPatternItem& item, 
                     }
                 }
             }
-            if (displayable != NULL)
+            if (createdTag != NULL_TAG)
             {
-                try { displayable->SetLayer(1); } catch (...) {}
-                try { displayable->Unblank(); } catch (...) {}
-                try { displayable->RedisplayObject(); } catch (...) {}
+                stepStart = std::chrono::steady_clock::now();
+                UF_OBJ_set_layer(createdTag, 1);
+                displayMs = ElapsedMilliseconds(stepStart);
             }
         }
         LogLine("[CreateBodyNote] created-by-UF_DRF_create_note status=" + std::to_string(createStatus)
@@ -2331,6 +2948,17 @@ static void CreateBodyNote(NXOpen::Part* workPart, const FlatPatternItem& item, 
             + " attachedViewTag=" + std::to_string(static_cast<unsigned long long>(attachedViewTag))
             + " linkedText=" + std::to_string(linkedText ? 1 : 0)
             + " editStatus=" + std::to_string(editStatus)
+            + " timingMs prepare=" + std::to_string(prepareMs)
+            + " createNote=" + std::to_string(createNoteMs)
+            + " type=" + std::to_string(typeMs)
+            + " attach=" + std::to_string(attachMs)
+            + " managerGet=" + std::to_string(managerGetMs)
+            + " builderCreate=" + std::to_string(builderCreateMs)
+            + " builderStyle=" + std::to_string(builderStyleMs)
+            + " builderCommit=" + std::to_string(builderCommitMs)
+            + " builderDestroy=" + std::to_string(builderDestroyMs)
+            + " display=" + std::to_string(displayMs)
+            + " total=" + std::to_string(ElapsedMilliseconds(totalStart))
             + " text=" + text
             + " ufInitialText=" + ufInitialText
             + " point=(" + FormatReal(adjustedPoint.X) + "," + FormatReal(adjustedPoint.Y) + ")");
@@ -2555,6 +3183,348 @@ static void SetFlatPatternCurveState(
     }
 }
 
+static void SetFlatPatternPreferenceCurveState(
+    NXOpen::Drawings::ViewStyleBuilder* viewStyle,
+    NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectType objectType,
+    bool state,
+    const std::string& label)
+{
+    if (viewStyle == NULL)
+    {
+        return;
+    }
+
+    try
+    {
+        NXOpen::Drawings::ViewStyleFPCurvesBuilder* curveBuilder =
+            viewStyle->GetViewStyleFPCurve(objectType);
+        if (curveBuilder == NULL)
+        {
+            LogLine("[ApplyFlatPatternDefaultBendCurveVisibility] " + label + " builder is null");
+            return;
+        }
+
+        const bool oldState = curveBuilder->State();
+        curveBuilder->SetState(state);
+        LogLine("[ApplyFlatPatternDefaultBendCurveVisibility] " + label
+            + " old=" + std::to_string(oldState ? 1 : 0)
+            + " new=" + std::to_string(state ? 1 : 0));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[ApplyFlatPatternDefaultBendCurveVisibility] " + label
+            + " NXException code=" + std::to_string(ex.ErrorCode())
+            + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[ApplyFlatPatternDefaultBendCurveVisibility] " + label + " exception");
+    }
+}
+
+static void LogFlatPatternPreferenceCurveState(
+    NXOpen::Drawings::ViewStyleBuilder* viewStyle,
+    NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectType objectType,
+    const std::string& label,
+    const std::string& phase)
+{
+    if (viewStyle == NULL)
+    {
+        LogLine("[FlatPatternPreferenceState] " + phase + " " + label + " builder=null");
+        return;
+    }
+
+    try
+    {
+        NXOpen::Drawings::ViewStyleFPCurvesBuilder* curveBuilder =
+            viewStyle->GetViewStyleFPCurve(objectType);
+        if (curveBuilder == NULL)
+        {
+            LogLine("[FlatPatternPreferenceState] " + phase + " " + label + " builder=null");
+            return;
+        }
+        LogLine("[FlatPatternPreferenceState] " + phase + " " + label
+            + " state=" + std::to_string(curveBuilder->State() ? 1 : 0));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[FlatPatternPreferenceState] " + phase + " " + label
+            + " NXException code=" + std::to_string(ex.ErrorCode())
+            + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[FlatPatternPreferenceState] " + phase + " " + label + " exception");
+    }
+}
+
+static std::string FlatPatternObjectTypeName(NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectType objectType)
+{
+    switch (objectType)
+    {
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendCenterLine:
+        return "BendCenterLine";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendUpCenterLine:
+        return "BendUpCenterLine";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendDownCenterLine:
+        return "BendDownCenterLine";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendTangentLine:
+        return "BendTangentLine";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeOuterMoldLine:
+        return "OuterMoldLine";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeInnerMoldLine:
+        return "InnerMoldLine";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeExteriorCurves:
+        return "ExteriorCurves";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeInteriorCurves:
+        return "InteriorCurves";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeInteriorCutoutCurves:
+        return "InteriorCutoutCurves";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeInteriorFeatureCurves:
+        return "InteriorFeatureCurves";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeLighteningHoleCenter:
+        return "LighteningHoleCenter";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeJoggleLine:
+        return "JoggleLine";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeAddedTopGeometry:
+        return "AddedTopGeometry";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeAddedBottomGeometry:
+        return "AddedBottomGeometry";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeToolMarker:
+        return "ToolMarker";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeHole:
+        return "Hole";
+    case NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeCentermark:
+        return "Centermark";
+    default:
+        return "Unknown";
+    }
+}
+
+static void LogAllFlatPatternCurveBuilders(NXOpen::Drawings::ViewStyleBuilder* viewStyle, const std::string& phase)
+{
+    if (viewStyle == NULL)
+    {
+        LogLine("[FlatPatternPreferenceAllCurves] " + phase + " viewStyle=null");
+        return;
+    }
+
+    try
+    {
+        std::vector<NXOpen::Drawings::ViewStyleFPCurvesBuilder*> curves = viewStyle->GetAllViewStyleFPCurves();
+        LogLine("[FlatPatternPreferenceAllCurves] " + phase + " count=" + std::to_string(curves.size()));
+        for (size_t i = 0; i < curves.size(); ++i)
+        {
+            NXOpen::Drawings::ViewStyleFPCurvesBuilder* curve = curves[i];
+            if (curve == NULL)
+            {
+                LogLine("[FlatPatternPreferenceAllCurves] " + phase + " index=" + std::to_string(i) + " builder=null");
+                continue;
+            }
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectType type = curve->Type();
+            LogLine("[FlatPatternPreferenceAllCurves] " + phase
+                + " index=" + std::to_string(i)
+                + " typeInt=" + std::to_string(static_cast<int>(type))
+                + " type=" + FlatPatternObjectTypeName(type)
+                + " state=" + std::to_string(curve->State() ? 1 : 0)
+                + " font=" + std::to_string(static_cast<int>(curve->Font()))
+                + " width=" + std::to_string(static_cast<int>(curve->Width())));
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[FlatPatternPreferenceAllCurves] " + phase + " NXException code="
+            + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[FlatPatternPreferenceAllCurves] " + phase + " exception");
+    }
+}
+
+static void LogFlatPatternPreferenceStateInUiOrder(NXOpen::Drawings::ViewStyleBuilder* viewStyle, const std::string& phase)
+{
+    struct FlatPatternCurveLogItem
+    {
+        NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectType objectType;
+        const char* label;
+    };
+
+    const FlatPatternCurveLogItem items[] = {
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendUpCenterLine, "上折弯中心线/BendUpCenterLine" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendDownCenterLine, "折弯相切(录制对应)/BendDownCenterLine" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendTangentLine, "折弯相切/BendTangentLine" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeOuterMoldLine, "外模/OuterMoldLine" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeInnerMoldLine, "外部轮廓(录制对应)/InnerMoldLine" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeExteriorCurves, "ExteriorCurves(NX枚举)" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeInteriorCutoutCurves, "内部开孔/InteriorCutoutCurves" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeInteriorFeatureCurves, "内部特征/InteriorFeatureCurves" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeLighteningHoleCenter, "减轻孔/LighteningHoleCenter" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeJoggleLine, "槽接/JoggleLine" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeAddedTopGeometry, "添加的顶部/AddedTopGeometry" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeAddedBottomGeometry, "添加的底部/AddedBottomGeometry" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeToolMarker, "中心线(录制对应)/ToolMarker" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeHole, "孔特征/Hole" },
+        { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeCentermark, "中心标记/Centermark" }
+    };
+
+    for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); ++i)
+    {
+        LogFlatPatternPreferenceCurveState(viewStyle, items[i].objectType, items[i].label, phase);
+    }
+    LogAllFlatPatternCurveBuilders(viewStyle, phase);
+
+    if (viewStyle == NULL)
+    {
+        LogLine("[FlatPatternPreferenceState] " + phase + " 标注/FPCallouts viewStyle=null");
+        LogLine("[FlatPatternPreferenceState] " + phase + " 标注配置/FPCalloutConfig viewStyle=null");
+        return;
+    }
+
+    try
+    {
+        std::vector<NXOpen::Drawings::ViewStyleFPCalloutsBuilder*> callouts =
+            viewStyle->GetAllViewStyleFPCallouts();
+        LogLine("[FlatPatternPreferenceState] " + phase + " 标注/FPCallouts count="
+            + std::to_string(callouts.size()));
+        for (size_t i = 0; i < callouts.size(); ++i)
+        {
+            NXOpen::Drawings::ViewStyleFPCalloutsBuilder* callout = callouts[i];
+            if (callout == NULL)
+            {
+                LogLine("[FlatPatternPreferenceState] " + phase + " 标注/FPCallout[" + std::to_string(i) + "] builder=null");
+                continue;
+            }
+            LogLine("[FlatPatternPreferenceState] " + phase + " 标注/FPCallout[" + std::to_string(i)
+                + "] type=" + LocaleText(callout->Type())
+                + " state=" + std::to_string(callout->State() ? 1 : 0));
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[FlatPatternPreferenceState] " + phase + " 标注/FPCallouts NXException code="
+            + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[FlatPatternPreferenceState] " + phase + " 标注/FPCallouts exception");
+    }
+
+    try
+    {
+        NXOpen::Drawings::ViewStyleFPCalloutConfigBuilder* config = viewStyle->GetViewStyleFPCalloutConfig();
+        if (config == NULL)
+        {
+            LogLine("[FlatPatternPreferenceState] " + phase + " 标注配置/FPCalloutConfig builder=null");
+        }
+        else
+        {
+            LogLine("[FlatPatternPreferenceState] " + phase + " 标注配置/FPCalloutConfig orientation="
+                + std::to_string(static_cast<int>(config->GetOrientationType()))
+                + " offset=" + FormatReal(config->GetCalloutOffsetDistance()));
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[FlatPatternPreferenceState] " + phase + " 标注配置/FPCalloutConfig NXException code="
+            + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[FlatPatternPreferenceState] " + phase + " 标注配置/FPCalloutConfig exception");
+    }
+}
+
+static void ApplyFlatPatternDefaultBendCurveVisibility(NXOpen::Part* workPart, bool showBendLines)
+{
+    if (workPart == NULL)
+    {
+        LogLine("[ApplyFlatPatternDefaultBendCurveVisibility] skip null workPart");
+        return;
+    }
+
+    struct FlatPatternCurveVisibility
+    {
+        NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectType objectType;
+        bool state;
+        const char* label;
+    };
+
+    NXOpen::Drafting::PreferencesBuilder* builder = NULL;
+    try
+    {
+        builder = workPart->SettingsManager()->CreatePreferencesBuilder();
+        NXOpen::Drawings::ViewStyleBuilder* viewStyle = builder != NULL ? builder->ViewStyle() : NULL;
+        LogFlatPatternPreferenceStateInUiOrder(viewStyle, "before-set");
+
+        const FlatPatternCurveVisibility bendControlled[] = {
+            { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendCenterLine, showBendLines, "BendCenterLine" },
+            { NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendUpCenterLine, showBendLines, "BendUpCenterLine" }
+        };
+        for (size_t i = 0; i < sizeof(bendControlled) / sizeof(bendControlled[0]); ++i)
+        {
+            SetFlatPatternPreferenceCurveState(viewStyle,
+                bendControlled[i].objectType,
+                bendControlled[i].state,
+                bendControlled[i].label);
+        }
+        LogFlatPatternPreferenceStateInUiOrder(viewStyle, "after-set-before-commit");
+
+        builder->Commit();
+        builder->Destroy();
+        builder = NULL;
+
+        LogLine("[ApplyFlatPatternDefaultBendCurveVisibility] committed show="
+            + std::to_string(showBendLines ? 1 : 0));
+
+        NXOpen::Drafting::PreferencesBuilder* verifyBuilder = NULL;
+        try
+        {
+            verifyBuilder = workPart->SettingsManager()->CreatePreferencesBuilder();
+            LogFlatPatternPreferenceStateInUiOrder(verifyBuilder != NULL ? verifyBuilder->ViewStyle() : NULL, "after-commit");
+            if (verifyBuilder != NULL)
+            {
+                verifyBuilder->Destroy();
+                verifyBuilder = NULL;
+            }
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogLine("[ApplyFlatPatternDefaultBendCurveVisibility] verify NXException code="
+                + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message()));
+            if (verifyBuilder != NULL)
+            {
+                try { verifyBuilder->Destroy(); } catch (...) {}
+            }
+        }
+        catch (...)
+        {
+            LogLine("[ApplyFlatPatternDefaultBendCurveVisibility] verify exception");
+            if (verifyBuilder != NULL)
+            {
+                try { verifyBuilder->Destroy(); } catch (...) {}
+            }
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[ApplyFlatPatternDefaultBendCurveVisibility] NXException code="
+            + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message()));
+        if (builder != NULL)
+        {
+            try { builder->Destroy(); } catch (...) {}
+        }
+    }
+    catch (...)
+    {
+        LogLine("[ApplyFlatPatternDefaultBendCurveVisibility] exception");
+        if (builder != NULL)
+        {
+            try { builder->Destroy(); } catch (...) {}
+        }
+    }
+}
+
 static void ApplyFlatPatternBendCurveVisibility(
     NXOpen::Part* workPart,
     NXOpen::Drawings::BaseView* view,
@@ -2589,6 +3559,62 @@ static void ApplyFlatPatternBendCurveVisibility(
             NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendDownCenterLine,
             showBendLines,
             "BendDownCenterLine");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeExteriorCurves,
+            true,
+            "ExteriorCurves");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeInteriorCurves,
+            true,
+            "InteriorCurves");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeInteriorCutoutCurves,
+            true,
+            "InteriorCutoutCurves");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeInteriorFeatureCurves,
+            true,
+            "InteriorFeatureCurves");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeLighteningHoleCenter,
+            true,
+            "LighteningHoleCenter");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeJoggleLine,
+            true,
+            "JoggleLine");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeAddedTopGeometry,
+            true,
+            "AddedTopGeometry");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeAddedBottomGeometry,
+            true,
+            "AddedBottomGeometry");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeToolMarker,
+            true,
+            "ToolMarker");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeHole,
+            true,
+            "Hole");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeBendTangentLine,
+            false,
+            "BendTangentLine");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeOuterMoldLine,
+            false,
+            "OuterMoldLine");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeInnerMoldLine,
+            false,
+            "InnerMoldLine");
+        SetFlatPatternCurveState(builder,
+            NXOpen::SheetMetal::FlatPatternSettings::FlatPatternObjectTypeCentermark,
+            false,
+            "Centermark");
 
         builder->Commit();
         builder->Destroy();
@@ -3054,66 +4080,161 @@ static bool FindOverallDimensionCurvePairFallback(
     return firstFound && secondFound;
 }
 
-static bool CreateOverallDimension(NXOpen::Part* workPart, NXOpen::Drawings::BaseView* view, const DraftRect& rect, bool horizontal, double dimensionGap)
+static bool CreateOverallDimension(NXOpen::Part* workPart, NXOpen::Drawings::BaseView* view, const DraftRect& rect, bool horizontal, double dimensionGap, double dimensionScale)
 {
+    const std::chrono::steady_clock::time_point totalStart = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point stepStart = totalStart;
     std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(view);
+    const long long collectMs = ElapsedMilliseconds(stepStart);
     if (workPart == NULL || view == NULL || curves.empty())
     {
-        LogLine("[CreateOverallDimension] skipped empty inputs");
+        LogLine(std::string("[CreateOverallDimension] skipped empty inputs direction=")
+            + (horizontal ? "H" : "V")
+            + " curveCount=" + std::to_string(curves.size())
+            + " collectMs=" + std::to_string(collectMs)
+            + " totalMs=" + std::to_string(ElapsedMilliseconds(totalStart)));
         return false;
     }
 
     CurveAssocCandidate first = {};
     CurveAssocCandidate second = {};
-    if (!FindOverallDimensionCurvePair(view, curves, rect, horizontal, first, second))
+    stepStart = std::chrono::steady_clock::now();
+    const bool foundPrimary = FindOverallDimensionCurvePair(view, curves, rect, horizontal, first, second);
+    const long long findPrimaryMs = ElapsedMilliseconds(stepStart);
+    bool usedFallback = false;
+    long long findFallbackMs = 0;
+    if (!foundPrimary)
     {
-        if (!FindOverallDimensionCurvePairFallback(view, curves, rect, horizontal, first, second))
+        stepStart = std::chrono::steady_clock::now();
+        const bool foundFallback = FindOverallDimensionCurvePairFallback(view, curves, rect, horizontal, first, second);
+        findFallbackMs = ElapsedMilliseconds(stepStart);
+        if (!foundFallback)
         {
-            LogLine(std::string("[CreateOverallDimension] no curve pair direction=") + (horizontal ? "H" : "V"));
+            LogLine(std::string("[CreateOverallDimension] no curve pair direction=") + (horizontal ? "H" : "V")
+                + " curveCount=" + std::to_string(curves.size())
+                + " collectMs=" + std::to_string(collectMs)
+                + " findPrimaryMs=" + std::to_string(findPrimaryMs)
+                + " findFallbackMs=" + std::to_string(findFallbackMs)
+                + " totalMs=" + std::to_string(ElapsedMilliseconds(totalStart)));
             return false;
         }
-        LogLine(std::string("[CreateOverallDimension] used fallback direction=") + (horizontal ? "H" : "V"));
+        usedFallback = true;
     }
 
     NXOpen::Annotations::Dimension* nullDimension = NULL;
+    stepStart = std::chrono::steady_clock::now();
     NXOpen::Annotations::RapidDimensionBuilder* builder = workPart->Dimensions()->CreateRapidDimensionBuilder(nullDimension);
+    const long long builderCreateMs = ElapsedMilliseconds(stepStart);
     if (builder == NULL)
     {
+        LogLine(std::string("[CreateOverallDimension] builder null direction=") + (horizontal ? "H" : "V")
+            + " curveCount=" + std::to_string(curves.size())
+            + " collectMs=" + std::to_string(collectMs)
+            + " findPrimaryMs=" + std::to_string(findPrimaryMs)
+            + " findFallbackMs=" + std::to_string(findFallbackMs)
+            + " builderCreateMs=" + std::to_string(builderCreateMs)
+            + " totalMs=" + std::to_string(ElapsedMilliseconds(totalStart)));
         return false;
     }
 
     NXOpen::View* nullView = NULL;
     NXOpen::Point3d assistPoint(0.0, 0.0, 0.0);
+    stepStart = std::chrono::steady_clock::now();
+    const double styleScale = ClampPositive(dimensionScale, 1.0);
     builder->Style()->DimensionStyle()->SetTextCentered(true);
     builder->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
+    NXOpen::Annotations::LetteringStyleBuilder* letteringStyle = builder->Style()->LetteringStyle();
+    if (letteringStyle != NULL)
+    {
+        const double baseDimensionTextSize = ClampPositive(letteringStyle->DimensionTextSize(), 3.5);
+        const double scaledDimensionTextSize = baseDimensionTextSize * styleScale;
+        letteringStyle->SetDimensionTextSize(scaledDimensionTextSize);
+        letteringStyle->SetAppendedTextSize(scaledDimensionTextSize);
+        letteringStyle->SetToleranceTextSize(scaledDimensionTextSize);
+        letteringStyle->SetTwoLineToleranceTextSize(scaledDimensionTextSize);
+    }
+    NXOpen::Annotations::LineArrowStyleBuilder* lineArrowStyle = builder->Style()->LineArrowStyle();
+    if (lineArrowStyle != NULL)
+    {
+        lineArrowStyle->SetArrowheadLength(ClampPositive(lineArrowStyle->ArrowheadLength(), 3.0) * styleScale);
+        lineArrowStyle->SetDotArrowheadDiameter(ClampPositive(lineArrowStyle->DotArrowheadDiameter(), 1.0) * styleScale);
+        lineArrowStyle->SetTextToLineDistance(ClampPositive(lineArrowStyle->TextToLineDistance(), 1.0) * styleScale);
+        lineArrowStyle->SetLinePastArrowDistance(ClampPositive(lineArrowStyle->LinePastArrowDistance(), 1.0) * styleScale);
+        lineArrowStyle->SetLinePastArrowDistance2(ClampPositive(lineArrowStyle->LinePastArrowDistance2(), 1.0) * styleScale);
+    }
     builder->Measurement()->SetMethod(horizontal ?
         NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodHorizontal :
         NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodVertical);
+    const long long styleMs = ElapsedMilliseconds(stepStart);
+    stepStart = std::chrono::steady_clock::now();
     builder->FirstAssociativity()->SetValue(first.snapType, first.curve, view, first.modelPoint, NULL, nullView, assistPoint);
     builder->SecondAssociativity()->SetValue(second.snapType, second.curve, view, second.modelPoint, NULL, nullView, assistPoint);
+    const long long assocMs = ElapsedMilliseconds(stepStart);
 
     NXOpen::Point3d origin = horizontal ?
         NXOpen::Point3d(rect.maxX - dimensionGap, rect.maxY + dimensionGap, 0.0) :
         NXOpen::Point3d(rect.minX - dimensionGap, rect.minY - dimensionGap, 0.0);
+    stepStart = std::chrono::steady_clock::now();
     builder->Origin()->Origin()->SetValue(NULL, nullView, origin);
+    const long long originMs = ElapsedMilliseconds(stepStart);
 
     try
     {
+        stepStart = std::chrono::steady_clock::now();
         builder->Commit();
+        const long long commitMs = ElapsedMilliseconds(stepStart);
+        stepStart = std::chrono::steady_clock::now();
         builder->Destroy();
+        const long long destroyMs = ElapsedMilliseconds(stepStart);
         LogLine(std::string("[CreateOverallDimension] created direction=") + (horizontal ? "H" : "V")
-            + " origin=(" + FormatReal(origin.X) + "," + FormatReal(origin.Y) + ")");
+            + " origin=(" + FormatReal(origin.X) + "," + FormatReal(origin.Y) + ")"
+            + " dimensionScale=" + FormatReal(styleScale)
+            + " curveCount=" + std::to_string(curves.size())
+            + " usedFallback=" + std::to_string(usedFallback ? 1 : 0)
+            + " collectMs=" + std::to_string(collectMs)
+            + " findPrimaryMs=" + std::to_string(findPrimaryMs)
+            + " findFallbackMs=" + std::to_string(findFallbackMs)
+            + " builderCreateMs=" + std::to_string(builderCreateMs)
+            + " styleMs=" + std::to_string(styleMs)
+            + " assocMs=" + std::to_string(assocMs)
+            + " originMs=" + std::to_string(originMs)
+            + " commitMs=" + std::to_string(commitMs)
+            + " destroyMs=" + std::to_string(destroyMs)
+            + " totalMs=" + std::to_string(ElapsedMilliseconds(totalStart)));
         return true;
     }
     catch (const NXOpen::NXException& ex)
     {
-        LogLine("[CreateOverallDimension] commit failed: " + LocaleText(ex.Message()));
+        const long long commitFailMs = ElapsedMilliseconds(stepStart);
+        LogLine("[CreateOverallDimension] commit failed direction=" + std::string(horizontal ? "H" : "V")
+            + " message=" + LocaleText(ex.Message())
+            + " curveCount=" + std::to_string(curves.size())
+            + " collectMs=" + std::to_string(collectMs)
+            + " findPrimaryMs=" + std::to_string(findPrimaryMs)
+            + " findFallbackMs=" + std::to_string(findFallbackMs)
+            + " builderCreateMs=" + std::to_string(builderCreateMs)
+            + " styleMs=" + std::to_string(styleMs)
+            + " assocMs=" + std::to_string(assocMs)
+            + " originMs=" + std::to_string(originMs)
+            + " commitFailMs=" + std::to_string(commitFailMs)
+            + " totalMs=" + std::to_string(ElapsedMilliseconds(totalStart)));
         builder->Destroy();
         return false;
     }
     catch (...)
     {
-        LogLine("[CreateOverallDimension] commit failed");
+        const long long commitFailMs = ElapsedMilliseconds(stepStart);
+        LogLine("[CreateOverallDimension] commit failed direction=" + std::string(horizontal ? "H" : "V")
+            + " curveCount=" + std::to_string(curves.size())
+            + " collectMs=" + std::to_string(collectMs)
+            + " findPrimaryMs=" + std::to_string(findPrimaryMs)
+            + " findFallbackMs=" + std::to_string(findFallbackMs)
+            + " builderCreateMs=" + std::to_string(builderCreateMs)
+            + " styleMs=" + std::to_string(styleMs)
+            + " assocMs=" + std::to_string(assocMs)
+            + " originMs=" + std::to_string(originMs)
+            + " commitFailMs=" + std::to_string(commitFailMs)
+            + " totalMs=" + std::to_string(ElapsedMilliseconds(totalStart)));
         builder->Destroy();
         return false;
     }
@@ -3124,8 +4245,12 @@ static void DoUpdateNow(const char* reason)
     try
     {
         Session* session = Session::GetSession();
+        const std::chrono::steady_clock::time_point updateStart = std::chrono::steady_clock::now();
         Session::UndoMarkId mark = session->SetUndoMark(Session::MarkVisibilityInvisible, reason != NULL ? reason : "PILianDaoCuZKT update");
         session->UpdateManager()->DoUpdate(mark);
+        LogLine(std::string("[DoUpdateNow] update ok reason=")
+            + (reason != NULL ? reason : "")
+            + " ms=" + std::to_string(ElapsedMilliseconds(updateStart)));
     }
     catch (...)
     {
@@ -3133,9 +4258,241 @@ static void DoUpdateNow(const char* reason)
     }
 }
 
-static void LayoutAndAnnotateViews(NXOpen::Part* workPart, const std::vector<FlatPatternItem>& items, const CommandOptions& options)
+class UfSuppressViewUpdateGuard
 {
-    LogLine("[LayoutAndAnnotateViews] begin itemCount=" + std::to_string(items.size()));
+public:
+    UfSuppressViewUpdateGuard()
+        : oldSuppressViewUpdate_(false),
+          active_(false)
+    {
+        logical oldValue = false;
+        const int askStatus = UF_DRAW_ask_suppress_view_updat(&oldValue);
+        if (askStatus != 0)
+        {
+            LogLine("[UfSuppressViewUpdateGuard] ask failed status=" + std::to_string(askStatus));
+            return;
+        }
+
+        oldSuppressViewUpdate_ = oldValue;
+        const int setStatus = UF_DRAW_set_suppress_view_updat(true);
+        if (setStatus == 0)
+        {
+            active_ = true;
+            LogLine("[UfSuppressViewUpdateGuard] enabled old="
+                + std::to_string(oldSuppressViewUpdate_ ? 1 : 0));
+        }
+        else
+        {
+            LogLine("[UfSuppressViewUpdateGuard] enable failed status=" + std::to_string(setStatus));
+        }
+    }
+
+    ~UfSuppressViewUpdateGuard()
+    {
+        Restore();
+    }
+
+    void Restore()
+    {
+        if (!active_)
+        {
+            return;
+        }
+
+        const int restoreStatus = UF_DRAW_set_suppress_view_updat(oldSuppressViewUpdate_);
+        LogLine("[UfSuppressViewUpdateGuard] restored status="
+            + std::to_string(restoreStatus)
+            + " value=" + std::to_string(oldSuppressViewUpdate_ ? 1 : 0));
+        active_ = false;
+    }
+
+private:
+    logical oldSuppressViewUpdate_;
+    bool active_;
+};
+
+class DraftingDelayUpdateGuard
+{
+public:
+    explicit DraftingDelayUpdateGuard(NXOpen::Part* part)
+        : part_(part),
+          drafting_(NULL),
+          oldDelayViewUpdate_(false),
+          oldDelayUpdateOnCreation_(false),
+          oldUpdateViewWithoutLwData_(NXOpen::Preferences::PartDrafting::UpdateViewWithoutLwDataOptionIgnore),
+          active_(false)
+    {
+        try
+        {
+            drafting_ = (part_ != NULL && part_->Preferences() != NULL) ? part_->Preferences()->Drafting() : NULL;
+            if (drafting_ == NULL)
+            {
+                LogLine("[DraftingDelayUpdateGuard] drafting preferences unavailable");
+                return;
+            }
+
+            oldDelayViewUpdate_ = drafting_->DelayViewUpdate();
+            oldDelayUpdateOnCreation_ = drafting_->DelayUpdateOnCreation();
+            oldUpdateViewWithoutLwData_ = drafting_->UpdateViewWithoutLwData();
+            drafting_->SetDelayViewUpdate(false);
+            drafting_->SetDelayUpdateOnCreation(true);
+            drafting_->SetUpdateViewWithoutLwData(NXOpen::Preferences::PartDrafting::UpdateViewWithoutLwDataOptionGenerate);
+            active_ = true;
+            LogLine("[DraftingDelayUpdateGuard] enabled oldDelayViewUpdate="
+                + std::to_string(oldDelayViewUpdate_ ? 1 : 0)
+                + " oldDelayUpdateOnCreation=" + std::to_string(oldDelayUpdateOnCreation_ ? 1 : 0)
+                + " oldUpdateViewWithoutLwData=" + std::to_string(static_cast<int>(oldUpdateViewWithoutLwData_))
+                + " newDelayViewUpdate=0 newDelayUpdateOnCreation=1 newUpdateViewWithoutLwData=Generate");
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogLine("[DraftingDelayUpdateGuard] enable NXException code=" + std::to_string(ex.ErrorCode())
+                + " message=" + std::string(ex.Message()));
+        }
+        catch (...)
+        {
+            LogLine("[DraftingDelayUpdateGuard] enable exception");
+        }
+    }
+
+    ~DraftingDelayUpdateGuard()
+    {
+        Restore();
+    }
+
+    void Restore()
+    {
+        if (!active_ || drafting_ == NULL)
+        {
+            return;
+        }
+
+        try
+        {
+            LogLine("[DraftingDelayUpdateGuard] final preferences left unchanged by request"
+                + std::string(" delayViewUpdate=") + std::to_string(drafting_->DelayViewUpdate() ? 1 : 0)
+                + " delayUpdateOnCreation=" + std::to_string(drafting_->DelayUpdateOnCreation() ? 1 : 0)
+                + " updateViewWithoutLwData=" + std::to_string(static_cast<int>(drafting_->UpdateViewWithoutLwData()))
+                + " oldDelayViewUpdate=" + std::to_string(oldDelayViewUpdate_ ? 1 : 0)
+                + " oldDelayUpdateOnCreation=" + std::to_string(oldDelayUpdateOnCreation_ ? 1 : 0)
+                + " oldUpdateViewWithoutLwData=" + std::to_string(static_cast<int>(oldUpdateViewWithoutLwData_)));
+        }
+        catch (...)
+        {
+            LogLine("[DraftingDelayUpdateGuard] final preferences left unchanged by request, read current state failed");
+        }
+        active_ = false;
+    }
+
+private:
+    NXOpen::Part* part_;
+    NXOpen::Preferences::PartDrafting* drafting_;
+    bool oldDelayViewUpdate_;
+    bool oldDelayUpdateOnCreation_;
+    NXOpen::Preferences::PartDrafting::UpdateViewWithoutLwDataOption oldUpdateViewWithoutLwData_;
+    bool active_;
+};
+
+static void UpdateOneDraftingView(NXOpen::Part* workPart, NXOpen::Drawings::BaseView* view, const std::string& reason)
+{
+    if (view == NULL)
+    {
+        return;
+    }
+
+    const std::chrono::steady_clock::time_point updateStart = std::chrono::steady_clock::now();
+    NXOpen::Drawings::DraftingView* draftingView = dynamic_cast<NXOpen::Drawings::DraftingView*>(view);
+    if (draftingView != NULL)
+    {
+        try
+        {
+            draftingView->Update();
+            LogLine("[UpdateOneDraftingView] NXOpen ok reason=" + reason
+                + " viewTag=" + std::to_string(static_cast<unsigned long long>(view->Tag()))
+                + " ms=" + std::to_string(ElapsedMilliseconds(updateStart)));
+            return;
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogLine("[UpdateOneDraftingView] NXOpen failed reason=" + reason
+                + " code=" + std::to_string(ex.ErrorCode())
+                + " message=" + std::string(ex.Message()));
+        }
+        catch (...)
+        {
+            LogLine("[UpdateOneDraftingView] NXOpen failed reason=" + reason);
+        }
+    }
+
+    try
+    {
+        NXOpen::Drawings::DraftingDrawingSheet* sheet =
+            (workPart != NULL && workPart->DraftingDrawingSheets() != NULL) ?
+            workPart->DraftingDrawingSheets()->CurrentDrawingSheet() : NULL;
+        const int status = (sheet != NULL) ? UF_DRAW_update_one_view(sheet->Tag(), view->Tag()) : -1;
+        LogLine("[UpdateOneDraftingView] UF reason=" + reason
+            + " status=" + std::to_string(status)
+            + " sheetTag=" + std::to_string(static_cast<unsigned long long>(sheet != NULL ? sheet->Tag() : NULL_TAG))
+            + " viewTag=" + std::to_string(static_cast<unsigned long long>(view->Tag()))
+            + " ms=" + std::to_string(ElapsedMilliseconds(updateStart)));
+    }
+    catch (...)
+    {
+        LogLine("[UpdateOneDraftingView] UF exception reason=" + reason
+            + " viewTag=" + std::to_string(static_cast<unsigned long long>(view->Tag()))
+            + " ms=" + std::to_string(ElapsedMilliseconds(updateStart)));
+    }
+}
+
+static void DeleteTaggedObjects(const std::vector<NXOpen::TaggedObject*>& objects, const std::string& reason)
+{
+    if (objects.empty())
+    {
+        return;
+    }
+
+    try
+    {
+        Session* session = Session::GetSession();
+        NXOpen::Update* update = session->UpdateManager();
+        update->ClearDeleteList();
+        const int addErrors = update->AddObjectsToDeleteList(objects);
+        Session::UndoMarkId mark = session->SetUndoMark(Session::MarkVisibilityInvisible, reason.c_str());
+        const int updateErrors = update->DoUpdate(mark);
+        LogLine("[DeleteTaggedObjects] reason=" + reason
+            + " count=" + std::to_string(objects.size())
+            + " addErrors=" + std::to_string(addErrors)
+            + " updateErrors=" + std::to_string(updateErrors));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[DeleteTaggedObjects] NXException reason=" + reason
+            + " code=" + std::to_string(ex.ErrorCode())
+            + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[DeleteTaggedObjects] exception reason=" + reason);
+    }
+}
+
+struct LayoutBatchResult
+{
+    std::vector<FlatPatternItem> overflowItems;
+    std::vector<FlatPatternCreateFailure> failures;
+    double nextY;
+    size_t createdCount;
+    bool placedAny;
+};
+
+static LayoutBatchResult LayoutAndAnnotateViews(NXOpen::Part* workPart, const std::vector<FlatPatternItem>& items, const CommandOptions& options, double startY)
+{
+    LayoutBatchResult result;
+    result.nextY = startY;
+    result.createdCount = 0;
+    result.placedAny = false;
+    LogLine("[LayoutAndAnnotateViews] begin itemCount=" + std::to_string(items.size())
+        + " startY=" + FormatReal(startY));
     struct CreatedView
     {
         FlatPatternItem item;
@@ -3150,91 +4507,51 @@ static void LayoutAndAnnotateViews(NXOpen::Part* workPart, const std::vector<Fla
         bool placed;
     };
 
-    std::vector<CreatedView> createdViews;
-    createdViews.reserve(items.size());
-
-    const NXOpen::Point3d sheetCenter(options.sheetWidth * 0.5, options.sheetHeight * 0.5, 0.0);
-    LogLine("[LayoutAndAnnotateViews] phase1 create all views at sheet center");
-    for (size_t i = 0; i < items.size(); ++i)
-    {
-        LogLine("[LayoutAndAnnotateViews] create item index=" + std::to_string(i)
-            + " part=" + LocaleText(items[i].part != NULL ? items[i].part->Name() : NXOpen::NXString(""))
-            + " view=" + items[i].viewName);
-
-        NXOpen::Drawings::BaseView* view = CreateFlatBaseView(workPart, items[i], options, sheetCenter);
-        if (view == NULL)
-        {
-            LogLine("[PILianDaoCuZKT] create view failed: " + items[i].partKey + " view=" + items[i].viewName);
-            continue;
-        }
-
-        CreatedView created;
-        created.item = items[i];
-        created.view = view;
-        created.width = 50.0;
-        created.height = 40.0;
-        created.material = BodyMaterialText(items[i].part, items[i].body);
-        created.thickness = BodyThicknessText(items[i].part, items[i].body);
-        created.layoutKey = BodyLayoutKey(created.material, created.thickness);
-        created.valid = false;
-        created.placed = false;
-        createdViews.push_back(created);
-    }
-
-    if (createdViews.empty())
-    {
-        LogLine("[LayoutAndAnnotateViews] no views created");
-        return;
-    }
-
-    DoUpdateNow("PILianDaoCuZKT create views");
-    LogLine("[LayoutAndAnnotateViews] phase1b center every view by boundary before measuring");
-    for (size_t i = 0; i < createdViews.size(); ++i)
-    {
-        MoveViewBoundaryCenterTo(createdViews[i].view, sheetCenter);
-    }
-    DoUpdateNow("PILianDaoCuZKT center views before layout");
-
-    LogLine("[LayoutAndAnnotateViews] phase1c apply bend line visibility show="
-        + std::to_string(options.showBendLines ? 1 : 0));
-    for (size_t i = 0; i < createdViews.size(); ++i)
-    {
-        ApplyFlatPatternBendCurveVisibility(workPart, createdViews[i].view, options.showBendLines);
-    }
-    DoUpdateNow("PILianDaoCuZKT apply bend line visibility");
-
-    LogLine("[LayoutAndAnnotateViews] phase2 measure view rectangles");
-    for (size_t i = 0; i < createdViews.size(); ++i)
-    {
-        DraftRect rect;
-        const bool hasRect = RectForLayout(createdViews[i].view, rect);
-        if (!hasRect)
-        {
-            rect.minX = sheetCenter.X - 25.0;
-            rect.maxX = sheetCenter.X + 25.0;
-            rect.minY = sheetCenter.Y - 20.0;
-            rect.maxY = sheetCenter.Y + 20.0;
-        }
-        createdViews[i].rect = rect;
-        createdViews[i].width = std::max(50.0, RectWidth(rect));
-        createdViews[i].height = std::max(40.0, RectHeight(rect));
-        createdViews[i].valid = hasRect;
-        LogLine("[LayoutAndAnnotateViews] measured index=" + std::to_string(i)
-            + " valid=" + std::to_string(hasRect ? 1 : 0)
-            + " width=" + FormatReal(createdViews[i].width)
-            + " height=" + FormatReal(createdViews[i].height)
-            + " material=" + createdViews[i].material
-            + " thickness=" + createdViews[i].thickness);
-    }
-
-    LogLine("[LayoutAndAnnotateViews] phase3 sort rows by material and thickness");
-    const double margin = std::max(10.0, options.viewSpacing);
-    const double dimensionGap = options.annotateMaxDimension ? std::max(3.0, options.noteTextSize * 2.0) : 0.0;
-    const double dimensionTopReserve = options.annotateMaxDimension ? dimensionGap + options.noteTextSize * 4.0 : 0.0;
-    const double dimensionRightReserve = options.annotateMaxDimension ? dimensionGap + options.noteTextSize * 6.0 : 0.0;
+    const double margin = kSheetMargin;
+    const double dimensionScale = ClampPositive(options.viewScaleDenominator, 1.0);
+    const double dimensionGap = options.annotateMaxDimension ? kDimensionPlacementGap * dimensionScale : 0.0;
+    const double dimensionTopReserve = options.annotateMaxDimension ? dimensionGap + 14.0 * dimensionScale : 0.0;
+    const double dimensionRightReserve = options.annotateMaxDimension ? dimensionGap + 21.0 * dimensionScale : 0.0;
     const double noteGap = std::max(2.0, options.noteTextSize * 1.5);
     const double noteReserve = noteGap + options.noteTextSize * 4.0;
     const double usableWidth = options.sheetWidth - margin * 2.0;
+
+    struct PlannedView
+    {
+        FlatPatternItem item;
+        double width;
+        double height;
+        double blockWidth;
+        double blockHeight;
+        size_t rowIndex;
+        NXOpen::Point3d center;
+        bool placed;
+    };
+
+    std::vector<PlannedView> plannedViews;
+    plannedViews.reserve(items.size());
+    for (size_t i = 0; i < items.size(); ++i)
+    {
+        PlannedView planned;
+        planned.item = items[i];
+        planned.width = items[i].hasFlatSize ? std::max(1.0, items[i].flatWidth) : 50.0;
+        planned.height = items[i].hasFlatSize ? std::max(1.0, items[i].flatHeight) : 40.0;
+        planned.blockWidth = planned.width + dimensionRightReserve;
+        planned.blockHeight = dimensionTopReserve + planned.height + noteReserve;
+        planned.rowIndex = static_cast<size_t>(-1);
+        planned.center = NXOpen::Point3d(0.0, 0.0, 0.0);
+        planned.placed = false;
+        plannedViews.push_back(planned);
+        LogLine("[LayoutAndAnnotateViews] planned index=" + std::to_string(i)
+            + " hasFlatSize=" + std::to_string(items[i].hasFlatSize ? 1 : 0)
+            + " minimumX=" + FormatReal(items[i].flatWidth)
+            + " minimumY=" + FormatReal(items[i].flatHeight)
+            + " estWidth=" + FormatReal(planned.width)
+            + " estHeight=" + FormatReal(planned.height)
+            + " layoutKey=" + items[i].layoutKey);
+    }
+
+    LogLine("[LayoutAndAnnotateViews] phase1 calculate final view positions before creation");
 
     struct LayoutRow
     {
@@ -3247,24 +4564,44 @@ static void LayoutAndAnnotateViews(NXOpen::Part* workPart, const std::vector<Fla
     };
 
     std::map<std::string, std::vector<size_t> > groupedIndices;
-    for (size_t i = 0; i < createdViews.size(); ++i)
+    for (size_t i = 0; i < plannedViews.size(); ++i)
     {
-        groupedIndices[createdViews[i].layoutKey].push_back(i);
+        const std::string key = plannedViews[i].item.layoutKey.empty()
+            ? BodyLayoutKey(plannedViews[i].item.material, plannedViews[i].item.thickness)
+            : plannedViews[i].item.layoutKey;
+        groupedIndices[key].push_back(i);
     }
 
     std::vector<LayoutRow> rows;
     for (std::map<std::string, std::vector<size_t> >::const_iterator git = groupedIndices.begin(); git != groupedIndices.end(); ++git)
     {
+        std::vector<size_t> sortedIndices = git->second;
+        std::sort(sortedIndices.begin(), sortedIndices.end(), [&plannedViews](size_t a, size_t b) {
+            const double sortYA = plannedViews[a].item.hasFlatSize ? plannedViews[a].item.flatHeight : plannedViews[a].height;
+            const double sortYB = plannedViews[b].item.hasFlatSize ? plannedViews[b].item.flatHeight : plannedViews[b].height;
+            if (fabs(sortYA - sortYB) > 1.0e-6)
+            {
+                return sortYA > sortYB;
+            }
+            const double sortXA = plannedViews[a].item.hasFlatSize ? plannedViews[a].item.flatWidth : plannedViews[a].width;
+            const double sortXB = plannedViews[b].item.hasFlatSize ? plannedViews[b].item.flatWidth : plannedViews[b].width;
+            if (fabs(sortXA - sortXB) > 1.0e-6)
+            {
+                return sortXA > sortXB;
+            }
+            return a < b;
+        });
+
         LayoutRow row;
         row.key = git->first;
         row.totalWidth = 0.0;
         row.maxBlockHeight = 0.0;
 
-        for (size_t j = 0; j < git->second.size(); ++j)
+        for (size_t j = 0; j < sortedIndices.size(); ++j)
         {
-            const size_t viewIndex = git->second[j];
-            const double blockWidth = createdViews[viewIndex].width + dimensionRightReserve;
-            const double blockHeight = dimensionTopReserve + createdViews[viewIndex].height + noteReserve;
+            const size_t viewIndex = sortedIndices[j];
+            const double blockWidth = plannedViews[viewIndex].blockWidth;
+            const double blockHeight = plannedViews[viewIndex].blockHeight;
             const double nextTotalWidth = row.indices.empty() ? blockWidth : row.totalWidth + options.viewSpacing + blockWidth;
 
             if (!row.indices.empty() && nextTotalWidth > usableWidth)
@@ -3281,8 +4618,8 @@ static void LayoutAndAnnotateViews(NXOpen::Part* workPart, const std::vector<Fla
 
             if (row.indices.empty())
             {
-                row.material = createdViews[viewIndex].material;
-                row.thickness = createdViews[viewIndex].thickness;
+                row.material = plannedViews[viewIndex].item.material;
+                row.thickness = plannedViews[viewIndex].item.thickness;
                 row.totalWidth = blockWidth;
             }
             else
@@ -3299,18 +4636,25 @@ static void LayoutAndAnnotateViews(NXOpen::Part* workPart, const std::vector<Fla
         }
     }
 
-    LogLine("[LayoutAndAnnotateViews] phase3 move views by material/thickness rows rowCount=" + std::to_string(rows.size()));
-    double y = options.sheetHeight - margin;
-
+    LogLine("[LayoutAndAnnotateViews] phase2 assign direct create positions rowCount=" + std::to_string(rows.size()));
+    double y = startY;
+    const bool freshSheetCursor = startY >= options.sheetHeight - margin - 1.0e-6;
     for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
     {
         const LayoutRow& row = rows[rowIndex];
         if (y - row.maxBlockHeight < margin)
         {
-            LogLine("[PILianDaoCuZKT] sheet is full, remaining rows skipped layout row=" + std::to_string(rowIndex)
-                + " material=" + row.material + " thickness=" + row.thickness
-                + " rowHeight=" + FormatReal(row.maxBlockHeight));
-            break;
+            if (rowIndex > 0 || !freshSheetCursor)
+            {
+                LogLine("[PILianDaoCuZKT] sheet is full, remaining rows overflow to next sheet row=" + std::to_string(rowIndex)
+                    + " material=" + row.material + " thickness=" + row.thickness
+                    + " y=" + FormatReal(y)
+                    + " rowHeight=" + FormatReal(row.maxBlockHeight));
+                break;
+            }
+
+            LogLine("[PILianDaoCuZKT] first row exceeds sheet height, force placing to avoid endless overflow rowHeight="
+                + FormatReal(row.maxBlockHeight));
         }
 
         LogLine("[LayoutAndAnnotateViews] row=" + std::to_string(rowIndex)
@@ -3324,18 +4668,19 @@ static void LayoutAndAnnotateViews(NXOpen::Part* workPart, const std::vector<Fla
         for (size_t j = 0; j < row.indices.size(); ++j)
         {
             const size_t i = row.indices[j];
-            const double width = createdViews[i].width;
-            const double height = createdViews[i].height;
-            const double blockWidth = width + dimensionRightReserve;
-            const double blockHeight = dimensionTopReserve + height + noteReserve;
+            const double width = plannedViews[i].width;
+            const double height = plannedViews[i].height;
+            const double blockWidth = plannedViews[i].blockWidth;
+            const double blockHeight = plannedViews[i].blockHeight;
 
             const double viewLeft = x;
             const double viewTop = y - dimensionTopReserve;
             NXOpen::Point3d center(viewLeft + width * 0.5, viewTop - height * 0.5, 0.0);
-            MoveViewBoundaryCenterTo(createdViews[i].view, center);
-            DoUpdateNow("PILianDaoCuZKT move one view");
-            createdViews[i].placed = true;
-            LogLine("[LayoutAndAnnotateViews] moved index=" + std::to_string(i)
+            plannedViews[i].center = center;
+            plannedViews[i].rowIndex = rowIndex;
+            plannedViews[i].placed = true;
+            result.placedAny = true;
+            LogLine("[LayoutAndAnnotateViews] planned position index=" + std::to_string(i)
                 + " row=" + std::to_string(rowIndex)
                 + " center=(" + FormatReal(center.X) + "," + FormatReal(center.Y)
                 + ") blockWidth=" + FormatReal(blockWidth)
@@ -3347,19 +4692,98 @@ static void LayoutAndAnnotateViews(NXOpen::Part* workPart, const std::vector<Fla
 
         y -= row.maxBlockHeight + options.rowSpacing;
     }
+    result.nextY = y;
 
-    DoUpdateNow("PILianDaoCuZKT layout views");
+    std::vector<CreatedView> createdViews;
+    createdViews.reserve(items.size());
+    LogLine("[LayoutAndAnnotateViews] phase3 create placed views directly at final positions");
+    for (size_t i = 0; i < plannedViews.size(); ++i)
+    {
+        if (!plannedViews[i].placed)
+        {
+            result.overflowItems.push_back(plannedViews[i].item);
+            LogLine("[LayoutAndAnnotateViews] overflow item index=" + std::to_string(i)
+                + " part=" + plannedViews[i].item.partKey
+                + " view=" + plannedViews[i].item.viewName);
+            continue;
+        }
+
+        LogLine("[LayoutAndAnnotateViews] create item index=" + std::to_string(i)
+            + " part=" + LocaleText(plannedViews[i].item.part != NULL ? plannedViews[i].item.part->Name() : NXOpen::NXString(""))
+            + " view=" + plannedViews[i].item.viewName
+            + " center=(" + FormatReal(plannedViews[i].center.X) + "," + FormatReal(plannedViews[i].center.Y) + ")");
+        NXOpen::Drawings::BaseView* view = CreateFlatBaseView(workPart, plannedViews[i].item, options, plannedViews[i].center);
+        if (view == NULL)
+        {
+            LogLine("[PILianDaoCuZKT] create view failed: " + plannedViews[i].item.partKey + " view=" + plannedViews[i].item.viewName);
+            FlatPatternCreateFailure failure;
+            failure.partKey = plannedViews[i].item.partKey;
+            failure.viewName = plannedViews[i].item.viewName;
+            result.failures.push_back(failure);
+            const double shift = plannedViews[i].blockWidth + options.viewSpacing;
+            for (size_t j = i + 1; j < plannedViews.size(); ++j)
+            {
+                if (plannedViews[j].placed && plannedViews[j].rowIndex == plannedViews[i].rowIndex)
+                {
+                    plannedViews[j].center.X -= shift;
+                    LogLine("[LayoutAndAnnotateViews] compact row after failed view failedIndex="
+                        + std::to_string(i)
+                        + " shiftedIndex=" + std::to_string(j)
+                        + " shift=" + FormatReal(shift)
+                        + " newCenter=(" + FormatReal(plannedViews[j].center.X)
+                        + "," + FormatReal(plannedViews[j].center.Y) + ")");
+                }
+            }
+            continue;
+        }
+        CreatedView created;
+        created.item = plannedViews[i].item;
+        created.view = view;
+        created.width = plannedViews[i].width;
+        created.height = plannedViews[i].height;
+        created.material = plannedViews[i].item.material;
+        created.thickness = plannedViews[i].item.thickness;
+        created.layoutKey = plannedViews[i].item.layoutKey.empty() ? BodyLayoutKey(created.material, created.thickness) : plannedViews[i].item.layoutKey;
+        created.valid = false;
+        created.placed = true;
+        created.rect.minX = plannedViews[i].center.X - plannedViews[i].width * 0.5;
+        created.rect.maxX = plannedViews[i].center.X + plannedViews[i].width * 0.5;
+        created.rect.minY = plannedViews[i].center.Y - plannedViews[i].height * 0.5;
+        created.rect.maxY = plannedViews[i].center.Y + plannedViews[i].height * 0.5;
+        createdViews.push_back(created);
+        ++result.createdCount;
+    }
+
+    if (createdViews.empty())
+    {
+        LogLine("[LayoutAndAnnotateViews] no views created on this sheet");
+        return result;
+    }
+
+    LogLine("[LayoutAndAnnotateViews] phase3a measure directly created view rectangles");
+    for (size_t i = 0; i < createdViews.size(); ++i)
+    {
+        DraftRect rect;
+        const bool hasRect = RectForLayout(createdViews[i].view, rect);
+        if (hasRect)
+        {
+            createdViews[i].rect = rect;
+            createdViews[i].width = std::max(1.0, RectWidth(rect));
+            createdViews[i].height = std::max(1.0, RectHeight(rect));
+        }
+        createdViews[i].valid = hasRect;
+        LogLine("[LayoutAndAnnotateViews] measured direct index=" + std::to_string(i)
+            + " valid=" + std::to_string(hasRect ? 1 : 0)
+            + " width=" + FormatReal(createdViews[i].width)
+            + " height=" + FormatReal(createdViews[i].height)
+            + " itemMinimumY=" + FormatReal(createdViews[i].item.flatHeight));
+    }
+
+    LogLine("[LayoutAndAnnotateViews] skip layout move/update; views created at final positions");
 
     LogLine("[LayoutAndAnnotateViews] phase3b reapply bend line visibility after layout show="
         + std::to_string(options.showBendLines ? 1 : 0));
-    for (size_t i = 0; i < createdViews.size(); ++i)
-    {
-        if (createdViews[i].placed)
-        {
-            ApplyFlatPatternBendCurveVisibility(workPart, createdViews[i].view, options.showBendLines);
-        }
-    }
-    DoUpdateNow("PILianDaoCuZKT reapply bend line visibility");
+    LogLine("[LayoutAndAnnotateViews] phase3b skipped per-view bend line reapply; using drafting view defaults");
 
     LogLine("[LayoutAndAnnotateViews] phase4 annotate and dimension after final layout");
     for (size_t i = 0; i < createdViews.size(); ++i)
@@ -3388,24 +4812,37 @@ static void LayoutAndAnnotateViews(NXOpen::Part* workPart, const std::vector<Fla
         if (options.annotateMaxDimension)
         {
             LogLine("[LayoutAndAnnotateViews] create max dimensions index=" + std::to_string(i));
-            CreateOverallDimension(workPart, createdViews[i].view, displayedRect, true, dimensionGap);
-            CreateOverallDimension(workPart, createdViews[i].view, displayedRect, false, dimensionGap);
+            std::chrono::steady_clock::time_point dimensionStart = std::chrono::steady_clock::now();
+            CreateOverallDimension(workPart, createdViews[i].view, displayedRect, true, dimensionGap, dimensionScale);
+            const long long horizontalDimensionMs = ElapsedMilliseconds(dimensionStart);
+            dimensionStart = std::chrono::steady_clock::now();
+            CreateOverallDimension(workPart, createdViews[i].view, displayedRect, false, dimensionGap, dimensionScale);
+            const long long verticalDimensionMs = ElapsedMilliseconds(dimensionStart);
+            LogLine("[LayoutAndAnnotateViews] dimension timing index=" + std::to_string(i)
+                + " horizontalMs=" + std::to_string(horizontalDimensionMs)
+                + " verticalMs=" + std::to_string(verticalDimensionMs));
         }
 
         const double bodyNoteGap = dimensionGap + std::max(noteGap, options.noteTextSize * 2.0);
         NXOpen::Point3d notePoint((displayedRect.minX + displayedRect.maxX) * 0.5, displayedRect.minY - bodyNoteGap, 0.0);
+        std::chrono::steady_clock::time_point noteStart = std::chrono::steady_clock::now();
         CreateBodyNote(workPart, createdViews[i].item, createdViews[i].view, notePoint, options.noteTextSize);
         LogLine("[LayoutAndAnnotateViews] note index=" + std::to_string(i)
             + " point=(" + FormatReal(notePoint.X) + "," + FormatReal(notePoint.Y)
             + ") displayedMinY=" + FormatReal(displayedRect.minY)
-            + " bodyNoteGap=" + FormatReal(bodyNoteGap));
+            + " bodyNoteGap=" + FormatReal(bodyNoteGap)
+            + " noteMs=" + std::to_string(ElapsedMilliseconds(noteStart)));
     }
-    DoUpdateNow("PILianDaoCuZKT annotate views");
-    LogLine("[LayoutAndAnnotateViews] done");
+    LogLine("[LayoutAndAnnotateViews] skip annotation update; final update runs once after all pages");
+    LogLine("[LayoutAndAnnotateViews] done overflowCount=" + std::to_string(result.overflowItems.size())
+        + " nextY=" + FormatReal(result.nextY)
+        + " placedAny=" + std::to_string(result.placedAny ? 1 : 0));
+    return result;
 }
 
-static void RunBatchFlatPatternDrawing(const CommandOptions& options)
+static DrawingRunSummary RunBatchFlatPatternDrawing(const CommandOptions& options)
 {
+    DrawingRunSummary summary;
     LogLine("[RunBatchFlatPatternDrawing] begin");
     Session* session = Session::GetSession();
     NXOpen::Part* displayPart = session->Parts()->Display();
@@ -3449,19 +4886,192 @@ static void RunBatchFlatPatternDrawing(const CommandOptions& options)
     }
 
     LogLine("[PILianDaoCuZKT] flat pattern count: " + std::to_string(items.size()));
-    CreateCustomSheet(workPart, options);
-    LayoutAndAnnotateViews(workPart, items, options);
+    summary.totalCount = items.size();
+    SortFlatPatternItemsForClassBatches(items);
+    DeleteExistingPluginSheets(workPart);
+    ApplyFlatPatternDefaultBendCurveVisibility(workPart, options.showBendLines);
+    DraftingDelayUpdateGuard draftingDelayGuard(workPart);
+
+    size_t nextItemIndex = 0;
+    size_t pageIndex = 0;
+    std::vector<FlatPatternItem> carryItems;
+    const double margin = kSheetMargin;
+    const double minimumUsefulCursorY = margin + std::max(40.0, options.noteTextSize * 8.0) + options.rowSpacing;
+    double pageCursorY = options.sheetHeight - margin;
+    bool sheetActive = false;
+    std::string currentSheetName;
+    size_t sheetPlacedCount = 0;
+    while (nextItemIndex < items.size() || !carryItems.empty())
+    {
+        if (!carryItems.empty())
+        {
+            sheetActive = false;
+        }
+        else if (sheetActive && pageCursorY < minimumUsefulCursorY)
+        {
+            LogLine("[RunBatchFlatPatternDrawing] current sheet remaining height is low, start next sheet sheet="
+                + currentSheetName
+                + " placedCount=" + std::to_string(sheetPlacedCount)
+                + " cursorY=" + FormatReal(pageCursorY)
+                + " minimumUsefulCursorY=" + FormatReal(minimumUsefulCursorY));
+            sheetActive = false;
+        }
+
+        if (!sheetActive)
+        {
+            if (!currentSheetName.empty())
+            {
+                LogLine("[RunBatchFlatPatternDrawing] page close sheet=" + currentSheetName
+                    + " placedCount=" + std::to_string(sheetPlacedCount)
+                    + " nextItemIndex=" + std::to_string(nextItemIndex)
+                    + " carryCount=" + std::to_string(carryItems.size()));
+            }
+
+            currentSheetName = PluginSheetName(pageIndex);
+            LogLine("[RunBatchFlatPatternDrawing] page begin index=" + std::to_string(pageIndex + 1)
+                + " sheet=" + currentSheetName
+                + " carryCount=" + std::to_string(carryItems.size())
+                + " nextItemIndex=" + std::to_string(nextItemIndex));
+            CreateCustomSheet(workPart, options, currentSheetName);
+            ++pageIndex;
+            summary.sheetCount = pageIndex;
+            pageCursorY = options.sheetHeight - margin;
+            sheetPlacedCount = 0;
+            sheetActive = true;
+        }
+
+        std::vector<FlatPatternItem> batchItems;
+        const size_t carryCount = carryItems.size();
+        std::string batchLayoutKey;
+        if (!carryItems.empty())
+        {
+            batchLayoutKey = carryItems[0].layoutKey;
+            batchItems.swap(carryItems);
+        }
+        else
+        {
+            batchLayoutKey = items[nextItemIndex].layoutKey;
+            while (nextItemIndex < items.size()
+                && items[nextItemIndex].layoutKey == batchLayoutKey)
+            {
+                batchItems.push_back(items[nextItemIndex]);
+                ++nextItemIndex;
+            }
+        }
+
+        if (batchItems.empty())
+        {
+            break;
+        }
+
+        const size_t batchInputCount = batchItems.size();
+        const bool sheetHadContentBeforeBatch = sheetPlacedCount > 0;
+        LogLine("[RunBatchFlatPatternDrawing] batch layout begin sheet=" + currentSheetName
+            + " layoutKey=" + batchLayoutKey
+            + " inputCount=" + std::to_string(batchInputCount)
+            + " carryCount=" + std::to_string(carryCount)
+            + " cursorY=" + FormatReal(pageCursorY)
+            + " nextItemIndex=" + std::to_string(nextItemIndex));
+        LayoutBatchResult layoutResult = LayoutAndAnnotateViews(workPart, batchItems, options, pageCursorY);
+        std::vector<FlatPatternItem>().swap(batchItems);
+
+        const size_t batchPlacedCount = layoutResult.createdCount;
+        summary.createdCount += layoutResult.createdCount;
+        summary.failures.insert(summary.failures.end(), layoutResult.failures.begin(), layoutResult.failures.end());
+        pageCursorY = layoutResult.nextY;
+        const bool pageFull = !layoutResult.overflowItems.empty();
+        carryItems.swap(layoutResult.overflowItems);
+        sheetPlacedCount += batchPlacedCount;
+
+        LogLine("[RunBatchFlatPatternDrawing] batch done sheet=" + currentSheetName
+            + " layoutKey=" + batchLayoutKey
+            + " placedCount=" + std::to_string(batchPlacedCount)
+            + " sheetPlacedCount=" + std::to_string(sheetPlacedCount)
+            + " carryCount=" + std::to_string(carryItems.size())
+            + " pageFull=" + std::to_string(pageFull ? 1 : 0)
+            + " nextItemIndex=" + std::to_string(nextItemIndex)
+            + " nextCursorY=" + FormatReal(pageCursorY));
+        LogLine("[RunBatchFlatPatternDrawing] batch update skipped; final update runs once after all pages");
+        if (batchPlacedCount == 0 && !carryItems.empty())
+        {
+            if (sheetHadContentBeforeBatch)
+            {
+                LogLine("[RunBatchFlatPatternDrawing] no room for next row on current sheet, continue on new sheet sheet="
+                    + currentSheetName
+                    + " carryCount=" + std::to_string(carryItems.size())
+                    + " cursorY=" + FormatReal(pageCursorY));
+                sheetActive = false;
+                continue;
+            }
+
+            LogLine("[RunBatchFlatPatternDrawing] batch made no progress on an empty sheet, stop pagination to avoid endless loop sheet=" + currentSheetName);
+            break;
+        }
+
+        if (pageFull)
+        {
+            sheetActive = false;
+        }
+    }
+    if (!currentSheetName.empty())
+    {
+        LogLine("[RunBatchFlatPatternDrawing] page close sheet=" + currentSheetName
+            + " placedCount=" + std::to_string(sheetPlacedCount)
+            + " nextItemIndex=" + std::to_string(nextItemIndex)
+            + " carryCount=" + std::to_string(carryItems.size()));
+    }
     LogLine("[RunBatchFlatPatternDrawing] layout complete");
 
+    DoUpdateNow("PILianDaoCuZKT final update after all pages");
     try
     {
-        session->UpdateManager()->DoUpdate(session->SetUndoMark(Session::MarkVisibilityInvisible, "PILianDaoCuZKT Update"));
+        session->Parts()->SetWork(workPart);
+        NXOpen::Part* finalDisplayPart = session->Parts()->Display();
+        NXOpen::Part* finalWorkPart = session->Parts()->Work();
+        LogLine("[RunBatchFlatPatternDrawing] final active parts displayPart="
+            + LocaleText(finalDisplayPart != NULL ? finalDisplayPart->Name() : NXOpen::NXString(""))
+            + " workPart=" + LocaleText(finalWorkPart != NULL ? finalWorkPart->Name() : NXOpen::NXString("")));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[RunBatchFlatPatternDrawing] final SetWork NXException code="
+            + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message()));
     }
     catch (...)
     {
-        LogLine("[RunBatchFlatPatternDrawing] update exception ignored");
+        LogLine("[RunBatchFlatPatternDrawing] final SetWork exception");
+    }
+
+    NXOpen::Drafting::PreferencesBuilder* finalPreferenceBuilder = NULL;
+    try
+    {
+        finalPreferenceBuilder = workPart->SettingsManager()->CreatePreferencesBuilder();
+        LogFlatPatternPreferenceStateInUiOrder(finalPreferenceBuilder != NULL ? finalPreferenceBuilder->ViewStyle() : NULL, "final-before-exit");
+        if (finalPreferenceBuilder != NULL)
+        {
+            finalPreferenceBuilder->Destroy();
+            finalPreferenceBuilder = NULL;
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[RunBatchFlatPatternDrawing] final preference read NXException code="
+            + std::to_string(ex.ErrorCode()) + " message=" + std::string(ex.Message()));
+        if (finalPreferenceBuilder != NULL)
+        {
+            try { finalPreferenceBuilder->Destroy(); } catch (...) {}
+        }
+    }
+    catch (...)
+    {
+        LogLine("[RunBatchFlatPatternDrawing] final preference read exception");
+        if (finalPreferenceBuilder != NULL)
+        {
+            try { finalPreferenceBuilder->Destroy(); } catch (...) {}
+        }
     }
     LogLine("[RunBatchFlatPatternDrawing] done");
+    return summary;
 }
 }
 
@@ -3504,10 +5114,6 @@ extern "C" DllExport void ufusr(char* param, int* retcod, int param_len)
     catch (const std::exception& ex)
     {
         LogLine(std::string("[ufusr] exception: ") + ex.what());
-        if (PILianDaoCuZKTDialog::theUI != NULL)
-        {
-            PILianDaoCuZKTDialog::theUI->NXMessageBox()->Show("PILianDaoCuZKT", NXOpen::NXMessageBox::DialogTypeError, ex.what());
-        }
     }
     if (dialog != NULL)
     {
@@ -3542,7 +5148,6 @@ NXOpen::BlockStyler::BlockDialog::DialogResponse PILianDaoCuZKTDialog::Launch()
     catch (const std::exception& ex)
     {
         LogLine(std::string("[Dialog::Launch] exception: ") + ex.what());
-        PILianDaoCuZKTDialog::theUI->NXMessageBox()->Show("PILianDaoCuZKT", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
     return NXOpen::BlockStyler::BlockDialog::DialogResponseInvalid;
 }
@@ -3569,7 +5174,6 @@ void PILianDaoCuZKTDialog::initialize_cb()
     catch (const std::exception& ex)
     {
         LogLine(std::string("[initialize_cb] exception: ") + ex.what());
-        PILianDaoCuZKTDialog::theUI->NXMessageBox()->Show("PILianDaoCuZKT", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
 }
 
@@ -3607,21 +5211,19 @@ int PILianDaoCuZKTDialog::ok_cb()
             + " viewSpacing=" + FormatReal(options.viewSpacing)
             + " rowSpacing=" + FormatReal(options.rowSpacing)
             + " noteTextSize=" + FormatReal(options.noteTextSize)
-            + " viewScaleDenominator=" + FormatReal(options.viewScaleDenominator));
+            + " dimensionScale=" + FormatReal(options.viewScaleDenominator)
+            + " viewScale=1");
 
         RunBatchFlatPatternDrawing(options);
-        PILianDaoCuZKTDialog::theUI->NXMessageBox()->Show("PILianDaoCuZKT", NXOpen::NXMessageBox::DialogTypeInformation, "批量展开图出图完成。");
     }
     catch (const std::exception& ex)
     {
         LogLine(std::string("[ok_cb] exception: ") + ex.what());
-        PILianDaoCuZKTDialog::theUI->NXMessageBox()->Show("PILianDaoCuZKT", NXOpen::NXMessageBox::DialogTypeError, ex.what());
         return 1;
     }
     catch (...)
     {
         LogLine("[ok_cb] unknown exception");
-        PILianDaoCuZKTDialog::theUI->NXMessageBox()->Show("PILianDaoCuZKT", NXOpen::NXMessageBox::DialogTypeError, "Unknown error.");
         return 1;
     }
     return 0;
