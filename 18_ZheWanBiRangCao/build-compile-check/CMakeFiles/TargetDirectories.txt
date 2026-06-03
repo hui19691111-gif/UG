@@ -1,0 +1,3 @@
+G:/UG智辉钣金插件_源码精简_20260516_最新版_整理最新_20260531_211854/features/18_ZheWanBiRangCao/build-compile-check/CMakeFiles/ZheWanBiRangCao.dir
+G:/UG智辉钣金插件_源码精简_20260516_最新版_整理最新_20260531_211854/features/18_ZheWanBiRangCao/build-compile-check/CMakeFiles/ALL_BUILD.dir
+G:/UG智辉钣金插件_源码精简_20260516_最新版_整理最新_20260531_211854/features/18_ZheWanBiRangCao/build-compile-check/CMakeFiles/ZERO_CHECK.dir

@@ -1,0 +1,3 @@
+#pragma once
+
+#define IDR_ZH_DLX_AUTOCREATETHREEVIEWS_DLX 101

@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="G:\UG智辉钣金插件_源码精简_20260602\features\18_ZheWanBiRangCao\build-codex\CMakeFiles\d4831065d113050ec9eed15a12fbd9e6\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{05801BFA-C44B-3366-A588-9A67A9FA29B2}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Dialog NX="2412" id="Dialog" name="Dialog" type="uicomp" title="拆机架" version="1.0.0" Expanded="1" ContainerItems="1">
+  <item id="faceSelection" icon="selection_cursor.bmp" name="faceSelection" type="uicomp" class="UICOMP_selection" Expanded="1" presentation="Select Object">
+    <PropertyList id="id" mode="0">
+      <Property id="API Name" mask="16656" name="API Name" type="string" group="General::" sname="BlockID" value="faceSelection" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection"/>
+      <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection"/>
+      <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection"/>
+      <Property id="Top" loc="1" mask="16384" name="Top" type="attachment" group="Other::Attachments::" sname="Top" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+      <Property id="Left" loc="2" mask="16384" name="Left" type="attachment" group="Other::Attachments::" sname="Left" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+      <Property id="Right" loc="3" mask="16384" name="Right" type="attachment" group="Other::Attachments::" sname="Right" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+      <Property id="Label" mask="0" name="Label" type="utfstring" group="Block Specific::" sname="LabelString" value="选择面" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"/>
+      <Property id="Many" mask="0" name="Many" type="enum" group="Block Specific::" sname="SelectMode" source="3" ClassID="UGS::UICOMP_selection" dynamic="0" selected="0" hierarchy="UGS::UICOMP_selection">
+        <Option name="Single" value="0"/>
+        <Option name="Multiple" value="1"/>
+      </Property>
+      <Property id="MaximumScope" mask="0" name="MaximumScope" type="enum" group="Block Specific::" sname="MaximumScope" source="1" ClassID="UGS::UICOMP_selection" dynamic="0" selected="11" hierarchy="UGS::UICOMP_selection">
+        <Option name="Entire Assembly" value="3"/>
+        <Option name="Within Work Part Only" value="10"/>
+        <Option name="Within Work Part and Components" value="11"/>
+      </Property>
+      <Property id="ShadowScope" mask="69636" name="ShadowScope" type="enum" group="Block Specific::" sname="ShadowScope" source="1" ClassID="UGS::UICOMP_selection" dynamic="0" selected="1" hierarchy="UGS::UICOMP_selection">
+        <Option name="None" value="0"/>
+        <Option name="Allow Shadow Occurrence" value="1"/>
+        <Option name="Real Occurrence Only" value="2"/>
+      </Property>
+      <Property id="AutoProgress" mask="0" name="AutoProgress" type="logical" group="Block Specific::" sname="AutomaticProgression" value="False" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"/>
+    </PropertyList>
+  </item>
+  <PropertyList id="id" mode="0">
+    <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="拆机架"/>
+    <Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="DockPolicy" mask="4096" name="DockPolicy" selected="0" sname="Dialog Sizing" source="1" type="enum"><Option name="Allow Resize" value="0"/><Option name="Follow Policy" value="1"/></Property>
+    <Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="HideApply" mask="4096" name="HideApply" sname="HideApply" source="3" type="logical" value="False"/>
+  </PropertyList>
+</Dialog>
+

@@ -1,0 +1,3 @@
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+cl /nologo /LD /EHsc /std:c++17 /O2 /MD /DNDEBUG /DWIN32 /D_WINDOWS /D_USRDLL /D_CRT_SECURE_NO_WARNINGS /I"D:\Program Files\Siemens\NX2412\UGOPEN" /I"D:\Program Files\Siemens\NX2412\UGOPEN\NXOpen" /I"D:\UGPluginRepo_clean_20260506-235206\ChaiJiJia" "D:\UGPluginRepo_clean_20260506-235206\ChaiJiJia\src\ChaiJiJia.cpp" /Fe"D:\UGPluginRepo_clean_20260506-235206\ChaiJiJia\build_manual\ChaiJiJia.dll" /Fo"D:\UGPluginRepo_clean_20260506-235206\ChaiJiJia\build_manual\ChaiJiJia.obj" /link /LIBPATH:"D:\Program Files\Siemens\NX2412\UGOPEN" libufun.lib libnxopencpp.lib libnxopencpp_features.lib libnxopenuicpp.lib user32.lib
+

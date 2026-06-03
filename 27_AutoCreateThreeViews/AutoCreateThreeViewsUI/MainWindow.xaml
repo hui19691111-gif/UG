@@ -1,0 +1,488 @@
+﻿<Window x:Class="AutoCreateThreeViewsUI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="自动三视图出图 - 参数设置"
+        Width="1240"
+        Height="720"
+        MinWidth="1120"
+        MinHeight="620"
+        WindowStartupLocation="CenterScreen"
+        Background="#F4F6F8"
+        FontFamily="Microsoft YaHei UI"
+        FontSize="13"
+        UseLayoutRounding="True">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Height" Value="36"/>
+            <Setter Property="Padding" Value="22,0"/>
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="BorderBrush" Value="#C9D3DC"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+        <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="#0072BC"/>
+            <Setter Property="BorderBrush" Value="#0067AA"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="Margin" Value="0,2,0,8"/>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="Margin" Value="0,2,0,8"/>
+            <Setter Property="Padding" Value="6,0"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="Margin" Value="0,4,18,4"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style x:Key="ViewTileButton" TargetType="ToggleButton">
+            <Setter Property="Width" Value="72"/>
+            <Setter Property="Height" Value="54"/>
+            <Setter Property="Padding" Value="1"/>
+            <Setter Property="Margin" Value="3"/>
+            <Setter Property="Background" Value="#F8FAFC"/>
+            <Setter Property="BorderBrush" Value="#AEB9C4"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Foreground" Value="#273747"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="BorderBrush" Value="#0072BC"/>
+                                <Setter TargetName="Root" Property="Background" Value="#EEF7FF"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Root" Property="BorderBrush" Value="#0072BC"/>
+                                <Setter TargetName="Root" Property="Background" Value="#DCEFFF"/>
+                                <Setter Property="Foreground" Value="#005A96"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="ViewButtonImage" TargetType="Image">
+            <Setter Property="Width" Value="68"/>
+            <Setter Property="Height" Value="50"/>
+            <Setter Property="Stretch" Value="Uniform"/>
+            <Setter Property="RenderOptions.BitmapScalingMode" Value="Fant"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+        </Style>
+        <Style x:Key="AuxViewImage" TargetType="Image">
+            <Setter Property="Width" Value="48"/>
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="Stretch" Value="Uniform"/>
+            <Setter Property="RenderOptions.BitmapScalingMode" Value="Fant"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+        </Style>
+        <Style x:Key="GroupTitle" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#1D2D3A"/>
+            <Setter Property="Margin" Value="0,0,0,8"/>
+        </Style>
+    </Window.Resources>
+
+    <DockPanel Margin="10">
+        <TabControl x:Name="MainTabControl"
+                    DockPanel.Dock="Top"
+                    Height="Auto"
+                    Margin="0,0,0,8"
+                    SelectedIndex="0"
+                    SelectionChanged="MainTabControl_SelectionChanged">
+            <TabItem x:Name="PartSelectionTab" Header="出图零件"/>
+            <TabItem x:Name="ViewTab" Header="视图"/>
+            <TabItem x:Name="AnnotationTab" Header="标注"/>
+            <TabItem x:Name="TechnicalRequirementsTab" Header="技术要求库"/>
+        </TabControl>
+
+        <Grid DockPanel.Dock="Bottom" Height="56" Margin="0,10,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="140"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="170"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="130"/>
+            </Grid.ColumnDefinitions>
+            <Button Grid.Column="0" Content="应用" Width="125" HorizontalAlignment="Left" Click="ApplyPartSettingsButton_Click"/>
+            <Button Grid.Column="2" Content="生成图纸" Width="150" Style="{StaticResource PrimaryButton}" Click="GenerateButton_Click"/>
+            <Button Grid.Column="4" Content="关闭" Width="125" HorizontalAlignment="Right" Click="CloseButton_Click"/>
+        </Grid>
+
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="470"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0" Background="White" BorderBrush="#D8DEE5" BorderThickness="1" Padding="12" Margin="0,0,10,0">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <Grid>
+                    <StackPanel x:Name="PartSelectionPanel">
+                        <TextBlock Text="出图零件" Style="{StaticResource GroupTitle}"/>
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="16"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <CheckBox x:Name="SelectAllPartsCheckBox"
+                                      Grid.Column="0"
+                                      Content="全选"
+                                      VerticalAlignment="Center"
+                                      Checked="SelectAllPartsCheckBox_Changed"
+                                      Unchecked="SelectAllPartsCheckBox_Changed"/>
+                            <CheckBox x:Name="ShareAllPartsOptionsCheckBox"
+                                      Grid.Column="2"
+                                      Content="所有零件共用参数"
+                                      VerticalAlignment="Center"
+                                      Checked="ShareAllPartsOptionsCheckBox_Changed"
+                                      Unchecked="ShareAllPartsOptionsCheckBox_Changed"/>
+                        </Grid>
+                        <Border BorderBrush="#D8DEE5" BorderThickness="1" Background="#FBFCFD" Padding="8" Margin="0,0,0,12">
+                            <DockPanel>
+                                <TextBlock x:Name="SelectedAssemblyTextBlock"
+                                           DockPanel.Dock="Bottom"
+                                           Text="当前工作零件"
+                                           Foreground="#5B6977"
+                                           Margin="2,8,2,0"
+                                           TextTrimming="CharacterEllipsis"/>
+                                <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
+                                    <Button Content="放大" Width="64" Height="28" Margin="0,0,6,0" Padding="0" Click="ZoomInButton_Click"/>
+                                    <Button Content="缩小" Width="64" Height="28" Margin="0,0,6,0" Padding="0" Click="ZoomOutButton_Click"/>
+                                    <Button Content="适合" Width="64" Height="28" Padding="0" Click="ZoomFitButton_Click"/>
+                                </StackPanel>
+                                <TreeView x:Name="AssemblyTree"
+                                          Height="392"
+                                          BorderThickness="0"
+                                          Background="#FBFCFD"
+                                          SelectedItemChanged="AssemblyTree_SelectedItemChanged"
+                                          MouseDoubleClick="AssemblyTree_MouseDoubleClick"/>
+                            </DockPanel>
+                        </Border>
+                    </StackPanel>
+                    <StackPanel x:Name="ViewSettingsPanel" Visibility="Collapsed">
+                        <TextBlock Text="模型与模板" Style="{StaticResource GroupTitle}"/>
+                        <TextBlock Text="图纸模板："/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="86"/>
+                            </Grid.ColumnDefinitions>
+                            <ComboBox x:Name="TemplateComboBox" SelectedIndex="0">
+                                <ComboBoxItem Content="自动匹配模板"/>
+                                <ComboBoxItem Content="A4-noviews-template1.prt" Tag="D:\UG智辉钣金插件\DATA\A4-noviews-template1.prt"/>
+                                <ComboBoxItem Content="A4-noviews-template2.prt" Tag="D:\UG智辉钣金插件\DATA\A4-noviews-template2.prt"/>
+                                <ComboBoxItem Content="A4-noviews-template.prt" Tag="D:\UG智辉钣金插件\DATA\A4-noviews-template.prt"/>
+                                <ComboBoxItem Content="A4-noviews-template-.prt" Tag="D:\UG智辉钣金插件\DATA\A4-noviews-template-.prt"/>
+                            </ComboBox>
+                            <Button Grid.Column="1" Content="管理模板..." Height="28" Margin="6,2,0,8" Padding="0" Click="ManageTemplateButton_Click"/>
+                        </Grid>
+                        <TextBlock Text="投影方式："/>
+                        <StackPanel Orientation="Horizontal" Margin="0,2,0,14">
+                            <RadioButton x:Name="FirstAngleRadio"
+                                         Content="第一角法"
+                                         IsChecked="True"
+                                         Checked="ProjectionMode_Checked"
+                                         Margin="0,0,14,0"/>
+                            <RadioButton x:Name="ThirdAngleRadio"
+                                         Content="第三角法"
+                                         Checked="ProjectionMode_Checked"/>
+                        </StackPanel>
+
+                        <Separator Margin="0,0,0,12"/>
+                        <TextBlock Text="视图布局" Style="{StaticResource GroupTitle}"/>
+                        <TextBlock Text="主视图方向："/>
+                        <ComboBox x:Name="FrontDirectionModeComboBox" SelectedIndex="0">
+                            <ComboBoxItem Content="最大平面最长直边" Tag="largestFaceLongestEdge"/>
+                            <ComboBoxItem Content="展开基面展开X向" Tag="flatPatternX"/>
+                            <ComboBoxItem Content="手选面跟X向" Tag="manualFaceX"/>
+                        </ComboBox>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="12"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="视图间距："/>
+                                <TextBox x:Name="ViewSpacingTextBox" Text="20"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="边距："/>
+                                <TextBox x:Name="SheetMarginTextBox" Text="20"/>
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock Text="比例："/>
+                        <ComboBox SelectedIndex="0"><ComboBoxItem Content="自动适配"/></ComboBox>
+                        <CheckBox Content="保持视图对齐" IsChecked="True"/>
+
+                        <Separator Margin="0,10,0,12"/>
+                        <TextBlock Text="视图内容" Style="{StaticResource GroupTitle}"/>
+                        <TextBlock x:Name="ProjectionHintText"
+                                   Text="第一角法标准布局：上仰、下俯、左侧右视、右侧左视、后视放最右"
+                                   Foreground="#5B6977"
+                                   Margin="0,0,0,6"/>
+                        <Border BorderBrush="#D8DEE5" BorderThickness="1" Background="#FBFCFD" Padding="8" Margin="0,0,0,8">
+                        <Canvas Width="330" Height="300" HorizontalAlignment="Center">
+                            <ToggleButton x:Name="TopViewButton" Canvas.Left="96" Canvas.Top="8" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
+                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/top.png"/>
+                            </ToggleButton>
+                            <ToggleButton x:Name="LeftPositionViewButton" Canvas.Left="18" Canvas.Top="82" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
+                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/left.png"/>
+                            </ToggleButton>
+                            <ToggleButton x:Name="FrontViewButton" Canvas.Left="96" Canvas.Top="82" IsChecked="True" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
+                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/front.png"/>
+                            </ToggleButton>
+                            <ToggleButton x:Name="RightPositionViewButton" Canvas.Left="174" Canvas.Top="82" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
+                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/right.png"/>
+                            </ToggleButton>
+                            <ToggleButton x:Name="BackViewButton" Canvas.Left="252" Canvas.Top="82" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
+                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/back.png"/>
+                            </ToggleButton>
+                            <ToggleButton x:Name="BottomViewButton" Canvas.Left="96" Canvas.Top="158" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
+                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/bottom.png"/>
+                            </ToggleButton>
+                            <ToggleButton x:Name="BackBottomViewButton" Canvas.Left="96" Canvas.Top="236" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
+                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/backbottom.png"/>
+                            </ToggleButton>
+                        </Canvas>
+                        </Border>
+                        <TextBlock Text="附加视图" Style="{StaticResource GroupTitle}" Margin="0,4,0,8"/>
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="58"/>
+                                <ColumnDefinition Width="54"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="轴测图" VerticalAlignment="Center" Margin="0,0,6,8"/>
+                            <Image Grid.Row="0" Grid.Column="1" Style="{StaticResource AuxViewImage}" Source="Assets/ViewButtons/iso.png" Margin="0,0,6,8"/>
+                            <UniformGrid Grid.Row="0" Grid.Column="2" Columns="4" Margin="0,0,0,8">
+                                <ToggleButton x:Name="IsoTopLeftButton" Content="左上" Height="28" Margin="2" Padding="0" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed"/>
+                                <ToggleButton x:Name="IsoTopRightButton" Content="右上" Height="28" Margin="2" Padding="0" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed"/>
+                                <ToggleButton x:Name="IsoBottomLeftButton" Content="左下" Height="28" Margin="2" Padding="0" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed"/>
+                                <ToggleButton x:Name="IsoBottomRightButton" Content="右下" Height="28" Margin="2" Padding="0" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed"/>
+                            </UniformGrid>
+
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="展开图" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <Image Grid.Row="1" Grid.Column="1" Style="{StaticResource AuxViewImage}" Source="Assets/ViewButtons/flat.png" Margin="0,0,6,0"/>
+                            <UniformGrid Grid.Row="1" Grid.Column="2" Columns="4">
+                                <ToggleButton x:Name="FlatTopLeftButton" Content="左上" Height="28" Margin="2" Padding="0" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed"/>
+                                <ToggleButton x:Name="FlatTopRightButton" Content="右上" Height="28" Margin="2" Padding="0" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed"/>
+                                <ToggleButton x:Name="FlatBottomLeftButton" Content="左下" Height="28" Margin="2" Padding="0" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed"/>
+                                <ToggleButton x:Name="FlatBottomRightButton" Content="右下" Height="28" Margin="2" Padding="0" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed"/>
+                            </UniformGrid>
+                        </Grid>
+                        <CheckBox x:Name="AuxAutoCompactCheckBox"
+                                  Content="附加图自动紧凑摆放"
+                                  Margin="0,10,0,0"
+                                  Checked="PreviewOption_Changed"
+                                  Unchecked="PreviewOption_Changed"/>
+                    </StackPanel>
+                    <StackPanel x:Name="AnnotationSettingsPanel" Visibility="Collapsed">
+                        <TextBlock Text="标注设置" Style="{StaticResource GroupTitle}"/>
+                        <TextBlock Text="选择生成图纸时需要自动创建的尺寸类型。"
+                                   Foreground="#5B6977"
+                                   TextWrapping="Wrap"
+                                   Margin="0,0,0,12"/>
+                        <Border BorderBrush="#D8DEE5" BorderThickness="1" Background="#FBFCFD" Padding="12">
+                            <StackPanel>
+                                <CheckBox x:Name="DimensionOverallCheckBox"
+                                          Content="最大尺寸标注"
+                                          IsChecked="True"/>
+                                <CheckBox x:Name="DimensionLinearCheckBox"
+                                          Content="水平垂直标注"
+                                          IsChecked="False"
+                                          IsEnabled="False"
+                                          Visibility="Collapsed"/>
+                                <CheckBox x:Name="DimensionAngleCheckBox"
+                                          Content="角度标注"
+                                          IsChecked="True"/>
+                                <CheckBox x:Name="DimensionHoleCheckBox"
+                                          Content="孔标注"
+                                          IsChecked="True"/>
+                                <CheckBox x:Name="DimensionHoleLocationCheckBox"
+                                          Content="孔位置标注"
+                                          IsChecked="True"/>
+                                <CheckBox x:Name="DimensionInnerClosedCurveCheckBox"
+                                          Content="内封闭曲线标注"
+                                          IsChecked="True"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                    <StackPanel x:Name="TechnicalRequirementsPanel" Visibility="Collapsed">
+                        <CheckBox x:Name="TechnicalRequirementEnabledCheckBox"
+                                  Content="启用技术要求"
+                                  IsChecked="True"
+                                  Margin="0,0,0,8"
+                                  Checked="TechnicalRequirementOption_Changed"
+                                  Unchecked="TechnicalRequirementOption_Changed"/>
+                        <TextBlock Text="文本输入" Style="{StaticResource GroupTitle}"/>
+                        <TextBox x:Name="TechnicalRequirementTextBox"
+                                 Height="150"
+                                 AcceptsReturn="True"
+                                 AcceptsTab="True"
+                                 TextWrapping="Wrap"
+                                 VerticalScrollBarVisibility="Auto"
+                                 VerticalContentAlignment="Top"
+                                 Margin="0,0,0,8"/>
+                        <CheckBox x:Name="TechnicalRequirementIndexCheckBox"
+                                  Content="添加索引"
+                                  IsChecked="True"
+                                  Margin="0,0,0,10"/>
+                        <TextBlock Text="摆放位置" Style="{StaticResource GroupTitle}" Margin="0,0,0,6"/>
+                        <UniformGrid Columns="4" Margin="0,0,0,10">
+                            <ToggleButton x:Name="TechnicalTopLeftButton"
+                                          Content="左上"
+                                          IsChecked="True"
+                                          Height="28"
+                                          Margin="2"
+                                          Padding="0"
+                                          Checked="TechnicalRequirementCorner_Changed"
+                                          Unchecked="TechnicalRequirementCorner_Changed"/>
+                            <ToggleButton x:Name="TechnicalTopRightButton"
+                                          Content="右上"
+                                          Height="28"
+                                          Margin="2"
+                                          Padding="0"
+                                          Checked="TechnicalRequirementCorner_Changed"
+                                          Unchecked="TechnicalRequirementCorner_Changed"/>
+                            <ToggleButton x:Name="TechnicalBottomLeftButton"
+                                          Content="左下"
+                                          Height="28"
+                                          Margin="2"
+                                          Padding="0"
+                                          Checked="TechnicalRequirementCorner_Changed"
+                                          Unchecked="TechnicalRequirementCorner_Changed"/>
+                            <ToggleButton x:Name="TechnicalBottomRightButton"
+                                          Content="右下"
+                                          Height="28"
+                                          Margin="2"
+                                          Padding="0"
+                                          Checked="TechnicalRequirementCorner_Changed"
+                                          Unchecked="TechnicalRequirementCorner_Changed"/>
+                        </UniformGrid>
+                        <Border BorderBrush="#D8DEE5" BorderThickness="1" Background="#FBFCFD" Padding="8">
+                            <StackPanel>
+                                <TextBlock Text="技术要求库" Style="{StaticResource GroupTitle}" Margin="0,0,0,6"/>
+                                <Border BorderBrush="#D8DEE5" BorderThickness="1" Background="#F5F7F9" Padding="4">
+                                    <TreeView x:Name="TechnicalRequirementTree"
+                                              Height="220"
+                                              BorderThickness="0"
+                                              Background="#F5F7F9"
+                                              SelectedItemChanged="TechnicalRequirementTree_SelectedItemChanged"/>
+                                </Border>
+                                <TextBlock Text="编辑内容" Margin="0,8,0,2"/>
+                                <TextBox x:Name="TechnicalRequirementEditTextBox" Margin="0,0,0,6"/>
+                                <UniformGrid Columns="5">
+                                    <Button Content="新增分类" Height="28" Margin="2" Padding="0" Click="AddTechnicalCategoryButton_Click"/>
+                                    <Button Content="新增明细" Height="28" Margin="2" Padding="0" Click="AddTechnicalNoteButton_Click"/>
+                                    <Button Content="修改" Height="28" Margin="2" Padding="0" Click="UpdateTechnicalRequirementButton_Click"/>
+                                    <Button Content="删除" Height="28" Margin="2" Padding="0" Click="DeleteTechnicalRequirementButton_Click"/>
+                                    <Button Content="保存库" Height="28" Margin="2" Padding="0" Click="SaveTechnicalLibraryButton_Click"/>
+                                </UniformGrid>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                    </Grid>
+                </ScrollViewer>
+            </Border>
+
+            <Border Grid.Column="1" Background="White" BorderBrush="#D8DEE5" BorderThickness="1" Padding="10">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="图纸预览" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                    <Viewbox Stretch="Uniform">
+                        <Canvas x:Name="PreviewCanvas" Width="620" Height="500" Background="White">
+                            <Rectangle Canvas.Left="20" Canvas.Top="20" Width="580" Height="450" Stroke="#55616D" StrokeThickness="1.2"/>
+                            <Rectangle Canvas.Left="442" Canvas.Top="390" Width="140" Height="60" Stroke="#55616D"/>
+                            <Line X1="442" Y1="410" X2="582" Y2="410" Stroke="#55616D"/>
+                            <Line X1="442" Y1="430" X2="582" Y2="430" Stroke="#55616D"/>
+                            <TextBlock Canvas.Left="468" Canvas.Top="393" Text="BRACKET_001" FontSize="10"/>
+                            <TextBlock Canvas.Left="470" Canvas.Top="413" Text="SPCC    t=2.00" FontSize="10"/>
+                            <TextBlock Canvas.Left="470" Canvas.Top="433" Text="比例 1:1" FontSize="10"/>
+
+                            <TextBlock x:Name="PreviewProjectionText" Canvas.Left="510" Canvas.Top="48" Text="第一角法" FontSize="11"/>
+                            <Ellipse Canvas.Left="560" Canvas.Top="46" Width="14" Height="14" Stroke="#4F5B66"/>
+                            <Line X1="577" Y1="53" X2="590" Y2="53" Stroke="#4F5B66"/>
+
+                            <Canvas x:Name="PreviewTopView" Canvas.Left="242" Canvas.Top="70" Width="120" Height="62">
+                                <Image Width="120" Height="62" Source="Assets/ViewButtons/top.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                            </Canvas>
+
+                            <Canvas x:Name="PreviewLeftPositionView" Canvas.Left="64" Canvas.Top="210" Width="86" Height="72">
+                                <Image Width="86" Height="72" Source="Assets/ViewButtons/left.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                            </Canvas>
+
+                            <Canvas x:Name="PreviewFrontView" Canvas.Left="225" Canvas.Top="210" Width="150" Height="72">
+                                <Image Width="150" Height="72" Source="Assets/ViewButtons/front.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                            </Canvas>
+
+                            <Canvas x:Name="PreviewRightPositionView" Canvas.Left="415" Canvas.Top="210" Width="88" Height="72">
+                                <Image Width="88" Height="72" Source="Assets/ViewButtons/right.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                            </Canvas>
+
+                            <Canvas x:Name="PreviewBackView" Canvas.Left="495" Canvas.Top="210" Width="120" Height="72">
+                                <Image Width="120" Height="72" Source="Assets/ViewButtons/back.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                            </Canvas>
+
+                            <Canvas x:Name="PreviewBackBottomView" Canvas.Left="242" Canvas.Top="420" Width="120" Height="72">
+                                <Image Width="120" Height="72" Source="Assets/ViewButtons/backbottom.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                            </Canvas>
+
+                            <Canvas x:Name="PreviewBottomView" Canvas.Left="242" Canvas.Top="335" Width="120" Height="70">
+                                <Image Width="120" Height="70" Source="Assets/ViewButtons/bottom.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                            </Canvas>
+
+                            <Canvas x:Name="PreviewIsoView" Canvas.Left="65" Canvas.Top="75" Width="94" Height="66">
+                                <Image Width="94" Height="66" Source="Assets/ViewButtons/iso.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                            </Canvas>
+
+                            <Canvas x:Name="PreviewFlatView" Canvas.Left="420" Canvas.Top="335" Width="140" Height="70">
+                                <Image Width="140" Height="70" Source="Assets/ViewButtons/flat.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                            </Canvas>
+
+                            <Border x:Name="PreviewTechnicalRequirement"
+                                    Canvas.Left="40"
+                                    Canvas.Top="40"
+                                    Width="128"
+                                    Height="82"
+                                    BorderBrush="#55616D"
+                                    BorderThickness="1"
+                                    Background="#FFFFFF"
+                                    Padding="6"
+                                    Visibility="Collapsed"
+                                    IsHitTestVisible="False">
+                                <StackPanel>
+                                    <TextBlock Text="技术要求" FontWeight="SemiBold" FontSize="10"/>
+                                    <TextBlock Text="1. 未注公差&#10;2. 去除毛刺&#10;3. 表面处理"
+                                               FontSize="9"
+                                               Margin="0,4,0,0"
+                                               TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </Border>
+                        </Canvas>
+                    </Viewbox>
+                </DockPanel>
+            </Border>
+        </Grid>
+    </DockPanel>
+</Window>

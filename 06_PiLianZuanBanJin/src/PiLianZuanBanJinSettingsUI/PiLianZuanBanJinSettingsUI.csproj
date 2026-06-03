@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>PiLianZuanBanJinSettingsUI</AssemblyName>
+    <RootNamespace>ZhsmToolboxSettingsUI</RootNamespace>
+    <Optimize>true</Optimize>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\ZhsmBendFactorBatchShared\BendFactorBatchExchange.cs" Link="Shared\BendFactorBatchExchange.cs" />
+    <Compile Include="..\ZhsmBendFactorBatchShared\BendFactorDefaultTables.cs" Link="Shared\BendFactorDefaultTables.cs" />
+  </ItemGroup>
+</Project>

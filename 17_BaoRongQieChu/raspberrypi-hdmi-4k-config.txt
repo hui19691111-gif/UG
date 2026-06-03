@@ -1,0 +1,32 @@
+# 树莓派 4 HDMI 4K 输出配置示例
+# 使用方法：
+# 1. 将需要的配置复制到 /boot/firmware/config.txt
+# 2. 保存后重启树莓派
+# 3. 如需 4K60，请将显示器接到树莓派 4 的 HDMI0 接口
+
+[all]
+
+# 使用 KMS 图形驱动
+dtoverlay=vc4-kms-v3d
+
+# 在树莓派 4 上启用 4K 60Hz
+hdmi_enable_4kp60=1
+
+# 提高部分显示器的兼容性
+hdmi_force_hotplug=1
+
+# 期望输出模式：3840x2160 @ 60Hz
+# 如果显示不稳定，可改为 30Hz
+hdmi_group=2
+hdmi_mode=97
+
+# 可选：HDMI 线较长或质量一般时，可尝试打开
+# config_hdmi_boost=7
+
+# 可选：如果启动时没有画面，可尝试取消注释
+# hdmi_safe=1
+
+# 说明：
+# hdmi_mode=97 常用于 3840x2160 60Hz 的 DMT 模式。
+# 如果显示器 EDID 不支持这个模式，可以删除 hdmi_group 和
+# hdmi_mode，让系统自动识别最佳分辨率与刷新率。

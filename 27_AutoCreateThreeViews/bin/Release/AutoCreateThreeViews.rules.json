@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "activeRule": "默认钣金规则",
+  "rules": [
+    {
+      "enabled": true,
+      "name": "默认钣金规则",
+      "priority": 10,
+      "conditions": {
+        "partType": "钣金件",
+        "materialsContains": ["SPCC", "AL5052"],
+        "thicknessMinMm": 0.8,
+        "thicknessMaxMm": 3.0,
+        "maxOuterSizeMm": 600.0,
+        "minHoleCount": 1,
+        "detectBends": true,
+        "detectFlatPattern": true
+      },
+      "actions": {
+        "template": "A3横向-公司标准",
+        "projection": "第三角法",
+        "mainViewDirection": "最大展开面",
+        "scaleStrategy": "自动适配优先1:1",
+        "annotationScheme": "常用钣金标注",
+        "outputFormats": ["PDF", "DWG"],
+        "autoFillTitleBlock": true,
+        "writeLog": true
+      }
+    }
+  ]
+}

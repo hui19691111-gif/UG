@@ -1,0 +1,3 @@
+#pragma once
+
+#define IDR_ZH_DLX_TWOPOINTBILANCAO_DLX 101

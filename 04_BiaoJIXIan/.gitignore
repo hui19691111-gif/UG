@@ -1,0 +1,17 @@
+build/
+.vs/
+backup/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.tlog
+*.lastbuildstate
+*.VC.db
+*.opendb
+*.log
+*.tmp
+*.user
+*.suo
+*.cache

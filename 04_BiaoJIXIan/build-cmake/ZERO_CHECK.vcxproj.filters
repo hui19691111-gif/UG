@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\UGPluginRepo_clean_20260506-235206\BiaoJiXian\build-cmake\CMakeFiles\335b59a771913c8f892086fec0c72765\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{53B32B12-4AD3-3346-8AE6-FA652E05E4F9}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

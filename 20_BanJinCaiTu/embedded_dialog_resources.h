@@ -1,0 +1,3 @@
+#pragma once
+
+#define IDR_ZH_DLX_BANJINCAITUDIALOG_DLX 101

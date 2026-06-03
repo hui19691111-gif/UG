@@ -1,0 +1,2 @@
+G:\UG智辉钣金插件_源码精简_20260516_最新版\features\09_KonBiaoZu\bin\Release\data\KonBiaoZuRules.ini
+G:\UG智辉钣金插件_源码精简_20260602\features\09_KonBiaoZu\bin\Release\data\KonBiaoZuRules.ini

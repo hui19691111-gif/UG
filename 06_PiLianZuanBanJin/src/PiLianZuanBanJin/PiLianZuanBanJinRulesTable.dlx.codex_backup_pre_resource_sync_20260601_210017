@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Dialog ContainerItems="4" Expanded="1" NX="1926" Saved="Mon Jun  1 18:22:00 2026 " class="" creator="Administrator" id="Dialog" languageInfo="Language and Codeset: simpl_chinese 13" name="Dialog" notes="" title="折弯规则表" type="uicomp" version="1.0.0">
+  <item Expanded="1" class="UICOMP_tree_control" hierarchy="UICOMP_list_box" icon="styler_tree.bmp" id="tree_control0" name="tree_control0" notes="" presentation="树列表" type="uicomp">
+    <PropertyList id="id" mode="0">
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_tree_control" id="API Name" mask="16400" name="API Name" sname="BlockID" source="3" type="string" value="tree_control0" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_tree_control" id="Title" mask="0" name="Title" sname="Label" source="1" type="utfstring" value="" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_tree_control" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_tree_control" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_tree_control" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_tree_control" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP_tree_control" group="Block Specific::" hierarchy="UGS::UICOMP_tree_control" id="InitialHeight" mask="16384" name="InitialHeight" sname="Height" source="1" type="integer" value="520" />
+      <Property ClassID="UGS::UICOMP_tree_control" group="Block Specific::" hierarchy="UGS::UICOMP_tree_control" id="InitialWidth" mask="16384" name="InitialWidth" sname="Width" source="1" type="integer" value="1100" />
+      <Property ClassID="UGS::UICOMP_tree_control" group="Block Specific::" hierarchy="UGS::UICOMP_tree_control" id="MinimumHeight" mask="16384" name="MinimumHeight" sname="MinimumHeight" source="1" type="integer" value="360" />
+      <Property ClassID="UGS::UICOMP_tree_control" group="Block Specific::" hierarchy="UGS::UICOMP_tree_control" id="MinimumWidth" mask="16384" name="MinimumWidth" sname="MinimumWidth" source="1" type="integer" value="900" />
+      <Property ClassID="UGS::UICOMP_tree_control" group="Block Specific::" hierarchy="UGS::UICOMP_tree_control" id="CanStretchHeight" mask="16384" name="CanStretchHeight" sname="CanStretchHeight" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP_tree_control" group="Block Specific::" hierarchy="UGS::UICOMP_tree_control" id="CanStretchWidth" mask="16384" name="CanStretchWidth" sname="CanStretchWidth" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP_tree_control" group="Block Specific::" hierarchy="UGS::UICOMP_tree_control" id="ShowHeader" mask="0" name="ShowHeader" sname="ShowHeader" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP_tree_control" group="Block Specific::" hierarchy="UGS::UICOMP_tree_control" id="ShowMultipleColumns" mask="0" name="ShowMultipleColumns" sname="ShowMultipleColumns" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP_tree_control" group="Block Specific::" hierarchy="UGS::UICOMP_tree_control" id="ShowToolTips" mask="0" name="ShowToolTips" sname="ShowToolTips" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP_tree_control" group="Block Specific::" hierarchy="UGS::UICOMP_tree_control" id="ShowExpandCollapseMarker" mask="0" name="ShowExpandCollapseMarker" sname="ShowExpandCollapseMarker" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP_tree_control" group="Block Specific::" hierarchy="UGS::UICOMP_tree_control" id="SortRootNodes" mask="0" name="SortRootNodes" sname="SortRootNodes" source="1" type="logical" value="False" />
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Top" loc="1" mask="16384" name="Top" offset="0" sname="Top" source="3" target="Default" type="attachment" />
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Left" loc="2" mask="16384" name="Left" offset="0" sname="Left" source="3" target="Default" type="attachment" />
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment" />
+      <Property ClassID="UGS::UICOMP_tree_control" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_tree_control" id="SelectionMode" mask="0" name="SelectionMode" selected="1" sname="SelectionMode" source="1" type="enum">
+        <Option name="None" value="0" />
+        <Option name="Single" value="1" />
+        <Option name="Multiple" value="2" />
+      </Property>
+    </PropertyList>
+  </item>
+  <item Expanded="1" class="UICOMP_button" hierarchy="UGS::UICOMP_button" icon="styler_browser_pushbutton.bmp" id="addCrossSelectionNodeButton" name="addCrossSelectionNodeButton" notes="" presentation="Action Button" type="uicomp">
+    <PropertyList id="id" mode="0">
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="API Name" mask="16400" name="API Name" sname="BlockID" source="3" type="string" value="addCrossSelectionNodeButton" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="新增规则" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Top" loc="1" mask="16640" name="Top" offset="0" sname="Top" source="3" target="tree_control0" type="attachment" />
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Left" loc="2" mask="16384" name="Left" offset="0" sname="Left" source="3" target="Default" type="attachment" />
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment" />
+    </PropertyList>
+  </item>
+  <item Expanded="1" class="UICOMP_button" hierarchy="UGS::UICOMP_button" icon="styler_browser_pushbutton.bmp" id="addNodeButton" name="addNodeButton" notes="" presentation="Action Button" type="uicomp">
+    <PropertyList id="id" mode="0">
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="API Name" mask="16400" name="API Name" sname="BlockID" source="3" type="string" value="addNodeButton" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="保存规则" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Top" loc="1" mask="16640" name="Top" offset="0" sname="Top" source="3" target="addCrossSelectionNodeButton" type="attachment" />
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Left" loc="2" mask="16384" name="Left" offset="0" sname="Left" source="3" target="Default" type="attachment" />
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment" />
+    </PropertyList>
+  </item>
+  <item Expanded="1" class="UICOMP_button" hierarchy="UGS::UICOMP_button" icon="styler_browser_pushbutton.bmp" id="deleteNodeButton" name="deleteNodeButton" notes="" presentation="Action Button" type="uicomp">
+    <PropertyList id="id" mode="0">
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="API Name" mask="16400" name="API Name" sname="BlockID" source="3" type="string" value="deleteNodeButton" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="删除规则" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True" />
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Top" loc="1" mask="16640" name="Top" offset="0" sname="Top" source="3" target="addNodeButton" type="attachment" />
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Left" loc="2" mask="16384" name="Left" offset="0" sname="Left" source="3" target="Default" type="attachment" />
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment" />
+    </PropertyList>
+  </item>
+  <PropertyList id="id" mode="0">
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
+    <Property ClassID="UGS::UICOMP" brief="0" dynamic="0" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="NavigationStyle" mask="393216" name="NavigationStyle" selected="2" sname="Navigation Style" source="1" type="enum">
+      <Option name="OK Cancel" value="0" />
+      <Option name="Close" value="1" />
+      <Option name="OK Apply Cancel" value="2" />
+    </Property>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="折弯规则表" />
+  </PropertyList>
+</Dialog>

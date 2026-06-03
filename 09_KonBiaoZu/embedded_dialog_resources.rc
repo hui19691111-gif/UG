@@ -1,0 +1,3 @@
+#include "embedded_dialog_resources.h"
+
+IDR_ZH_DLX_KONBIAOZU_DLX RCDATA "dialog/KonBiaoZu.dlx"

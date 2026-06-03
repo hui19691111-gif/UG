@@ -1,0 +1,19 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="G:\UG智辉钣金插件_源码精简_20260516_最新版_整理最新_20260531_211854\features\17_BaoRongQieChu\BaoRongQieChu.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="G:\UG智辉钣金插件_源码精简_20260516_最新版_整理最新_20260531_211854\features\17_BaoRongQieChu\BaoRongQieChuMain.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="G:\UG智辉钣金插件_源码精简_20260516_最新版_整理最新_20260531_211854\features\17_BaoRongQieChu\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{0AB52ACC-2575-3AFC-9102-C1DBA196CEA9}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

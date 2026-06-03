@@ -1,0 +1,4444 @@
+﻿#include "PiLianZuanBanJin.hpp"
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <queue>
+#include <regex>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <windows.h>
+#ifdef CreateDialog
+#undef CreateDialog
+#endif
+
+using namespace NXOpen;
+using namespace NXOpen::Assemblies;
+using namespace NXOpen::BlockStyler;
+using namespace NXOpen::Features;
+using namespace NXOpen::Features::SheetMetal;
+using namespace NXOpen::Preferences;
+
+namespace zhihui_license_guard
+{
+typedef int (__stdcall *EnsureAuthorizedProc)(const wchar_t*, const wchar_t*, wchar_t*, int);
+
+HMODULE LoadProtectedLicenseGate()
+{
+    const wchar_t* moduleName = L"ZhaoFuNxLicenseGate.dll";
+
+    HMODULE existing = GetModuleHandleW(moduleName);
+    if (existing != NULL)
+    {
+        return existing;
+    }
+
+    HMODULE selfModule = NULL;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&LoadProtectedLicenseGate), &selfModule))
+    {
+        wchar_t localPath[MAX_PATH] = { 0 };
+        DWORD length = GetModuleFileNameW(selfModule, localPath, MAX_PATH);
+        if (length > 0 && length < MAX_PATH)
+        {
+            DWORD slash = length;
+            while (slash > 0 && localPath[slash - 1] != L'\\' && localPath[slash - 1] != L'/')
+            {
+                --slash;
+            }
+
+            if (slash > 0)
+            {
+                DWORD pos = slash;
+                for (DWORD i = 0; moduleName[i] != L'\0' && pos + 1 < MAX_PATH; ++i, ++pos)
+                {
+                    localPath[pos] = moduleName[i];
+                }
+                localPath[pos] = L'\0';
+
+                HMODULE localModule = LoadLibraryW(localPath);
+                if (localModule != NULL)
+                {
+                    return localModule;
+                }
+            }
+        }
+    }
+
+    HMODULE fixedModule = LoadLibraryW(L"D:\\UG智辉钣金插件\\application\\ZhaoFuNxLicenseGate.dll");
+    if (fixedModule != NULL)
+    {
+        return fixedModule;
+    }
+
+    return LoadLibraryW(moduleName);
+}
+
+bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
+{
+    return true;
+    wchar_t message[1024] = { 0 };
+    HMODULE module = LoadProtectedLicenseGate();
+    if (module == NULL)
+    {
+        return false;
+    }
+
+    EnsureAuthorizedProc ensureAuthorized = reinterpret_cast<EnsureAuthorizedProc>(GetProcAddress(module, "ZfnxEnsureAuthorized"));
+    if (ensureAuthorized == NULL)
+    {
+        return false;
+    }
+
+    const int ok = ensureAuthorized(featureCode, displayName, message, static_cast<int>(sizeof(message) / sizeof(message[0])));
+    const int ok2 = ok == 1 ? ensureAuthorized(featureCode, displayName, message, static_cast<int>(sizeof(message) / sizeof(message[0]))) : ok;
+    return ok == 1 && ok2 == 1;
+}
+}
+
+namespace
+{
+    const char* PiLianConfigFileName = "PiLianZuanBanJin_bend_factor_config.json";
+    const char* PiLianSettingsArgument = "--pilian-zhuanbanjin-bend-factor";
+
+    struct BodyBox
+    {
+        double length = 0.0;
+        double width = 0.0;
+        double height = 0.0;
+        double score = 0.0;
+    };
+
+    struct FaceInfo
+    {
+        Face* face = NULL;
+        int type = 0;
+        double areaScore = -1.0;
+        double totalScore = -1.0;
+    };
+
+    struct FaceCandidate
+    {
+        Face* face = NULL;
+        int type = 0;
+        double area = 0.0;
+        double center[3] = { 0.0, 0.0, 0.0 };
+        double normal[3] = { 0.0, 0.0, 1.0 };
+        double score = 0.0;
+    };
+
+    std::map<tag_t, bool> BuildScoringTangentChainTags(const std::vector<FaceCandidate>& candidates);
+
+    struct BodyResult
+    {
+        int layer = 0;
+        std::string name;
+        bool convertOk = false;
+        int neutralFaceCount = 0;
+        bool flatOk = false;
+        std::string error;
+    };
+
+    struct BendRule
+    {
+        bool enabled = true;
+        bool fallback = false;
+        std::string name;
+        std::string material;
+        std::string method = "KFactor";
+        std::string note;
+        double value = 0.5;
+        bool hasAngleMin = false;
+        bool hasAngleMax = false;
+        bool hasThicknessMin = false;
+        bool hasThicknessMax = false;
+        bool hasRadiusMin = false;
+        bool hasRadiusMax = false;
+        bool hasRadiusOverride = false;
+        double angleMin = 0.0;
+        double angleMax = 0.0;
+        double thicknessMin = 0.0;
+        double thicknessMax = 0.0;
+        double radiusMin = 0.0;
+        double radiusMax = 0.0;
+        double radiusOverride = 0.0;
+    };
+
+    struct RuleConfig
+    {
+        std::vector<BendRule> rules;
+        bool useAbsoluteLargeArc = true;
+        double absoluteLargeArcRadius = 7.0;
+        bool useRatioLargeArc = false;
+        double ratioLargeArc = 5.0;
+    };
+
+    struct BendFaceRecord
+    {
+        Face* face = NULL;
+        double thickness = 0.0;
+        double innerRadius = 0.0;
+        double angleDeg = 0.0;
+        double currentK = 0.0;
+        double targetK = 0.5;
+        double targetRadius = 0.0;
+    };
+
+    class UfGuard
+    {
+    public:
+        UfGuard()
+        {
+            int error = UF_initialize();
+            if (error != 0)
+            {
+                throw std::runtime_error("UF_initialize failed: " + std::to_string(error));
+            }
+        }
+
+        ~UfGuard()
+        {
+            UF_terminate();
+        }
+    };
+
+    std::string ToUtf8(const NXString& value)
+    {
+        const char* text = value.GetUTF8Text();
+        return text == NULL ? std::string() : std::string(text);
+    }
+
+    std::string TrimCopy(const std::string& value)
+    {
+        size_t first = 0;
+        while (first < value.size() && static_cast<unsigned char>(value[first]) <= ' ')
+        {
+            ++first;
+        }
+
+        size_t last = value.size();
+        while (last > first && static_cast<unsigned char>(value[last - 1]) <= ' ')
+        {
+            --last;
+        }
+
+        return value.substr(first, last - first);
+    }
+
+    bool IsValidUtf8(const std::string& value)
+    {
+        size_t i = 0;
+        while (i < value.size())
+        {
+            const unsigned char c = static_cast<unsigned char>(value[i]);
+            if (c <= 0x7F)
+            {
+                ++i;
+            }
+            else if ((c & 0xE0) == 0xC0)
+            {
+                if (i + 1 >= value.size() || (static_cast<unsigned char>(value[i + 1]) & 0xC0) != 0x80 || c < 0xC2)
+                {
+                    return false;
+                }
+                i += 2;
+            }
+            else if ((c & 0xF0) == 0xE0)
+            {
+                if (i + 2 >= value.size()
+                    || (static_cast<unsigned char>(value[i + 1]) & 0xC0) != 0x80
+                    || (static_cast<unsigned char>(value[i + 2]) & 0xC0) != 0x80)
+                {
+                    return false;
+                }
+                i += 3;
+            }
+            else if ((c & 0xF8) == 0xF0)
+            {
+                if (i + 3 >= value.size()
+                    || (static_cast<unsigned char>(value[i + 1]) & 0xC0) != 0x80
+                    || (static_cast<unsigned char>(value[i + 2]) & 0xC0) != 0x80
+                    || (static_cast<unsigned char>(value[i + 3]) & 0xC0) != 0x80)
+                {
+                    return false;
+                }
+                i += 4;
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    std::string AnsiToUtf8(const std::string& value)
+    {
+        if (value.empty())
+        {
+            return value;
+        }
+
+        int wideLength = MultiByteToWideChar(CP_ACP, 0, value.c_str(), -1, NULL, 0);
+        if (wideLength <= 0)
+        {
+            return value;
+        }
+
+        std::wstring wide(static_cast<size_t>(wideLength), L'\0');
+        MultiByteToWideChar(CP_ACP, 0, value.c_str(), -1, &wide[0], wideLength);
+
+        int utf8Length = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, NULL, 0, NULL, NULL);
+        if (utf8Length <= 0)
+        {
+            return value;
+        }
+
+        std::string utf8(static_cast<size_t>(utf8Length), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, &utf8[0], utf8Length, NULL, NULL);
+        if (!utf8.empty() && utf8[utf8.size() - 1] == '\0')
+        {
+            utf8.resize(utf8.size() - 1);
+        }
+
+        return utf8;
+    }
+
+    std::string NormalizeUtf8Message(const std::string& value)
+    {
+        return IsValidUtf8(value) ? value : AnsiToUtf8(value);
+    }
+
+    bool HasNonEmptyStringAttribute(tag_t objectTag, const char* title)
+    {
+        if (objectTag == NULL_TAG || title == NULL || title[0] == '\0')
+        {
+            return false;
+        }
+
+        UF_ATTR_info_t info;
+        UF_ATTR_init_user_attribute_info(&info);
+        logical hasAttribute = false;
+        const int error = UF_ATTR_get_user_attribute_with_title_and_type(
+            objectTag,
+            title,
+            UF_ATTR_string,
+            UF_ATTR_NOT_ARRAY,
+            &info,
+            &hasAttribute);
+
+        bool ok = false;
+        if (error == 0 && hasAttribute && !info.unset && info.string_value != NULL)
+        {
+            ok = !TrimCopy(info.string_value).empty();
+        }
+
+        UF_ATTR_free_user_attribute_info_strings(&info);
+        return ok;
+    }
+
+    bool HasIntegerAttribute(tag_t objectTag, const char* title)
+    {
+        if (objectTag == NULL_TAG || title == NULL || title[0] == '\0')
+        {
+            return false;
+        }
+
+        UF_ATTR_info_t info;
+        UF_ATTR_init_user_attribute_info(&info);
+        logical hasAttribute = false;
+        const int error = UF_ATTR_get_user_attribute_with_title_and_type(
+            objectTag,
+            title,
+            UF_ATTR_integer,
+            UF_ATTR_NOT_ARRAY,
+            &info,
+            &hasAttribute);
+
+        const bool ok = error == 0 && hasAttribute && !info.unset;
+        UF_ATTR_free_user_attribute_info_strings(&info);
+        return ok;
+    }
+
+    bool PartHasBatchAttributes(Part* part)
+    {
+        return part != NULL
+            && HasNonEmptyStringAttribute(part->Tag(), u8"材料")
+            && HasNonEmptyStringAttribute(part->Tag(), u8"数量");
+    }
+
+    bool BodyHasBatchAttributes(Body* body)
+    {
+        return body != NULL
+            && HasNonEmptyStringAttribute(body->Tag(), "cailiao")
+            && HasIntegerAttribute(body->Tag(), "sulian");
+    }
+
+    std::string PartName(Part* part)
+    {
+        if (part == NULL)
+        {
+            return std::string();
+        }
+
+        try
+        {
+            return ToUtf8(part->Leaf());
+        }
+        catch (...)
+        {
+            return std::string();
+        }
+    }
+
+    NXString U8(const char* text);
+
+    void CollectChildPrototypeParts(Component* component, std::vector<Part*>& parts, std::set<tag_t>& seenParts)
+    {
+        if (component == NULL)
+        {
+            return;
+        }
+
+        std::vector<Component*> children = component->GetChildren();
+        for (size_t i = 0; i < children.size(); ++i)
+        {
+            Component* child = children[i];
+            if (child == NULL)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (child->IsComponentOrAncestorSuppressed())
+                {
+                    continue;
+                }
+            }
+            catch (...)
+            {
+            }
+
+            try
+            {
+                Part* prototypePart = dynamic_cast<Part*>(child->Prototype());
+                if (prototypePart != NULL && seenParts.insert(prototypePart->Tag()).second)
+                {
+                    parts.push_back(prototypePart);
+                }
+            }
+            catch (...)
+            {
+            }
+
+            CollectChildPrototypeParts(child, parts, seenParts);
+        }
+    }
+
+    bool ConfirmAssemblyBatch(UI* ui)
+    {
+        if (ui == NULL)
+        {
+            return true;
+        }
+
+        const std::string message =
+            "准备对本工作装配里的所有子装配进行批量转钣金跟展开处理。\n\n"
+            "执行前请确保所有要转钣金的部件都已经设置了材料跟数量，"
+            "并且零件已经全部处理成可成功转钣金跟展开的状态。\n\n"
+            "继续执行请选择“是”，退出请选择“否”。";
+        return ui->NXMessageBox()->Show(
+            U8("批量转钣金"),
+            NXMessageBox::DialogTypeQuestion,
+            U8(message.c_str())) == 1;
+    }
+
+    NXString U8(const char* text)
+    {
+        return NXString(text == NULL ? "" : text, NXString::UTF8);
+    }
+
+    NXString U8(const std::string& text)
+    {
+        return NXString(text, NXString::UTF8);
+    }
+
+    std::string ReadAllText(const std::string& path)
+    {
+        std::ifstream input(path.c_str(), std::ios::in | std::ios::binary);
+        if (!input)
+        {
+            return std::string();
+        }
+
+        std::ostringstream buffer;
+        buffer << input.rdbuf();
+        return buffer.str();
+    }
+
+    std::string ModuleDirectory()
+    {
+        char path[MAX_PATH] = { 0 };
+        HMODULE module = NULL;
+        GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&ModuleDirectory),
+            &module);
+        GetModuleFileNameA(module, path, MAX_PATH);
+        std::string fullPath(path);
+        size_t slash = fullPath.find_last_of("\\/");
+        return slash == std::string::npos ? std::string(".") : fullPath.substr(0, slash);
+    }
+
+    std::string CombinePath(const std::string& left, const std::string& right)
+    {
+        if (left.empty())
+        {
+            return right;
+        }
+
+        char tail = left[left.size() - 1];
+        return (tail == '\\' || tail == '/') ? left + right : left + "\\" + right;
+    }
+
+    bool FileExists(const std::string& path)
+    {
+        DWORD attrs = GetFileAttributesA(path.c_str());
+        return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    }
+
+    std::string FindConfigPath()
+    {
+        std::string moduleDir = ModuleDirectory();
+        std::vector<std::string> paths;
+        paths.push_back(CombinePath(moduleDir, std::string("..\\config\\") + PiLianConfigFileName));
+        paths.push_back(CombinePath(moduleDir, PiLianConfigFileName));
+        paths.push_back(std::string("D:\\UG智辉钣金插件\\config\\") + PiLianConfigFileName);
+        for (size_t i = 0; i < paths.size(); ++i)
+        {
+            if (FileExists(paths[i]))
+            {
+                return paths[i];
+            }
+        }
+
+        return std::string();
+    }
+
+    std::string FindSettingsExePath()
+    {
+        std::string moduleDir = ModuleDirectory();
+        std::vector<std::string> paths;
+        paths.push_back(CombinePath(moduleDir, "PiLianZuanBanJinSettingsUI.exe"));
+        paths.push_back(CombinePath(moduleDir, "..\\application\\PiLianZuanBanJinSettingsUI.exe"));
+        paths.push_back("D:\\UG智辉钣金插件\\application\\PiLianZuanBanJinSettingsUI.exe");
+        for (size_t i = 0; i < paths.size(); ++i)
+        {
+            if (FileExists(paths[i]))
+            {
+                return paths[i];
+            }
+        }
+        return std::string();
+    }
+
+    bool ExtractJsonBool(const std::string& text, const std::string& name, bool defaultValue)
+    {
+        std::regex pattern("\"" + name + "\"\\s*:\\s*(true|false)", std::regex_constants::icase);
+        std::smatch match;
+        if (std::regex_search(text, match, pattern))
+        {
+            return _stricmp(match[1].str().c_str(), "true") == 0;
+        }
+
+        return defaultValue;
+    }
+
+    double ExtractJsonNumber(const std::string& text, const std::string& name, double defaultValue)
+    {
+        std::regex pattern("\"" + name + "\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|null)");
+        std::smatch match;
+        if (std::regex_search(text, match, pattern))
+        {
+            std::string value = match[1].str();
+            if (value != "null" && value != "NULL")
+            {
+                return std::atof(value.c_str());
+            }
+        }
+
+        return defaultValue;
+    }
+
+    bool TryExtractJsonNumber(const std::string& text, const std::string& name, double* value)
+    {
+        std::regex pattern("\"" + name + "\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|null)");
+        std::smatch match;
+        if (std::regex_search(text, match, pattern))
+        {
+            std::string raw = match[1].str();
+            if (raw != "null" && raw != "NULL")
+            {
+                *value = std::atof(raw.c_str());
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    std::string ExtractJsonString(const std::string& text, const std::string& name, const std::string& defaultValue)
+    {
+        std::regex pattern("\"" + name + "\"\\s*:\\s*\"([^\"]*)\"");
+        std::smatch match;
+        return std::regex_search(text, match, pattern) ? match[1].str() : defaultValue;
+    }
+
+    std::string ExtractArrayBody(const std::string& text, const std::string& name)
+    {
+        std::string token = "\"" + name + "\"";
+        size_t pos = text.find(token);
+        if (pos == std::string::npos)
+        {
+            return std::string();
+        }
+
+        size_t start = text.find('[', pos);
+        if (start == std::string::npos)
+        {
+            return std::string();
+        }
+
+        int depth = 0;
+        bool inString = false;
+        bool escape = false;
+        for (size_t i = start; i < text.size(); ++i)
+        {
+            char c = text[i];
+            if (escape)
+            {
+                escape = false;
+                continue;
+            }
+            if (c == '\\' && inString)
+            {
+                escape = true;
+                continue;
+            }
+            if (c == '"')
+            {
+                inString = !inString;
+                continue;
+            }
+            if (inString)
+            {
+                continue;
+            }
+            if (c == '[')
+            {
+                ++depth;
+            }
+            else if (c == ']')
+            {
+                --depth;
+                if (depth == 0)
+                {
+                    return text.substr(start + 1, i - start - 1);
+                }
+            }
+        }
+
+        return std::string();
+    }
+
+    std::vector<std::string> ExtractObjectBodies(const std::string& arrayBody)
+    {
+        std::vector<std::string> objects;
+        int depth = 0;
+        bool inString = false;
+        bool escape = false;
+        size_t start = std::string::npos;
+        for (size_t i = 0; i < arrayBody.size(); ++i)
+        {
+            char c = arrayBody[i];
+            if (escape)
+            {
+                escape = false;
+                continue;
+            }
+            if (c == '\\' && inString)
+            {
+                escape = true;
+                continue;
+            }
+            if (c == '"')
+            {
+                inString = !inString;
+                continue;
+            }
+            if (inString)
+            {
+                continue;
+            }
+            if (c == '{')
+            {
+                if (depth == 0)
+                {
+                    start = i;
+                }
+                ++depth;
+            }
+            else if (c == '}')
+            {
+                --depth;
+                if (depth == 0 && start != std::string::npos)
+                {
+                    objects.push_back(arrayBody.substr(start, i - start + 1));
+                    start = std::string::npos;
+                }
+            }
+        }
+
+        return objects;
+    }
+
+    void SetLabel(UIBlock* block, const char* label)
+    {
+        if (block != NULL)
+        {
+            block->SetLabel(U8(label));
+        }
+    }
+
+    void ShowMessage(UI* ui, const char* title, NXMessageBox::DialogType type, const std::string& message)
+    {
+        if (ui != NULL)
+        {
+            ui->NXMessageBox()->Show(U8(title), type, U8(message));
+        }
+    }
+
+    std::string BodyName(Body* body)
+    {
+        if (body == NULL)
+        {
+            return std::string();
+        }
+
+        try
+        {
+            std::string name = ToUtf8(body->Name());
+            if (!name.empty())
+            {
+                return name;
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return "Body_" + std::to_string(static_cast<int>(body->Tag()));
+    }
+
+    bool IsAlive(tag_t tag)
+    {
+        return tag != NULL_TAG && UF_OBJ_ask_status(tag) == UF_OBJ_ALIVE;
+    }
+
+    BodyBox MeasureBodyBox(Body* body)
+    {
+        BodyBox result;
+        if (body == NULL)
+        {
+            return result;
+        }
+
+        double box[6] = { 0, 0, 0, 0, 0, 0 };
+        if (UF_MODL_ask_bounding_box(body->Tag(), box) != 0)
+        {
+            return result;
+        }
+
+        std::vector<double> dims;
+        dims.push_back(std::fabs(box[3] - box[0]));
+        dims.push_back(std::fabs(box[4] - box[1]));
+        dims.push_back(std::fabs(box[5] - box[2]));
+        std::sort(dims.begin(), dims.end(), std::greater<double>());
+        result.length = dims[0];
+        result.width = dims[1];
+        result.height = dims[2];
+        result.score = result.length * result.width * std::max(result.height, 0.001);
+        return result;
+    }
+
+    double FaceBoxAreaScore(Face* face)
+    {
+        if (face == NULL)
+        {
+            return -1.0;
+        }
+
+        double box[6] = { 0, 0, 0, 0, 0, 0 };
+        if (UF_MODL_ask_bounding_box(face->Tag(), box) != 0)
+        {
+            return -1.0;
+        }
+
+        std::vector<double> dims;
+        dims.push_back(std::fabs(box[3] - box[0]));
+        dims.push_back(std::fabs(box[4] - box[1]));
+        dims.push_back(std::fabs(box[5] - box[2]));
+        std::sort(dims.begin(), dims.end(), std::greater<double>());
+        return dims[0] * dims[1];
+    }
+
+    double FaceAreaScore(Face* face)
+    {
+        if (face == NULL)
+        {
+            return -1.0;
+        }
+
+        try
+        {
+            Session* session = Session::GetSession();
+            if (session == NULL || session->Parts() == NULL)
+            {
+                return FaceBoxAreaScore(face);
+            }
+
+            Part* workPart = session->Parts()->Work();
+            if (workPart == NULL || workPart->MeasureManager() == NULL || workPart->UnitCollection() == NULL)
+            {
+                return FaceBoxAreaScore(face);
+            }
+
+            Unit* areaUnit = workPart->UnitCollection()->GetBase("Area");
+            Unit* lengthUnit = workPart->UnitCollection()->GetBase("Length");
+            if (areaUnit == NULL || lengthUnit == NULL)
+            {
+                return FaceBoxAreaScore(face);
+            }
+
+            std::vector<IParameterizedSurface*> faceObjects;
+            faceObjects.push_back(face);
+            MeasureFaces* measure = workPart->MeasureManager()->NewFaceProperties(areaUnit, lengthUnit, 0.99, faceObjects);
+            if (measure == NULL)
+            {
+                return FaceBoxAreaScore(face);
+            }
+
+            const double area = measure->Area();
+            return area > 0.0 ? area : FaceBoxAreaScore(face);
+        }
+        catch (...)
+        {
+            return FaceBoxAreaScore(face);
+        }
+    }
+
+    bool AskFaceType(Face* face, int* type)
+    {
+        if (face == NULL || type == NULL)
+        {
+            return false;
+        }
+
+        double point[3] = { 0, 0, 0 };
+        double direction[3] = { 0, 0, 0 };
+        double box[6] = { 0, 0, 0, 0, 0, 0 };
+        double radius = 0.0;
+        double radiusData = 0.0;
+        int normDir = 0;
+        return UF_MODL_ask_face_data(face->Tag(), type, point, direction, box, &radius, &radiusData, &normDir) == 0;
+    }
+
+    bool AskFaceData(Face* face, int* type, double center[3], double normal[3], double* radiusOut)
+    {
+        if (face == NULL)
+        {
+            return false;
+        }
+
+        double point[3] = { 0, 0, 0 };
+        double direction[3] = { 0, 0, 1 };
+        double box[6] = { 0, 0, 0, 0, 0, 0 };
+        double radius = 0.0;
+        double radiusData = 0.0;
+        int normDir = 0;
+        if (UF_MODL_ask_face_data(face->Tag(), type, point, direction, box, &radius, &radiusData, &normDir) != 0)
+        {
+            return false;
+        }
+
+        if (center != NULL)
+        {
+            center[0] = (box[0] + box[3]) * 0.5;
+            center[1] = (box[1] + box[4]) * 0.5;
+            center[2] = (box[2] + box[5]) * 0.5;
+        }
+        if (normal != NULL)
+        {
+            normal[0] = direction[0] * (normDir == -1 ? -1.0 : 1.0);
+            normal[1] = direction[1] * (normDir == -1 ? -1.0 : 1.0);
+            normal[2] = direction[2] * (normDir == -1 ? -1.0 : 1.0);
+        }
+        if (radiusOut != NULL)
+        {
+            *radiusOut = radius;
+        }
+        return true;
+    }
+
+    double Dot3(const double a[3], const double b[3])
+    {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    }
+
+    double Distance3(const double a[3], const double b[3])
+    {
+        double dx = a[0] - b[0];
+        double dy = a[1] - b[1];
+        double dz = a[2] - b[2];
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    double Length3(const double v[3])
+    {
+        return std::sqrt(Dot3(v, v));
+    }
+
+    bool Normalize3(double v[3])
+    {
+        double length = Length3(v);
+        if (length <= 1e-12)
+        {
+            return false;
+        }
+
+        v[0] /= length;
+        v[1] /= length;
+        v[2] /= length;
+        return true;
+    }
+
+    double CrossLength3(const double a[3], const double b[3])
+    {
+        double cross[3] = {
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0]
+        };
+        return Length3(cross);
+    }
+
+    std::vector<tag_t> TagsFromUfList(uf_list_p_t list)
+    {
+        std::vector<tag_t> tags;
+        if (list == NULL)
+        {
+            return tags;
+        }
+
+        int count = 0;
+        if (UF_MODL_ask_list_count(list, &count) != 0)
+        {
+            return tags;
+        }
+
+        for (int i = 0; i < count; ++i)
+        {
+            tag_t tag = NULL_TAG;
+            if (UF_MODL_ask_list_item(list, i, &tag) == 0 && tag != NULL_TAG)
+            {
+                tags.push_back(tag);
+            }
+        }
+
+        return tags;
+    }
+
+    TaggedObject* ObjectFromTag(tag_t tag)
+    {
+        if (tag == NULL_TAG)
+        {
+            return NULL;
+        }
+
+        try
+        {
+            return NXObjectManager::Get(tag);
+        }
+        catch (...)
+        {
+            return NULL;
+        }
+    }
+
+    double PointDistance(const Point3d& a, const Point3d& b)
+    {
+        const double dx = a.X - b.X;
+        const double dy = a.Y - b.Y;
+        const double dz = a.Z - b.Z;
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    std::vector<Face*> AdjacentFacesByEdge(Edge* edge, Face* owner)
+    {
+        std::vector<Face*> faces;
+        if (edge == NULL)
+        {
+            return faces;
+        }
+
+        uf_list_p_t faceList = NULL;
+        if (UF_MODL_ask_edge_faces(edge->Tag(), &faceList) != 0 || faceList == NULL)
+        {
+            return faces;
+        }
+
+        std::vector<tag_t> tags = TagsFromUfList(faceList);
+        UF_MODL_delete_list(&faceList);
+        for (size_t i = 0; i < tags.size(); ++i)
+        {
+            if (owner != NULL && tags[i] == owner->Tag())
+            {
+                continue;
+            }
+            Face* face = dynamic_cast<Face*>(ObjectFromTag(tags[i]));
+            if (face != NULL)
+            {
+                faces.push_back(face);
+            }
+        }
+
+        return faces;
+    }
+
+    std::vector<Edge*> FaceEdgesByUf(Face* face)
+    {
+        std::vector<Edge*> edges;
+        if (face == NULL)
+        {
+            return edges;
+        }
+
+        uf_list_p_t edgeList = NULL;
+        if (UF_MODL_ask_face_edges(face->Tag(), &edgeList) != 0 || edgeList == NULL)
+        {
+            try
+            {
+                return face->GetEdges();
+            }
+            catch (...)
+            {
+                return edges;
+            }
+        }
+
+        std::vector<tag_t> tags = TagsFromUfList(edgeList);
+        UF_MODL_delete_list(&edgeList);
+        for (size_t i = 0; i < tags.size(); ++i)
+        {
+            Edge* edge = dynamic_cast<Edge*>(ObjectFromTag(tags[i]));
+            if (edge != NULL)
+            {
+                edges.push_back(edge);
+            }
+        }
+
+        return edges;
+    }
+
+    std::vector<FaceCandidate> GetPlanarCandidates(Body* body)
+    {
+        std::vector<FaceCandidate> candidates;
+        if (body == NULL)
+        {
+            return candidates;
+        }
+
+        std::vector<Face*> faces = body->GetFaces();
+        for (size_t i = 0; i < faces.size(); ++i)
+        {
+            int type = 0;
+            double radius = 0.0;
+            FaceCandidate candidate;
+            if (!AskFaceData(faces[i], &type, candidate.center, candidate.normal, &radius) || type != UF_MODL_PLANAR_FACE)
+            {
+                continue;
+            }
+
+            candidate.face = faces[i];
+            candidate.type = type;
+            candidate.area = FaceAreaScore(faces[i]);
+            candidates.push_back(candidate);
+        }
+
+        return candidates;
+    }
+
+    bool IsPlanarOrCylindricalFace(Face* face)
+    {
+        int type = 0;
+        return AskFaceType(face, &type) &&
+            (type == UF_MODL_PLANAR_FACE || type == UF_MODL_CYLINDRICAL_FACE);
+    }
+
+    std::vector<Face*> CollectContinuousTangentFaces(Face* startFace)
+    {
+        std::vector<Face*> result;
+        if (startFace == NULL)
+        {
+            return result;
+        }
+
+        std::queue<Face*> queue;
+        std::set<tag_t> visited;
+        queue.push(startFace);
+        visited.insert(startFace->Tag());
+        while (!queue.empty())
+        {
+            Face* current = queue.front();
+            queue.pop();
+            if (current == NULL)
+            {
+                continue;
+            }
+
+            result.push_back(current);
+            std::vector<Edge*> edges = FaceEdgesByUf(current);
+            for (size_t i = 0; i < edges.size(); ++i)
+            {
+                logical isSmooth = false;
+                if (UF_MODL_ask_edge_smoothness(edges[i]->Tag(), 18.2, &isSmooth) != 0 || !isSmooth)
+                {
+                    continue;
+                }
+
+                std::vector<Face*> adjacent = AdjacentFacesByEdge(edges[i], current);
+                for (size_t j = 0; j < adjacent.size(); ++j)
+                {
+                    Face* next = adjacent[j];
+                    if (next == NULL || visited.count(next->Tag()) || !IsPlanarOrCylindricalFace(next))
+                    {
+                        continue;
+                    }
+
+                    visited.insert(next->Tag());
+                    queue.push(next);
+                }
+            }
+        }
+
+        return result;
+    }
+
+    std::map<tag_t, bool> FaceTagMap(const std::vector<Face*>& faces)
+    {
+        std::map<tag_t, bool> tags;
+        for (size_t i = 0; i < faces.size(); ++i)
+        {
+            if (faces[i] != NULL)
+            {
+                tags[faces[i]->Tag()] = true;
+            }
+        }
+        return tags;
+    }
+
+    std::vector<FaceCandidate> FilterCandidatesByTags(
+        const std::vector<FaceCandidate>& candidates,
+        const std::map<tag_t, bool>& tags)
+    {
+        std::vector<FaceCandidate> filtered;
+        if (tags.empty())
+        {
+            return filtered;
+        }
+
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            if (candidates[i].face != NULL && tags.count(candidates[i].face->Tag()))
+            {
+                filtered.push_back(candidates[i]);
+            }
+        }
+        return filtered;
+    }
+
+    std::vector<FaceCandidate> GetLargestPlanarFaceGroup(const std::vector<FaceCandidate>& candidates)
+    {
+        std::vector<FaceCandidate> group;
+        if (candidates.empty())
+        {
+            return group;
+        }
+
+        double maxArea = 0.0;
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            maxArea = std::max(maxArea, candidates[i].area);
+        }
+
+        double tolerance = std::max(maxArea * 0.001, 0.01);
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            if (std::fabs(candidates[i].area - maxArea) <= tolerance)
+            {
+                group.push_back(candidates[i]);
+            }
+        }
+
+        if (group.empty())
+        {
+            FaceCandidate largest = candidates[0];
+            for (size_t i = 1; i < candidates.size(); ++i)
+            {
+                if (candidates[i].area > largest.area)
+                {
+                    largest = candidates[i];
+                }
+            }
+            group.push_back(largest);
+        }
+
+        std::sort(group.begin(), group.end(), [](const FaceCandidate& a, const FaceCandidate& b) {
+            return a.area > b.area;
+        });
+        return group;
+    }
+
+    FaceCandidate* FindCandidateByTag(std::vector<FaceCandidate>& candidates, tag_t tag)
+    {
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            if (candidates[i].face != NULL && candidates[i].face->Tag() == tag)
+            {
+                return &candidates[i];
+            }
+        }
+        return NULL;
+    }
+
+    FaceCandidate FindNearestParallelPlanarFace(
+        const std::vector<FaceCandidate>& allCandidates,
+        const FaceCandidate& reference,
+        double minArea,
+        bool* found)
+    {
+        FaceCandidate best;
+        if (found != NULL)
+        {
+            *found = false;
+        }
+        if (reference.face == NULL)
+        {
+            return best;
+        }
+
+        double bestDistance = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < allCandidates.size(); ++i)
+        {
+            const FaceCandidate& candidate = allCandidates[i];
+            if (candidate.face == NULL || candidate.face->Tag() == reference.face->Tag())
+            {
+                continue;
+            }
+            if (candidate.area < minArea || std::fabs(Dot3(candidate.normal, reference.normal)) < 0.995)
+            {
+                continue;
+            }
+
+            double delta[3] = {
+                candidate.center[0] - reference.center[0],
+                candidate.center[1] - reference.center[1],
+                candidate.center[2] - reference.center[2]
+            };
+            double distance = std::fabs(Dot3(delta, reference.normal));
+            if (distance < 1e-6 || distance >= bestDistance)
+            {
+                continue;
+            }
+
+            best = candidate;
+            bestDistance = distance;
+            if (found != NULL)
+            {
+                *found = true;
+            }
+        }
+
+        return best;
+    }
+
+    bool HasMarkerLineOnFace(Face* face)
+    {
+        if (face == NULL)
+        {
+            return false;
+        }
+
+        int type = 0;
+        if (!AskFaceType(face, &type) || type != UF_MODL_PLANAR_FACE)
+        {
+            return false;
+        }
+
+        std::vector<Edge*> edges = FaceEdgesByUf(face);
+        for (size_t i = 0; i < edges.size(); ++i)
+        {
+            Point3d a1;
+            Point3d a2;
+            try
+            {
+                edges[i]->GetVertices(&a1, &a2);
+            }
+            catch (...)
+            {
+                continue;
+            }
+            double lenA = PointDistance(a1, a2);
+            if (lenA <= 2.0)
+            {
+                continue;
+            }
+            double va[3] = { a2.X - a1.X, a2.Y - a1.Y, a2.Z - a1.Z };
+            double vaLen = std::max(lenA, 1e-9);
+
+            for (size_t j = i + 1; j < edges.size(); ++j)
+            {
+                Point3d b1;
+                Point3d b2;
+                try
+                {
+                    edges[j]->GetVertices(&b1, &b2);
+                }
+                catch (...)
+                {
+                    continue;
+                }
+                double lenB = PointDistance(b1, b2);
+                if (lenB <= 2.0)
+                {
+                    continue;
+                }
+                double vb[3] = { b2.X - b1.X, b2.Y - b1.Y, b2.Z - b1.Z };
+                double parallel = std::fabs((va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2]) / (vaLen * std::max(lenB, 1e-9)));
+                if (parallel < 0.995)
+                {
+                    continue;
+                }
+                double w[3] = { b1.X - a1.X, b1.Y - a1.Y, b1.Z - a1.Z };
+                double cross[3] = {
+                    w[1] * va[2] - w[2] * va[1],
+                    w[2] * va[0] - w[0] * va[2],
+                    w[0] * va[1] - w[1] * va[0]
+                };
+                double distance = std::sqrt(Dot3(cross, cross)) / vaLen;
+                if (distance > 1e-9 && distance <= 0.01)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    struct CylinderAxisRecord
+    {
+        double point[3] = { 0.0, 0.0, 0.0 };
+        double direction[3] = { 0.0, 0.0, 1.0 };
+    };
+
+    bool AskCylinderAxis(Face* face, CylinderAxisRecord* axis)
+    {
+        if (face == NULL || axis == NULL)
+        {
+            return false;
+        }
+
+        int type = 0;
+        double box[6] = { 0, 0, 0, 0, 0, 0 };
+        double radius = 0.0;
+        double radiusData = 0.0;
+        int normDir = 0;
+        if (UF_MODL_ask_face_data(face->Tag(), &type, axis->point, axis->direction, box, &radius, &radiusData, &normDir) != 0 ||
+            type != UF_MODL_CYLINDRICAL_FACE)
+        {
+            return false;
+        }
+
+        if (!Normalize3(axis->direction))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    bool IsCoaxialCylinderAxis(const CylinderAxisRecord& a, const CylinderAxisRecord& b)
+    {
+        const double parallelTolerance = 0.999;
+        const double axisDistanceTolerance = 0.05;
+        if (std::fabs(Dot3(a.direction, b.direction)) < parallelTolerance)
+        {
+            return false;
+        }
+
+        double delta[3] = {
+            b.point[0] - a.point[0],
+            b.point[1] - a.point[1],
+            b.point[2] - a.point[2]
+        };
+        return CrossLength3(delta, a.direction) <= axisDistanceTolerance;
+    }
+
+    double AdjacentCylinderScore(Face* face, const std::map<tag_t, bool>& sameSideTags)
+    {
+        if (face == NULL)
+        {
+            return 0.0;
+        }
+
+        std::vector<CylinderAxisRecord> bendAxes;
+        std::vector<Edge*> edges = FaceEdgesByUf(face);
+        for (size_t i = 0; i < edges.size(); ++i)
+        {
+            std::vector<Face*> adjacent = AdjacentFacesByEdge(edges[i], face);
+            for (size_t j = 0; j < adjacent.size(); ++j)
+            {
+                if (!sameSideTags.empty() && !sameSideTags.count(adjacent[j]->Tag()))
+                {
+                    continue;
+                }
+
+                CylinderAxisRecord axis;
+                if (!AskCylinderAxis(adjacent[j], &axis))
+                {
+                    continue;
+                }
+
+                bool alreadyCounted = false;
+                for (size_t k = 0; k < bendAxes.size(); ++k)
+                {
+                    if (IsCoaxialCylinderAxis(bendAxes[k], axis))
+                    {
+                        alreadyCounted = true;
+                        break;
+                    }
+                }
+
+                if (!alreadyCounted)
+                {
+                    bendAxes.push_back(axis);
+                }
+            }
+        }
+
+        int count = static_cast<int>(bendAxes.size());
+        if (count <= 1) return 0.0;
+        if (count == 2) return 2.0;
+        if (count == 3) return 4.0;
+        return 6.0;
+    }
+
+    double BendDirectionPreferenceScore(const FaceCandidate& candidate, bool preferUpBends)
+    {
+        if (candidate.face == NULL)
+        {
+            return 0.0;
+        }
+
+        int positiveSide = 0;
+        int negativeSide = 0;
+        std::map<tag_t, bool> seen;
+        std::vector<Edge*> edges = FaceEdgesByUf(candidate.face);
+        for (size_t i = 0; i < edges.size(); ++i)
+        {
+            std::vector<Face*> adjacent = AdjacentFacesByEdge(edges[i], candidate.face);
+            for (size_t j = 0; j < adjacent.size(); ++j)
+            {
+                Face* face = adjacent[j];
+                if (face == NULL || seen[face->Tag()])
+                {
+                    continue;
+                }
+
+                int type = 0;
+                double center[3] = { 0.0, 0.0, 0.0 };
+                double normal[3] = { 0.0, 0.0, 1.0 };
+                double radius = 0.0;
+                if (!AskFaceData(face, &type, center, normal, &radius) || type != UF_MODL_CYLINDRICAL_FACE)
+                {
+                    continue;
+                }
+
+                seen[face->Tag()] = true;
+                double vectorToBend[3] = {
+                    center[0] - candidate.center[0],
+                    center[1] - candidate.center[1],
+                    center[2] - candidate.center[2]
+                };
+                if (Dot3(vectorToBend, candidate.normal) >= 0.0)
+                {
+                    ++positiveSide;
+                }
+                else
+                {
+                    ++negativeSide;
+                }
+            }
+        }
+
+        int preferred = preferUpBends ? positiveSide : negativeSide;
+        int opposite = preferUpBends ? negativeSide : positiveSide;
+        return static_cast<double>(preferred - opposite) * 2.0;
+    }
+
+    void CountBendSides(const FaceCandidate& candidate, int* positiveSide, int* negativeSide)
+    {
+        if (positiveSide != NULL)
+        {
+            *positiveSide = 0;
+        }
+        if (negativeSide != NULL)
+        {
+            *negativeSide = 0;
+        }
+        if (candidate.face == NULL)
+        {
+            return;
+        }
+
+        std::map<tag_t, bool> seen;
+        std::vector<Edge*> edges = FaceEdgesByUf(candidate.face);
+        for (size_t i = 0; i < edges.size(); ++i)
+        {
+            std::vector<Face*> adjacent = AdjacentFacesByEdge(edges[i], candidate.face);
+            for (size_t j = 0; j < adjacent.size(); ++j)
+            {
+                Face* face = adjacent[j];
+                if (face == NULL || seen[face->Tag()])
+                {
+                    continue;
+                }
+
+                int type = 0;
+                double center[3] = { 0.0, 0.0, 0.0 };
+                double normal[3] = { 0.0, 0.0, 1.0 };
+                double radius = 0.0;
+                if (!AskFaceData(face, &type, center, normal, &radius) || type != UF_MODL_CYLINDRICAL_FACE)
+                {
+                    continue;
+                }
+
+                seen[face->Tag()] = true;
+                double vectorToBend[3] = {
+                    center[0] - candidate.center[0],
+                    center[1] - candidate.center[1],
+                    center[2] - candidate.center[2]
+                };
+                if (Dot3(vectorToBend, candidate.normal) >= 0.0)
+                {
+                    if (positiveSide != NULL) ++(*positiveSide);
+                }
+                else
+                {
+                    if (negativeSide != NULL) ++(*negativeSide);
+                }
+            }
+        }
+    }
+
+    bool HasInnerLoopScore(Face* face)
+    {
+        if (face == NULL)
+        {
+            return false;
+        }
+        int topology = 0;
+        if (UF_MODL_ask_face_topology(face->Tag(), &topology) == 0 && topology != UF_MODL_FLAT_TOPOLOGY)
+        {
+            return true;
+        }
+        return FaceEdgesByUf(face).size() > 4;
+    }
+
+    std::map<tag_t, double> ChainPositionScores(const std::vector<FaceCandidate>& candidates)
+    {
+        std::map<tag_t, double> scores;
+        if (candidates.empty())
+        {
+            return scores;
+        }
+
+        double minC[3] = { candidates[0].center[0], candidates[0].center[1], candidates[0].center[2] };
+        double maxC[3] = { candidates[0].center[0], candidates[0].center[1], candidates[0].center[2] };
+        for (size_t i = 1; i < candidates.size(); ++i)
+        {
+            for (int a = 0; a < 3; ++a)
+            {
+                minC[a] = std::min(minC[a], candidates[i].center[a]);
+                maxC[a] = std::max(maxC[a], candidates[i].center[a]);
+            }
+        }
+
+        int axis = 0;
+        double span = maxC[0] - minC[0];
+        for (int a = 1; a < 3; ++a)
+        {
+            double candidateSpan = maxC[a] - minC[a];
+            if (candidateSpan > span)
+            {
+                span = candidateSpan;
+                axis = a;
+            }
+        }
+
+        double mid = (minC[axis] + maxC[axis]) * 0.5;
+        double half = std::max(span * 0.5, 1e-9);
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            double normalizedDistance = std::min(1.0, std::fabs(candidates[i].center[axis] - mid) / half);
+            scores[candidates[i].face->Tag()] = 3.0 * (1.0 - normalizedDistance);
+        }
+
+        return scores;
+    }
+
+    FaceInfo ScoreAndSelectBaseFace(
+        std::vector<FaceCandidate> candidates,
+        const std::map<tag_t, bool>& scoringChainTags)
+    {
+        FaceInfo result;
+        if (candidates.empty())
+        {
+            return result;
+        }
+
+        double minArea = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            if (candidates[i].area > 1e-9)
+            {
+                minArea = std::min(minArea, candidates[i].area);
+            }
+        }
+        if (minArea == std::numeric_limits<double>::max())
+        {
+            minArea = 1.0;
+        }
+
+        std::map<tag_t, double> position = ChainPositionScores(candidates);
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            double areaScore = std::max(1.0, candidates[i].area / std::max(minArea, 1e-9));
+            double positionScore = position.count(candidates[i].face->Tag()) ? position[candidates[i].face->Tag()] : 0.0;
+            double innerLoopScore = HasInnerLoopScore(candidates[i].face) ? 1.0 : 0.0;
+            double cylinderScore = AdjacentCylinderScore(candidates[i].face, scoringChainTags);
+            candidates[i].score = areaScore + positionScore + innerLoopScore + cylinderScore;
+            if (candidates[i].score > result.totalScore ||
+                (std::fabs(candidates[i].score - result.totalScore) <= 1e-9 && candidates[i].area > result.areaScore))
+            {
+                result.face = candidates[i].face;
+                result.type = candidates[i].type;
+                result.areaScore = candidates[i].area;
+                result.totalScore = candidates[i].score;
+            }
+        }
+
+        return result;
+    }
+
+    FaceInfo SelectMarkerLineBaseFace(const std::vector<FaceCandidate>& allCandidates)
+    {
+        FaceInfo result;
+        FaceCandidate markerCandidate;
+        bool foundMarker = false;
+        for (size_t i = 0; i < allCandidates.size(); ++i)
+        {
+            if (HasMarkerLineOnFace(allCandidates[i].face) &&
+                (!foundMarker || allCandidates[i].area > markerCandidate.area))
+            {
+                markerCandidate = allCandidates[i];
+                foundMarker = true;
+            }
+        }
+
+        if (!foundMarker || markerCandidate.face == NULL)
+        {
+            return result;
+        }
+
+        std::map<tag_t, bool> chainTags = FaceTagMap(CollectContinuousTangentFaces(markerCandidate.face));
+        std::vector<FaceCandidate> chainCandidates = FilterCandidatesByTags(allCandidates, chainTags);
+        if (!chainCandidates.empty())
+        {
+            return ScoreAndSelectBaseFace(chainCandidates, chainTags);
+        }
+
+        std::vector<FaceCandidate> markerCandidates;
+        markerCandidates.push_back(markerCandidate);
+        return ScoreAndSelectBaseFace(markerCandidates, std::map<tag_t, bool>());
+    }
+    FaceInfo SelectConvertBaseFace(Body* body, const AutoConvertOptions& options)
+    {
+        FaceInfo result;
+        std::vector<FaceCandidate> allCandidates = GetPlanarCandidates(body);
+        if (allCandidates.empty())
+        {
+            if (body == NULL)
+            {
+                return result;
+            }
+
+            std::vector<Face*> faces = body->GetFaces();
+            for (size_t i = 0; i < faces.size(); ++i)
+            {
+                int type = 0;
+                if (!AskFaceType(faces[i], &type) || type != UF_MODL_CYLINDRICAL_FACE)
+                {
+                    continue;
+                }
+
+                double score = FaceAreaScore(faces[i]);
+                if (score > result.areaScore)
+                {
+                    result.face = faces[i];
+                    result.type = type;
+                    result.areaScore = score;
+                    result.totalScore = score;
+                }
+            }
+            return result;
+        }
+
+        if (options.markerLineFaceUp)
+        {
+            FaceInfo markerFace = SelectMarkerLineBaseFace(allCandidates);
+            if (markerFace.face != NULL)
+            {
+                return markerFace;
+            }
+        }
+        for (size_t i = 0; i < allCandidates.size(); ++i)
+        {
+            if (allCandidates[i].area > result.areaScore)
+            {
+                result.face = allCandidates[i].face;
+                result.type = allCandidates[i].type;
+                result.areaScore = allCandidates[i].area;
+                result.totalScore = allCandidates[i].area;
+            }
+        }
+
+        return result;
+    }
+
+    bool BuildBendFaceTagSets(
+        SheetmetalManager* manager,
+        Body* body,
+        std::map<tag_t, bool>* innerBendTags,
+        std::map<tag_t, bool>* outerBendTags)
+    {
+        if (innerBendTags != NULL)
+        {
+            innerBendTags->clear();
+        }
+        if (outerBendTags != NULL)
+        {
+            outerBendTags->clear();
+        }
+        if (manager == NULL || body == NULL)
+        {
+            return false;
+        }
+
+        std::vector<Face*> innerBendFaces;
+        std::vector<SheetmetalBendState> states;
+        try
+        {
+            manager->GetInnerBendFaces(body, innerBendFaces, states);
+        }
+        catch (...)
+        {
+            return false;
+        }
+
+        for (size_t i = 0; i < innerBendFaces.size(); ++i)
+        {
+            Face* innerFace = innerBendFaces[i];
+            if (innerFace == NULL)
+            {
+                continue;
+            }
+            if (i < states.size() && states[i] != SheetmetalBendStateBent)
+            {
+                continue;
+            }
+
+            if (innerBendTags != NULL)
+            {
+                (*innerBendTags)[innerFace->Tag()] = true;
+            }
+
+            try
+            {
+                Face* outerFace = manager->GetOppositeFace(innerFace);
+                if (outerFace != NULL && outerBendTags != NULL)
+                {
+                    (*outerBendTags)[outerFace->Tag()] = true;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        return (innerBendTags != NULL && !innerBendTags->empty()) ||
+            (outerBendTags != NULL && !outerBendTags->empty());
+    }
+
+    FaceInfo SelectSheetmetalBaseFaceByBendDirection(
+        SheetmetalManager* manager,
+        Body* body,
+        const AutoConvertOptions& options)
+    {
+        FaceInfo fallback = SelectConvertBaseFace(body, options);
+        if (fallback.face == NULL)
+        {
+            return fallback;
+        }
+
+        std::vector<FaceCandidate> allCandidates = GetPlanarCandidates(body);
+        if (options.markerLineFaceUp)
+        {
+            FaceInfo markerFace = SelectMarkerLineBaseFace(allCandidates);
+            if (markerFace.face != NULL)
+            {
+                return markerFace;
+            }
+        }
+
+        FaceCandidate* selectedCandidate = FindCandidateByTag(allCandidates, fallback.face->Tag());
+        if (selectedCandidate == NULL)
+        {
+            return fallback;
+        }
+
+        std::map<tag_t, bool> innerBendTags;
+        std::map<tag_t, bool> outerBendTags;
+        if (!BuildBendFaceTagSets(manager, body, &innerBendTags, &outerBendTags))
+        {
+            return fallback;
+        }
+
+        std::vector<Face*> tangentFaces = CollectContinuousTangentFaces(selectedCandidate->face);
+        std::map<tag_t, bool> tangentTags = FaceTagMap(tangentFaces);
+        std::vector<FaceCandidate> chainCandidates = FilterCandidatesByTags(allCandidates, tangentTags);
+        if (chainCandidates.empty())
+        {
+            return fallback;
+        }
+
+        int innerCount = 0;
+        int outerCount = 0;
+        for (size_t i = 0; i < tangentFaces.size(); ++i)
+        {
+            if (tangentFaces[i] == NULL)
+            {
+                continue;
+            }
+            if (innerBendTags.count(tangentFaces[i]->Tag()))
+            {
+                ++innerCount;
+            }
+            if (outerBendTags.count(tangentFaces[i]->Tag()))
+            {
+                ++outerCount;
+            }
+        }
+
+        if (innerCount == outerCount)
+        {
+            return ScoreAndSelectBaseFace(chainCandidates, tangentTags);
+        }
+
+        bool currentDirectionIsDownBends = outerCount > innerCount;
+        bool desiredDirectionIsDownBends = !options.preferUpBends;
+        std::vector<FaceCandidate> directionCandidates = chainCandidates;
+        std::map<tag_t, bool> scoringChainTags = tangentTags;
+        if (currentDirectionIsDownBends != desiredDirectionIsDownBends)
+        {
+            directionCandidates.clear();
+            std::map<tag_t, bool> seen;
+            for (size_t i = 0; i < chainCandidates.size(); ++i)
+            {
+                bool found = false;
+                FaceCandidate parallelFace = FindNearestParallelPlanarFace(
+                    allCandidates,
+                    chainCandidates[i],
+                    chainCandidates[i].area * 0.5,
+                    &found);
+                if (found && parallelFace.face != NULL && !seen[parallelFace.face->Tag()])
+                {
+                    directionCandidates.push_back(parallelFace);
+                    seen[parallelFace.face->Tag()] = true;
+                }
+            }
+            scoringChainTags = BuildScoringTangentChainTags(directionCandidates);
+        }
+
+        FaceInfo directed = ScoreAndSelectBaseFace(directionCandidates, scoringChainTags);
+        return directed.face == NULL ? fallback : directed;
+    }
+
+    std::map<tag_t, bool> BuildScoringTangentChainTags(const std::vector<FaceCandidate>& candidates)
+    {
+        std::map<tag_t, bool> tags;
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            if (candidates[i].face == NULL)
+            {
+                continue;
+            }
+
+            std::vector<Face*> chain = CollectContinuousTangentFaces(candidates[i].face);
+            for (size_t j = 0; j < chain.size(); ++j)
+            {
+                if (chain[j] != NULL)
+                {
+                    tags[chain[j]->Tag()] = true;
+                }
+            }
+        }
+
+        if (tags.empty())
+        {
+            for (size_t i = 0; i < candidates.size(); ++i)
+            {
+                if (candidates[i].face != NULL)
+                {
+                    tags[candidates[i].face->Tag()] = true;
+                }
+            }
+        }
+
+        return tags;
+    }
+
+    FaceInfo SelectScoredBaseFace(Body* body, const AutoConvertOptions& options)
+    {
+        FaceInfo result;
+        std::vector<FaceCandidate> allCandidates = GetPlanarCandidates(body);
+        if (allCandidates.empty())
+        {
+            if (body == NULL)
+            {
+                return result;
+            }
+            std::vector<Face*> faces = body->GetFaces();
+            for (size_t i = 0; i < faces.size(); ++i)
+            {
+                int type = 0;
+                if (!AskFaceType(faces[i], &type) || type != UF_MODL_CYLINDRICAL_FACE)
+                {
+                    continue;
+                }
+                double score = FaceAreaScore(faces[i]);
+                if (score > result.areaScore)
+                {
+                    result.face = faces[i];
+                    result.type = type;
+                    result.areaScore = score;
+                    result.totalScore = score;
+                }
+            }
+            return result;
+        }
+
+        if (options.markerLineFaceUp)
+        {
+            FaceInfo markerFace = SelectMarkerLineBaseFace(allCandidates);
+            if (markerFace.face != NULL)
+            {
+                return markerFace;
+            }
+        }
+
+        std::vector<FaceCandidate> largestGroup = GetLargestPlanarFaceGroup(allCandidates);
+        if (!largestGroup.empty() && largestGroup[0].face != NULL)
+        {
+            std::vector<Face*> tangentFaces = CollectContinuousTangentFaces(largestGroup[0].face);
+            std::map<tag_t, bool> tangentTags = FaceTagMap(tangentFaces);
+            std::vector<FaceCandidate> baseDirectionCandidates = FilterCandidatesByTags(allCandidates, tangentTags);
+            if (!baseDirectionCandidates.empty())
+            {
+                int positiveSide = 0;
+                int negativeSide = 0;
+                CountBendSides(largestGroup[0], &positiveSide, &negativeSide);
+                if (positiveSide != negativeSide)
+                {
+                    bool baseIsDownBends = negativeSide > positiveSide;
+                    bool useParallelSide = baseIsDownBends != !options.preferUpBends;
+                    std::vector<FaceCandidate> directionCandidates = baseDirectionCandidates;
+                    std::map<tag_t, bool> scoringChainTags = tangentTags;
+                    if (useParallelSide)
+                    {
+                        directionCandidates.clear();
+                        std::map<tag_t, bool> seen;
+                        for (size_t i = 0; i < baseDirectionCandidates.size(); ++i)
+                        {
+                            bool found = false;
+                            FaceCandidate parallelFace = FindNearestParallelPlanarFace(
+                                allCandidates,
+                                baseDirectionCandidates[i],
+                                baseDirectionCandidates[i].area * 0.5,
+                                &found);
+                            if (found && parallelFace.face != NULL && !seen[parallelFace.face->Tag()])
+                            {
+                                directionCandidates.push_back(parallelFace);
+                                seen[parallelFace.face->Tag()] = true;
+                            }
+                        }
+                        scoringChainTags = BuildScoringTangentChainTags(directionCandidates);
+                    }
+
+                    result = ScoreAndSelectBaseFace(directionCandidates, scoringChainTags);
+                    if (result.face != NULL)
+                    {
+                        return result;
+                    }
+                }
+            }
+        }
+
+        return ScoreAndSelectBaseFace(largestGroup.empty() ? allCandidates : largestGroup, std::map<tag_t, bool>());
+    }
+
+    RuleConfig LoadRuleConfig()
+    {
+        RuleConfig config;
+        std::string path = FindConfigPath();
+        std::string json = path.empty() ? std::string() : ReadAllText(path);
+        if (json.empty())
+        {
+            return config;
+        }
+
+        config.useAbsoluteLargeArc = ExtractJsonBool(json, "UseAbsoluteRadiusThreshold", true);
+        config.absoluteLargeArcRadius = ExtractJsonNumber(json, "AbsoluteRadiusThreshold", 7.0);
+        config.useRatioLargeArc = ExtractJsonBool(json, "UseRadiusThicknessRatio", false);
+        config.ratioLargeArc = ExtractJsonNumber(json, "RadiusThicknessRatioThreshold", 5.0);
+
+        std::vector<std::string> ruleObjects = ExtractObjectBodies(ExtractArrayBody(json, "Rules"));
+        for (size_t i = 0; i < ruleObjects.size(); ++i)
+        {
+            BendRule rule;
+            const std::string& item = ruleObjects[i];
+            rule.enabled = ExtractJsonBool(item, "Enabled", true);
+            rule.fallback = ExtractJsonBool(item, "IsFallback", false);
+            rule.name = ExtractJsonString(item, "RuleName", std::string());
+            rule.material = ExtractJsonString(item, "Material", std::string());
+            rule.method = ExtractJsonString(item, "Method", "KFactor");
+            rule.note = ExtractJsonString(item, "Note", std::string());
+            rule.value = ExtractJsonNumber(item, "Value", 0.5);
+            rule.hasAngleMin = TryExtractJsonNumber(item, "AngleMinDeg", &rule.angleMin);
+            rule.hasAngleMax = TryExtractJsonNumber(item, "AngleMaxDeg", &rule.angleMax);
+            rule.hasThicknessMin = TryExtractJsonNumber(item, "ThicknessMin", &rule.thicknessMin);
+            rule.hasThicknessMax = TryExtractJsonNumber(item, "ThicknessMax", &rule.thicknessMax);
+            rule.hasRadiusMin = TryExtractJsonNumber(item, "InnerRadiusMin", &rule.radiusMin);
+            rule.hasRadiusMax = TryExtractJsonNumber(item, "InnerRadiusMax", &rule.radiusMax);
+            rule.hasRadiusOverride = TryExtractJsonNumber(item, "RadiusOverride", &rule.radiusOverride);
+            if (rule.enabled)
+            {
+                config.rules.push_back(rule);
+            }
+        }
+
+        return config;
+    }
+
+    bool WithinRange(double value, bool hasMin, double minValue, bool hasMax, double maxValue)
+    {
+        if (hasMin && value < minValue)
+        {
+            return false;
+        }
+        if (hasMax && value > maxValue)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    bool ContainsTextNoCase(const std::string& text, const char* token)
+    {
+        std::string left = text;
+        std::string right = token == NULL ? std::string() : std::string(token);
+        std::transform(left.begin(), left.end(), left.begin(), ::tolower);
+        std::transform(right.begin(), right.end(), right.begin(), ::tolower);
+        return left.find(right) != std::string::npos;
+    }
+
+    bool IsLargeArcBend(const BendFaceRecord& record, const RuleConfig& config)
+    {
+        bool byAbsolute = config.useAbsoluteLargeArc &&
+            config.absoluteLargeArcRadius > 0.0 &&
+            record.innerRadius >= config.absoluteLargeArcRadius;
+        bool byRatio = config.useRatioLargeArc &&
+            config.ratioLargeArc > 0.0 &&
+            record.thickness > 1e-9 &&
+            record.innerRadius / record.thickness >= config.ratioLargeArc;
+        return byAbsolute || byRatio;
+    }
+
+    const BendRule* MatchRule(const RuleConfig& config, const BendFaceRecord& record)
+    {
+        const BendRule* fallback = NULL;
+        bool largeArc = IsLargeArcBend(record, config);
+        for (size_t i = 0; i < config.rules.size(); ++i)
+        {
+            const BendRule& rule = config.rules[i];
+            if (!rule.enabled)
+            {
+                continue;
+            }
+            if (rule.fallback)
+            {
+                fallback = &rule;
+                continue;
+            }
+
+            bool pressEdgeRule = ContainsTextNoCase(rule.note, "[PressEdge]");
+            bool largeArcRule = ContainsTextNoCase(rule.note, "[LargeArc]");
+            bool smallArcRule = ContainsTextNoCase(rule.note, "[SmallArc]");
+            if (pressEdgeRule)
+            {
+                continue;
+            }
+            if (largeArc && !largeArcRule)
+            {
+                continue;
+            }
+            if (!largeArc && largeArcRule)
+            {
+                continue;
+            }
+            if (smallArcRule && largeArc)
+            {
+                continue;
+            }
+            if (!WithinRange(record.angleDeg, rule.hasAngleMin, rule.angleMin, rule.hasAngleMax, rule.angleMax) ||
+                !WithinRange(record.thickness, rule.hasThicknessMin, rule.thicknessMin, rule.hasThicknessMax, rule.thicknessMax) ||
+                !WithinRange(record.innerRadius, rule.hasRadiusMin, rule.radiusMin, rule.hasRadiusMax, rule.radiusMax))
+            {
+                continue;
+            }
+
+            return &rule;
+        }
+
+        return fallback;
+    }
+
+    bool SafeAngleRadians(double angleDeg, double* radians)
+    {
+        if (radians == NULL || angleDeg <= 0.001 || angleDeg >= 179.999)
+        {
+            return false;
+        }
+
+        *radians = angleDeg * 3.14159265358979323846 / 180.0;
+        return true;
+    }
+
+    bool CalculateTargetK(const BendRule& rule, BendFaceRecord* record)
+    {
+        if (record == NULL)
+        {
+            return false;
+        }
+
+        double effectiveRadius = rule.hasRadiusOverride ? rule.radiusOverride : record->innerRadius;
+        record->targetRadius = effectiveRadius;
+        if (ContainsTextNoCase(rule.method, "KFactor"))
+        {
+            record->targetK = rule.value;
+            return record->targetK >= 0.0 && record->targetK <= 1.0;
+        }
+
+        if (!ContainsTextNoCase(rule.method, "Deduction") || record->thickness <= 0.0)
+        {
+            return false;
+        }
+
+        double angleRad = 0.0;
+        if (!SafeAngleRadians(record->angleDeg, &angleRad))
+        {
+            return false;
+        }
+
+        double bendAllowance = 2.0 * (effectiveRadius + record->thickness) * std::tan(angleRad / 2.0) - rule.value;
+        record->targetK = (bendAllowance / angleRad - effectiveRadius) / record->thickness;
+        return !std::isnan(record->targetK) && !std::isinf(record->targetK) &&
+            record->targetK >= 0.0 && record->targetK <= 1.0;
+    }
+
+    std::string FormatDouble(double value, int precision)
+    {
+        std::ostringstream stream;
+        stream << std::fixed << std::setprecision(precision) << value;
+        return stream.str();
+    }
+
+
+    std::string UiTextToUtf8(const NXString& value)
+    {
+        const char* text = value.GetUTF8Text();
+        if (text != NULL && text[0] != '\0')
+        {
+            return NormalizeUtf8Message(text);
+        }
+
+        text = value.GetLocaleText();
+        if (text != NULL && text[0] != '\0')
+        {
+            return NormalizeUtf8Message(text);
+        }
+
+        text = value.GetText();
+        return text == NULL ? std::string() : NormalizeUtf8Message(text);
+    }
+
+    std::string RuleMethodDisplay(const std::string& method)
+    {
+        return method == "Deduction" ? std::string(u8"扣除") : std::string(u8"K因子");
+    }
+
+    std::string RuleBoolDisplay(bool value)
+    {
+        return value ? std::string(u8"是") : std::string(u8"否");
+    }
+
+    bool RuleBoolValue(const std::string& value, bool defaultValue)
+    {
+        std::string text = TrimCopy(value);
+        std::transform(text.begin(), text.end(), text.begin(), ::tolower);
+        if (text == u8"是" || text == "true" || text == "1" || text == "yes" || text == "y")
+        {
+            return true;
+        }
+        if (text == u8"否" || text == "false" || text == "0" || text == "no" || text == "n")
+        {
+            return false;
+        }
+        return defaultValue;
+    }
+
+    std::string NumberText(double value)
+    {
+        std::string text = FormatDouble(value, 6);
+        while (text.size() > 1 && text[text.size() - 1] == '0')
+        {
+            text.erase(text.size() - 1);
+        }
+        if (!text.empty() && text[text.size() - 1] == '.')
+        {
+            text.erase(text.size() - 1);
+        }
+        return text.empty() ? std::string("0") : text;
+    }
+
+    std::string OptionalRuleNumber(bool hasValue, double value)
+    {
+        return hasValue ? NumberText(value) : std::string();
+    }
+
+    RuleConfig LoadRuleConfigForEditor()
+    {
+        RuleConfig config;
+        std::string path = FindConfigPath();
+        std::string json = path.empty() ? std::string() : ReadAllText(path);
+        if (json.empty())
+        {
+            return config;
+        }
+
+        config.useAbsoluteLargeArc = ExtractJsonBool(json, "UseAbsoluteRadiusThreshold", true);
+        config.absoluteLargeArcRadius = ExtractJsonNumber(json, "AbsoluteRadiusThreshold", 7.0);
+        config.useRatioLargeArc = ExtractJsonBool(json, "UseRadiusThicknessRatio", false);
+        config.ratioLargeArc = ExtractJsonNumber(json, "RadiusThicknessRatioThreshold", 5.0);
+
+        std::vector<std::string> ruleObjects = ExtractObjectBodies(ExtractArrayBody(json, "Rules"));
+        for (size_t i = 0; i < ruleObjects.size(); ++i)
+        {
+            BendRule rule;
+            const std::string& item = ruleObjects[i];
+            rule.enabled = ExtractJsonBool(item, "Enabled", true);
+            rule.fallback = ExtractJsonBool(item, "IsFallback", false);
+            rule.name = ExtractJsonString(item, "RuleName", std::string());
+            rule.material = ExtractJsonString(item, "Material", std::string());
+            rule.method = ExtractJsonString(item, "Method", "KFactor");
+            rule.note = ExtractJsonString(item, "Note", std::string());
+            rule.value = ExtractJsonNumber(item, "Value", 0.5);
+            rule.hasAngleMin = TryExtractJsonNumber(item, "AngleMinDeg", &rule.angleMin);
+            rule.hasAngleMax = TryExtractJsonNumber(item, "AngleMaxDeg", &rule.angleMax);
+            rule.hasThicknessMin = TryExtractJsonNumber(item, "ThicknessMin", &rule.thicknessMin);
+            rule.hasThicknessMax = TryExtractJsonNumber(item, "ThicknessMax", &rule.thicknessMax);
+            rule.hasRadiusMin = TryExtractJsonNumber(item, "InnerRadiusMin", &rule.radiusMin);
+            rule.hasRadiusMax = TryExtractJsonNumber(item, "InnerRadiusMax", &rule.radiusMax);
+            rule.hasRadiusOverride = TryExtractJsonNumber(item, "RadiusOverride", &rule.radiusOverride);
+            config.rules.push_back(rule);
+        }
+
+        return config;
+    }
+
+    std::string JsonEscape(const std::string& value)
+    {
+        std::ostringstream stream;
+        for (size_t i = 0; i < value.size(); ++i)
+        {
+            unsigned char c = static_cast<unsigned char>(value[i]);
+            switch (c)
+            {
+            case '"': stream << "\\\""; break;
+            case '\\': stream << "\\\\"; break;
+            case '\b': stream << "\\b"; break;
+            case '\f': stream << "\\f"; break;
+            case '\n': stream << "\\n"; break;
+            case '\r': stream << "\\r"; break;
+            case '\t': stream << "\\t"; break;
+            default:
+                if (c < 0x20)
+                {
+                    stream << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(c) << std::dec << std::setfill(' ');
+                }
+                else
+                {
+                    stream << value[i];
+                }
+                break;
+            }
+        }
+        return stream.str();
+    }
+
+    void AppendJsonOptionalNumber(std::ostringstream& stream, const char* name, bool hasValue, double value)
+    {
+        stream << ",\"" << name << "\":";
+        if (hasValue)
+        {
+            stream << NumberText(value);
+        }
+        else
+        {
+            stream << "null";
+        }
+    }
+
+    std::string BuildRulesJsonArray(const std::vector<BendRule>& rules)
+    {
+        std::ostringstream stream;
+        stream << "[\n";
+        for (size_t i = 0; i < rules.size(); ++i)
+        {
+            const BendRule& rule = rules[i];
+            stream << "  {\"Enabled\":" << (rule.enabled ? "true" : "false");
+            stream << ",\"RuleName\":\"" << JsonEscape(rule.name) << "\"";
+            AppendJsonOptionalNumber(stream, "AngleMinDeg", rule.hasAngleMin, rule.angleMin);
+            AppendJsonOptionalNumber(stream, "AngleMaxDeg", rule.hasAngleMax, rule.angleMax);
+            AppendJsonOptionalNumber(stream, "ThicknessMin", rule.hasThicknessMin, rule.thicknessMin);
+            AppendJsonOptionalNumber(stream, "ThicknessMax", rule.hasThicknessMax, rule.thicknessMax);
+            AppendJsonOptionalNumber(stream, "InnerRadiusMin", rule.hasRadiusMin, rule.radiusMin);
+            AppendJsonOptionalNumber(stream, "InnerRadiusMax", rule.hasRadiusMax, rule.radiusMax);
+            stream << ",\"Material\":\"" << JsonEscape(rule.material) << "\"";
+            stream << ",\"Method\":\"" << JsonEscape(rule.method.empty() ? std::string("KFactor") : rule.method) << "\"";
+            stream << ",\"Value\":" << NumberText(rule.value);
+            AppendJsonOptionalNumber(stream, "RadiusOverride", rule.hasRadiusOverride, rule.radiusOverride);
+            stream << ",\"IsFallback\":" << (rule.fallback ? "true" : "false");
+            stream << ",\"Note\":\"" << JsonEscape(rule.note) << "\"}";
+            if (i + 1 < rules.size())
+            {
+                stream << ",";
+            }
+            stream << "\n";
+        }
+        stream << "]";
+        return stream.str();
+    }
+
+    bool FindJsonArraySpan(const std::string& json, const std::string& name, size_t* begin, size_t* end)
+    {
+        std::regex pattern("\\\"" + name + "\\\"\\s*:\\s*\\[");
+        std::smatch match;
+        if (!std::regex_search(json, match, pattern))
+        {
+            return false;
+        }
+
+        size_t open = static_cast<size_t>(match.position(0) + match.length(0) - 1);
+        int depth = 0;
+        bool inString = false;
+        bool escape = false;
+        for (size_t i = open; i < json.size(); ++i)
+        {
+            char c = json[i];
+            if (inString)
+            {
+                if (escape)
+                {
+                    escape = false;
+                }
+                else if (c == '\\')
+                {
+                    escape = true;
+                }
+                else if (c == '"')
+                {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inString = true;
+            }
+            else if (c == '[')
+            {
+                ++depth;
+            }
+            else if (c == ']')
+            {
+                --depth;
+                if (depth == 0)
+                {
+                    *begin = open;
+                    *end = i + 1;
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    std::string RulesJsonSavePath()
+    {
+        std::string path = FindConfigPath();
+        if (!path.empty())
+        {
+            return path;
+        }
+        return std::string("D:\\UG智辉钣金插件\\config\\") + PiLianConfigFileName;
+    }
+
+    bool SaveRuleConfigToJson(const RuleConfig& config, std::string* pathOut, std::string* error)
+    {
+        std::string path = RulesJsonSavePath();
+        std::string json = ReadAllText(path);
+        std::string rulesJson = BuildRulesJsonArray(config.rules);
+        if (json.empty())
+        {
+            json = std::string("{\n  \"LargeArcRuleSettings\":{\"UseAbsoluteRadiusThreshold\":true,\"AbsoluteRadiusThreshold\":") +
+                NumberText(config.absoluteLargeArcRadius) +
+                ",\"UseRadiusThicknessRatio\":false,\"RadiusThicknessRatioThreshold\":" +
+                NumberText(config.ratioLargeArc) + "},\n  \"Rules\":" + rulesJson + "\n}\n";
+        }
+        else
+        {
+            size_t begin = 0;
+            size_t end = 0;
+            if (FindJsonArraySpan(json, "Rules", &begin, &end))
+            {
+                json.replace(begin, end - begin, rulesJson);
+            }
+            else
+            {
+                size_t insert = json.find_last_of('}');
+                if (insert == std::string::npos)
+                {
+                    json = std::string("{\n  \"Rules\":") + rulesJson + "\n}\n";
+                }
+                else
+                {
+                    std::string prefix = json.substr(0, insert);
+                    std::string suffix = json.substr(insert);
+                    if (prefix.find_last_not_of(" \t\r\n") != std::string::npos && prefix[prefix.find_last_not_of(" \t\r\n")] != '{')
+                    {
+                        prefix += ",";
+                    }
+                    json = prefix + "\n  \"Rules\":" + rulesJson + "\n" + suffix;
+                }
+            }
+        }
+
+        std::ofstream file(path.c_str(), std::ios::out | std::ios::binary);
+        if (!file)
+        {
+            if (error != NULL)
+            {
+                *error = u8"无法写入规则配置：" + path;
+            }
+            return false;
+        }
+        file.write(json.c_str(), static_cast<std::streamsize>(json.size()));
+        if (pathOut != NULL)
+        {
+            *pathOut = path;
+        }
+        return true;
+    }
+
+    void TrySetBlockString(UIBlock* block, const char* propertyName, const char* value)
+    {
+        if (block == NULL)
+        {
+            return;
+        }
+
+        PropertyList* props = NULL;
+        try
+        {
+            props = block->GetProperties();
+            props->SetString(propertyName, value == NULL ? "" : value);
+        }
+        catch (...)
+        {
+        }
+        if (props != NULL)
+        {
+            delete props;
+        }
+    }
+
+    void TrySetBlockVisible(UIBlock* block, bool visible)
+    {
+        if (block == NULL)
+        {
+            return;
+        }
+
+        const char* names[] = { "Show", "Visibility" };
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+        {
+            PropertyList* props = NULL;
+            try
+            {
+                props = block->GetProperties();
+                props->SetLogical(names[i], visible);
+            }
+            catch (...)
+            {
+            }
+            if (props != NULL)
+            {
+                delete props;
+            }
+        }
+    }
+
+    void SetNodeColumnText(Node* node, int columnID, const std::string& text)
+    {
+        if (node != NULL)
+        {
+            node->SetColumnDisplayText(columnID, U8(text.empty() ? std::string(" ") : text));
+        }
+    }
+
+    class PiLianRulesTableDialog
+    {
+    public:
+        enum Columns
+        {
+            ColumnEnabled = 0,
+            ColumnName = 1,
+            ColumnMaterial = 2,
+            ColumnAngleMin = 3,
+            ColumnAngleMax = 4,
+            ColumnThicknessMin = 5,
+            ColumnThicknessMax = 6,
+            ColumnRadiusMin = 7,
+            ColumnRadiusMax = 8,
+            ColumnMethod = 9,
+            ColumnValue = 10,
+            ColumnRadiusOverride = 11,
+            ColumnFallback = 12,
+            ColumnNote = 13
+        };
+
+        explicit PiLianRulesTableDialog(UI* ui, const std::string& dlxPath) :
+            ui_(ui),
+            dialog_(NULL),
+            tree_(NULL),
+            addButton_(NULL),
+            saveButton_(NULL),
+            deleteButton_(NULL),
+            selectedNode_(NULL),
+            columnsInserted_(false)
+        {
+            if (ui_ != NULL)
+            {
+                dialog_ = ui_->CreateDialog(dlxPath.c_str());
+                dialog_->AddInitializeHandler(make_callback(this, &PiLianRulesTableDialog::initialize_cb));
+                dialog_->AddDialogShownHandler(make_callback(this, &PiLianRulesTableDialog::dialogShown_cb));
+                dialog_->AddUpdateHandler(make_callback(this, &PiLianRulesTableDialog::update_cb));
+                dialog_->AddApplyHandler(make_callback(this, &PiLianRulesTableDialog::apply_cb));
+                dialog_->AddOkHandler(make_callback(this, &PiLianRulesTableDialog::ok_cb));
+            }
+        }
+
+        ~PiLianRulesTableDialog()
+        {
+            if (dialog_ != NULL)
+            {
+                delete dialog_;
+                dialog_ = NULL;
+            }
+        }
+
+        void Show()
+        {
+            if (dialog_ != NULL)
+            {
+                dialog_->Launch();
+            }
+        }
+
+        void initialize_cb()
+        {
+            tree_ = dynamic_cast<Tree*>(dialog_->TopBlock()->FindBlock("tree_control0"));
+            addButton_ = dynamic_cast<UIBlock*>(dialog_->TopBlock()->FindBlock("addCrossSelectionNodeButton"));
+            saveButton_ = dynamic_cast<UIBlock*>(dialog_->TopBlock()->FindBlock("addNodeButton"));
+            deleteButton_ = dynamic_cast<UIBlock*>(dialog_->TopBlock()->FindBlock("deleteNodeButton"));
+            LocalizeAndHideUnusedBlocks();
+            config_ = LoadRuleConfigForEditor();
+            if (tree_ != NULL)
+            {
+                tree_->SetOnSelectHandler(make_callback(this, &PiLianRulesTableDialog::OnSelectCallback));
+                tree_->SetOnBeginLabelEditHandler(make_callback(this, &PiLianRulesTableDialog::OnBeginLabelEditCallback));
+                tree_->SetOnEndLabelEditHandler(make_callback(this, &PiLianRulesTableDialog::OnEndLabelEditCallback));
+                tree_->SetAskEditControlHandler(make_callback(this, &PiLianRulesTableDialog::AskEditControlCallback));
+                tree_->SetOnEditOptionSelectedHandler(make_callback(this, &PiLianRulesTableDialog::OnEditOptionSelectedCallback));
+            }
+        }
+
+        void dialogShown_cb()
+        {
+            if (tree_ != NULL && !columnsInserted_)
+            {
+                tree_->InsertColumn(ColumnEnabled, U8("启用"), 55);
+                tree_->InsertColumn(ColumnName, U8("名称"), 170);
+                tree_->InsertColumn(ColumnMaterial, U8("材料"), 90);
+                tree_->InsertColumn(ColumnAngleMin, U8("角小"), 65);
+                tree_->InsertColumn(ColumnAngleMax, U8("角大"), 65);
+                tree_->InsertColumn(ColumnThicknessMin, U8("厚小"), 65);
+                tree_->InsertColumn(ColumnThicknessMax, U8("厚大"), 65);
+                tree_->InsertColumn(ColumnRadiusMin, U8("R小"), 60);
+                tree_->InsertColumn(ColumnRadiusMax, U8("R大"), 60);
+                tree_->InsertColumn(ColumnMethod, U8("方法"), 70);
+                tree_->InsertColumn(ColumnValue, U8("值"), 70);
+                tree_->InsertColumn(ColumnRadiusOverride, U8("半径覆盖"), 80);
+                tree_->InsertColumn(ColumnFallback, U8("兜底"), 55);
+                tree_->InsertColumn(ColumnNote, U8("备注"), 180);
+                for (int i = ColumnEnabled; i <= ColumnFallback; ++i)
+                {
+                    tree_->SetColumnResizePolicy(i, Tree::ColumnResizePolicyConstantWidth);
+                }
+                tree_->SetColumnResizePolicy(ColumnNote, Tree::ColumnResizePolicyResizeWithTree);
+                columnsInserted_ = true;
+            }
+            RebuildTree();
+        }
+
+        int update_cb(UIBlock* block)
+        {
+            if (block == addButton_)
+            {
+                AddRule();
+            }
+            else if (block == saveButton_)
+            {
+                Save();
+            }
+            else if (block == deleteButton_)
+            {
+                DeleteSelectedRule();
+            }
+            return 0;
+        }
+
+        int apply_cb()
+        {
+            return Save() ? 0 : 1;
+        }
+
+        int ok_cb()
+        {
+            return Save() ? 0 : 1;
+        }
+
+        void OnSelectCallback(Tree*, Node* node, int, bool selected)
+        {
+            selectedNode_ = selected ? node : NULL;
+        }
+
+        Tree::BeginLabelEditState OnBeginLabelEditCallback(Tree*, Node* node, int columnID)
+        {
+            if (nodeToRule_.find(node) == nodeToRule_.end())
+            {
+                return Tree::BeginLabelEditStateDisallow;
+            }
+            return columnID >= ColumnEnabled && columnID <= ColumnNote ?
+                Tree::BeginLabelEditStateAllow :
+                Tree::BeginLabelEditStateDisallow;
+        }
+
+        Tree::EndLabelEditState OnEndLabelEditCallback(Tree*, Node* node, int columnID, NXString editedText)
+        {
+            size_t index = 0;
+            if (!IndexForNode(node, &index))
+            {
+                return Tree::EndLabelEditStateRejectText;
+            }
+            if (!ApplyTextToRule(config_.rules[index], columnID, UiTextToUtf8(editedText)))
+            {
+                return Tree::EndLabelEditStateRejectText;
+            }
+            FillNode(node, config_.rules[index]);
+            return Tree::EndLabelEditStateAcceptText;
+        }
+
+        Tree::ControlType AskEditControlCallback(Tree* tree, Node*, int columnID)
+        {
+            if (columnID == ColumnEnabled || columnID == ColumnFallback)
+            {
+                std::vector<NXString> options;
+                options.push_back(U8("是"));
+                options.push_back(U8("否"));
+                tree->SetEditOptions(options, 0);
+                return Tree::ControlTypeComboBox;
+            }
+            if (columnID == ColumnMethod)
+            {
+                std::vector<NXString> options;
+                options.push_back(U8("K因子"));
+                options.push_back(U8("扣除"));
+                tree->SetEditOptions(options, 0);
+                return Tree::ControlTypeComboBox;
+            }
+            return Tree::ControlTypeNone;
+        }
+
+        Tree::EditControlOption OnEditOptionSelectedCallback(Tree*, Node* node, int columnID, int selectedOptionID, NXString selectedOptionText, Tree::ControlType)
+        {
+            size_t index = 0;
+            if (!IndexForNode(node, &index))
+            {
+                return Tree::EditControlOptionReject;
+            }
+            std::string text = UiTextToUtf8(selectedOptionText);
+            if ((columnID == ColumnEnabled || columnID == ColumnFallback) && selectedOptionID >= 0)
+            {
+                text = selectedOptionID == 0 ? u8"是" : u8"否";
+            }
+            else if (columnID == ColumnMethod && selectedOptionID >= 0)
+            {
+                text = selectedOptionID == 0 ? u8"K因子" : u8"扣除";
+            }
+            if (!ApplyTextToRule(config_.rules[index], columnID, text))
+            {
+                return Tree::EditControlOptionReject;
+            }
+            FillNode(node, config_.rules[index]);
+            return Tree::EditControlOptionAccept;
+        }
+
+    private:
+        UI* ui_;
+        BlockDialog* dialog_;
+        Tree* tree_;
+        UIBlock* addButton_;
+        UIBlock* saveButton_;
+        UIBlock* deleteButton_;
+        RuleConfig config_;
+        std::map<Node*, size_t> nodeToRule_;
+        std::vector<Node*> allNodes_;
+        Node* selectedNode_;
+        bool columnsInserted_;
+
+        void LocalizeAndHideUnusedBlocks()
+        {
+            TrySetBlockString(dialog_->TopBlock(), "Label", "折弯规则表");
+            TrySetBlockString(dialog_->TopBlock(), "LabelString", "折弯规则表");
+            TrySetBlockString(dialog_->TopBlock(), "Title", "折弯规则表");
+            TrySetBlockString(addButton_, "Label", "新增规则");
+            TrySetBlockString(saveButton_, "Label", "保存规则");
+            TrySetBlockString(deleteButton_, "Label", "删除规则");
+
+            const char* hideBlockIds[] = {
+                "selection0", "autoTapHoleToggle", "autoPemHoleToggle", "autoCounterboreHoleToggle",
+                "stateIconGroup", "NodeEditGroup", "menuGroup", "dragDropGroup", "defaultActionGroup",
+                "redrawGroup", "listingWindowGroup", "instructions", "nodeString", "stateIconOptions",
+                "nodeToolTip", "nodeEditOptions", "showMenuToggle", "disallowDragToggle", "dropOptions",
+                "defaultActionToggle", "redrawInstruction", "redrawToggle", "listingWindowToggle"
+            };
+            for (size_t i = 0; i < sizeof(hideBlockIds) / sizeof(hideBlockIds[0]); ++i)
+            {
+                TrySetBlockVisible(dynamic_cast<UIBlock*>(dialog_->TopBlock()->FindBlock(hideBlockIds[i])), false);
+            }
+        }
+
+        void RebuildTree()
+        {
+            if (tree_ == NULL)
+            {
+                return;
+            }
+            for (size_t i = allNodes_.size(); i > 0; --i)
+            {
+                try { tree_->DeleteNode(allNodes_[i - 1]); } catch (...) {}
+            }
+            nodeToRule_.clear();
+            allNodes_.clear();
+            selectedNode_ = NULL;
+
+            for (size_t i = 0; i < config_.rules.size(); ++i)
+            {
+                std::string nodeText = config_.rules[i].name.empty() ? std::string(u8"规则") : config_.rules[i].name;
+                Node* node = tree_->CreateNode(U8(nodeText));
+                tree_->InsertNode(node, NULL, NULL, Tree::NodeInsertOptionAlwaysLast);
+                allNodes_.push_back(node);
+                FillNode(node, config_.rules[i]);
+                nodeToRule_[node] = i;
+            }
+        }
+
+        void FillNode(Node* node, const BendRule& rule)
+        {
+            SetNodeColumnText(node, ColumnEnabled, RuleBoolDisplay(rule.enabled));
+            SetNodeColumnText(node, ColumnName, rule.name);
+            SetNodeColumnText(node, ColumnMaterial, rule.material);
+            SetNodeColumnText(node, ColumnAngleMin, OptionalRuleNumber(rule.hasAngleMin, rule.angleMin));
+            SetNodeColumnText(node, ColumnAngleMax, OptionalRuleNumber(rule.hasAngleMax, rule.angleMax));
+            SetNodeColumnText(node, ColumnThicknessMin, OptionalRuleNumber(rule.hasThicknessMin, rule.thicknessMin));
+            SetNodeColumnText(node, ColumnThicknessMax, OptionalRuleNumber(rule.hasThicknessMax, rule.thicknessMax));
+            SetNodeColumnText(node, ColumnRadiusMin, OptionalRuleNumber(rule.hasRadiusMin, rule.radiusMin));
+            SetNodeColumnText(node, ColumnRadiusMax, OptionalRuleNumber(rule.hasRadiusMax, rule.radiusMax));
+            SetNodeColumnText(node, ColumnMethod, RuleMethodDisplay(rule.method));
+            SetNodeColumnText(node, ColumnValue, NumberText(rule.value));
+            SetNodeColumnText(node, ColumnRadiusOverride, OptionalRuleNumber(rule.hasRadiusOverride, rule.radiusOverride));
+            SetNodeColumnText(node, ColumnFallback, RuleBoolDisplay(rule.fallback));
+            SetNodeColumnText(node, ColumnNote, rule.note);
+        }
+
+        bool IndexForNode(Node* node, size_t* index) const
+        {
+            std::map<Node*, size_t>::const_iterator it = nodeToRule_.find(node);
+            if (it == nodeToRule_.end())
+            {
+                return false;
+            }
+            if (index != NULL)
+            {
+                *index = it->second;
+            }
+            return true;
+        }
+
+        bool ParseOptionalNumber(const std::string& text, bool* hasValue, double* value)
+        {
+            std::string trimmed = TrimCopy(text);
+            if (trimmed.empty())
+            {
+                *hasValue = false;
+                *value = 0.0;
+                return true;
+            }
+            char* end = NULL;
+            double parsed = std::strtod(trimmed.c_str(), &end);
+            if (end == trimmed.c_str())
+            {
+                return false;
+            }
+            *hasValue = true;
+            *value = parsed;
+            return true;
+        }
+
+        bool ApplyTextToRule(BendRule& rule, int columnID, const std::string& text)
+        {
+            std::string value = TrimCopy(text);
+            switch (columnID)
+            {
+            case ColumnEnabled: rule.enabled = RuleBoolValue(value, rule.enabled); return true;
+            case ColumnName: rule.name = value; return true;
+            case ColumnMaterial: rule.material = value; return true;
+            case ColumnAngleMin: return ParseOptionalNumber(value, &rule.hasAngleMin, &rule.angleMin);
+            case ColumnAngleMax: return ParseOptionalNumber(value, &rule.hasAngleMax, &rule.angleMax);
+            case ColumnThicknessMin: return ParseOptionalNumber(value, &rule.hasThicknessMin, &rule.thicknessMin);
+            case ColumnThicknessMax: return ParseOptionalNumber(value, &rule.hasThicknessMax, &rule.thicknessMax);
+            case ColumnRadiusMin: return ParseOptionalNumber(value, &rule.hasRadiusMin, &rule.radiusMin);
+            case ColumnRadiusMax: return ParseOptionalNumber(value, &rule.hasRadiusMax, &rule.radiusMax);
+            case ColumnMethod: rule.method = value.find(u8"扣") != std::string::npos ? "Deduction" : "KFactor"; return true;
+            case ColumnValue:
+            {
+                char* end = NULL;
+                double parsed = std::strtod(value.c_str(), &end);
+                if (end == value.c_str())
+                {
+                    return false;
+                }
+                rule.value = parsed;
+                return true;
+            }
+            case ColumnRadiusOverride: return ParseOptionalNumber(value, &rule.hasRadiusOverride, &rule.radiusOverride);
+            case ColumnFallback: rule.fallback = RuleBoolValue(value, rule.fallback); return true;
+            case ColumnNote: rule.note = value; return true;
+            default: return false;
+            }
+        }
+
+        void AddRule()
+        {
+            BendRule rule;
+            rule.name = u8"新规则";
+            rule.material = u8"材质 <未指定>";
+            config_.rules.push_back(rule);
+            RebuildTree();
+        }
+
+        void DeleteSelectedRule()
+        {
+            size_t index = 0;
+            if (!IndexForNode(selectedNode_, &index) || index >= config_.rules.size())
+            {
+                return;
+            }
+            config_.rules.erase(config_.rules.begin() + static_cast<std::vector<BendRule>::difference_type>(index));
+            RebuildTree();
+        }
+
+        bool Save()
+        {
+            std::string path;
+            std::string error;
+            if (!SaveRuleConfigToJson(config_, &path, &error))
+            {
+                ShowMessage(ui_, "折弯规则表", NXMessageBox::DialogTypeError, error);
+                return false;
+            }
+            ShowMessage(ui_, "折弯规则表", NXMessageBox::DialogTypeInformation, u8"规则表已保存：" + path);
+            return true;
+        }
+    };
+
+    FaceInfo FindLargestPlanarFace(Body* body)
+    {
+        FaceInfo best;
+        if (body == NULL)
+        {
+            return best;
+        }
+
+        std::vector<Face*> faces = body->GetFaces();
+        for (size_t i = 0; i < faces.size(); ++i)
+        {
+            int type = 0;
+            if (!AskFaceType(faces[i], &type) || type != UF_MODL_PLANAR_FACE)
+            {
+                continue;
+            }
+
+            double score = FaceAreaScore(faces[i]);
+            if (score > best.areaScore)
+            {
+                best.face = faces[i];
+                best.type = type;
+                best.areaScore = score;
+            }
+        }
+
+        if (best.face != NULL)
+        {
+            return best;
+        }
+
+        for (size_t i = 0; i < faces.size(); ++i)
+        {
+            int type = 0;
+            if (!AskFaceType(faces[i], &type) || type != UF_MODL_CYLINDRICAL_FACE)
+            {
+                continue;
+            }
+
+            double score = FaceAreaScore(faces[i]);
+            if (score > best.areaScore)
+            {
+                best.face = faces[i];
+                best.type = type;
+                best.areaScore = score;
+            }
+        }
+
+        return best;
+    }
+
+    double Distance(const Point3d& a, const Point3d& b)
+    {
+        const double dx = a.X - b.X;
+        const double dy = a.Y - b.Y;
+        const double dz = a.Z - b.Z;
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    Edge* FindLongestStraightEdge(Face* face, Point3d* startPoint, Point3d* endPoint)
+    {
+        if (face == NULL)
+        {
+            return NULL;
+        }
+
+        Edge* bestEdge = NULL;
+        double bestLength = -1.0;
+        std::vector<Edge*> edges = face->GetEdges();
+        for (size_t i = 0; i < edges.size(); ++i)
+        {
+            if (edges[i] == NULL)
+            {
+                continue;
+            }
+
+            Point3d p1;
+            Point3d p2;
+            try
+            {
+                if (edges[i]->SolidEdgeType() != NXOpen::Edge::EdgeTypeLinear)
+                {
+                    continue;
+                }
+
+                edges[i]->GetVertices(&p1, &p2);
+            }
+            catch (...)
+            {
+                continue;
+            }
+
+            double length = Distance(p1, p2);
+            if (length > bestLength)
+            {
+                bestLength = length;
+                bestEdge = edges[i];
+                if (startPoint != NULL)
+                {
+                    *startPoint = p1;
+                }
+                if (endPoint != NULL)
+                {
+                    *endPoint = p2;
+                }
+            }
+        }
+
+        return bestEdge;
+    }
+
+    std::string FeatureName(Feature* feature)
+    {
+        if (feature == NULL)
+        {
+            return std::string();
+        }
+
+        try
+        {
+            return ToUtf8(feature->GetFeatureName());
+        }
+        catch (...)
+        {
+            return std::string();
+        }
+    }
+
+    std::string FeatureTypeText(Feature* feature)
+    {
+        if (feature == NULL)
+        {
+            return std::string();
+        }
+
+        try
+        {
+            return ToUtf8(feature->FeatureType());
+        }
+        catch (...)
+        {
+            return std::string();
+        }
+    }
+
+    bool IsConvertSheetmetalFeatureName(const std::string& name)
+    {
+        return ContainsTextNoCase(name, "SB Convert To Sheet Metal") ||
+            ContainsTextNoCase(name, "Convert To Sheet Metal") ||
+            ContainsTextNoCase(name, "Convert To Sheetmetal");
+    }
+
+    bool IsConvertSheetmetalFeature(Feature* feature)
+    {
+        if (feature == NULL)
+        {
+            return false;
+        }
+
+        return IsConvertSheetmetalFeatureName(FeatureName(feature)) ||
+            IsConvertSheetmetalFeatureName(FeatureTypeText(feature));
+    }
+
+    bool FeatureOwnsBody(Feature* feature, Body* body)
+    {
+        if (feature == NULL || body == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            std::vector<Body*> bodies = feature->GetBodies();
+            for (size_t i = 0; i < bodies.size(); ++i)
+            {
+                if (bodies[i] != NULL && bodies[i]->Tag() == body->Tag())
+                {
+                    return true;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return false;
+    }
+
+    bool IsSheetmetalBody(Part* workPart, SheetmetalManager* manager, Body* body)
+    {
+        if (body == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            std::vector<Feature*> features = body->GetFeatures();
+            for (size_t i = 0; i < features.size(); ++i)
+            {
+                Feature* feature = features[i];
+                if (IsConvertSheetmetalFeature(feature))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        if (workPart != NULL && workPart->Features() != NULL)
+        {
+            try
+            {
+                for (FeatureCollection::iterator it = workPart->Features()->begin(); it != workPart->Features()->end(); ++it)
+                {
+                    Feature* feature = *it;
+                    if (!IsConvertSheetmetalFeature(feature))
+                    {
+                        continue;
+                    }
+
+                    if (FeatureOwnsBody(feature, body))
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        if (manager != NULL)
+        {
+            try
+            {
+                std::vector<Face*> innerBendFaces;
+                std::vector<SheetmetalBendState> states;
+                manager->GetInnerBendFaces(body, innerBendFaces, states);
+                if (!innerBendFaces.empty())
+                {
+                    return true;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        return false;
+    }
+
+    bool IsNeutralFactorFeature(Feature* feature)
+    {
+        if (feature == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            std::string type = ToUtf8(feature->FeatureType());
+            return ContainsTextNoCase(type, "Neutral") ||
+                ContainsTextNoCase(type, "Factor") ||
+                ContainsTextNoCase(type, "Resize Neutral");
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    std::map<tag_t, Feature*> BuildNeutralFactorFeatureByFace(Body* body)
+    {
+        std::map<tag_t, Feature*> featureByFace;
+        if (body == NULL)
+        {
+            return featureByFace;
+        }
+
+        try
+        {
+            std::vector<Feature*> features = body->GetFeatures();
+            for (size_t i = 0; i < features.size(); ++i)
+            {
+                Feature* feature = features[i];
+                if (!IsNeutralFactorFeature(feature))
+                {
+                    continue;
+                }
+
+                std::vector<Face*> faces = feature->GetFaces();
+                for (size_t j = 0; j < faces.size(); ++j)
+                {
+                    if (faces[j] != NULL && IsAlive(faces[j]->Tag()))
+                    {
+                        featureByFace[faces[j]->Tag()] = feature;
+                    }
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return featureByFace;
+    }
+
+    int CommitNeutralFactorFeature(Part* workPart, Feature* existingFeature, const std::vector<Face*>& faces, double neutralFactor)
+    {
+        if (workPart == NULL || faces.empty())
+        {
+            return 0;
+        }
+
+        std::vector<Face*> validFaces;
+        std::map<tag_t, bool> seen;
+        for (size_t i = 0; i < faces.size(); ++i)
+        {
+            Face* face = faces[i];
+            if (face == NULL || !IsAlive(face->Tag()) || seen[face->Tag()])
+            {
+                continue;
+            }
+
+            validFaces.push_back(face);
+            seen[face->Tag()] = true;
+        }
+
+        if (validFaces.empty())
+        {
+            return 0;
+        }
+
+        ResizeNeutralFactorBuilder* resizeBuilder = NULL;
+        try
+        {
+            resizeBuilder = workPart->Features()->SheetmetalManager()->CreateResizeNeutralFactorBuilder(existingFeature);
+            resizeBuilder->SetUseGlobal(false);
+            resizeBuilder->NeutralFactor()->SetFormula(FormatDouble(neutralFactor, 12));
+
+            SelectionIntentRuleOptions* ruleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+            ruleOptions->SetSelectedFromInactive(false);
+            FaceDumbRule* faceRule = workPart->ScRuleFactory()->CreateRuleFaceDumb(validFaces, ruleOptions);
+            delete ruleOptions;
+
+            std::vector<SelectionIntentRule*> rules(1);
+            rules[0] = faceRule;
+            resizeBuilder->BendFaces()->ReplaceRules(rules, false);
+
+            Feature* feature = resizeBuilder->CommitFeature();
+            resizeBuilder->Destroy();
+            resizeBuilder = NULL;
+            Session::GetSession()->CleanUpFacetedFacesAndEdges();
+            return feature == NULL ? 0 : static_cast<int>(validFaces.size());
+        }
+        catch (...)
+        {
+            if (resizeBuilder != NULL)
+            {
+                try
+                {
+                    resizeBuilder->Destroy();
+                }
+                catch (...)
+                {
+                }
+            }
+
+            return 0;
+        }
+    }
+
+    int ApplyNeutralFactorByRules(Part* workPart, SheetmetalManager* manager, Body* body, const RuleConfig& ruleConfig)
+    {
+        if (workPart == NULL || manager == NULL || body == NULL)
+        {
+            return 0;
+        }
+
+        std::vector<Face*> innerBendFaces;
+        std::vector<SheetmetalBendState> states;
+        try
+        {
+            manager->GetInnerBendFaces(body, innerBendFaces, states);
+        }
+        catch (...)
+        {
+            return 0;
+        }
+
+        double thickness = 0.0;
+        try
+        {
+            thickness = manager->GetBodyThickness(body);
+        }
+        catch (...)
+        {
+            thickness = 0.0;
+        }
+
+        std::map<tag_t, Feature*> neutralFeatureByFace = BuildNeutralFactorFeatureByFace(body);
+        std::map<tag_t, Feature*> neutralFeaturesByTag;
+        std::map<std::string, std::vector<Face*> > facesByRule;
+        int prepared = 0;
+        for (size_t i = 0; i < innerBendFaces.size(); ++i)
+        {
+            if (i < states.size() && states[i] != SheetmetalBendStateBent)
+            {
+                continue;
+            }
+
+            Face* face = innerBendFaces[i];
+            if (face == NULL || !IsAlive(face->Tag()))
+            {
+                continue;
+            }
+
+            BendFaceRecord record;
+            record.face = face;
+            record.thickness = thickness;
+            try
+            {
+                SheetmetalBendParameters parameters = manager->GetBendParameters(face);
+                if (parameters.BendState != SheetmetalBendStateBent)
+                {
+                    continue;
+                }
+
+                record.innerRadius = parameters.InnerRadius;
+                record.angleDeg = parameters.BendAngle;
+                record.currentK = parameters.NeutralFactor;
+            }
+            catch (...)
+            {
+                continue;
+            }
+
+            const BendRule* rule = MatchRule(ruleConfig, record);
+            if (rule == NULL || !CalculateTargetK(*rule, &record))
+            {
+                record.targetK = 0.5;
+            }
+
+            if (std::fabs(record.currentK - record.targetK) <= 1e-6)
+            {
+                continue;
+            }
+
+            Feature* existingNeutralFeature = NULL;
+            std::map<tag_t, Feature*>::iterator existingIt = neutralFeatureByFace.find(face->Tag());
+            if (existingIt != neutralFeatureByFace.end())
+            {
+                existingNeutralFeature = existingIt->second;
+            }
+
+            tag_t existingFeatureTag = existingNeutralFeature == NULL ? NULL_TAG : existingNeutralFeature->Tag();
+            if (existingNeutralFeature != NULL)
+            {
+                neutralFeaturesByTag[existingFeatureTag] = existingNeutralFeature;
+            }
+
+            std::string key = std::to_string(static_cast<unsigned long long>(existingFeatureTag)) +
+                "|" + FormatDouble(record.targetRadius > 0.0 ? record.targetRadius : record.innerRadius, 3) +
+                "|" + FormatDouble(record.angleDeg, 3) +
+                "|" + FormatDouble(record.targetK, 6);
+            facesByRule[key].push_back(face);
+            ++prepared;
+        }
+
+        int appliedFaces = 0;
+        for (std::map<std::string, std::vector<Face*> >::iterator it = facesByRule.begin(); it != facesByRule.end(); ++it)
+        {
+            size_t lastPipe = it->first.find_last_of('|');
+            double targetK = lastPipe == std::string::npos ? 0.5 : std::atof(it->first.substr(lastPipe + 1).c_str());
+            tag_t existingFeatureTag = NULL_TAG;
+            size_t firstPipe = it->first.find('|');
+            if (firstPipe != std::string::npos)
+            {
+                existingFeatureTag = static_cast<tag_t>(std::strtoull(it->first.substr(0, firstPipe).c_str(), NULL, 10));
+            }
+
+            Feature* existingNeutralFeature = NULL;
+            std::map<tag_t, Feature*>::iterator featureIt = neutralFeaturesByTag.find(existingFeatureTag);
+            if (featureIt != neutralFeaturesByTag.end())
+            {
+                existingNeutralFeature = featureIt->second;
+            }
+
+            appliedFaces += CommitNeutralFactorFeature(workPart, existingNeutralFeature, it->second, targetK);
+        }
+
+        return appliedFaces == 0 ? prepared : appliedFaces;
+    }
+
+    int ApplyBendRadiusToInnerBends(Part* workPart, SheetmetalManager* manager, Body* body, double innerRadius)
+    {
+        if (workPart == NULL || manager == NULL || body == NULL || innerRadius <= 0.0)
+        {
+            return 0;
+        }
+
+        std::vector<Face*> innerBendFaces;
+        std::vector<SheetmetalBendState> states;
+        try
+        {
+            manager->GetInnerBendFaces(body, innerBendFaces, states);
+        }
+        catch (...)
+        {
+            return 0;
+        }
+
+        std::vector<Face*> validFaces;
+        std::map<tag_t, bool> seen;
+        for (size_t i = 0; i < innerBendFaces.size(); ++i)
+        {
+            if (i < states.size() && states[i] != SheetmetalBendStateBent)
+            {
+                continue;
+            }
+            Face* face = innerBendFaces[i];
+            if (face == NULL || !IsAlive(face->Tag()) || seen[face->Tag()])
+            {
+                continue;
+            }
+            validFaces.push_back(face);
+            seen[face->Tag()] = true;
+        }
+
+        if (validFaces.empty())
+        {
+            return 0;
+        }
+
+        ResizeBendRadiusBuilder* radiusBuilder = NULL;
+        try
+        {
+            NXOpen::Features::Feature* nullFeature(NULL);
+            radiusBuilder = manager->CreateResizeBendRadiusFeatureBuilder(nullFeature);
+            SelectionIntentRuleOptions* ruleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+            ruleOptions->SetSelectedFromInactive(false);
+            FaceDumbRule* faceRule = workPart->ScRuleFactory()->CreateRuleFaceDumb(validFaces, ruleOptions);
+            delete ruleOptions;
+
+            std::vector<SelectionIntentRule*> rules(1);
+            rules[0] = faceRule;
+            radiusBuilder->BendFaces()->ReplaceRules(rules, false);
+            radiusBuilder->BendRadius()->SetFormula(FormatDouble(innerRadius, 12));
+            Feature* feature = radiusBuilder->CommitFeature();
+            radiusBuilder->Destroy();
+            radiusBuilder = NULL;
+            Session::GetSession()->CleanUpFacetedFacesAndEdges();
+            return feature == NULL ? 0 : static_cast<int>(validFaces.size());
+        }
+        catch (...)
+        {
+            if (radiusBuilder != NULL)
+            {
+                try
+                {
+                    radiusBuilder->Destroy();
+                }
+                catch (...)
+                {
+                }
+            }
+            return 0;
+        }
+    }
+
+    void ApplySheetmetalPreferencesBeforeConvert(Part* workPart, const AutoConvertOptions& options)
+    {
+        if (workPart == NULL)
+        {
+            return;
+        }
+
+        SheetMetalPreferencesBuilder* prefsBuilder = NULL;
+        try
+        {
+            SheetMetalPreferencesManager* prefsManager = workPart->Preferences()->SheetMetalPreferences();
+            if (prefsManager == NULL)
+            {
+                return;
+            }
+
+            prefsBuilder = prefsManager->CreateSheetMetalPreferencesBuilder();
+            prefsBuilder->SetParameterEntryType(SheetMetalPreferencesBuilder::ParameterEntryTypesValue);
+            prefsBuilder->SetBendDefinitionMethod(SheetMetalPreferencesBuilder::BendDefinitionMethodOptionsNeutralFactorValue);
+
+            if (options.innerRadius > 0.0)
+            {
+                prefsBuilder->BendRadius()->SetFormula(FormatDouble(options.innerRadius, 12));
+            }
+            if (options.reliefDepth > 0.0)
+            {
+                prefsBuilder->BendReliefDepth()->SetFormula(FormatDouble(options.reliefDepth, 12));
+            }
+            if (options.reliefWidth > 0.0)
+            {
+                prefsBuilder->BendReliefWidth()->SetFormula(FormatDouble(options.reliefWidth, 12));
+            }
+
+            prefsBuilder->Commit();
+            prefsBuilder->Destroy();
+            prefsBuilder = NULL;
+        }
+        catch (...)
+        {
+            if (prefsBuilder != NULL)
+            {
+                try
+                {
+                    prefsBuilder->Destroy();
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+    }
+
+    Body* ResolveFeatureBody(Feature* feature, Body* fallback)
+    {
+        if (feature == NULL)
+        {
+            return fallback;
+        }
+
+        try
+        {
+            std::vector<Body*> bodies = feature->GetBodies();
+            for (size_t i = 0; i < bodies.size(); ++i)
+            {
+                if (bodies[i] != NULL && IsAlive(bodies[i]->Tag()))
+                {
+                    return bodies[i];
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return fallback;
+    }
+
+    bool IsFlatPatternFeature(Feature* feature)
+    {
+        if (feature == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            std::string type = ToUtf8(feature->FeatureType());
+            if (ContainsTextNoCase(type, "Flat Pattern") ||
+                ContainsTextNoCase(type, "FlatPattern") ||
+                ContainsTextNoCase(type, "SB Flat"))
+            {
+                return true;
+            }
+        }
+        catch (...)
+        {
+        }
+
+        try
+        {
+            std::string name = ToUtf8(feature->GetFeatureName());
+            if (ContainsTextNoCase(name, "Flat Pattern") ||
+                ContainsTextNoCase(name, "FlatPattern") ||
+                ContainsTextNoCase(name, "SB Flat"))
+            {
+                return true;
+            }
+        }
+        catch (...)
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    bool BodyContainsFace(Body* body, Face* targetFace)
+    {
+        if (body == NULL || targetFace == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            Body* faceBody = targetFace->GetBody();
+            if (faceBody != NULL && faceBody->Tag() == body->Tag())
+            {
+                return true;
+            }
+        }
+        catch (...)
+        {
+        }
+
+        try
+        {
+            std::vector<Face*> faces = body->GetFaces();
+            for (size_t i = 0; i < faces.size(); ++i)
+            {
+                if (faces[i] != NULL && faces[i]->Tag() == targetFace->Tag())
+                {
+                    return true;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return false;
+    }
+
+    Feature* FindExistingFlatPatternFeature(Part* workPart, SheetmetalManager* manager, Body* body)
+    {
+        if (workPart == NULL || manager == NULL || body == NULL)
+        {
+            return NULL;
+        }
+
+        try
+        {
+            std::vector<Feature*> features = body->GetFeatures();
+            for (size_t i = 0; i < features.size(); ++i)
+            {
+                Feature* feature = features[i];
+                if (IsFlatPatternFeature(feature))
+                {
+                    return feature;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        try
+        {
+            for (FeatureCollection::iterator it = workPart->Features()->begin(); it != workPart->Features()->end(); ++it)
+            {
+                Feature* feature = *it;
+
+                FlatPatternBuilder* builder = NULL;
+                try
+                {
+                    builder = manager->CreateFlatPatternBuilder(feature);
+                    Face* upwardFace = builder->UpwardFace() == NULL ? NULL : builder->UpwardFace()->Value();
+                    bool matched = BodyContainsFace(body, upwardFace);
+                    builder->Destroy();
+                    builder = NULL;
+                    if (matched)
+                    {
+                        return feature;
+                    }
+                }
+                catch (...)
+                {
+                    if (builder != NULL)
+                    {
+                        try
+                        {
+                            builder->Destroy();
+                        }
+                        catch (...)
+                        {
+                        }
+                    }
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return NULL;
+    }
+
+    Feature* CommitFlatPattern(
+        Part* workPart,
+        Feature* existingFlatPattern,
+        Face* flatFace,
+        Edge* xAxisEdge,
+        const Point3d& referenceVertex)
+    {
+        if (workPart == NULL || flatFace == NULL)
+        {
+            return NULL;
+        }
+
+        NXOpen::Features::SheetMetal::FlatPatternBuilder* flatPatternBuilder = NULL;
+        try
+        {
+            flatPatternBuilder = workPart->Features()->SheetmetalManager()->CreateFlatPatternBuilder(existingFlatPattern);
+            if (existingFlatPattern == NULL)
+            {
+                flatPatternBuilder->SetApplicationContext(NXOpen::Features::SheetMetal::ApplicationContextNxSheetMetal);
+            }
+            flatPatternBuilder->SetOrientation(xAxisEdge == NULL
+                ? NXOpen::Features::SheetMetal::FlatSolidBuilder::OrientationTypeDefault
+                : NXOpen::Features::SheetMetal::FlatSolidBuilder::OrientationTypeEdge);
+            flatPatternBuilder->OuterCornerTreatment()->SetTreatmentType(NXOpen::Features::SheetMetal::CornerTreatmentBuilder::CornerTreatmentTypeRadius);
+            flatPatternBuilder->OuterCornerTreatment()->Value()->SetFormula("1");
+            flatPatternBuilder->UpwardFace()->SetValue(flatFace);
+            if (xAxisEdge != NULL)
+            {
+                flatPatternBuilder->XAxisEdge()->SetValue(xAxisEdge);
+                flatPatternBuilder->SetReferenceVertex(referenceVertex);
+            }
+
+            Feature* flatFeature = flatPatternBuilder->CommitFeature();
+            flatPatternBuilder->Destroy();
+            Session::GetSession()->CleanUpFacetedFacesAndEdges();
+            return flatFeature;
+        }
+        catch (...)
+        {
+            if (flatPatternBuilder != NULL)
+            {
+                try
+                {
+                    flatPatternBuilder->Destroy();
+                }
+                catch (...)
+                {
+                }
+            }
+            throw;
+        }
+    }
+
+    void ApplyFaceColor(Session* session, Face* face, int color)
+    {
+        if (session == NULL || face == NULL || color <= 0)
+        {
+            return;
+        }
+
+        DisplayModification* modification = session->DisplayManager()->NewDisplayModification();
+        modification->SetApplyToAllFaces(false);
+        modification->SetApplyToOwningParts(false);
+        modification->SetNewColor(color);
+        std::vector<DisplayableObject*> objects;
+        objects.push_back(face);
+        modification->Apply(objects);
+        delete modification;
+    }
+
+    int ClampLayer(int layer)
+    {
+        if (layer < 1)
+        {
+            return 1;
+        }
+        return layer > 256 ? 256 : layer;
+    }
+
+    bool GetLogicalValue(Toggle* toggle, bool defaultValue)
+    {
+        if (toggle == NULL)
+        {
+            return defaultValue;
+        }
+
+        PropertyList* props = toggle->GetProperties();
+        bool value = props->GetLogical("Value");
+        delete props;
+        return value;
+    }
+
+    int GetIntegerValue(IntegerBlock* block, int defaultValue)
+    {
+        if (block == NULL)
+        {
+            return defaultValue;
+        }
+
+        PropertyList* props = block->GetProperties();
+        int value = props->GetInteger("Value");
+        delete props;
+        return value;
+    }
+
+    double GetDoubleValue(DoubleBlock* block, double defaultValue)
+    {
+        if (block == NULL)
+        {
+            return defaultValue;
+        }
+
+        PropertyList* props = block->GetProperties();
+        double value = props->GetDouble("Value");
+        delete props;
+        return value;
+    }
+
+    int GetColorValue(ObjectColorPicker* picker, int defaultValue)
+    {
+        if (picker == NULL)
+        {
+            return defaultValue;
+        }
+
+        std::vector<int> values = picker->GetValue();
+        return values.empty() ? defaultValue : values[0];
+    }
+
+    std::string BuildResultMessage(const std::vector<BodyResult>& results)
+    {
+        int convertCount = 0;
+        int flatCount = 0;
+        int failCount = 0;
+        for (size_t i = 0; i < results.size(); ++i)
+        {
+            if (results[i].convertOk)
+            {
+                ++convertCount;
+            }
+            if (results[i].flatOk)
+            {
+                ++flatCount;
+            }
+            if (!results[i].error.empty())
+            {
+                ++failCount;
+            }
+        }
+
+        std::ostringstream builder;
+        builder << "C++自动转钣金执行完成\n";
+        builder << "成功转钣金: " << convertCount << " 个实体\n";
+        builder << "成功展开: " << flatCount << " 个实体\n";
+        builder << "失败/跳过: " << failCount << " 个实体\n\n";
+        if (!results.empty())
+        {
+            builder << "[明细]\n";
+            for (size_t i = 0; i < results.size(); ++i)
+            {
+                builder << "- 图层 " << results[i].layer << " / " << results[i].name
+                        << "  转钣金=" << (results[i].convertOk ? "成功" : "未执行")
+                        << "  调因子面=" << results[i].neutralFaceCount
+                        << "  展开=" << (results[i].flatOk ? "成功" : "失败");
+                if (!results[i].error.empty())
+                {
+                    builder << "  原因=" << results[i].error;
+                }
+                builder << "\n";
+            }
+        }
+
+        return builder.str();
+    }}
+
+Session* PiLianZuanBanJinDialog::theSession = NULL;
+UI* PiLianZuanBanJinDialog::theUI = NULL;
+
+PiLianZuanBanJinDialog::PiLianZuanBanJinDialog()
+    : theDialog(NULL),
+      theDlxFileName("PiLianZuanBanJin.dlx"),
+      strategyGroup(NULL),
+      advancedGroup(NULL),
+      markerLineFaceUpToggle(NULL),
+      autoSaveAfterRunToggle(NULL),
+      facePreferenceEnum(NULL),
+      fixedFaceColorToggle(NULL),
+      fixedFaceColorPicker(NULL),
+      reliefDepthDouble(NULL),
+      reliefWidthDouble(NULL),
+      innerRadiusDouble(NULL),
+      skipSmallBodyToggle(NULL),
+      minLengthDouble(NULL),
+      minWidthDouble(NULL),
+      layerRangeToggle(NULL),
+      startLayerInteger(NULL),
+      endLayerInteger(NULL),
+      largestBodyOnlyToggle(NULL),
+      settingsButton(NULL)
+{
+    PiLianZuanBanJinDialog::theSession = Session::GetSession();
+    PiLianZuanBanJinDialog::theUI = UI::GetUI();
+    theDialog = theUI->CreateDialog(theDlxFileName);
+    theDialog->AddInitializeHandler(make_callback(this, &PiLianZuanBanJinDialog::initialize_cb));
+    theDialog->AddUpdateHandler(make_callback(this, &PiLianZuanBanJinDialog::update_cb));
+    theDialog->AddOkHandler(make_callback(this, &PiLianZuanBanJinDialog::ok_cb));
+    theDialog->AddApplyHandler(make_callback(this, &PiLianZuanBanJinDialog::apply_cb));
+}
+
+PiLianZuanBanJinDialog::~PiLianZuanBanJinDialog()
+{
+    if (theDialog != NULL)
+    {
+        delete theDialog;
+        theDialog = NULL;
+    }
+}
+
+int PiLianZuanBanJinDialog::Show()
+{
+    return theDialog->Launch();
+}
+
+void PiLianZuanBanJinDialog::initialize_cb()
+{
+    strategyGroup = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("strategyGroup"));
+    advancedGroup = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("advancedGroup"));
+    markerLineFaceUpToggle = dynamic_cast<Toggle*>(theDialog->TopBlock()->FindBlock("markerLineFaceUpToggle"));
+    autoSaveAfterRunToggle = dynamic_cast<Toggle*>(theDialog->TopBlock()->FindBlock("autoSaveAfterRunToggle"));
+    facePreferenceEnum = dynamic_cast<Enumeration*>(theDialog->TopBlock()->FindBlock("facePreferenceEnum"));
+    fixedFaceColorToggle = dynamic_cast<Toggle*>(theDialog->TopBlock()->FindBlock("fixedFaceColorToggle"));
+    fixedFaceColorPicker = dynamic_cast<ObjectColorPicker*>(theDialog->TopBlock()->FindBlock("fixedFaceColorPicker"));
+    reliefDepthDouble = dynamic_cast<DoubleBlock*>(theDialog->TopBlock()->FindBlock("reliefDepthDouble"));
+    reliefWidthDouble = dynamic_cast<DoubleBlock*>(theDialog->TopBlock()->FindBlock("reliefWidthDouble"));
+    innerRadiusDouble = dynamic_cast<DoubleBlock*>(theDialog->TopBlock()->FindBlock("innerRadiusDouble"));
+    skipSmallBodyToggle = dynamic_cast<Toggle*>(theDialog->TopBlock()->FindBlock("skipSmallBodyToggle"));
+    minLengthDouble = dynamic_cast<DoubleBlock*>(theDialog->TopBlock()->FindBlock("minLengthDouble"));
+    minWidthDouble = dynamic_cast<DoubleBlock*>(theDialog->TopBlock()->FindBlock("minWidthDouble"));
+    layerRangeToggle = dynamic_cast<Toggle*>(theDialog->TopBlock()->FindBlock("layerRangeToggle"));
+    startLayerInteger = dynamic_cast<IntegerBlock*>(theDialog->TopBlock()->FindBlock("startLayerInteger"));
+    endLayerInteger = dynamic_cast<IntegerBlock*>(theDialog->TopBlock()->FindBlock("endLayerInteger"));
+    largestBodyOnlyToggle = dynamic_cast<Toggle*>(theDialog->TopBlock()->FindBlock("largestBodyOnlyToggle"));
+    settingsButton = dynamic_cast<Button*>(theDialog->TopBlock()->FindBlock("settingsButton"));
+    InitializeValues();
+    UpdateSensitivity();
+}
+
+int PiLianZuanBanJinDialog::update_cb(UIBlock* block)
+{
+    if (block == settingsButton)
+    {
+        std::string dlxPath = FindRulesTableDlxPath();
+        if (dlxPath.empty())
+        {
+            ShowMessage(theUI, "自动转钣金 C++", NXMessageBox::DialogTypeInformation, "未找到UG内置规则表。");
+        }
+        else
+        {
+            try
+            {
+                PiLianRulesTableDialog rulesDialog(theUI, dlxPath);
+                rulesDialog.Show();
+            }
+            catch (const std::exception& ex)
+            {
+                ShowMessage(theUI, "自动转钣金 C++", NXMessageBox::DialogTypeError, ex.what());
+            }
+            catch (...)
+            {
+                ShowMessage(theUI, "自动转钣金 C++", NXMessageBox::DialogTypeError, "UG内置规则表打开失败。");
+            }
+        }
+    }
+    else if (block == skipSmallBodyToggle || block == layerRangeToggle || block == fixedFaceColorToggle)
+    {
+        UpdateSensitivity();
+    }
+
+    return 0;
+}
+
+int PiLianZuanBanJinDialog::ok_cb()
+{
+    try
+    {
+        Run(CollectOptions());
+        return 0;
+    }
+    catch (const std::exception& ex)
+    {
+        ShowMessage(theUI, "自动转钣金 C++", NXMessageBox::DialogTypeError, ex.what());
+        return 1;
+    }
+}
+
+int PiLianZuanBanJinDialog::apply_cb()
+{
+    return ok_cb();
+}
+
+void PiLianZuanBanJinDialog::InitializeValues()
+{
+    if (theDialog != NULL && theDialog->TopBlock() != NULL)
+    {
+        theDialog->TopBlock()->SetLabel(U8("自动转钣金"));
+    }
+
+    SetLabel(strategyGroup, "系数策略");
+    SetLabel(markerLineFaceUpToggle, "标记线面朝上");
+    SetLabel(autoSaveAfterRunToggle, "运行完成自动保存");
+    SetLabel(facePreferenceEnum, "固定面方向");
+    SetLabel(fixedFaceColorToggle, "展开基面颜色");
+    SetLabel(fixedFaceColorPicker, "");
+    SetLabel(reliefDepthDouble, "避让槽深");
+    SetLabel(reliefWidthDouble, "避让槽宽");
+    SetLabel(innerRadiusDouble, "内R半径");
+    SetLabel(advancedGroup, "高级过滤");
+    SetLabel(skipSmallBodyToggle, "跳过过小实体");
+    SetLabel(minLengthDouble, "最小长度");
+    SetLabel(minWidthDouble, "最小宽度");
+    SetLabel(layerRangeToggle, "按图层范围查找实体");
+    SetLabel(startLayerInteger, "初始图层");
+    SetLabel(endLayerInteger, "结束图层");
+    SetLabel(largestBodyOnlyToggle, "每层只处理最大实体");
+    SetLabel(settingsButton, "规则设置...");
+
+    if (facePreferenceEnum != NULL)
+    {
+        std::vector<NXString> members;
+        members.push_back(U8("下折多"));
+        members.push_back(U8("上折多"));
+        facePreferenceEnum->SetEnumMembers(members);
+        facePreferenceEnum->SetValueAsString(U8("下折多"));
+    }
+
+    if (fixedFaceColorPicker != NULL)
+    {
+        fixedFaceColorPicker->SetValue(std::vector<int>(1, 6));
+    }
+
+    if (reliefDepthDouble != NULL)
+    {
+        reliefDepthDouble->SetValue(0.2);
+    }
+    if (reliefWidthDouble != NULL)
+    {
+        reliefWidthDouble->SetValue(0.2);
+    }
+    if (innerRadiusDouble != NULL)
+    {
+        innerRadiusDouble->SetValue(0.0);
+    }
+
+    std::string json = ReadAllText(FindConfigPath());
+    if (!json.empty())
+    {
+        if (markerLineFaceUpToggle != NULL) markerLineFaceUpToggle->SetValue(ExtractJsonBool(json, "MarkerLineFaceUp", false));
+        if (autoSaveAfterRunToggle != NULL) autoSaveAfterRunToggle->SetValue(ExtractJsonBool(json, "AutoSaveAfterRun", true));
+        if (fixedFaceColorToggle != NULL) fixedFaceColorToggle->SetValue(ExtractJsonBool(json, "ApplyFixedFaceColor", true));
+        if (skipSmallBodyToggle != NULL) skipSmallBodyToggle->SetValue(ExtractJsonBool(json, "SkipSmallBodyByWidthHeight", false));
+        if (layerRangeToggle != NULL) layerRangeToggle->SetValue(ExtractJsonBool(json, "FilterBodiesByLayerRange", true));
+        if (startLayerInteger != NULL) startLayerInteger->SetValue(static_cast<int>(ExtractJsonNumber(json, "StartBodyLayer", 1)));
+        if (endLayerInteger != NULL) endLayerInteger->SetValue(static_cast<int>(ExtractJsonNumber(json, "EndBodyLayer", 99)));
+        if (largestBodyOnlyToggle != NULL) largestBodyOnlyToggle->SetValue(ExtractJsonBool(json, "ProcessLargestBodyOnlyPerLayer", false));
+        if (minLengthDouble != NULL) minLengthDouble->SetValue(ExtractJsonNumber(json, "MinBodyLengthForProcessing", 0.0));
+        if (minWidthDouble != NULL) minWidthDouble->SetValue(ExtractJsonNumber(json, "MinBodyWidthForProcessing", 0.0));
+
+        std::string preference = ExtractJsonString(json, "BaseFaceDirectionPreference", "PreferDownBends");
+        if (facePreferenceEnum != NULL)
+        {
+            facePreferenceEnum->SetValueAsString(ContainsTextNoCase(preference, "Up") ? U8("上折多") : U8("下折多"));
+        }
+    }
+}
+void PiLianZuanBanJinDialog::UpdateSensitivity()
+{
+    const bool smallBodyEnabled = GetLogicalValue(skipSmallBodyToggle, false);
+    if (minLengthDouble != NULL)
+    {
+        PropertyList* props = minLengthDouble->GetProperties();
+        props->SetLogical("Enable", smallBodyEnabled);
+        delete props;
+    }
+
+    if (minWidthDouble != NULL)
+    {
+        PropertyList* props = minWidthDouble->GetProperties();
+        props->SetLogical("Enable", smallBodyEnabled);
+        delete props;
+    }
+
+    const bool layerEnabled = GetLogicalValue(layerRangeToggle, true);
+    if (startLayerInteger != NULL)
+    {
+        PropertyList* props = startLayerInteger->GetProperties();
+        props->SetLogical("Enable", layerEnabled);
+        delete props;
+    }
+
+    if (endLayerInteger != NULL)
+    {
+        PropertyList* props = endLayerInteger->GetProperties();
+        props->SetLogical("Enable", layerEnabled);
+        delete props;
+    }
+
+    if (fixedFaceColorPicker != NULL)
+    {
+        PropertyList* props = fixedFaceColorPicker->GetProperties();
+        props->SetLogical("Enable", GetLogicalValue(fixedFaceColorToggle, true));
+        delete props;
+    }
+}
+
+AutoConvertOptions PiLianZuanBanJinDialog::CollectOptions() const
+{
+    AutoConvertOptions options;
+    options.markerLineFaceUp = GetLogicalValue(markerLineFaceUpToggle, false);
+    options.autoSaveAfterRun = GetLogicalValue(autoSaveAfterRunToggle, true);
+    options.preferUpBends = facePreferenceEnum != NULL &&
+        ToUtf8(facePreferenceEnum->ValueAsString()).find("上") != std::string::npos;
+    options.applyFixedFaceColor = GetLogicalValue(fixedFaceColorToggle, true);
+    options.fixedFaceColor = GetColorValue(fixedFaceColorPicker, 6);
+    options.reliefDepth = std::max(0.0, GetDoubleValue(reliefDepthDouble, 0.2));
+    options.reliefWidth = std::max(0.0, GetDoubleValue(reliefWidthDouble, 0.2));
+    options.innerRadius = std::max(0.0, GetDoubleValue(innerRadiusDouble, 0.0));
+    options.skipSmallBody = GetLogicalValue(skipSmallBodyToggle, false);
+    options.minLength = GetDoubleValue(minLengthDouble, 0.0);
+    options.minWidth = GetDoubleValue(minWidthDouble, 0.0);
+    options.filterLayerRange = GetLogicalValue(layerRangeToggle, true);
+    options.startLayer = ClampLayer(GetIntegerValue(startLayerInteger, 1));
+    options.endLayer = ClampLayer(GetIntegerValue(endLayerInteger, 99));
+    if (options.startLayer > options.endLayer)
+    {
+        std::swap(options.startLayer, options.endLayer);
+    }
+    options.largestBodyOnlyPerLayer = GetLogicalValue(largestBodyOnlyToggle, false);
+    return options;
+}
+
+void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
+{
+    UfGuard ufGuard;
+    Session* session = Session::GetSession();
+    Part* workPart = session->Parts()->Work();
+    if (workPart == NULL)
+    {
+        throw std::runtime_error("请先打开一个工作部件。");
+    }
+
+    RuleConfig ruleConfig = LoadRuleConfig();
+    std::vector<Part*> partsToProcess;
+    std::set<tag_t> seenParts;
+    partsToProcess.push_back(workPart);
+    seenParts.insert(workPart->Tag());
+
+    bool assemblyMode = false;
+    try
+    {
+        ComponentAssembly* assembly = workPart->ComponentAssembly();
+        Component* root = assembly == NULL ? NULL : assembly->RootComponent();
+        if (root != NULL && !root->GetChildren().empty())
+        {
+            assemblyMode = true;
+            if (!ConfirmAssemblyBatch(theUI))
+            {
+                return;
+            }
+
+            CollectChildPrototypeParts(root, partsToProcess, seenParts);
+        }
+    }
+    catch (...)
+    {
+    }
+
+    std::vector<BodyResult> results;
+    int attributeSkippedCount = 0;
+    for (size_t partIndex = 0; partIndex < partsToProcess.size(); ++partIndex)
+    {
+        Part* processPart = partsToProcess[partIndex];
+        if (processPart == NULL)
+        {
+            continue;
+        }
+
+        try
+        {
+            session->Parts()->SetWork(processPart);
+        }
+        catch (...)
+        {
+        }
+
+        SheetmetalManager* manager = processPart->Features()->SheetmetalManager();
+        const bool partAttributesOk = PartHasBatchAttributes(processPart);
+        const std::string processPartName = PartName(processPart);
+        std::vector<Body*> candidates;
+        std::map<int, Body*> largestByLayer;
+        std::map<int, double> largestScoreByLayer;
+        for (BodyCollection::iterator it = processPart->Bodies()->begin(); it != processPart->Bodies()->end(); ++it)
+        {
+            Body* body = *it;
+            if (body == NULL || !IsAlive(body->Tag()))
+            {
+                continue;
+            }
+
+            try
+            {
+                if (!body->IsSolidBody())
+                {
+                    continue;
+                }
+            }
+            catch (...)
+            {
+                continue;
+            }
+
+            if (!partAttributesOk && !BodyHasBatchAttributes(body))
+            {
+                ++attributeSkippedCount;
+                continue;
+            }
+
+            const int layer = body->Layer();
+            if (options.filterLayerRange && (layer < options.startLayer || layer > options.endLayer))
+            {
+                continue;
+            }
+
+            BodyBox box = MeasureBodyBox(body);
+            if (options.skipSmallBody && (box.length < options.minLength || box.width < options.minWidth))
+            {
+                continue;
+            }
+
+            if (options.largestBodyOnlyPerLayer)
+            {
+                if (largestByLayer.find(layer) == largestByLayer.end() || box.score > largestScoreByLayer[layer])
+                {
+                    largestByLayer[layer] = body;
+                    largestScoreByLayer[layer] = box.score;
+                }
+            }
+            else
+            {
+                candidates.push_back(body);
+            }
+        }
+
+        if (options.largestBodyOnlyPerLayer)
+        {
+            for (std::map<int, Body*>::iterator it = largestByLayer.begin(); it != largestByLayer.end(); ++it)
+            {
+                candidates.push_back(it->second);
+            }
+        }
+
+        const size_t resultStart = results.size();
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            Body* body = candidates[i];
+            BodyResult result;
+            result.layer = body == NULL ? 0 : body->Layer();
+            result.name = processPartName.empty() ? BodyName(body) : processPartName + " / " + BodyName(body);
+
+            try
+            {
+                FaceInfo fixedFaceInfo = SelectConvertBaseFace(body, options);
+                if (fixedFaceInfo.face == NULL)
+                {
+                    result.error = "未找到可用固定面";
+                    results.push_back(result);
+                    continue;
+                }
+
+                Face* fixedFace = fixedFaceInfo.face;
+
+                Body* activeBody = body;
+                const bool alreadySheetmetal = IsSheetmetalBody(processPart, manager, body);
+                if (!alreadySheetmetal)
+                {
+                    ApplySheetmetalPreferencesBeforeConvert(processPart, options);
+                    ConvertToSheetmetalBuilder* convertBuilder = manager->CreateConvertToSheetmetalFeatureBuilder(NULL);
+                    convertBuilder->SetApplicationContext(ApplicationContextNxSheetMetal);
+                    convertBuilder->SetBendReliefType(ConvertToSheetmetalBuilder::BendReliefTypeOptionsSquare);
+                    convertBuilder->BendReliefDepth()->SetRightHandSide(FormatDouble(options.reliefDepth, 6));
+                    convertBuilder->BendReliefWidth()->SetRightHandSide(FormatDouble(options.reliefWidth, 6));
+                    convertBuilder->SetMaintainZeroBendRadius(options.innerRadius <= 0.0);
+                    convertBuilder->SetBaseFace(NULL);
+                    convertBuilder->SetBaseFace(fixedFace);
+                    std::vector<Edge*> ripEdges;
+                    convertBuilder->SetRipEdges(ripEdges);
+                    Feature* convertFeature = convertBuilder->CommitFeature();
+                    convertBuilder->Destroy();
+                    session->CleanUpFacetedFacesAndEdges();
+                    activeBody = ResolveFeatureBody(convertFeature, body);
+                    result.convertOk = convertFeature != NULL;
+                }
+
+                result.neutralFaceCount = ApplyNeutralFactorByRules(processPart, manager, activeBody, ruleConfig);
+
+                Feature* existingFlatPattern = FindExistingFlatPatternFeature(processPart, manager, activeBody);
+                FaceInfo postConvertFaceInfo = SelectSheetmetalBaseFaceByBendDirection(manager, activeBody, options);
+                Face* flatFace = postConvertFaceInfo.face == NULL ? fixedFace : postConvertFaceInfo.face;
+                if (options.applyFixedFaceColor)
+                {
+                    ApplyFaceColor(session, flatFace, options.fixedFaceColor);
+                }
+                Point3d startPoint;
+                Point3d endPoint;
+                Edge* xAxisEdge = FindLongestStraightEdge(flatFace, &startPoint, &endPoint);
+
+                Feature* flatFeature = CommitFlatPattern(processPart, existingFlatPattern, flatFace, xAxisEdge, endPoint);
+                result.flatOk = flatFeature != NULL;
+                if (!result.flatOk)
+                {
+                    result.error = existingFlatPattern == NULL ? "展开未返回有效特征" : "编辑展开未返回有效特征";
+                }
+            }
+            catch (const NXException& ex)
+            {
+                result.error = "NX执行失败，请检查该实体是否可转钣金并可展开";
+            }
+            catch (const std::exception& ex)
+            {
+                result.error = NormalizeUtf8Message(ex.what());
+            }
+
+            results.push_back(result);
+        }
+
+        if (options.autoSaveAfterRun && results.size() > resultStart)
+        {
+            try
+            {
+                processPart->Save(BasePart::SaveComponentsTrue, BasePart::CloseAfterSaveFalse);
+            }
+            catch (...)
+            {
+            }
+        }
+    }
+
+    try
+    {
+        session->Parts()->SetWork(workPart);
+    }
+    catch (...)
+    {
+    }
+
+    std::string message = BuildResultMessage(results);
+    if (assemblyMode)
+    {
+        message += "\n扫描部件: " + std::to_string(partsToProcess.size()) + " 个";
+    }
+    if (attributeSkippedCount > 0)
+    {
+        message += "\n属性不完整跳过: " + std::to_string(attributeSkippedCount) + " 个实体";
+    }
+
+    ShowMessage(theUI, "自动转钣金 C++", NXMessageBox::DialogTypeInformation, message);
+}
+
+extern "C" DllExport void ufusr(char* param, int* retcod, int param_len)
+{
+    if (!zhihui_license_guard::EnsureAuthorized(L"ZHIHUI.PILIANZUANBANJIN", L"PiLianZuanBanJin"))
+    {
+        if (retcod != NULL)
+        {
+            *retcod = 1;
+        }
+        return;
+    }
+
+    PiLianZuanBanJinDialog* dialog = NULL;
+    try
+    {
+        dialog = new PiLianZuanBanJinDialog();
+        dialog->Show();
+    }
+    catch (const std::exception& ex)
+    {
+        ShowMessage(UI::GetUI(), "自动转钣金 C++", NXMessageBox::DialogTypeError, ex.what());
+    }
+
+    if (dialog != NULL)
+    {
+        delete dialog;
+        dialog = NULL;
+    }
+}
+
+extern "C" DllExport int ufusr_ask_unload()
+{
+    return UF_UNLOAD_IMMEDIATELY;
+}
+
+

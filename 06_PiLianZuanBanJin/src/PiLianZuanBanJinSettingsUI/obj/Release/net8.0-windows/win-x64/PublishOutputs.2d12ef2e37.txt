@@ -1,0 +1,4 @@
+G:\UG智辉钣金插件_源码精简_20260602\dist\UG智辉钣金插件_2.18\plugin\application\PiLianZuanBanJinSettingsUI.exe
+G:\UG智辉钣金插件_源码精简_20260602\dist\UG智辉钣金插件_2.18\plugin\application\PiLianZuanBanJinSettingsUI.dll
+G:\UG智辉钣金插件_源码精简_20260602\dist\UG智辉钣金插件_2.18\plugin\application\PiLianZuanBanJinSettingsUI.deps.json
+G:\UG智辉钣金插件_源码精简_20260602\dist\UG智辉钣金插件_2.18\plugin\application\PiLianZuanBanJinSettingsUI.runtimeconfig.json

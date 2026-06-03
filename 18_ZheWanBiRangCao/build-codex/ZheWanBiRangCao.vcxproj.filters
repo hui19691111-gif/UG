@@ -1,0 +1,19 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="G:\UG智辉钣金插件_源码精简_20260602\features\18_ZheWanBiRangCao\ZheWanBiRangCao.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="G:\UG智辉钣金插件_源码精简_20260602\features\18_ZheWanBiRangCao\ZheWanBiRangCaoMain.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="G:\UG智辉钣金插件_源码精简_20260602\features\18_ZheWanBiRangCao\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{A2FCA629-5F2E-3C61-A41A-7148B7B1B4E4}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

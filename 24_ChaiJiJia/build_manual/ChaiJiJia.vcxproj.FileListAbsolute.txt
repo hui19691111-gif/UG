@@ -1,0 +1,4 @@
+D:\UGPluginRepo_clean_20260506-235206\ChaiJiJia\build_manual\ChaiJiJia.dll
+D:\UG智辉钣金插件_源码精简_20260516_最新版\features\24_ChaiJiJia\build_manual\ChaiJiJia.dll
+G:\UG智辉钣金插件_源码精简_20260516_最新版\features\24_ChaiJiJia\build_manual\ChaiJiJia.dll
+G:\UG智辉钣金插件_源码精简_20260602\features\24_ChaiJiJia\build_manual\ChaiJiJia.dll

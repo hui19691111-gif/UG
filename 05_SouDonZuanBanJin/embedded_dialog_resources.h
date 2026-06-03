@@ -1,0 +1,3 @@
+#pragma once
+
+#define IDR_ZH_DLX_SOUDONZUANBANJIN_DLX 101

@@ -1,0 +1,73 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{7B178481-9E38-44EA-BE38-1E54E89D54C0}</ProjectGuid>
+    <RootNamespace>kakou</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(ProjectDir)bin\Release\</OutDir>
+    <IntDir>$(ProjectDir)obj\Release\</IntDir>
+    <TargetName>KaKou</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <DebugInformationFormat>None</DebugInformationFormat>
+      <BufferSecurityCheck>true</BufferSecurityCheck>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/utf-8 /Gw %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(UGII_BASE_DIR)\UGOPEN;$(UGII_BASE_DIR)\UGOPEN\NXOpen;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
+      <RandomizedBaseAddress>true</RandomizedBaseAddress>
+      <DataExecutionPrevention>true</DataExecutionPrevention>
+      <SetChecksum>true</SetChecksum>
+      <AdditionalLibraryDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>libufun.lib;libufun_cae.lib;libufun_cam.lib;libufun_die.lib;libufun_vdac.lib;libufun_weld.lib;libnxopencpp.lib;libnxopencpp_aecdesign.lib;libnxopencpp_annotations.lib;libnxopencpp_appearance.lib;libnxopencpp_assemblies.lib;libnxopencpp_automatedtesting.lib;libnxopencpp_bodydes.lib;libnxopencpp_cadcaeprep.lib;libnxopencpp_cae.lib;libnxopencpp_cam.lib;libnxopencpp_capitalintegration.lib;libnxopencpp_clouddm.lib;libnxopencpp_collaborationapplication.lib;libnxopencpp_diagramming.lib;libnxopencpp_diagramminglibraryauthor.lib;libnxopencpp_die.lib;libnxopencpp_display.lib;libnxopencpp_drafting.lib;libnxopencpp_drawings.lib;libnxopencpp_electricalrouting.lib;libnxopencpp_facet.lib;libnxopencpp_features.lib;libnxopencpp_fields.lib;libnxopencpp_formboard.lib;libnxopencpp_gateway.lib;libnxopencpp_geometricanalysis.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_implicit.lib;libnxopencpp_issue.lib;libnxopencpp_layer.lib;libnxopencpp_layout2d.lib;libnxopencpp_markup.lib;libnxopencpp_mechanicalrouting.lib;libnxopencpp_mechatronics.lib;libnxopencpp_mendixreporting.lib;libnxopencpp_modldirect.lib;libnxopencpp_modlutils.lib;libnxopencpp_moldcooling.lib;libnxopencpp_motion.lib;libnxopencpp_openxml.lib;libnxopencpp_optimization.lib;libnxopencpp_options.lib;libnxopencpp_partfamily.lib;libnxopencpp_pcbexchange.lib;libnxopencpp_pdm.lib;libnxopencpp_physmat.lib;libnxopencpp_placement.lib;libnxopencpp_plas.lib;libnxopencpp_positioning.lib;libnxopencpp_preferences.lib;libnxopencpp_report.lib;libnxopencpp_routing.lib;libnxopencpp_routingcommon.lib;libnxopencpp_schematic.lib;libnxopencpp_select.lib;libnxopencpp_shapesearch.lib;libnxopencpp_sheetmetal.lib;libnxopencpp_shipdesign.lib;libnxopencpp_sim.lib;libnxopencpp_structuredesign.lib;libnxopencpp_tooling.lib;libnxopencpp_userdefinedobjects.lib;libnxopencpp_userdefinedtemplate.lib;libnxopencpp_validate.lib;libnxopencpp_visualreporting.lib;libnxopencpp_vsa.lib;libnxopencpp_weld.lib;libugopenint.lib;libugopenint_cae.lib;libugopenint_cam.lib;libnxopenuicpp.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="kakou.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="kakou.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\kakou.bmp" />
+    <None Include="..\kakou.dlx" />
+    <None Include="..\kakou_face.bmp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="..\embedded_dialog_resources.rc" />
+    <ClInclude Include="..\embedded_dialog_resources.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

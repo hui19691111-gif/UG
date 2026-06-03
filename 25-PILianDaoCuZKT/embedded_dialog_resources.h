@@ -1,0 +1,3 @@
+#pragma once
+
+#define IDR_ZH_DLX_PILIANDAOCUZKTDIALOG_DLX 101
