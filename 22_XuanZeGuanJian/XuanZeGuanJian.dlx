@@ -679,6 +679,38 @@
               </PropertyList>
             </item>
           </Property>
+          <Property class="UICOMP_string" hierarchy="UGS::UICOMP_group" id="roundMinimumDiameter" mask="256" name="roundMinimumDiameter" presentation="字符串" type="uicomp">
+            <item Expanded="1" class="UICOMP_string" hierarchy="UICOMP_string" icon="styler_string.bmp" id="roundMinimumDiameter" name="roundMinimumDiameter" notes="" presentation="字符串" type="uicomp">
+              <PropertyList id="id" mode="0">
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_string" id="API Name" mask="16656" name="API Name" sname="BlockID" source="3" type="string" value="roundMinimumDiameter" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_string" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_string" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_string" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="圆管最小直径(mm)" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_string" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_string" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_string" id="HideGroup" mask="69636" name="HideGroup" sname="HideGroup" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_string" id="ReadWrite" mask="0" name="ReadWrite" sname="RetainValue" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_string" id="UIOnly" mask="69636" name="UIOnly" sname="RetainValueInUIOnly" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_string" id="Translated" mask="16384" name="Translated" sname="Localize" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP_string" group="Block Specific::" hierarchy="UGS::UICOMP_string" id="Icon" mask="128" name="Icon" sname="Bitmap" source="3" type="string" value="" />
+                <Property ClassID="UGS::UICOMP_string" group="Block Specific::" hierarchy="UGS::UICOMP_string" id="Value" mask="0" name="Value" sname="Value" source="4" type="string" value="0" />
+                <Property ClassID="UGS::UICOMP_string" group="Block Specific::" hierarchy="UGS::UICOMP_string" id="WideValue" mask="4" name="WideValue" sname="WideValue" source="4" type="utfstring" value="0" />
+                <Property ClassID="UGS::UICOMP_string" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_string" id="PresentationStyle" mask="16384" name="PresentationStyle" selected="0" sname="PresentationStyle" source="1" type="enum">
+                  <Option name="KeyIn" value="0" />
+                  <Option name="Wide" value="1" />
+                  <Option name="List" value="2" />
+                  <Option name="Combo" value="3" />
+                  <Option name="Autocomplete" value="4" />
+                </Property>
+                <Property ClassID="UGS::UICOMP_string" group="Block Specific::" hierarchy="UGS::UICOMP_string" id="MaxTextLength" mask="16384" name="MaxTextLength" sname="MaxTextLength" source="1" type="integer" value="16" />
+                <Property ClassID="UGS::UICOMP_string" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_string" id="Width" mask="16384" name="Width" selected="0" sname="Width" source="1" type="enum">
+                  <Option name="Narrow" value="0" />
+                  <Option name="Standard" value="1" />
+                </Property>
+                <Property ClassID="UGS::UICOMP_string" group="Block Specific::" hierarchy="UGS::UICOMP_string" id="RequiredInput" mask="0" name="RequiredInput" sname="RequiredInput" source="1" type="logical" value="False" />
+              </PropertyList>
+            </item>
+          </Property>
           <Property class="UICOMP_string" hierarchy="UGS::UICOMP_group" id="rectangularStandardLength" mask="256" name="rectangularStandardLength" presentation="字符串" type="uicomp">
             <item Expanded="1" class="UICOMP_string" hierarchy="UICOMP_string" icon="styler_string.bmp" id="rectangularStandardLength" name="rectangularStandardLength" notes="" presentation="字符串" type="uicomp">
               <PropertyList id="id" mode="0">

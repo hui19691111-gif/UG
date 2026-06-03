@@ -608,6 +608,23 @@ double GetStandardLength(NXOpen::BlockStyler::StringBlock* block)
     return std::max(0.0, value) * 1000.0;
 }
 
+double GetMillimeterInput(NXOpen::BlockStyler::StringBlock* block)
+{
+    if (block == NULL)
+    {
+        return 0.0;
+    }
+
+    const std::string text = block->Value().GetText();
+    char* end = NULL;
+    const double value = std::strtod(text.c_str(), &end);
+    if (end == text.c_str())
+    {
+        return 0.0;
+    }
+    return std::max(0.0, value);
+}
+
 std::string FormatStandardLength(double standardLength)
 {
     if (standardLength <= 0.0)
@@ -774,6 +791,7 @@ struct DirectionCluster
 };
 
 void FaceBoxProjectionRange(const double box[6], const double axis[3], double& minProjection, double& maxProjection);
+bool CylindricalFaceHasFullCircularEdge(tag_t faceTag);
 
 bool EstimateMainLengthAxisFromEdges(tag_t bodyTag, double axis[3])
 {
@@ -781,87 +799,98 @@ bool EstimateMainLengthAxisFromEdges(tag_t bodyTag, double axis[3])
     axis[1] = 0.0;
     axis[2] = 0.0;
 
+    double bestAxisLength = 0.0;
+
     uf_list_p_t edgeList = NULL;
-    if (UF_MODL_ask_body_edges(bodyTag, &edgeList) != 0 || edgeList == NULL)
+    if (UF_MODL_ask_body_edges(bodyTag, &edgeList) == 0 && edgeList != NULL)
     {
-        return false;
-    }
+        const std::vector<tag_t> edgeTags = UfListToTags(edgeList);
+        UF_MODL_delete_list(&edgeList);
 
-    const std::vector<tag_t> edgeTags = UfListToTags(edgeList);
-    UF_MODL_delete_list(&edgeList);
-
-    std::vector<DirectionCluster> clusters;
-    const double parallelToleranceCos = std::cos(5.0 * 3.14159265358979323846 / 180.0);
-    for (std::size_t index = 0; index < edgeTags.size(); ++index)
-    {
-        double point1[3] = {0.0, 0.0, 0.0};
-        double point2[3] = {0.0, 0.0, 0.0};
-        int vertexCount = 0;
-        if (UF_MODL_ask_edge_verts(edgeTags[index], point1, point2, &vertexCount) != 0 || vertexCount != 2)
+        for (std::size_t index = 0; index < edgeTags.size(); ++index)
         {
-            continue;
-        }
-
-        const double edgeLength = Distance3(point1, point2);
-        if (edgeLength < 0.5)
-        {
-            continue;
-        }
-
-        double direction[3] =
-        {
-            point2[0] - point1[0],
-            point2[1] - point1[1],
-            point2[2] - point1[2]
-        };
-        if (!Normalize3(direction))
-        {
-            continue;
-        }
-        CanonicalizeDirection(direction);
-
-        bool addedToCluster = false;
-        for (std::size_t clusterIndex = 0; clusterIndex < clusters.size(); ++clusterIndex)
-        {
-            if (std::fabs(Dot3(direction, clusters[clusterIndex].direction)) >= parallelToleranceCos)
+            int edgeType = 0;
+            if (UF_MODL_ask_edge_type(edgeTags[index], &edgeType) != 0 || edgeType != UF_MODL_LINEAR_EDGE)
             {
-                clusters[clusterIndex].totalLength += edgeLength;
-                ++clusters[clusterIndex].count;
-                addedToCluster = true;
-                break;
+                continue;
+            }
+
+            double point1[3] = {0.0, 0.0, 0.0};
+            double point2[3] = {0.0, 0.0, 0.0};
+            int vertexCount = 0;
+            if (UF_MODL_ask_edge_verts(edgeTags[index], point1, point2, &vertexCount) != 0 || vertexCount != 2)
+            {
+                continue;
+            }
+
+            const double edgeLength = Distance3(point1, point2);
+            if (edgeLength < 0.5)
+            {
+                continue;
+            }
+
+            double direction[3] =
+            {
+                point2[0] - point1[0],
+                point2[1] - point1[1],
+                point2[2] - point1[2]
+            };
+            if (!Normalize3(direction))
+            {
+                continue;
+            }
+            CanonicalizeDirection(direction);
+
+            if (edgeLength > bestAxisLength)
+            {
+                bestAxisLength = edgeLength;
+                axis[0] = direction[0];
+                axis[1] = direction[1];
+                axis[2] = direction[2];
             }
         }
+    }
 
-        if (!addedToCluster)
+    uf_list_p_t faceList = NULL;
+    if (UF_MODL_ask_body_faces(bodyTag, &faceList) == 0 && faceList != NULL)
+    {
+        const std::vector<tag_t> faceTags = UfListToTags(faceList);
+        UF_MODL_delete_list(&faceList);
+        for (std::size_t index = 0; index < faceTags.size(); ++index)
         {
-            DirectionCluster cluster = {};
-            cluster.direction[0] = direction[0];
-            cluster.direction[1] = direction[1];
-            cluster.direction[2] = direction[2];
-            cluster.totalLength = edgeLength;
-            cluster.count = 1;
-            clusters.push_back(cluster);
+            int type = 0;
+            double point[3] = {0.0, 0.0, 0.0};
+            double direction[3] = {0.0, 0.0, 0.0};
+            double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+            double radius = 0.0;
+            double radData = 0.0;
+            int normDir = 0;
+            if (UF_MODL_ask_face_data(faceTags[index], &type, point, direction, box, &radius, &radData, &normDir) != 0 ||
+                type != 16 || radius <= 0.0 || !Normalize3(direction))
+            {
+                continue;
+            }
+            if (!CylindricalFaceHasFullCircularEdge(faceTags[index]))
+            {
+                continue;
+            }
+
+            double minProjection = 0.0;
+            double maxProjection = 0.0;
+            FaceBoxProjectionRange(box, direction, minProjection, maxProjection);
+            const double cylinderAxisLength = maxProjection - minProjection;
+            if (cylinderAxisLength > bestAxisLength)
+            {
+                bestAxisLength = cylinderAxisLength;
+                CanonicalizeDirection(direction);
+                axis[0] = direction[0];
+                axis[1] = direction[1];
+                axis[2] = direction[2];
+            }
         }
     }
 
-    if (clusters.empty())
-    {
-        return false;
-    }
-
-    std::size_t bestIndex = 0;
-    for (std::size_t index = 1; index < clusters.size(); ++index)
-    {
-        if (clusters[index].totalLength > clusters[bestIndex].totalLength)
-        {
-            bestIndex = index;
-        }
-    }
-
-    axis[0] = clusters[bestIndex].direction[0];
-    axis[1] = clusters[bestIndex].direction[1];
-    axis[2] = clusters[bestIndex].direction[2];
-    return Normalize3(axis);
+    return bestAxisLength > 0.0 && Normalize3(axis);
 }
 
 bool AskBodyProjectionRangeFromEdges(tag_t bodyTag, const double axis[3], double& minProjection, double& maxProjection)
@@ -906,6 +935,104 @@ bool AskBodyProjectionRangeFromBox(tag_t bodyTag, const double axis[3], double& 
 
     FaceBoxProjectionRange(box, axis, minProjection, maxProjection);
     return maxProjection > minProjection;
+}
+
+bool BuildPerpendicularFrame(const double zAxis[3], double xAxis[3], double yAxis[3])
+{
+    double helper[3] = {0.0, 0.0, 1.0};
+    if (std::fabs(Dot3(helper, zAxis)) > 0.85)
+    {
+        helper[0] = 1.0;
+        helper[1] = 0.0;
+        helper[2] = 0.0;
+    }
+    const double helperProjection = Dot3(helper, zAxis);
+    xAxis[0] = helper[0] - zAxis[0] * helperProjection;
+    xAxis[1] = helper[1] - zAxis[1] * helperProjection;
+    xAxis[2] = helper[2] - zAxis[2] * helperProjection;
+    if (!Normalize3(xAxis))
+    {
+        return false;
+    }
+
+    yAxis[0] = zAxis[1] * xAxis[2] - zAxis[2] * xAxis[1];
+    yAxis[1] = zAxis[2] * xAxis[0] - zAxis[0] * xAxis[2];
+    yAxis[2] = zAxis[0] * xAxis[1] - zAxis[1] * xAxis[0];
+    return Normalize3(yAxis);
+}
+
+bool AskOrientedBodyDimensionsByAxis(
+    tag_t bodyTag,
+    const double lengthAxis[3],
+    double& length,
+    double& width,
+    double& height)
+{
+    double xAxis[3] = {0.0, 0.0, 0.0};
+    double yAxis[3] = {0.0, 0.0, 0.0};
+    if (!BuildPerpendicularFrame(lengthAxis, xAxis, yAxis))
+    {
+        return false;
+    }
+
+    double ranges[3][2] =
+    {
+        {DBL_MAX, -DBL_MAX},
+        {DBL_MAX, -DBL_MAX},
+        {DBL_MAX, -DBL_MAX}
+    };
+    const double* axes[3] = {lengthAxis, xAxis, yAxis};
+
+    uf_list_p_t edgeList = NULL;
+    if (UF_MODL_ask_body_edges(bodyTag, &edgeList) == 0 && edgeList != NULL)
+    {
+        const std::vector<tag_t> edgeTags = UfListToTags(edgeList);
+        UF_MODL_delete_list(&edgeList);
+        for (std::size_t index = 0; index < edgeTags.size(); ++index)
+        {
+            double point1[3] = {0.0, 0.0, 0.0};
+            double point2[3] = {0.0, 0.0, 0.0};
+            int vertexCount = 0;
+            if (UF_MODL_ask_edge_verts(edgeTags[index], point1, point2, &vertexCount) != 0 || vertexCount != 2)
+            {
+                continue;
+            }
+            const double* points[2] = {point1, point2};
+            for (int pointIndex = 0; pointIndex < 2; ++pointIndex)
+            {
+                for (int axisIndex = 0; axisIndex < 3; ++axisIndex)
+                {
+                    const double projection = Dot3(points[pointIndex], axes[axisIndex]);
+                    ranges[axisIndex][0] = std::min(ranges[axisIndex][0], projection);
+                    ranges[axisIndex][1] = std::max(ranges[axisIndex][1], projection);
+                }
+            }
+        }
+    }
+
+    if (ranges[0][1] <= ranges[0][0] || ranges[1][1] <= ranges[1][0] || ranges[2][1] <= ranges[2][0])
+    {
+        double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        if (UF_MODL_ask_bounding_box(bodyTag, box) != 0)
+        {
+            return false;
+        }
+        for (int axisIndex = 0; axisIndex < 3; ++axisIndex)
+        {
+            FaceBoxProjectionRange(box, axes[axisIndex], ranges[axisIndex][0], ranges[axisIndex][1]);
+        }
+    }
+
+    length = ranges[0][1] - ranges[0][0];
+    double crossDimensions[2] =
+    {
+        ranges[1][1] - ranges[1][0],
+        ranges[2][1] - ranges[2][0]
+    };
+    std::sort(crossDimensions, crossDimensions + 2);
+    height = crossDimensions[0];
+    width = crossDimensions[1];
+    return length > 0.0 && width > 0.0 && height > 0.0;
 }
 
 int SixSegmentHitIndex(double minProjection, double maxProjection, double position)
@@ -988,6 +1115,368 @@ bool FaceHasInnerLoop(tag_t faceTag)
     return peripheralCount >= 1 && holeCount >= 1;
 }
 
+struct SectionCurveSegment
+{
+    double first[3];
+    double second[3];
+    double direction[3];
+    bool line;
+    bool arc;
+};
+
+struct SectionLoop
+{
+    int lineCount;
+    int arcCount;
+    std::vector<double> lineAngles;
+};
+
+bool PointsNearlyEqual(const double lhs[3], const double rhs[3], double tolerance)
+{
+    return Distance3(lhs, rhs) <= tolerance;
+}
+
+int FindOrAddSectionPoint(std::vector<EdgeEndpointPair>& points, const double point[3], double tolerance)
+{
+    for (std::size_t index = 0; index < points.size(); ++index)
+    {
+        if (PointsNearlyEqual(points[index].first, point, tolerance))
+        {
+            return static_cast<int>(index);
+        }
+    }
+
+    EdgeEndpointPair pair = {};
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        pair.first[axis] = point[axis];
+        pair.second[axis] = point[axis];
+    }
+    points.push_back(pair);
+    return static_cast<int>(points.size() - 1);
+}
+
+bool LineDirectionInSection(
+    const double first[3],
+    const double second[3],
+    const double lengthAxis[3],
+    double direction[3])
+{
+    direction[0] = second[0] - first[0];
+    direction[1] = second[1] - first[1];
+    direction[2] = second[2] - first[2];
+    if (!Normalize3(direction))
+    {
+        return false;
+    }
+    if (std::fabs(Dot3(direction, lengthAxis)) > 0.10)
+    {
+        return false;
+    }
+    CanonicalizeDirection(direction);
+    return true;
+}
+
+bool EdgeLiesOnSection(
+    tag_t edgeTag,
+    double sectionPosition,
+    const double lengthAxis[3],
+    double tolerance,
+    SectionCurveSegment& segment)
+{
+    double point1[3] = {0.0, 0.0, 0.0};
+    double point2[3] = {0.0, 0.0, 0.0};
+    int vertexCount = 0;
+    if (UF_MODL_ask_edge_verts(edgeTag, point1, point2, &vertexCount) != 0 || vertexCount != 2)
+    {
+        return false;
+    }
+
+    const double projection1 = Dot3(point1, lengthAxis);
+    const double projection2 = Dot3(point2, lengthAxis);
+    if (std::fabs(projection1 - sectionPosition) > tolerance ||
+        std::fabs(projection2 - sectionPosition) > tolerance)
+    {
+        return false;
+    }
+
+    int edgeType = 0;
+    if (UF_MODL_ask_edge_type(edgeTag, &edgeType) != 0)
+    {
+        return false;
+    }
+
+    segment = SectionCurveSegment();
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        segment.first[axis] = point1[axis];
+        segment.second[axis] = point2[axis];
+    }
+    segment.line = edgeType == UF_MODL_LINEAR_EDGE;
+    segment.arc = edgeType == UF_MODL_CIRCULAR_EDGE;
+
+    if (segment.line)
+    {
+        return LineDirectionInSection(segment.first, segment.second, lengthAxis, segment.direction);
+    }
+
+    if (segment.arc)
+    {
+        UF_CURVE_arc_t arcData = {};
+        if (UF_CURVE_ask_arc_data(edgeTag, &arcData) == 0 && arcData.radius > 0.0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+double DirectionAngleInFrame(const double direction[3], const double xAxis[3], const double yAxis[3])
+{
+    return std::atan2(Dot3(direction, yAxis), Dot3(direction, xAxis));
+}
+
+bool AnglesPerpendicularFourSides(const std::vector<double>& angles)
+{
+    if (angles.size() != 4)
+    {
+        return false;
+    }
+
+    std::vector<double> normalized;
+    for (std::size_t index = 0; index < angles.size(); ++index)
+    {
+        double angle = std::fmod(angles[index], 3.14159265358979323846);
+        if (angle < 0.0)
+        {
+            angle += 3.14159265358979323846;
+        }
+        normalized.push_back(angle);
+    }
+    std::sort(normalized.begin(), normalized.end());
+
+    const double perpendicular = 3.14159265358979323846 * 0.5;
+    int firstDirectionCount = 1;
+    int secondDirectionCount = 0;
+    double firstAngle = normalized[0];
+    double secondAngle = 0.0;
+    const double angleTolerance = 8.0 * 3.14159265358979323846 / 180.0;
+    for (std::size_t index = 1; index < normalized.size(); ++index)
+    {
+        if (std::fabs(normalized[index] - firstAngle) <= angleTolerance ||
+            std::fabs(normalized[index] - firstAngle - 3.14159265358979323846) <= angleTolerance)
+        {
+            ++firstDirectionCount;
+        }
+        else if (secondDirectionCount == 0)
+        {
+            secondAngle = normalized[index];
+            secondDirectionCount = 1;
+        }
+        else if (std::fabs(normalized[index] - secondAngle) <= angleTolerance)
+        {
+            ++secondDirectionCount;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    if (firstDirectionCount != 2 || secondDirectionCount != 2)
+    {
+        return false;
+    }
+    double delta = std::fabs(secondAngle - firstAngle);
+    while (delta > 3.14159265358979323846)
+    {
+        delta -= 3.14159265358979323846;
+    }
+    delta = std::min(delta, std::fabs(3.14159265358979323846 - delta));
+    return std::fabs(delta - perpendicular) <= angleTolerance;
+}
+
+bool BuildSectionLoops(
+    const std::vector<SectionCurveSegment>& segments,
+    const double xAxis[3],
+    const double yAxis[3],
+    std::vector<SectionLoop>& loops)
+{
+    loops.clear();
+    if (segments.size() < 8)
+    {
+        return false;
+    }
+
+    std::vector<EdgeEndpointPair> points;
+    std::vector<std::vector<int> > adjacency;
+    std::vector<std::pair<int, int> > segmentPointIds(
+        segments.size(),
+        std::make_pair(-1, -1));
+    const double pointTolerance = 0.2;
+    for (std::size_t index = 0; index < segments.size(); ++index)
+    {
+        const int first = FindOrAddSectionPoint(points, segments[index].first, pointTolerance);
+        const int second = FindOrAddSectionPoint(points, segments[index].second, pointTolerance);
+        if (first == second)
+        {
+            continue;
+        }
+        segmentPointIds[index] = std::make_pair(first, second);
+        if (static_cast<int>(adjacency.size()) <= std::max(first, second))
+        {
+            adjacency.resize(static_cast<std::size_t>(std::max(first, second) + 1));
+        }
+        adjacency[first].push_back(static_cast<int>(index));
+        adjacency[second].push_back(static_cast<int>(index));
+    }
+
+    std::vector<bool> used(segments.size(), false);
+    for (std::size_t startSegment = 0; startSegment < segments.size(); ++startSegment)
+    {
+        if (used[startSegment])
+        {
+            continue;
+        }
+        if (segmentPointIds[startSegment].first < 0 || segmentPointIds[startSegment].second < 0)
+        {
+            continue;
+        }
+
+        std::vector<int> stack;
+        std::vector<int> componentSegments;
+        std::map<int, int> pointDegree;
+        stack.push_back(static_cast<int>(startSegment));
+        used[startSegment] = true;
+        while (!stack.empty())
+        {
+            const int segmentIndex = stack.back();
+            stack.pop_back();
+            componentSegments.push_back(segmentIndex);
+
+            const int pointIds[2] =
+            {
+                segmentPointIds[static_cast<std::size_t>(segmentIndex)].first,
+                segmentPointIds[static_cast<std::size_t>(segmentIndex)].second
+            };
+            ++pointDegree[pointIds[0]];
+            ++pointDegree[pointIds[1]];
+            for (int endIndex = 0; endIndex < 2; ++endIndex)
+            {
+                const int pointId = pointIds[endIndex];
+                if (pointId < 0 || pointId >= static_cast<int>(adjacency.size()))
+                {
+                    continue;
+                }
+                for (std::size_t linkIndex = 0; linkIndex < adjacency[pointId].size(); ++linkIndex)
+                {
+                    const int nextSegment = adjacency[pointId][linkIndex];
+                    if (segmentPointIds[static_cast<std::size_t>(nextSegment)].first < 0 ||
+                        segmentPointIds[static_cast<std::size_t>(nextSegment)].second < 0)
+                    {
+                        continue;
+                    }
+                    if (!used[static_cast<std::size_t>(nextSegment)])
+                    {
+                        used[static_cast<std::size_t>(nextSegment)] = true;
+                        stack.push_back(nextSegment);
+                    }
+                }
+            }
+        }
+
+        bool closed = componentSegments.size() >= 4;
+        for (std::map<int, int>::const_iterator it = pointDegree.begin(); it != pointDegree.end(); ++it)
+        {
+            if (it->second != 2)
+            {
+                closed = false;
+                break;
+            }
+        }
+        if (!closed)
+        {
+            continue;
+        }
+
+        SectionLoop loop = {};
+        for (std::size_t index = 0; index < componentSegments.size(); ++index)
+        {
+            const SectionCurveSegment& segment = segments[static_cast<std::size_t>(componentSegments[index])];
+            if (segment.line)
+            {
+                ++loop.lineCount;
+                loop.lineAngles.push_back(DirectionAngleInFrame(segment.direction, xAxis, yAxis));
+            }
+            else if (segment.arc)
+            {
+                ++loop.arcCount;
+            }
+        }
+        if (loop.lineCount > 0 || loop.arcCount > 0)
+        {
+            loops.push_back(loop);
+        }
+    }
+
+    return !loops.empty();
+}
+
+bool IsRectangularTubeLoop(const SectionLoop& loop)
+{
+    if (loop.lineCount == 4 && loop.arcCount == 0)
+    {
+        return AnglesPerpendicularFourSides(loop.lineAngles);
+    }
+    if (loop.lineCount == 4 && loop.arcCount == 4)
+    {
+        return AnglesPerpendicularFourSides(loop.lineAngles);
+    }
+    return false;
+}
+
+bool HasAcceptedRectangularSectionAt(
+    tag_t bodyTag,
+    double sectionPosition,
+    const double lengthAxis[3],
+    const double xAxis[3],
+    const double yAxis[3])
+{
+    uf_list_p_t edgeList = NULL;
+    if (UF_MODL_ask_body_edges(bodyTag, &edgeList) != 0 || edgeList == NULL)
+    {
+        return false;
+    }
+
+    const std::vector<tag_t> edgeTags = UfListToTags(edgeList);
+    UF_MODL_delete_list(&edgeList);
+    std::vector<SectionCurveSegment> segments;
+    for (std::size_t index = 0; index < edgeTags.size(); ++index)
+    {
+        SectionCurveSegment segment = {};
+        if (EdgeLiesOnSection(edgeTags[index], sectionPosition, lengthAxis, 1.0, segment))
+        {
+            segments.push_back(segment);
+        }
+    }
+
+    std::vector<SectionLoop> loops;
+    if (!BuildSectionLoops(segments, xAxis, yAxis, loops))
+    {
+        return false;
+    }
+
+    int acceptedLoopCount = 0;
+    for (std::size_t index = 0; index < loops.size(); ++index)
+    {
+        if (IsRectangularTubeLoop(loops[index]))
+        {
+            ++acceptedLoopCount;
+        }
+    }
+    return acceptedLoopCount >= 2;
+}
+
 bool HasClosedRectangularTubeSections(tag_t bodyTag)
 {
     double lengthAxis[3] = {0.0, 0.0, 0.0};
@@ -1003,72 +1492,23 @@ bool HasClosedRectangularTubeSections(tag_t bodyTag)
         return false;
     }
 
-    uf_list_p_t faceList = NULL;
-    if (UF_MODL_ask_body_faces(bodyTag, &faceList) != 0 || faceList == NULL)
+    double xAxis[3] = {0.0, 0.0, 0.0};
+    double yAxis[3] = {0.0, 0.0, 0.0};
+    if (!BuildPerpendicularFrame(lengthAxis, xAxis, yAxis))
     {
         return false;
     }
 
-    const std::vector<tag_t> faces = UfListToTags(faceList);
-    UF_MODL_delete_list(&faceList);
-
-    std::vector<double> sectionPositions;
-    bool sectionSegments[6] = {false, false, false, false, false, false};
-    const double normalParallelTolerance = std::cos(20.0 * 3.14159265358979323846 / 180.0);
-    for (std::size_t index = 0; index < faces.size(); ++index)
+    const double span = bodyMaxProjection - bodyMinProjection;
+    if (span <= 1.0)
     {
-        int faceType = 0;
-        if (UF_MODL_ask_face_type(faces[index], &faceType) != 0 || faceType != UF_MODL_PLANAR_FACE)
-        {
-            continue;
-        }
-
-        int type = 0;
-        double point[3] = {0.0, 0.0, 0.0};
-        double direction[3] = {0.0, 0.0, 0.0};
-        double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        double radius = 0.0;
-        double radData = 0.0;
-        int normDir = 0;
-        if (UF_MODL_ask_face_data(faces[index], &type, point, direction, box, &radius, &radData, &normDir) != 0)
-        {
-            continue;
-        }
-        if (!Normalize3(direction) || std::fabs(Dot3(direction, lengthAxis)) < normalParallelTolerance)
-        {
-            continue;
-        }
-
-        if (!FaceHasInnerLoop(faces[index]))
-        {
-            continue;
-        }
-
-        const double position = Dot3(point, lengthAxis);
-        bool alreadyCounted = false;
-        for (std::size_t posIndex = 0; posIndex < sectionPositions.size(); ++posIndex)
-        {
-            if (std::fabs(sectionPositions[posIndex] - position) < 1.0)
-            {
-                alreadyCounted = true;
-                break;
-            }
-        }
-
-        if (!alreadyCounted)
-        {
-            sectionPositions.push_back(position);
-            const int segment = SixSegmentHitIndex(bodyMinProjection, bodyMaxProjection, position);
-            if (segment >= 0)
-            {
-                sectionSegments[segment] = true;
-            }
-        }
+        return false;
     }
-
-    for (int segment = 0; segment < 6; ++segment)
+    const double fractions[] = {0.0, 1.0 / 6.0, 2.0 / 6.0, 3.0 / 6.0, 4.0 / 6.0, 5.0 / 6.0, 1.0};
+    for (int index = 0; index < static_cast<int>(sizeof(fractions) / sizeof(fractions[0])); ++index)
     {
-        if (sectionSegments[segment])
+        const double sectionPosition = bodyMinProjection + span * fractions[index];
+        if (HasAcceptedRectangularSectionAt(bodyTag, sectionPosition, lengthAxis, xAxis, yAxis))
         {
             return true;
         }
@@ -1114,7 +1554,50 @@ struct CylindricalFaceInfo
     double radius;
     double minProjection;
     double maxProjection;
+    bool fullCircle;
 };
+
+bool IsFullCircularEdge(tag_t edgeTag)
+{
+    int edgeType = 0;
+    if (UF_MODL_ask_edge_type(edgeTag, &edgeType) != 0 || edgeType != UF_MODL_CIRCULAR_EDGE)
+    {
+        return false;
+    }
+
+    double point1[3] = {0.0, 0.0, 0.0};
+    double point2[3] = {0.0, 0.0, 0.0};
+    int vertexCount = 0;
+    if (UF_MODL_ask_edge_verts(edgeTag, point1, point2, &vertexCount) == 0 && vertexCount == 0)
+    {
+        return true;
+    }
+
+    UF_CURVE_arc_t arcData = {};
+    return UF_CURVE_ask_arc_data(edgeTag, &arcData) == 0 &&
+        std::fabs(std::fabs(arcData.end_angle - arcData.start_angle) - 2.0 * 3.14159265358979323846) < 0.05 &&
+        arcData.radius > 0.0;
+}
+
+bool CylindricalFaceHasFullCircularEdge(tag_t faceTag)
+{
+    uf_list_p_t edgeList = NULL;
+    if (UF_MODL_ask_face_edges(faceTag, &edgeList) != 0 || edgeList == NULL)
+    {
+        return false;
+    }
+
+    const std::vector<tag_t> edgeTags = UfListToTags(edgeList);
+    UF_MODL_delete_list(&edgeList);
+    for (std::size_t index = 0; index < edgeTags.size(); ++index)
+    {
+        if (IsFullCircularEdge(edgeTags[index]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 bool AskCylindricalFaceInfo(tag_t faceTag, CylindricalFaceInfo& info)
 {
@@ -1134,7 +1617,38 @@ bool AskCylindricalFaceInfo(tag_t faceTag, CylindricalFaceInfo& info)
 
     info.faceTag = faceTag;
     FaceBoxProjectionRange(info.box, info.axis, info.minProjection, info.maxProjection);
+    info.fullCircle = CylindricalFaceHasFullCircularEdge(faceTag);
     return info.maxProjection > info.minProjection;
+}
+
+double DistancePointToAxis(const double point[3], const double axisPoint[3], const double axis[3])
+{
+    double delta[3] =
+    {
+        point[0] - axisPoint[0],
+        point[1] - axisPoint[1],
+        point[2] - axisPoint[2]
+    };
+    const double projection = Dot3(delta, axis);
+    delta[0] -= axis[0] * projection;
+    delta[1] -= axis[1] * projection;
+    delta[2] -= axis[2] * projection;
+    return std::sqrt(Dot3(delta, delta));
+}
+
+bool CylindersAreCoaxial(const CylindricalFaceInfo& outer, const CylindricalFaceInfo& inner)
+{
+    const double parallelTolerance = std::cos(2.0 * 3.14159265358979323846 / 180.0);
+    if (std::fabs(Dot3(outer.axis, inner.axis)) < parallelTolerance)
+    {
+        return false;
+    }
+    return DistancePointToAxis(inner.point, outer.point, outer.axis) <= 0.5;
+}
+
+bool NearlyInteger(double value, double tolerance)
+{
+    return std::fabs(value - std::floor(value + 0.5)) <= tolerance;
 }
 
 std::vector<CylindricalFaceInfo> CollectCylindricalFaces(tag_t bodyTag)
@@ -1279,6 +1793,77 @@ bool EstimateTubeDimensionsFromEdges(tag_t bodyTag, double& length, double& widt
         return false;
     }
 
+    double primaryAxis[3] = {0.0, 0.0, 0.0};
+    if (EstimateMainLengthAxisFromEdges(bodyTag, primaryAxis))
+    {
+        int firstCrossIndex = -1;
+        int secondCrossIndex = -1;
+        double bestCrossScore = -1.0;
+        const double perpendicularTolerance = 0.20;
+        for (std::size_t i = 0; i < clusters.size(); ++i)
+        {
+            if (std::fabs(Dot3(clusters[i].direction, primaryAxis)) > perpendicularTolerance)
+            {
+                continue;
+            }
+            for (std::size_t j = i + 1; j < clusters.size(); ++j)
+            {
+                if (std::fabs(Dot3(clusters[j].direction, primaryAxis)) > perpendicularTolerance ||
+                    std::fabs(Dot3(clusters[i].direction, clusters[j].direction)) > perpendicularTolerance)
+                {
+                    continue;
+                }
+                const double score = clusters[i].totalLength + clusters[j].totalLength +
+                    static_cast<double>(clusters[i].count + clusters[j].count) * 10.0;
+                if (score > bestCrossScore)
+                {
+                    bestCrossScore = score;
+                    firstCrossIndex = static_cast<int>(i);
+                    secondCrossIndex = static_cast<int>(j);
+                }
+            }
+        }
+
+        if (firstCrossIndex >= 0 && secondCrossIndex >= 0)
+        {
+            const double* axes[3] =
+            {
+                primaryAxis,
+                clusters[static_cast<std::size_t>(firstCrossIndex)].direction,
+                clusters[static_cast<std::size_t>(secondCrossIndex)].direction
+            };
+            double minProjection[3] = {DBL_MAX, DBL_MAX, DBL_MAX};
+            double maxProjection[3] = {-DBL_MAX, -DBL_MAX, -DBL_MAX};
+            for (std::size_t endpointIndex = 0; endpointIndex < endpointPairs.size(); ++endpointIndex)
+            {
+                const double* points[2] = {endpointPairs[endpointIndex].first, endpointPairs[endpointIndex].second};
+                for (int pointIndex = 0; pointIndex < 2; ++pointIndex)
+                {
+                    for (int axisIndex = 0; axisIndex < 3; ++axisIndex)
+                    {
+                        const double projection = Dot3(points[pointIndex], axes[axisIndex]);
+                        minProjection[axisIndex] = std::min(minProjection[axisIndex], projection);
+                        maxProjection[axisIndex] = std::max(maxProjection[axisIndex], projection);
+                    }
+                }
+            }
+
+            length = maxProjection[0] - minProjection[0];
+            double crossDimensions[2] =
+            {
+                maxProjection[1] - minProjection[1],
+                maxProjection[2] - minProjection[2]
+            };
+            std::sort(crossDimensions, crossDimensions + 2);
+            height = crossDimensions[0];
+            width = crossDimensions[1];
+            if (length > 0.5 && width > 0.5 && height > 0.5)
+            {
+                return true;
+            }
+        }
+    }
+
     double bestScore = -1.0;
     double bestDimensions[3] = {0.0, 0.0, 0.0};
     const double perpendicularTolerance = 0.20;
@@ -1367,8 +1952,6 @@ bool EstimateRoundTubeDimensions(tag_t bodyTag, double& length, double& diameter
         return false;
     }
 
-    const bool hasFullCircularEdge = HasFullCircularEdge(bodyTag);
-    std::vector<double> radii;
     double axis[3] = {0.0, 0.0, 0.0};
     double bodyMinProjection = 0.0;
     double bodyMaxProjection = 0.0;
@@ -1377,6 +1960,10 @@ bool EstimateRoundTubeDimensions(tag_t bodyTag, double& length, double& diameter
     double bestScore = -1.0;
     for (std::size_t index = 0; index < cylinders.size(); ++index)
     {
+        if (!cylinders[index].fullCircle)
+        {
+            continue;
+        }
         const double faceSpan = cylinders[index].maxProjection - cylinders[index].minProjection;
         const double score = faceSpan * std::max(1.0, cylinders[index].radius);
         if (score > bestScore)
@@ -1385,39 +1972,76 @@ bool EstimateRoundTubeDimensions(tag_t bodyTag, double& length, double& diameter
             bestCylinderIndex = index;
         }
     }
+    if (bestScore < 0.0)
+    {
+        return false;
+    }
 
     axis[0] = cylinders[bestCylinderIndex].axis[0];
     axis[1] = cylinders[bestCylinderIndex].axis[1];
     axis[2] = cylinders[bestCylinderIndex].axis[2];
+
+    const CylindricalFaceInfo& outerCylinder = cylinders[bestCylinderIndex];
+    double bodyMainAxis[3] = {0.0, 0.0, 0.0};
+    if (!EstimateMainLengthAxisFromEdges(bodyTag, bodyMainAxis) ||
+        std::fabs(Dot3(bodyMainAxis, axis)) < std::cos(5.0 * 3.14159265358979323846 / 180.0))
+    {
+        return false;
+    }
+
+    const double outerRadius = outerCylinder.radius;
+    double innerRadius = 0.0;
+    for (std::size_t index = 0; index < cylinders.size(); ++index)
+    {
+        if (index == bestCylinderIndex)
+        {
+            continue;
+        }
+        if (cylinders[index].radius >= outerRadius - 0.05)
+        {
+            continue;
+        }
+        if (!cylinders[index].fullCircle)
+        {
+            continue;
+        }
+        if (!CylindersAreCoaxial(outerCylinder, cylinders[index]))
+        {
+            continue;
+        }
+        if (cylinders[index].radius > innerRadius)
+        {
+            innerRadius = cylinders[index].radius;
+        }
+    }
+    if (innerRadius <= 0.0 || outerRadius - innerRadius <= 0.05)
+    {
+        return false;
+    }
+
     if (!AskBodyProjectionRangeFromEdges(bodyTag, axis, bodyMinProjection, bodyMaxProjection))
     {
         AskBodyProjectionRangeFromBox(bodyTag, axis, bodyMinProjection, bodyMaxProjection);
     }
     const double bodySpan = bodyMaxProjection - bodyMinProjection;
-    const double bestCylinderSpan = cylinders[bestCylinderIndex].maxProjection - cylinders[bestCylinderIndex].minProjection;
-    if (!hasFullCircularEdge && (bodySpan <= 0.0 || bestCylinderSpan < bodySpan * 0.50))
+    const double bestCylinderSpan = outerCylinder.maxProjection - outerCylinder.minProjection;
+    if (bodySpan <= 0.0 || bestCylinderSpan < bodySpan * 0.80)
     {
         return false;
     }
 
-    const double parallelTolerance = std::cos(15.0 * 3.14159265358979323846 / 180.0);
-    for (std::size_t index = 0; index < cylinders.size(); ++index)
+    const double rawDiameter = outerRadius * 2.0;
+    if (!NearlyInteger(rawDiameter, 0.05))
     {
-        if (std::fabs(Dot3(cylinders[index].axis, axis)) >= parallelTolerance)
-        {
-            radii.push_back(cylinders[index].radius);
-        }
+        return false;
     }
-    std::sort(radii.begin(), radii.end());
-    const double outerRadius = radii.back();
-    double innerRadius = 0.0;
-    for (int index = static_cast<int>(radii.size()) - 2; index >= 0; --index)
+    const double integerDiameter = std::floor(rawDiameter + 0.5);
+    const double orientedWidth = outerRadius * 2.0;
+    const double orientedHeight = outerRadius * 2.0;
+    if (std::fabs(orientedWidth - integerDiameter) > 0.5 ||
+        std::fabs(orientedHeight - integerDiameter) > 0.5)
     {
-        if (outerRadius - radii[index] > 0.05)
-        {
-            innerRadius = radii[index];
-            break;
-        }
+        return false;
     }
 
     uf_list_p_t edgeList = NULL;
@@ -1460,8 +2084,8 @@ bool EstimateRoundTubeDimensions(tag_t bodyTag, double& length, double& diameter
         length = dimensions[2];
     }
 
-    diameter = outerRadius * 2.0;
-    thickness = innerRadius > 0.0 ? outerRadius - innerRadius : 0.0;
+    diameter = integerDiameter;
+    thickness = outerRadius - innerRadius;
     return diameter > 0.0 && length > 0.0;
 }
 
@@ -1515,7 +2139,183 @@ double EstimateWallThicknessFromEdges(tag_t bodyTag, double width, double height
     return bestTenths > 0 ? static_cast<double>(bestTenths) / 10.0 : 0.0;
 }
 
-TubeRecord ClassifyBody(NXOpen::Body* body)
+std::string BuildBodyDiagnostic(tag_t bodyTag, const TubeRecord* record)
+{
+    std::ostringstream report;
+    report << "TAG " << bodyTag << " 管件识别诊断:";
+    if (record != NULL)
+    {
+        report << "\n  最终识别: " << KindName(record->kind)
+               << "，规格=" << record->spec
+               << "，长/宽/高/厚="
+               << FormatDouble(record->length, 3) << " / "
+               << FormatDouble(record->width, 3) << " / "
+               << FormatDouble(record->height, 3) << " / "
+               << FormatDouble(record->thickness, 3);
+    }
+
+    double dimensions[3] = {0.0, 0.0, 0.0};
+    if (!AskBodyDimensions(bodyTag, dimensions))
+    {
+        report << "\n  读取包容尺寸失败";
+        return report.str();
+    }
+    report << "\n  包容尺寸(小/中/大): "
+           << FormatDouble(dimensions[0], 3) << " / "
+           << FormatDouble(dimensions[1], 3) << " / "
+           << FormatDouble(dimensions[2], 3);
+
+    double length = dimensions[2];
+    double width = dimensions[1];
+    double height = dimensions[0];
+    const bool edgeDimensionsOk = EstimateTubeDimensionsFromEdges(bodyTag, length, width, height);
+    report << "\n  边方向估算尺寸: " << (edgeDimensionsOk ? "成功" : "失败")
+           << "，长/宽/高="
+           << FormatDouble(length, 3) << " / "
+           << FormatDouble(width, 3) << " / "
+           << FormatDouble(height, 3);
+
+    double specLength = length;
+    double specWidth = width;
+    double specHeight = height;
+    const bool specMatched = ReclassifyTubeDimensionsBySpec(specLength, specWidth, specHeight);
+    report << "\n  方/扁管规格表匹配: " << (specMatched ? "是" : "否");
+    if (specMatched)
+    {
+        report << "，截面=" << BuildSectionSpec(specWidth, specHeight)
+               << "，长度=" << FormatDouble(specLength, 3);
+    }
+
+    const bool rectangularSectionOk = HasClosedRectangularTubeSections(bodyTag);
+    report << "\n  方/扁管截面链: " << (rectangularSectionOk ? "通过" : "未通过")
+           << "，要求至少一个截面有2个闭环，且每个闭环为4直边垂直或4直边+4角R";
+
+    const std::vector<CylindricalFaceInfo> cylinders = CollectCylindricalFaces(bodyTag);
+    report << "\n  圆柱面数量: " << cylinders.size();
+    if (!cylinders.empty())
+    {
+        int fullCylinderCount = 0;
+        std::size_t bestCylinderIndex = 0;
+        double bestScore = -1.0;
+        for (std::size_t index = 0; index < cylinders.size(); ++index)
+        {
+            if (cylinders[index].fullCircle)
+            {
+                ++fullCylinderCount;
+            }
+            if (!cylinders[index].fullCircle)
+            {
+                continue;
+            }
+            const double faceSpan = cylinders[index].maxProjection - cylinders[index].minProjection;
+            const double score = faceSpan * std::max(1.0, cylinders[index].radius);
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestCylinderIndex = index;
+            }
+        }
+        report << "\n  整圆圆柱面数量: " << fullCylinderCount;
+        if (bestScore < 0.0)
+        {
+            report << "\n  无整圆外圆柱候选";
+            return report.str();
+        }
+
+        const CylindricalFaceInfo& outer = cylinders[bestCylinderIndex];
+        double innerRadius = 0.0;
+        int coaxialInnerCount = 0;
+        for (std::size_t index = 0; index < cylinders.size(); ++index)
+        {
+            if (index == bestCylinderIndex || cylinders[index].radius >= outer.radius - 0.05)
+            {
+                continue;
+            }
+            if (!cylinders[index].fullCircle)
+            {
+                continue;
+            }
+            if (CylindersAreCoaxial(outer, cylinders[index]))
+            {
+                ++coaxialInnerCount;
+                innerRadius = std::max(innerRadius, cylinders[index].radius);
+            }
+        }
+
+        double bodyMinProjection = 0.0;
+        double bodyMaxProjection = 0.0;
+        double axis[3] = {outer.axis[0], outer.axis[1], outer.axis[2]};
+        double bodyMainAxis[3] = {0.0, 0.0, 0.0};
+        const bool bodyMainAxisOk = EstimateMainLengthAxisFromEdges(bodyTag, bodyMainAxis);
+        const double mainAxisDot = bodyMainAxisOk ? std::fabs(Dot3(bodyMainAxis, axis)) : 0.0;
+        bool bodySpanOk = AskBodyProjectionRangeFromEdges(bodyTag, axis, bodyMinProjection, bodyMaxProjection);
+        if (!bodySpanOk)
+        {
+            bodySpanOk = AskBodyProjectionRangeFromBox(bodyTag, axis, bodyMinProjection, bodyMaxProjection);
+        }
+        const double bodySpan = bodyMaxProjection - bodyMinProjection;
+        const double outerSpan = outer.maxProjection - outer.minProjection;
+        const double rawDiameter = outer.radius * 2.0;
+        const double integerDiameter = std::floor(rawDiameter + 0.5);
+        const double orientedLength = bodySpan;
+        const double orientedWidth = outer.radius * 2.0;
+        const double orientedHeight = outer.radius * 2.0;
+        const bool orientedDimensionsOk = orientedLength > 0.0 && orientedWidth > 0.0 && orientedHeight > 0.0;
+
+        report << "\n  外圆柱候选: 半径=" << FormatDouble(outer.radius, 3)
+               << "，直径=" << FormatDouble(rawDiameter, 3)
+               << "，轴向跨度=" << FormatDouble(outerSpan, 3)
+               << "，整圆=" << (outer.fullCircle ? "是" : "否")
+               << "，打分=" << FormatDouble(bestScore, 3);
+        report << "\n  同轴内圆柱: " << coaxialInnerCount
+               << " 个，最大内半径=" << FormatDouble(innerRadius, 3)
+               << "，厚度=" << (innerRadius > 0.0 ? FormatDouble(outer.radius - innerRadius, 3) : "-");
+        report << "\n  圆管直径整数检查: " << (NearlyInteger(rawDiameter, 0.05) ? "通过" : "未通过");
+        report << "\n  圆柱轴与整体最长轴一致检查: "
+               << (bodyMainAxisOk && mainAxisDot >= std::cos(5.0 * 3.14159265358979323846 / 180.0) ? "通过" : "未通过")
+               << "，夹角余弦=" << FormatDouble(mainAxisDot, 6);
+        report << "\n  圆管定向包容外径检查: "
+               << (orientedDimensionsOk &&
+                   std::fabs(orientedWidth - integerDiameter) <= 0.5 &&
+                   std::fabs(orientedHeight - integerDiameter) <= 0.5 ? "通过" : "未通过")
+               << "，最长直边和最长圆柱轴比较取更长者定向，外径="
+               << FormatDouble(rawDiameter, 3)
+               << "，整数外径=" << FormatDouble(integerDiameter, 0)
+               << "，圆柱轴定向长/宽/高="
+               << (orientedDimensionsOk ? FormatDouble(orientedLength, 3) : "-") << " / "
+               << (orientedDimensionsOk ? FormatDouble(orientedWidth, 3) : "-") << " / "
+               << (orientedDimensionsOk ? FormatDouble(orientedHeight, 3) : "-");
+        report << "\n  外圆柱覆盖长度检查: "
+               << (bodySpanOk && bodySpan > 0.0 && outerSpan >= bodySpan * 0.80 ? "通过" : "未通过")
+               << "，外圆柱跨度/体跨度="
+               << FormatDouble(outerSpan, 3) << " / " << FormatDouble(bodySpan, 3);
+    }
+
+    return report.str();
+}
+
+void WriteTagDiagnosticFile(tag_t bodyTag, const std::string& text)
+{
+    const std::string moduleDirectory = GetModuleDirectory();
+    if (moduleDirectory.empty())
+    {
+        return;
+    }
+
+    std::ostringstream pathStream;
+    pathStream << moduleDirectory << "\\XuanZeGuanJian_" << bodyTag << "_diag.txt";
+    const std::string path = pathStream.str();
+    std::ofstream file(path.c_str(), std::ios::binary | std::ios::out | std::ios::trunc);
+    if (!file)
+    {
+        return;
+    }
+    const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
+    file.write(reinterpret_cast<const char*>(bom), sizeof(bom));
+    file << text << "\r\n";
+}
+
+TubeRecord ClassifyBody(NXOpen::Body* body, double minimumRoundDiameter)
 {
     TubeRecord record = {};
     record.body = body;
@@ -1557,12 +2357,15 @@ TubeRecord ClassifyBody(NXOpen::Body* body)
     double roundThickness = 0.0;
     if (EstimateRoundTubeDimensions(body->Tag(), record.length, roundDiameter, roundThickness))
     {
-        record.kind = TubeKindRound;
-        record.width = roundDiameter;
-        record.height = roundDiameter;
-        record.thickness = roundThickness;
-        record.spec = BuildRoundTubeSpec(roundDiameter, roundThickness);
-        return record;
+        if (minimumRoundDiameter <= 0.0 || roundDiameter + 0.01 >= minimumRoundDiameter)
+        {
+            record.kind = TubeKindRound;
+            record.width = roundDiameter;
+            record.height = roundDiameter;
+            record.thickness = roundThickness;
+            record.spec = BuildRoundTubeSpec(roundDiameter, roundThickness);
+            return record;
+        }
     }
 
     record.kind = TubeKindUnknown;
@@ -1665,7 +2468,8 @@ public:
           totalSetCountBlock(NULL),
           squareStandardLengthBlock(NULL),
           rectangularStandardLengthBlock(NULL),
-          roundStandardLengthBlock(NULL)
+          roundStandardLengthBlock(NULL),
+          roundMinimumDiameterBlock(NULL)
     {
         dialog = ui->CreateDialog("XuanZeGuanJian.dlx");
         dialog->AddInitializeHandler(NXOpen::make_callback(this, &XuanZeGuanJianDialog::Initialize));
@@ -1720,6 +2524,7 @@ private:
     NXOpen::BlockStyler::StringBlock* squareStandardLengthBlock;
     NXOpen::BlockStyler::StringBlock* rectangularStandardLengthBlock;
     NXOpen::BlockStyler::StringBlock* roundStandardLengthBlock;
+    NXOpen::BlockStyler::StringBlock* roundMinimumDiameterBlock;
     std::vector<std::string> materialOptions;
     std::vector<TubeRecord> lastRecords;
     std::vector<NXOpen::Body*> cachedBodies;
@@ -1749,9 +2554,11 @@ private:
         squareStandardLengthBlock = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(dialog->TopBlock()->FindBlock("squareStandardLength"));
         rectangularStandardLengthBlock = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(dialog->TopBlock()->FindBlock("rectangularStandardLength"));
         roundStandardLengthBlock = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(dialog->TopBlock()->FindBlock("roundStandardLength"));
+        roundMinimumDiameterBlock = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(dialog->TopBlock()->FindBlock("roundMinimumDiameter"));
         SetDefaultText(squareStandardLengthBlock, "6.0");
         SetDefaultText(rectangularStandardLengthBlock, "6.0");
         SetDefaultText(roundStandardLengthBlock, "6.0");
+        SetDefaultText(roundMinimumDiameterBlock, "0");
         LoadMaterialEnum();
 
         if (bodySelection != NULL)
@@ -1824,10 +2631,12 @@ private:
         }
         else if (block == squareToggle || block == rectangularToggle || block == roundToggle ||
                  block == squareStandardLengthBlock || block == rectangularStandardLengthBlock ||
-                 block == roundStandardLengthBlock || block == totalSetCountBlock ||
+                 block == roundStandardLengthBlock || block == roundMinimumDiameterBlock ||
+                 block == totalSetCountBlock ||
                  block == squareLayerBlock || block == rectangularLayerBlock || block == roundLayerBlock)
         {
-            SafeRebuildListForCurrentMode(block == squareToggle || block == rectangularToggle || block == roundToggle);
+            SafeRebuildListForCurrentMode(block == squareToggle || block == rectangularToggle ||
+                                          block == roundToggle || block == roundMinimumDiameterBlock);
         }
         return 0;
     }
@@ -1936,6 +2745,11 @@ private:
             return GetStandardLength(roundStandardLengthBlock);
         }
         return 0.0;
+    }
+
+    double MinimumRoundDiameter() const
+    {
+        return GetMillimeterInput(roundMinimumDiameterBlock);
     }
 
     int LayerForKind(TubeKind kind) const
@@ -2452,9 +3266,37 @@ private:
         std::set<tag_t> acceptedTags;
         for (std::size_t index = 0; index < bodies.size(); ++index)
         {
-            TubeRecord record = ClassifyBody(bodies[index]);
+            TubeRecord record = ClassifyBody(bodies[index], MinimumRoundDiameter());
+            if (bodies[index] != NULL && bodies[index]->Tag() == 213188 && session != NULL)
+            {
+                const std::string diagnostic = BuildBodyDiagnostic(bodies[index]->Tag(), &record);
+                WriteTagDiagnosticFile(bodies[index]->Tag(), diagnostic);
+                NXOpen::ListingWindow* listing = session->ListingWindow();
+                if (listing != NULL)
+                {
+                    if (!listing->IsOpen())
+                    {
+                        listing->Open();
+                    }
+                    listing->WriteLine(diagnostic.c_str());
+                }
+            }
             if (record.kind == TubeKindUnknown)
             {
+                if (bodies[index] != NULL && bodies[index]->Tag() == 72806 && session != NULL)
+                {
+                    const std::string diagnostic = BuildBodyDiagnostic(bodies[index]->Tag(), &record);
+                    WriteTagDiagnosticFile(bodies[index]->Tag(), diagnostic);
+                    NXOpen::ListingWindow* listing = session->ListingWindow();
+                    if (listing != NULL)
+                    {
+                        if (!listing->IsOpen())
+                        {
+                            listing->Open();
+                        }
+                        listing->WriteLine(diagnostic.c_str());
+                    }
+                }
                 continue;
             }
 

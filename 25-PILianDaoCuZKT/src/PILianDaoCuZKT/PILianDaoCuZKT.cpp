@@ -5214,7 +5214,11 @@ int PILianDaoCuZKTDialog::ok_cb()
             + " dimensionScale=" + FormatReal(options.viewScaleDenominator)
             + " viewScale=1");
 
-        RunBatchFlatPatternDrawing(options);
+        DrawingRunSummary summary = RunBatchFlatPatternDrawing(options);
+        const std::string message = BuildRunSummaryMessage(summary);
+        PILianDaoCuZKTDialog::theUI->NXMessageBox()->Show("PILianDaoCuZKT",
+            summary.failures.empty() ? NXOpen::NXMessageBox::DialogTypeInformation : NXOpen::NXMessageBox::DialogTypeWarning,
+            message.c_str());
     }
     catch (const std::exception& ex)
     {
