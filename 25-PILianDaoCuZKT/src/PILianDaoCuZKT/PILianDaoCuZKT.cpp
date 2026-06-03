@@ -1270,7 +1270,85 @@ static std::vector<FlatPatternItem> CollectPartFlatPatterns(NXOpen::Part* part, 
     return items;
 }
 
-static void CollectAssemblyLeafPartCounts(NXOpen::Assemblies::Component* component, std::map<tag_t, std::pair<NXOpen::Part*, int> >& counts)
+static bool IsAssemblyPart(NXOpen::Part* part)
+{
+    if (part == NULL || part->ComponentAssembly() == NULL)
+    {
+        return false;
+    }
+    try
+    {
+        NXOpen::Assemblies::Component* root = part->ComponentAssembly()->RootComponent();
+        return root != NULL && !root->GetChildren().empty();
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+static void EnsurePartFullyLoaded(NXOpen::Part* part)
+{
+    if (part == NULL)
+    {
+        return;
+    }
+    try
+    {
+        if (!part->IsFullyLoaded())
+        {
+            NXOpen::PartLoadStatus* status = part->LoadFully();
+            LogLine("[EnsurePartFullyLoaded] loaded part=" + LocaleText(part->Name())
+                + " status=" + std::string(status != NULL ? "ok" : "null"));
+            if (status != NULL)
+            {
+                delete status;
+            }
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[EnsurePartFullyLoaded] NXException part=" + LocaleText(part->Name())
+            + " code=" + std::to_string(ex.ErrorCode())
+            + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[EnsurePartFullyLoaded] exception part=" + LocaleText(part->Name()));
+    }
+}
+
+static void AddAssemblyPrototypePartCount(NXOpen::Assemblies::Component* component, std::map<tag_t, std::pair<NXOpen::Part*, int> >& counts)
+{
+    if (component == NULL)
+    {
+        return;
+    }
+    try
+    {
+        NXOpen::Part* part = dynamic_cast<NXOpen::Part*>(component->Prototype());
+        if (part != NULL)
+        {
+            EnsurePartFullyLoaded(part);
+            std::pair<NXOpen::Part*, int>& entry = counts[part->Tag()];
+            entry.first = part;
+            entry.second += 1;
+            LogLine("[AddAssemblyPrototypePartCount] part=" + LocaleText(part->Name())
+                + " count=" + std::to_string(entry.second));
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[AddAssemblyPrototypePartCount] NXException code=" + std::to_string(ex.ErrorCode())
+            + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[AddAssemblyPrototypePartCount] exception");
+    }
+}
+
+static void CollectAssemblyPartCounts(NXOpen::Assemblies::Component* component, std::map<tag_t, std::pair<NXOpen::Part*, int> >& counts)
 {
     if (component == NULL)
     {
@@ -1278,29 +1356,12 @@ static void CollectAssemblyLeafPartCounts(NXOpen::Assemblies::Component* compone
     }
 
     std::vector<NXOpen::Assemblies::Component*> children = component->GetChildren();
-    if (children.empty())
-    {
-        try
-        {
-            NXOpen::Part* part = dynamic_cast<NXOpen::Part*>(component->Prototype());
-            if (part != NULL)
-            {
-                std::pair<NXOpen::Part*, int>& entry = counts[part->Tag()];
-                entry.first = part;
-                entry.second += 1;
-            }
-        }
-        catch (...)
-        {
-        }
-        return;
-    }
-
     for (size_t i = 0; i < children.size(); ++i)
     {
+        NXOpen::Assemblies::Component* child = children[i];
         try
         {
-            if (children[i] != NULL && children[i]->IsComponentOrAncestorSuppressed())
+            if (child != NULL && child->IsComponentOrAncestorSuppressed())
             {
                 continue;
             }
@@ -1308,7 +1369,9 @@ static void CollectAssemblyLeafPartCounts(NXOpen::Assemblies::Component* compone
         catch (...)
         {
         }
-        CollectAssemblyLeafPartCounts(children[i], counts);
+
+        AddAssemblyPrototypePartCount(child, counts);
+        CollectAssemblyPartCounts(child, counts);
     }
 }
 
@@ -1328,7 +1391,7 @@ static std::vector<FlatPatternItem> CollectFlatPatternItems(NXOpen::Part* displa
         NXOpen::Assemblies::Component* root = displayPart->ComponentAssembly()->RootComponent();
         if (root != NULL && !root->GetChildren().empty())
         {
-            CollectAssemblyLeafPartCounts(root, partCounts);
+            CollectAssemblyPartCounts(root, partCounts);
         }
     }
     catch (...)
@@ -1435,29 +1498,63 @@ static NXOpen::Drawings::BaseView* CreateFlatBaseView(NXOpen::Part* workPart, co
 {
     LogLine("[CreateFlatBaseView] begin part=" + LocaleText(item.part != NULL ? item.part->Name() : NXOpen::NXString(""))
         + " viewName=" + item.viewName
+        + " workPart=" + LocaleText(workPart != NULL ? workPart->Name() : NXOpen::NXString(""))
         + " scaleDenominator=" + FormatReal(options.viewScaleDenominator));
     NXOpen::Drawings::BaseView* nullView = NULL;
-    NXOpen::Drawings::BaseViewBuilder* builder = workPart->DraftingViews()->CreateBaseViewBuilder(nullView);
-    builder->Scale()->SetNumerator(1.0);
-    builder->Scale()->SetDenominator(options.viewScaleDenominator);
-
-    NXOpen::ModelingView* modelView = FindModelingView(item.part, item.viewName);
-    if (modelView != NULL)
+    NXOpen::Drawings::BaseViewBuilder* builder = NULL;
+    try
     {
-        LogLine("[CreateFlatBaseView] selected model view=" + item.viewName);
-        builder->SelectModelView()->SetSelectedView(modelView);
-    }
-    else
-    {
-        LogLine("[CreateFlatBaseView] model view not found, commit with default");
-    }
+        if (workPart == NULL)
+        {
+            return NULL;
+        }
 
-    builder->Placement()->Placement()->SetValue(NULL, workPart->Views()->WorkView(), point);
-    NXOpen::NXObject* object = builder->Commit();
-    builder->Destroy();
-    NXOpen::Drawings::BaseView* view = dynamic_cast<NXOpen::Drawings::BaseView*>(object);
-    LogLine(std::string("[CreateFlatBaseView] commit ") + (view != NULL ? "ok" : "returned null"));
-    return view;
+        builder = workPart->DraftingViews()->CreateBaseViewBuilder(nullView);
+        builder->Scale()->SetNumerator(1.0);
+        builder->Scale()->SetDenominator(options.viewScaleDenominator);
+
+        NXOpen::ModelingView* modelView = FindModelingView(item.part, item.viewName);
+        if (modelView != NULL)
+        {
+            LogLine("[CreateFlatBaseView] selected model view=" + item.viewName
+                + " sourcePart=" + LocaleText(item.part != NULL ? item.part->Name() : NXOpen::NXString("")));
+            builder->SelectModelView()->SetSelectedView(modelView);
+        }
+        else
+        {
+            LogLine("[CreateFlatBaseView] model view not found, commit with default");
+        }
+
+        builder->Placement()->Placement()->SetValue(NULL, workPart->Views()->WorkView(), point);
+        NXOpen::NXObject* object = builder->Commit();
+        builder->Destroy();
+        builder = NULL;
+        NXOpen::Drawings::BaseView* view = dynamic_cast<NXOpen::Drawings::BaseView*>(object);
+        LogLine(std::string("[CreateFlatBaseView] commit ") + (view != NULL ? "ok" : "returned null"));
+        return view;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        if (builder != NULL)
+        {
+            try { builder->Destroy(); } catch (...) {}
+        }
+        LogLine("[CreateFlatBaseView] NXException code=" + std::to_string(ex.ErrorCode())
+            + " message=" + std::string(ex.Message())
+            + " part=" + item.partKey
+            + " viewName=" + item.viewName);
+        return NULL;
+    }
+    catch (...)
+    {
+        if (builder != NULL)
+        {
+            try { builder->Destroy(); } catch (...) {}
+        }
+        LogLine("[CreateFlatBaseView] exception part=" + item.partKey
+            + " viewName=" + item.viewName);
+        return NULL;
+    }
 }
 
 static bool RectFromViewCurves(NXOpen::Drawings::BaseView* view, DraftRect& rect)
@@ -2783,6 +2880,28 @@ static void RunBatchFlatPatternDrawing(const CommandOptions& options)
 
     LogLine("[RunBatchFlatPatternDrawing] displayPart=" + LocaleText(displayPart->Name())
         + " workPart=" + LocaleText(workPart->Name()));
+
+    if (IsAssemblyPart(displayPart) && workPart != displayPart)
+    {
+        LogLine("[RunBatchFlatPatternDrawing] display part is assembly, switch work part to assembly for drawing sheet");
+        try
+        {
+            session->Parts()->SetWork(displayPart);
+            workPart = displayPart;
+            LogLine("[RunBatchFlatPatternDrawing] work part switched to display assembly");
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogLine("[RunBatchFlatPatternDrawing] SetWork assembly NXException code=" + std::to_string(ex.ErrorCode())
+                + " message=" + std::string(ex.Message()));
+            workPart = displayPart;
+        }
+        catch (...)
+        {
+            LogLine("[RunBatchFlatPatternDrawing] SetWork assembly exception, use display assembly pointer");
+            workPart = displayPart;
+        }
+    }
 
     std::vector<FlatPatternItem> items = CollectFlatPatternItems(displayPart);
     if (items.empty())
