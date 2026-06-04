@@ -41,6 +41,7 @@
 #include <uf_object_types.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdarg>
 #include <cstdio>
 #include <fstream>
@@ -106,6 +107,18 @@ struct TubeRecord
 struct StatRow
 {
     TubeKind kind;
+    std::string name;
+    std::string spec;
+    std::string lengthText;
+    int quantity;
+    double totalLength;
+    std::vector<tag_t> bodyTags;
+};
+
+struct ManualRow
+{
+    TubeKind kind;
+    std::string typeText;
     std::string name;
     std::string spec;
     std::string lengthText;
@@ -2228,182 +2241,6 @@ double EstimateWallThicknessFromEdges(tag_t bodyTag, double width, double height
     return bestTenths > 0 ? static_cast<double>(bestTenths) / 10.0 : 0.0;
 }
 
-std::string BuildBodyDiagnostic(tag_t bodyTag, const TubeRecord* record)
-{
-    std::ostringstream report;
-    report << "TAG " << bodyTag << " 管件识别诊断:";
-    if (record != NULL)
-    {
-        report << "\n  最终识别: " << KindName(record->kind)
-               << "，规格=" << record->spec
-               << "，长/宽/高/厚="
-               << FormatDouble(record->length, 3) << " / "
-               << FormatDouble(record->width, 3) << " / "
-               << FormatDouble(record->height, 3) << " / "
-               << FormatDouble(record->thickness, 3);
-    }
-
-    double dimensions[3] = {0.0, 0.0, 0.0};
-    if (!AskBodyDimensions(bodyTag, dimensions))
-    {
-        report << "\n  读取包容尺寸失败";
-        return report.str();
-    }
-    report << "\n  包容尺寸(小/中/大): "
-           << FormatDouble(dimensions[0], 3) << " / "
-           << FormatDouble(dimensions[1], 3) << " / "
-           << FormatDouble(dimensions[2], 3);
-
-    double length = dimensions[2];
-    double width = dimensions[1];
-    double height = dimensions[0];
-    const bool edgeDimensionsOk = EstimateTubeDimensionsFromEdges(bodyTag, length, width, height);
-    report << "\n  边方向估算尺寸: " << (edgeDimensionsOk ? "成功" : "失败")
-           << "，长/宽/高="
-           << FormatDouble(length, 3) << " / "
-           << FormatDouble(width, 3) << " / "
-           << FormatDouble(height, 3);
-
-    double specLength = length;
-    double specWidth = width;
-    double specHeight = height;
-    const bool specMatched = ReclassifyTubeDimensionsBySpec(specLength, specWidth, specHeight);
-    report << "\n  方/扁管规格表匹配: " << (specMatched ? "是" : "否");
-    if (specMatched)
-    {
-        report << "，截面=" << BuildSectionSpec(specWidth, specHeight)
-               << "，长度=" << FormatDouble(specLength, 3);
-    }
-
-    const bool rectangularSectionOk = HasClosedRectangularTubeSections(bodyTag);
-    report << "\n  方/扁管截面链: " << (rectangularSectionOk ? "通过" : "未通过")
-           << "，要求至少一个截面有2个闭环，且每个闭环为4直边垂直或4直边+4角R";
-
-    const std::vector<CylindricalFaceInfo> cylinders = CollectCylindricalFaces(bodyTag);
-    report << "\n  圆柱面数量: " << cylinders.size();
-    if (!cylinders.empty())
-    {
-        int fullCylinderCount = 0;
-        std::size_t bestCylinderIndex = 0;
-        double bestScore = -1.0;
-        for (std::size_t index = 0; index < cylinders.size(); ++index)
-        {
-            if (cylinders[index].fullCircle)
-            {
-                ++fullCylinderCount;
-            }
-            if (!cylinders[index].fullCircle)
-            {
-                continue;
-            }
-            const double faceSpan = cylinders[index].maxProjection - cylinders[index].minProjection;
-            const double score = faceSpan * std::max(1.0, cylinders[index].radius);
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestCylinderIndex = index;
-            }
-        }
-        report << "\n  整圆圆柱面数量: " << fullCylinderCount;
-        if (bestScore < 0.0)
-        {
-            report << "\n  无整圆外圆柱候选";
-            return report.str();
-        }
-
-        const CylindricalFaceInfo& outer = cylinders[bestCylinderIndex];
-        double innerRadius = 0.0;
-        int coaxialInnerCount = 0;
-        for (std::size_t index = 0; index < cylinders.size(); ++index)
-        {
-            if (index == bestCylinderIndex || cylinders[index].radius >= outer.radius - 0.05)
-            {
-                continue;
-            }
-            if (!cylinders[index].fullCircle)
-            {
-                continue;
-            }
-            if (CylindersAreCoaxial(outer, cylinders[index]))
-            {
-                ++coaxialInnerCount;
-                innerRadius = std::max(innerRadius, cylinders[index].radius);
-            }
-        }
-
-        double bodyMinProjection = 0.0;
-        double bodyMaxProjection = 0.0;
-        double axis[3] = {outer.axis[0], outer.axis[1], outer.axis[2]};
-        double bodyMainAxis[3] = {0.0, 0.0, 0.0};
-        const bool bodyMainAxisOk = EstimateMainLengthAxisFromEdges(bodyTag, bodyMainAxis);
-        const double mainAxisDot = bodyMainAxisOk ? std::fabs(Dot3(bodyMainAxis, axis)) : 0.0;
-        bool bodySpanOk = AskBodyProjectionRangeFromEdges(bodyTag, axis, bodyMinProjection, bodyMaxProjection);
-        if (!bodySpanOk)
-        {
-            bodySpanOk = AskBodyProjectionRangeFromBox(bodyTag, axis, bodyMinProjection, bodyMaxProjection);
-        }
-        const double bodySpan = bodyMaxProjection - bodyMinProjection;
-        const double outerSpan = outer.maxProjection - outer.minProjection;
-        const double rawDiameter = outer.radius * 2.0;
-        const double integerDiameter = std::floor(rawDiameter + 0.5);
-        const double orientedLength = bodySpan;
-        const double orientedWidth = outer.radius * 2.0;
-        const double orientedHeight = outer.radius * 2.0;
-        const bool orientedDimensionsOk = orientedLength > 0.0 && orientedWidth > 0.0 && orientedHeight > 0.0;
-
-        report << "\n  外圆柱候选: 半径=" << FormatDouble(outer.radius, 3)
-               << "，直径=" << FormatDouble(rawDiameter, 3)
-               << "，轴向跨度=" << FormatDouble(outerSpan, 3)
-               << "，整圆=" << (outer.fullCircle ? "是" : "否")
-               << "，打分=" << FormatDouble(bestScore, 3);
-        report << "\n  同轴内圆柱: " << coaxialInnerCount
-               << " 个，最大内半径=" << FormatDouble(innerRadius, 3)
-               << "，厚度=" << (innerRadius > 0.0 ? FormatDouble(outer.radius - innerRadius, 3) : "-");
-        report << "\n  圆管直径整数检查: " << (NearlyInteger(rawDiameter, 0.05) ? "通过" : "未通过");
-        report << "\n  圆柱轴与整体最长轴一致检查: "
-               << (bodyMainAxisOk && mainAxisDot >= std::cos(5.0 * 3.14159265358979323846 / 180.0) ? "通过" : "未通过")
-               << "，夹角余弦=" << FormatDouble(mainAxisDot, 6);
-        report << "\n  圆管定向包容外径检查: "
-               << (orientedDimensionsOk &&
-                   std::fabs(orientedWidth - integerDiameter) <= 0.5 &&
-                   std::fabs(orientedHeight - integerDiameter) <= 0.5 ? "通过" : "未通过")
-               << "，最长直边和最长圆柱轴比较取更长者定向，外径="
-               << FormatDouble(rawDiameter, 3)
-               << "，整数外径=" << FormatDouble(integerDiameter, 0)
-               << "，圆柱轴定向长/宽/高="
-               << (orientedDimensionsOk ? FormatDouble(orientedLength, 3) : "-") << " / "
-               << (orientedDimensionsOk ? FormatDouble(orientedWidth, 3) : "-") << " / "
-               << (orientedDimensionsOk ? FormatDouble(orientedHeight, 3) : "-");
-        report << "\n  外圆柱覆盖长度检查: "
-               << (bodySpanOk && bodySpan > 0.0 && outerSpan >= bodySpan * 0.80 ? "通过" : "未通过")
-               << "，外圆柱跨度/体跨度="
-               << FormatDouble(outerSpan, 3) << " / " << FormatDouble(bodySpan, 3);
-    }
-
-    return report.str();
-}
-
-void WriteTagDiagnosticFile(tag_t bodyTag, const std::string& text)
-{
-    const std::string moduleDirectory = GetModuleDirectory();
-    if (moduleDirectory.empty())
-    {
-        return;
-    }
-
-    std::ostringstream pathStream;
-    pathStream << moduleDirectory << "\\XuanZeGuanJian_" << bodyTag << "_diag.txt";
-    const std::string path = pathStream.str();
-    std::ofstream file(path.c_str(), std::ios::binary | std::ios::out | std::ios::trunc);
-    if (!file)
-    {
-        return;
-    }
-    const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
-    file.write(reinterpret_cast<const char*>(bom), sizeof(bom));
-    file << text << "\r\n";
-}
-
 TubeRecord ClassifyBody(NXOpen::Body* body, double minimumRoundDiameter)
 {
     TubeRecord record = {};
@@ -2544,6 +2381,8 @@ public:
           rectangularToggle(NULL),
           roundToggle(NULL),
           countButton(NULL),
+          addRowButton(NULL),
+          deleteRowButton(NULL),
           materialEnum(NULL),
           sameBodyToggle(NULL),
           materialButton(NULL),
@@ -2595,6 +2434,8 @@ private:
     NXOpen::BlockStyler::Toggle* rectangularToggle;
     NXOpen::BlockStyler::Toggle* roundToggle;
     NXOpen::BlockStyler::Button* countButton;
+    NXOpen::BlockStyler::Button* addRowButton;
+    NXOpen::BlockStyler::Button* deleteRowButton;
     NXOpen::BlockStyler::Enumeration* materialEnum;
     NXOpen::BlockStyler::Toggle* sameBodyToggle;
     NXOpen::BlockStyler::Button* materialButton;
@@ -2607,6 +2448,9 @@ private:
     std::map<NXOpen::BlockStyler::Node*, std::vector<tag_t> > resultNodeBodies;
     std::vector<NXOpen::BlockStyler::Node*> resultNodes;
     std::vector<tag_t> highlightedBodies;
+    std::vector<tag_t> selectedResultBodyTags;
+    std::set<tag_t> ignoredBodyTags;
+    std::vector<ManualRow> manualRows;
     std::vector<std::vector<tag_t> > sameBodyGroups;
     NXOpen::BlockStyler::Toggle* layerToggle;
     NXOpen::BlockStyler::IntegerBlock* squareLayerBlock;
@@ -2628,6 +2472,8 @@ private:
         rectangularToggle = dynamic_cast<NXOpen::BlockStyler::Toggle*>(dialog->TopBlock()->FindBlock("rectangularToggle"));
         roundToggle = dynamic_cast<NXOpen::BlockStyler::Toggle*>(dialog->TopBlock()->FindBlock("roundToggle"));
         countButton = dynamic_cast<NXOpen::BlockStyler::Button*>(dialog->TopBlock()->FindBlock("countButton"));
+        addRowButton = dynamic_cast<NXOpen::BlockStyler::Button*>(dialog->TopBlock()->FindBlock("addRowButton"));
+        deleteRowButton = dynamic_cast<NXOpen::BlockStyler::Button*>(dialog->TopBlock()->FindBlock("deleteRowButton"));
         materialEnum = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(dialog->TopBlock()->FindBlock("materialEnum"));
         sameBodyToggle = dynamic_cast<NXOpen::BlockStyler::Toggle*>(dialog->TopBlock()->FindBlock("sameBodyToggle"));
         materialButton = dynamic_cast<NXOpen::BlockStyler::Button*>(dialog->TopBlock()->FindBlock("materialButton"));
@@ -2679,6 +2525,14 @@ private:
         if (block == countButton)
         {
             SafeExportTable();
+        }
+        else if (block == addRowButton)
+        {
+            SafeAddManualSameBodies();
+        }
+        else if (block == deleteRowButton)
+        {
+            SafeDeleteSelectedRows();
         }
         else if (block == bodySelection)
         {
@@ -3010,6 +2864,42 @@ private:
         }
     }
 
+    void SafeAddManualSameBodies()
+    {
+        try
+        {
+            AddManualSameBodies();
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogInternalError("add manual row failed", ex.Message());
+            ui->NXMessageBox()->Show("增加", NXOpen::NXMessageBox::DialogTypeError, ex.Message());
+        }
+        catch (const std::exception& ex)
+        {
+            LogInternalError("add manual row failed", ex.what());
+            ui->NXMessageBox()->Show("增加", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+        }
+    }
+
+    void SafeDeleteSelectedRows()
+    {
+        try
+        {
+            DeleteSelectedRows();
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogInternalError("delete row failed", ex.Message());
+            ui->NXMessageBox()->Show("删除", NXOpen::NXMessageBox::DialogTypeError, ex.Message());
+        }
+        catch (const std::exception& ex)
+        {
+            LogInternalError("delete row failed", ex.what());
+            ui->NXMessageBox()->Show("删除", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+        }
+    }
+
     void SafeApplyLayering()
     {
         try
@@ -3105,6 +2995,217 @@ private:
         }
     }
 
+    bool IsTagIgnored(tag_t bodyTag) const
+    {
+        return bodyTag != NULL_TAG && ignoredBodyTags.find(bodyTag) != ignoredBodyTags.end();
+    }
+
+    bool RecordIsIgnored(const TubeRecord& record) const
+    {
+        return record.body != NULL && IsTagIgnored(record.body->Tag());
+    }
+
+    tag_t SelectSingleBodyTag()
+    {
+        tag_t selected = NULL_TAG;
+        int response = 0;
+        int scope = UF_UI_SEL_SCOPE_WORK_PART;
+        double cursor[3] = {0.0, 0.0, 0.0};
+        tag_t view = NULL_TAG;
+
+        const int status = UF_UI_select_with_single_dialog(
+            const_cast<char*>("选择参考实体"),
+            const_cast<char*>("增加"),
+            scope,
+            NULL,
+            NULL,
+            &response,
+            &selected,
+            cursor,
+            &view);
+        if (status != 0 ||
+            (response != UF_UI_OBJECT_SELECTED && response != UF_UI_OBJECT_SELECTED_BY_NAME))
+        {
+            return NULL_TAG;
+        }
+
+        int type = 0;
+        int subtype = 0;
+        if (UF_OBJ_ask_type_and_subtype(selected, &type, &subtype) != 0 ||
+            type != UF_solid_type ||
+            subtype != UF_solid_body_subtype)
+        {
+            return NULL_TAG;
+        }
+        return selected;
+    }
+
+    std::vector<NXOpen::Body*> CollectWorkPartBodies()
+    {
+        std::vector<NXOpen::Body*> bodies;
+        if (session == NULL || session->Parts() == NULL || session->Parts()->Work() == NULL)
+        {
+            return bodies;
+        }
+
+        tag_t objectTag = NULL_TAG;
+        const tag_t partTag = session->Parts()->Work()->Tag();
+        std::set<tag_t> seenTags;
+        while (UF_OBJ_cycle_objs_in_part(partTag, UF_solid_type, &objectTag) == 0 && objectTag != NULL_TAG)
+        {
+            int type = 0;
+            int subtype = 0;
+            if (UF_OBJ_ask_type_and_subtype(objectTag, &type, &subtype) != 0 ||
+                type != UF_solid_type ||
+                subtype != UF_solid_body_subtype ||
+                !seenTags.insert(objectTag).second)
+            {
+                continue;
+            }
+
+            NXOpen::TaggedObject* taggedObject = NXOpen::NXObjectManager::Get(objectTag);
+            NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(taggedObject);
+            if (body != NULL)
+            {
+                bodies.push_back(body);
+            }
+        }
+        return bodies;
+    }
+
+    bool ContainsTag(const std::vector<tag_t>& tags, tag_t tag) const
+    {
+        return std::find(tags.begin(), tags.end(), tag) != tags.end();
+    }
+
+    NXOpen::Body* FindBodyByTag(const std::vector<NXOpen::Body*>& bodies, tag_t tag) const
+    {
+        for (std::size_t index = 0; index < bodies.size(); ++index)
+        {
+            if (bodies[index] != NULL && bodies[index]->Tag() == tag)
+            {
+                return bodies[index];
+            }
+        }
+        return NULL;
+    }
+
+    void AddManualRowFromTags(const std::vector<tag_t>& groupTags, NXOpen::Body* referenceBody)
+    {
+        if (groupTags.empty() || referenceBody == NULL)
+        {
+            return;
+        }
+
+        TubeRecord referenceRecord = ClassifyBody(referenceBody, MinimumRoundDiameter());
+        ManualRow row = {};
+        row.kind = referenceRecord.kind;
+        row.typeText = referenceRecord.kind == TubeKindUnknown ? "手动" : KindName(referenceRecord.kind);
+        row.name = referenceRecord.name.empty() ? "-" : referenceRecord.name;
+        row.spec = referenceRecord.kind == TubeKindUnknown ? "-" : referenceRecord.spec;
+        row.lengthText = referenceRecord.length > 0.0 ? FormatSpecValue(referenceRecord.length) : "-";
+        row.quantity = static_cast<int>(groupTags.size());
+        row.totalLength = referenceRecord.length > 0.0
+            ? referenceRecord.length * static_cast<double>(row.quantity)
+            : 0.0;
+        row.bodyTags = groupTags;
+        manualRows.push_back(row);
+    }
+
+    void AddManualSameBodies()
+    {
+        const tag_t referenceTag = SelectSingleBodyTag();
+        if (referenceTag == NULL_TAG)
+        {
+            return;
+        }
+
+        std::vector<NXOpen::Body*> allBodies = CollectWorkPartBodies();
+        NXOpen::Body* referenceBody = FindBodyByTag(allBodies, referenceTag);
+        if (referenceBody == NULL)
+        {
+            NXOpen::TaggedObject* taggedObject = NXOpen::NXObjectManager::Get(referenceTag);
+            referenceBody = dynamic_cast<NXOpen::Body*>(taggedObject);
+        }
+        if (referenceBody == NULL)
+        {
+            throw std::runtime_error("未选择有效实体");
+        }
+
+        std::vector<NXOpen::Body*> candidates;
+        candidates.push_back(referenceBody);
+        std::set<tag_t> seenTags;
+        seenTags.insert(referenceTag);
+        for (std::size_t index = 0; index < allBodies.size(); ++index)
+        {
+            if (allBodies[index] != NULL && seenTags.insert(allBodies[index]->Tag()).second)
+            {
+                candidates.push_back(allBodies[index]);
+            }
+        }
+
+        std::vector<tag_t> groupTags;
+        const std::vector<std::vector<tag_t> > groups =
+            tube_same_body::RunSameBodySearch(session, ui, candidates);
+        for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+        {
+            if (ContainsTag(groups[groupIndex], referenceTag))
+            {
+                groupTags = groups[groupIndex];
+                break;
+            }
+        }
+        if (groupTags.empty())
+        {
+            groupTags.push_back(referenceTag);
+        }
+
+        for (std::size_t index = 0; index < groupTags.size(); ++index)
+        {
+            ignoredBodyTags.erase(groupTags[index]);
+        }
+        AddManualRowFromTags(groupTags, referenceBody);
+        RefreshList();
+    }
+
+    void DeleteSelectedRows()
+    {
+        if (selectedResultBodyTags.empty())
+        {
+            return;
+        }
+
+        for (std::size_t index = 0; index < selectedResultBodyTags.size(); ++index)
+        {
+            if (selectedResultBodyTags[index] != NULL_TAG)
+            {
+                ignoredBodyTags.insert(selectedResultBodyTags[index]);
+            }
+        }
+
+        for (std::size_t rowIndex = manualRows.size(); rowIndex > 0; --rowIndex)
+        {
+            ManualRow& row = manualRows[rowIndex - 1];
+            bool remove = false;
+            for (std::size_t tagIndex = 0; tagIndex < row.bodyTags.size(); ++tagIndex)
+            {
+                if (ContainsTag(selectedResultBodyTags, row.bodyTags[tagIndex]))
+                {
+                    remove = true;
+                    break;
+                }
+            }
+            if (remove)
+            {
+                manualRows.erase(manualRows.begin() + static_cast<std::ptrdiff_t>(rowIndex - 1));
+            }
+        }
+
+        selectedResultBodyTags.clear();
+        ClearHighlightedBodies();
+        RefreshList();
+    }
+
     void HighlightBodies(const std::vector<tag_t>& bodyTags)
     {
         ClearKnownBodyDisplayHighlights();
@@ -3188,6 +3289,7 @@ private:
         if (!selected)
         {
             ClearHighlightedBodies();
+            selectedResultBodyTags.clear();
             return;
         }
 
@@ -3197,9 +3299,11 @@ private:
             if (found == resultNodeBodies.end())
             {
                 ClearHighlightedBodies();
+                selectedResultBodyTags.clear();
                 return;
             }
             ClearBodySelectionDisplay();
+            selectedResultBodyTags = found->second;
             HighlightBodies(found->second);
         }
         catch (const NXOpen::NXException& ex)
@@ -3252,6 +3356,7 @@ private:
         }
 
         ClearHighlightedBodies();
+        selectedResultBodyTags.clear();
         for (std::size_t index = resultNodes.size(); index > 0; --index)
         {
             NXOpen::BlockStyler::Node* node = resultNodes[index - 1];
@@ -3358,37 +3463,14 @@ private:
         std::set<tag_t> acceptedTags;
         for (std::size_t index = 0; index < bodies.size(); ++index)
         {
-            TubeRecord record = ClassifyBody(bodies[index], MinimumRoundDiameter());
-            if (bodies[index] != NULL && bodies[index]->Tag() == 213188 && session != NULL)
+            if (bodies[index] != NULL && IsTagIgnored(bodies[index]->Tag()))
             {
-                const std::string diagnostic = BuildBodyDiagnostic(bodies[index]->Tag(), &record);
-                WriteTagDiagnosticFile(bodies[index]->Tag(), diagnostic);
-                NXOpen::ListingWindow* listing = session->ListingWindow();
-                if (listing != NULL)
-                {
-                    if (!listing->IsOpen())
-                    {
-                        listing->Open();
-                    }
-                    listing->WriteLine(diagnostic.c_str());
-                }
+                continue;
             }
+
+            TubeRecord record = ClassifyBody(bodies[index], MinimumRoundDiameter());
             if (record.kind == TubeKindUnknown)
             {
-                if (bodies[index] != NULL && bodies[index]->Tag() == 72806 && session != NULL)
-                {
-                    const std::string diagnostic = BuildBodyDiagnostic(bodies[index]->Tag(), &record);
-                    WriteTagDiagnosticFile(bodies[index]->Tag(), diagnostic);
-                    NXOpen::ListingWindow* listing = session->ListingWindow();
-                    if (listing != NULL)
-                    {
-                        if (!listing->IsOpen())
-                        {
-                            listing->Open();
-                        }
-                        listing->WriteLine(diagnostic.c_str());
-                    }
-                }
                 continue;
             }
 
@@ -3441,7 +3523,9 @@ private:
         std::set<tag_t> seenTags;
         for (std::size_t index = 0; index < lastRecords.size(); ++index)
         {
-            if (lastRecords[index].body == NULL || lastRecords[index].kind == TubeKindUnknown)
+            if (lastRecords[index].body == NULL ||
+                lastRecords[index].kind == TubeKindUnknown ||
+                RecordIsIgnored(lastRecords[index]))
             {
                 continue;
             }
@@ -3475,6 +3559,39 @@ private:
         return NULL;
     }
 
+    std::vector<StatRow> BuildCurrentRows() const
+    {
+        std::vector<TubeRecord> visibleRecords;
+        visibleRecords.reserve(lastRecords.size());
+        for (std::size_t index = 0; index < lastRecords.size(); ++index)
+        {
+            if (!RecordIsIgnored(lastRecords[index]))
+            {
+                visibleRecords.push_back(lastRecords[index]);
+            }
+        }
+
+        std::vector<StatRow> rows = BuildStats(visibleRecords);
+        for (std::size_t index = 0; index < manualRows.size(); ++index)
+        {
+            if (manualRows[index].kind == TubeKindUnknown)
+            {
+                continue;
+            }
+
+            StatRow row = {};
+            row.kind = manualRows[index].kind;
+            row.name = manualRows[index].name;
+            row.spec = manualRows[index].spec;
+            row.lengthText = manualRows[index].lengthText;
+            row.quantity = manualRows[index].quantity;
+            row.totalLength = manualRows[index].totalLength;
+            row.bodyTags = manualRows[index].bodyTags;
+            rows.push_back(row);
+        }
+        return rows;
+    }
+
     bool AppendSameBodyRows(std::vector<NXOpen::NXString>& items, int setCount)
     {
         if (!IsSameBodyMode())
@@ -3488,6 +3605,19 @@ private:
         {
             const std::vector<tag_t>& groupTags = sameBodyGroups[groupIndex];
             if (groupTags.empty())
+            {
+                continue;
+            }
+            bool groupIgnored = false;
+            for (std::size_t tagIndex = 0; tagIndex < groupTags.size(); ++tagIndex)
+            {
+                if (IsTagIgnored(groupTags[tagIndex]))
+                {
+                    groupIgnored = true;
+                    break;
+                }
+            }
+            if (groupIgnored)
             {
                 continue;
             }
@@ -3551,7 +3681,7 @@ private:
             return;
         }
 
-        const std::vector<StatRow> rows = BuildStats(lastRecords);
+        const std::vector<StatRow> rows = BuildCurrentRows();
         int displayIndex = 1;
         for (std::size_t index = 0; index < rows.size(); ++index)
         {
@@ -3582,10 +3712,53 @@ private:
                 rows[index].bodyTags);
         }
 
+        for (std::size_t index = 0; index < manualRows.size(); ++index)
+        {
+            if (manualRows[index].kind != TubeKindUnknown)
+            {
+                continue;
+            }
+
+            bool rowIgnored = false;
+            for (std::size_t tagIndex = 0; tagIndex < manualRows[index].bodyTags.size(); ++tagIndex)
+            {
+                if (IsTagIgnored(manualRows[index].bodyTags[tagIndex]))
+                {
+                    rowIgnored = true;
+                    break;
+                }
+            }
+            if (rowIgnored)
+            {
+                continue;
+            }
+
+            const int totalQuantity = manualRows[index].quantity * setCount;
+            const std::string rowIndex = FormatSpecValue(static_cast<double>(displayIndex++));
+            std::ostringstream line;
+            line << rowIndex
+                 << " | " << manualRows[index].typeText
+                 << " | " << manualRows[index].name
+                 << " | " << material
+                 << " | " << manualRows[index].spec
+                 << " | " << manualRows[index].lengthText
+                 << " | " << totalQuantity;
+            items.push_back(line.str().c_str());
+            AddResultTreeRow(
+                rowIndex,
+                manualRows[index].typeText,
+                manualRows[index].name,
+                material,
+                manualRows[index].spec,
+                manualRows[index].lengthText,
+                FormatSpecValue(static_cast<double>(totalQuantity)),
+                manualRows[index].bodyTags);
+        }
+
         int unknownCount = 0;
         for (std::size_t index = 0; index < lastRecords.size(); ++index)
         {
-            if (lastRecords[index].kind == TubeKindUnknown)
+            if (lastRecords[index].kind == TubeKindUnknown && !RecordIsIgnored(lastRecords[index]))
             {
                 ++unknownCount;
             }
@@ -3836,7 +4009,7 @@ private:
 
     void ExportTable()
     {
-        const std::vector<StatRow> rows = BuildStats(lastRecords);
+        const std::vector<StatRow> rows = BuildCurrentRows();
         if (rows.empty())
         {
             return;
@@ -3852,8 +4025,13 @@ private:
         HINSTANCE result = ShellExecuteW(NULL, L"open", outputPath.c_str(), NULL, NULL, SW_SHOWNORMAL);
         if (reinterpret_cast<INT_PTR>(result) <= 32)
         {
-            const std::string message = "导出完成，但打开失败:\n" + WideToUtf8(outputPath);
-            OutputDebugStringA(message.c_str());
+            if (ui != NULL && ui->NXMessageBox() != NULL)
+            {
+                ui->NXMessageBox()->Show(
+                    "导出表格",
+                    NXOpen::NXMessageBox::DialogTypeInformation,
+                    "导出完成，但打开失败，请手动打开导出文件。");
+            }
         }
     }
 
@@ -3923,7 +4101,7 @@ private:
 
     void CalculateMaterialUsage()
     {
-        const std::vector<StatRow> rows = BuildStats(lastRecords);
+        const std::vector<StatRow> rows = BuildCurrentRows();
         if (rows.empty())
         {
             return;

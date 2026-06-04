@@ -77,6 +77,36 @@ bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
     return true;
 }
 }
+
+namespace
+{
+std::string Utf8LiteralToLocale(const char* text)
+{
+    if (text == NULL)
+    {
+        return "";
+    }
+
+    int wideLength = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
+    if (wideLength <= 0)
+    {
+        return text;
+    }
+
+    std::vector<wchar_t> wideText(wideLength);
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, &wideText[0], wideLength);
+
+    int localeLength = WideCharToMultiByte(CP_ACP, 0, &wideText[0], -1, NULL, 0, NULL, NULL);
+    if (localeLength <= 0)
+    {
+        return text;
+    }
+
+    std::vector<char> localeText(localeLength);
+    WideCharToMultiByte(CP_ACP, 0, &wideText[0], -1, &localeText[0], localeLength, NULL, NULL);
+    return std::string(&localeText[0]);
+}
+}
 //------------------------------------------------------------------------------
 // Constructor for NX Styler class
 //------------------------------------------------------------------------------
@@ -96,7 +126,7 @@ DaoCuDWG::DaoCuDWG()
         theDialog->AddInitializeHandler(make_callback(this, &DaoCuDWG::initialize_cb));
         theDialog->AddDialogShownHandler(make_callback(this, &DaoCuDWG::dialogShown_cb));
     }
-    catch (exception& ex)
+    catch (exception&)
     {
         //---- Enter your exception handling code here -----
         throw;
@@ -256,6 +286,11 @@ void DaoCuDWG::getchildren(Assemblies::Component* root)
 {
 
     //用户代码
+    if (root == NULL)
+    {
+        return;
+    }
+
     std::vector<Assemblies::Component*> children = root->GetChildren();//获取第一层Component
     for (int i = 0; i < children.size(); i++)
 
@@ -263,9 +298,15 @@ void DaoCuDWG::getchildren(Assemblies::Component* root)
 
         Assemblies::Component* component = children[i];//获取第一层第i个Component
         NXOpen::Part* part1(dynamic_cast<NXOpen::Part*>(theSession->Parts()->FindObject(component->DisplayName())));
-        VecPart.push_back(part1);
+        if (part1 != NULL)
+        {
+            VecPart.push_back(part1);
+        }
         getchildren(component);
-        UF_ASSEM_set_work_part(part1->Tag());
+        if (part1 != NULL)
+        {
+            UF_ASSEM_set_work_part(part1->Tag());
+        }
     }
 
 
@@ -280,6 +321,13 @@ void DaoCuDWG::dialogShown_cb()
 {
     try
     {
+        workPart = theSession->Parts()->Work();
+        displayPart = theSession->Parts()->Display();
+        if (workPart == NULL)
+        {
+            return;
+        }
+
         WorkName1 = workPart->Name();//提取工作部件的文件名
         StrName = WorkName1.GetLocaleText();
         NXString WorkFullPath = workPart->FullPath();//提取工作部件的路径跟名称
@@ -318,25 +366,43 @@ void DaoCuDWG::dialogShown_cb()
 int DaoCuDWG::apply_cb()
 {
     int errorCode = 0;
+    bool ufInitialized = false;
     try
     {
 		UF_initialize();
+        ufInitialized = true;
+        workPart = theSession->Parts()->Work();
+        displayPart = theSession->Parts()->Display();
+        VecPart.clear();
+        if (workPart == NULL)
+        {
+            theUI->NXMessageBox()->Show("提示", NXOpen::NXMessageBox::DialogTypeWarning, "请先打开一个部件!");
+            UF_terminate();
+            ufInitialized = false;
+            return 1;
+        }
+
 		AssTag = workPart->Tag();
 
 		//遍历实例
 		Assemblies::ComponentAssembly* componentassembly = workPart->ComponentAssembly();//获取装配底层（BaseWork为当前工作装配，basedisplaypart为当前显示的装配 两种结果是不一样的）
 		Assemblies::Component* rootcomponent = componentassembly->RootComponent();//获取rootcomponent
-		if (rootcomponent == NULL)//判断rootcomponent是否为空，空即提示不是装配，是就执行遍历
+		if (rootcomponent == NULL)//不是装配时，只导出当前工作部件的所有图纸页
 		{
-			//弹出消息框（四种消息框 错误：DialogTypeError 警告：DialogTypeWarning 提示：DialogTypeInformation 询问：DialogTypeQuestion
-			theUI->NXMessageBox()->Show("提示", NXOpen::NXMessageBox::DialogTypeWarning, "当前没在装配环境!"); //弹出消息框提示
+            VecPart.push_back(workPart);
 		}
 		else//
 		{
 			NXOpen::Part* part1(dynamic_cast<NXOpen::Part*>(theSession->Parts()->FindObject(rootcomponent->DisplayName())));
-			VecPart.push_back(part1);
+            if (part1 != NULL)
+            {
+			    VecPart.push_back(part1);
+            }
 			getchildren(rootcomponent);
-			UF_ASSEM_set_work_part(part1->Tag());
+            if (part1 != NULL)
+            {
+			    UF_ASSEM_set_work_part(part1->Tag());
+            }
 		}
 		//获取零件编号
 		PropertyList* nativeFolderBrowser0Props = nativeFolderBrowser0->GetProperties();
@@ -344,11 +410,16 @@ int DaoCuDWG::apply_cb()
 		delete nativeFolderBrowser0Props;
 		nativeFolderBrowser0Props = NULL;
 
-		for (size_t i = 0; i < VecPart.size(); i++)
+		for (size_t i = 0; i < VecPart.size(); )
 		{
+            if (VecPart[i] == NULL)
+            {
+                VecPart.erase(VecPart.begin() + i);
+                continue;
+            }
 			for (size_t b = i + 1; b < VecPart.size(); )
 			{
-				if (VecPart[i]->Tag() == VecPart[b]->Tag())
+				if (VecPart[b] == NULL || VecPart[i]->Tag() == VecPart[b]->Tag())
 				{
 					VecPart.erase(VecPart.begin() + b);
 				}
@@ -358,6 +429,7 @@ int DaoCuDWG::apply_cb()
 
 				}
 			}
+            i++;
 		}
 
 
@@ -369,9 +441,9 @@ int DaoCuDWG::apply_cb()
 		delete string0Props;
 		string0Props = NULL;
 
-		int Thetoggle0 = true;
-		int Thetoggle01 = false;
-		int Thetoggle02 = false;
+		bool Thetoggle0 = true;
+		bool Thetoggle01 = false;
+		bool Thetoggle02 = false;
 		if (toggle0 != NULL)
 		{
 			PropertyList* toggle0Props = toggle0->GetProperties();
@@ -493,21 +565,26 @@ int DaoCuDWG::apply_cb()
 
 		}
 
-		char ShuLiang[256];
-		sprintf(ShuLiang, "图纸共%d页  零件共%d个", c - 1, d);
+		std::string ShuLiang = Utf8LiteralToLocale("图纸共") + std::to_string(c - 1) +
+            Utf8LiteralToLocale("页  零件共") + std::to_string(d) + Utf8LiteralToLocale("个");
 		UF_UI_open_listing_window();
-		UF_UI_write_listing_window(ShuLiang);
+		UF_UI_write_listing_window(ShuLiang.c_str());
 
 		printPDFBuilder1->Destroy();
 		UF_PART_set_display_part(AssTag);
 		UF_ASSEM_set_work_part(AssTag);
 
 		UF_terminate();
+        ufInitialized = false;
     }
     catch (exception& ex)
     {
         //---- Enter your exception handling code here -----
         errorCode = 1;
+        if (ufInitialized)
+        {
+            UF_terminate();
+        }
         DaoCuDWG::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
     return errorCode;

@@ -62,6 +62,7 @@
 #include <cmath>
 #include <exception>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <random>
 #include <set>
@@ -349,20 +350,22 @@ struct BodyFingerprint
 {
     NXOpen::Body* body;
     tag_t tag;
-    double mass;
-    double centroid[3];
     int edgeCount;
     int faceCount;
     std::vector<LengthBucket> lengthBuckets;
     std::vector<Point3> vertexPoints;
     std::vector<Point3> circleCenterPoints;
-    std::vector<double> circleCenterDistances;
     std::vector<Point3> lineEdgePoints;
     std::vector<Point3> curveEdgePoints;
     std::vector<Point3> arcEdgePoints;
     std::vector<Point3> fullCircleEdgePoints;
+    std::vector<double> lineEdgeLengths;
+    std::vector<double> curveEdgeLengths;
+    std::vector<double> arcEdgeLengths;
+    std::vector<double> fullCircleEdgeLengths;
     std::vector<PlaneFaceFeature> planeFaces;
     std::vector<PlaneFaceGroup> planeFaceGroups;
+    bool planeFeaturesBuilt;
 };
 
 struct RigidTransform3
@@ -574,8 +577,6 @@ void WriteFingerprintDebugLog(
 
     debugLog << "Body " << (bodyIndex + 1)
              << ": tag=" << fingerprint.tag
-             << ", mass=" << FormatDouble(fingerprint.mass)
-             << ", centroid=" << FormatPoint(fingerprint.centroid)
              << ", edges=" << fingerprint.edgeCount
              << ", faces=" << fingerprint.faceCount
              << ", edgeLengthBuckets=" << fingerprint.lengthBuckets.size()
@@ -585,8 +586,13 @@ void WriteFingerprintDebugLog(
              << ", curveEdgePoints=" << fingerprint.curveEdgePoints.size()
              << ", arcEdgePoints=" << fingerprint.arcEdgePoints.size()
              << ", fullCircleEdgePoints=" << fingerprint.fullCircleEdgePoints.size()
+             << ", fullCircleEdgeLengths=" << fingerprint.fullCircleEdgeLengths.size()
+             << ", arcEdgeLengths=" << fingerprint.arcEdgeLengths.size()
+             << ", curveEdgeLengths=" << fingerprint.curveEdgeLengths.size()
+             << ", lineEdgeLengths=" << fingerprint.lineEdgeLengths.size()
              << ", planarFaces=" << fingerprint.planeFaces.size()
              << ", planeFaceGroups=" << fingerprint.planeFaceGroups.size()
+             << ", planeFeaturesBuilt=" << (fingerprint.planeFeaturesBuilt ? "true" : "false")
              << std::endl;
 }
 
@@ -1192,14 +1198,17 @@ void AppendUniqueEdgeVertices(
 
 void AppendEdgeGeometryPoints(
     NXOpen::Edge* edge,
-    const double centroid[3],
-    std::vector<double>& circleCenterDistances,
+    double edgeLength,
     std::vector<Point3>& vertexPoints,
     std::vector<Point3>& circleCenterPoints,
     std::vector<Point3>& lineEdgePoints,
     std::vector<Point3>& curveEdgePoints,
     std::vector<Point3>& arcEdgePoints,
-    std::vector<Point3>& fullCircleEdgePoints)
+    std::vector<Point3>& fullCircleEdgePoints,
+    std::vector<double>& lineEdgeLengths,
+    std::vector<double>& curveEdgeLengths,
+    std::vector<double>& arcEdgeLengths,
+    std::vector<double>& fullCircleEdgeLengths)
 {
     double firstVertex[3] = {};
     double secondVertex[3] = {};
@@ -1223,7 +1232,7 @@ void AppendEdgeGeometryPoints(
             const Point3 centerPoint = PointFromArray(center);
             circleCenterPoints.push_back(centerPoint);
             fullCircleEdgePoints.push_back(centerPoint);
-            circleCenterDistances.push_back(DistanceBetweenPoints(centroid, center));
+            fullCircleEdgeLengths.push_back(edgeLength);
         }
         return;
     }
@@ -1231,16 +1240,19 @@ void AppendEdgeGeometryPoints(
     if (isCircularEdge)
     {
         AppendEdgeVerticesToGroup(vertexCount, firstVertex, secondVertex, arcEdgePoints);
+        arcEdgeLengths.push_back(edgeLength);
         return;
     }
 
     if (edgeType == NXOpen::Edge::EdgeTypeLinear)
     {
         AppendEdgeVerticesToGroup(vertexCount, firstVertex, secondVertex, lineEdgePoints);
+        lineEdgeLengths.push_back(edgeLength);
     }
     else
     {
         AppendEdgeVerticesToGroup(vertexCount, firstVertex, secondVertex, curveEdgePoints);
+        curveEdgeLengths.push_back(edgeLength);
     }
 }
 
@@ -3210,10 +3222,6 @@ BodyFingerprint BuildFingerprint(NXOpen::Body* body)
     BodyFingerprint fingerprint = {};
     fingerprint.body = body;
     fingerprint.tag = body->Tag();
-    AskBodyMassProperties(
-        fingerprint.tag,
-        &fingerprint.mass,
-        fingerprint.centroid);
 
     std::vector<NXOpen::Edge*> edges = body->GetEdges();
     fingerprint.edgeCount = static_cast<int>(edges.size());
@@ -3222,32 +3230,58 @@ BodyFingerprint BuildFingerprint(NXOpen::Body* body)
     edgeLengths.reserve(edges.size());
     fingerprint.vertexPoints.reserve(edges.size() * 2);
     fingerprint.circleCenterPoints.reserve(edges.size());
-    fingerprint.circleCenterDistances.reserve(edges.size());
     fingerprint.lineEdgePoints.reserve(edges.size() * 2);
     fingerprint.curveEdgePoints.reserve(edges.size() * 2);
     fingerprint.arcEdgePoints.reserve(edges.size() * 2);
     fingerprint.fullCircleEdgePoints.reserve(edges.size());
+    fingerprint.lineEdgeLengths.reserve(edges.size());
+    fingerprint.curveEdgeLengths.reserve(edges.size());
+    fingerprint.arcEdgeLengths.reserve(edges.size());
+    fingerprint.fullCircleEdgeLengths.reserve(edges.size());
     for (std::size_t index = 0; index < edges.size(); ++index)
     {
         NXOpen::Edge* edge = edges[index];
-        edgeLengths.push_back(AskEdgeLength(edge->Tag()));
+        const double edgeLength = AskEdgeLength(edge->Tag());
+        edgeLengths.push_back(edgeLength);
         AppendEdgeGeometryPoints(
             edge,
-            fingerprint.centroid,
-            fingerprint.circleCenterDistances,
+            edgeLength,
             fingerprint.vertexPoints,
             fingerprint.circleCenterPoints,
             fingerprint.lineEdgePoints,
             fingerprint.curveEdgePoints,
             fingerprint.arcEdgePoints,
-            fingerprint.fullCircleEdgePoints);
+            fingerprint.fullCircleEdgePoints,
+            fingerprint.lineEdgeLengths,
+            fingerprint.curveEdgeLengths,
+            fingerprint.arcEdgeLengths,
+            fingerprint.fullCircleEdgeLengths);
     }
 
     fingerprint.lengthBuckets = BuildLengthBuckets(edgeLengths);
-    std::sort(fingerprint.circleCenterDistances.begin(), fingerprint.circleCenterDistances.end());
+    std::sort(fingerprint.fullCircleEdgeLengths.begin(), fingerprint.fullCircleEdgeLengths.end(), std::greater<double>());
+    std::sort(fingerprint.arcEdgeLengths.begin(), fingerprint.arcEdgeLengths.end(), std::greater<double>());
+    std::sort(fingerprint.curveEdgeLengths.begin(), fingerprint.curveEdgeLengths.end(), std::greater<double>());
+    std::sort(fingerprint.lineEdgeLengths.begin(), fingerprint.lineEdgeLengths.end(), std::greater<double>());
 
     std::vector<NXOpen::Face*> faces = body->GetFaces();
     fingerprint.faceCount = static_cast<int>(faces.size());
+    fingerprint.planeFeaturesBuilt = false;
+
+    return fingerprint;
+}
+
+void EnsurePlaneFaceFeatures(BodyFingerprint& fingerprint)
+{
+    if (fingerprint.planeFeaturesBuilt || fingerprint.body == NULL)
+    {
+        return;
+    }
+
+    std::vector<NXOpen::Face*> faces = fingerprint.body->GetFaces();
+    fingerprint.faceCount = static_cast<int>(faces.size());
+    fingerprint.planeFaces.clear();
+    fingerprint.planeFaceGroups.clear();
     fingerprint.planeFaces.reserve(faces.size());
     for (std::size_t index = 0; index < faces.size(); ++index)
     {
@@ -3258,8 +3292,7 @@ BodyFingerprint BuildFingerprint(NXOpen::Body* body)
         }
     }
     fingerprint.planeFaceGroups = BuildPlaneFaceGroups(fingerprint.planeFaces);
-
-    return fingerprint;
+    fingerprint.planeFeaturesBuilt = true;
 }
 
 const BodyFingerprint* FindFingerprintByTag(
@@ -3307,10 +3340,111 @@ bool CompareDistanceVectors(
     return true;
 }
 
+bool CompareLengthSequenceDescending(
+    const std::vector<double>& referenceLengths,
+    const std::vector<double>& candidateLengths,
+    const char* lengthName,
+    std::string& rejectReason)
+{
+    if (referenceLengths.size() != candidateLengths.size())
+    {
+        std::ostringstream stream;
+        stream << lengthName << " count mismatch: ref=" << referenceLengths.size()
+               << ", cand=" << candidateLengths.size();
+        rejectReason = stream.str();
+        return false;
+    }
+
+    for (std::size_t index = 0; index < referenceLengths.size(); ++index)
+    {
+        if (!NearlyEqual(referenceLengths[index], candidateLengths[index], kLengthTolerance))
+        {
+            std::ostringstream stream;
+            stream << lengthName << " sorted length " << (index + 1)
+                   << " mismatch: ref=" << FormatDouble(referenceLengths[index])
+                   << ", cand=" << FormatDouble(candidateLengths[index]);
+            rejectReason = stream.str();
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool CoarseBodyCountsMatch(
+    const BodyFingerprint& reference,
+    const BodyFingerprint& candidate,
+    std::string& rejectReason)
+{
+    if (reference.edgeCount != candidate.edgeCount)
+    {
+        std::ostringstream stream;
+        stream << "coarse edge count mismatch: ref=" << reference.edgeCount
+               << ", cand=" << candidate.edgeCount;
+        rejectReason = stream.str();
+        return false;
+    }
+
+    if (reference.faceCount != candidate.faceCount)
+    {
+        std::ostringstream stream;
+        stream << "coarse face count mismatch: ref=" << reference.faceCount
+               << ", cand=" << candidate.faceCount;
+        rejectReason = stream.str();
+        return false;
+    }
+
+    rejectReason.clear();
+    return true;
+}
+
+bool MiddleTypedEdgeLengthsMatch(
+    const BodyFingerprint& reference,
+    const BodyFingerprint& candidate,
+    std::string& rejectReason)
+{
+    if (!CompareLengthSequenceDescending(
+            reference.fullCircleEdgeLengths,
+            candidate.fullCircleEdgeLengths,
+            "middle full circle edge",
+            rejectReason))
+    {
+        return false;
+    }
+
+    if (!CompareLengthSequenceDescending(
+            reference.arcEdgeLengths,
+            candidate.arcEdgeLengths,
+            "middle arc edge",
+            rejectReason))
+    {
+        return false;
+    }
+
+    if (!CompareLengthSequenceDescending(
+            reference.curveEdgeLengths,
+            candidate.curveEdgeLengths,
+            "middle curve edge",
+            rejectReason))
+    {
+        return false;
+    }
+
+    if (!CompareLengthSequenceDescending(
+            reference.lineEdgeLengths,
+            candidate.lineEdgeLengths,
+            "middle line edge",
+            rejectReason))
+    {
+        return false;
+    }
+
+    rejectReason.clear();
+    return true;
+}
+
 struct LocalCoordinateSignature
 {
-    Point3 centroid;
-    std::vector<Point3> vertexLocalPoints;
     std::vector<Point3> lineEdgeLocalPoints;
     std::vector<Point3> curveEdgeLocalPoints;
     std::vector<Point3> arcEdgeLocalPoints;
@@ -3348,9 +3482,7 @@ LocalCoordinateSignature BuildLocalCoordinateSignature(
     const Frame3& frame)
 {
     LocalCoordinateSignature signature = {};
-    signature.centroid = TransformBodyCentroidToLocal(frame, fingerprint.centroid);
 
-    AppendTransformedPoints(frame, fingerprint.vertexPoints, signature.vertexLocalPoints);
     AppendTransformedPoints(frame, fingerprint.lineEdgePoints, signature.lineEdgeLocalPoints);
     AppendTransformedPoints(frame, fingerprint.curveEdgePoints, signature.curveEdgeLocalPoints);
     AppendTransformedPoints(frame, fingerprint.arcEdgePoints, signature.arcEdgeLocalPoints);
@@ -3390,8 +3522,6 @@ LocalCoordinateSignature ApplyCoordinateVariant(
     int variantIndex)
 {
     LocalCoordinateSignature result = {};
-    result.centroid = ApplyCoordinateVariant(signature.centroid, variantIndex);
-    ApplyPointVariant(signature.vertexLocalPoints, variantIndex, result.vertexLocalPoints);
     ApplyPointVariant(signature.lineEdgeLocalPoints, variantIndex, result.lineEdgeLocalPoints);
     ApplyPointVariant(signature.curveEdgeLocalPoints, variantIndex, result.curveEdgeLocalPoints);
     ApplyPointVariant(signature.arcEdgeLocalPoints, variantIndex, result.arcEdgeLocalPoints);
@@ -3522,12 +3652,11 @@ void WriteLocalCoordinateSignatureDebugLog(
         return;
     }
 
-    (*debugLog) << label << " local centroid=" << FormatPoint(signature.centroid) << std::endl;
-    WritePointVectorDebugLog(debugLog, "  unique vertex local points", signature.vertexLocalPoints);
-    WritePointVectorDebugLog(debugLog, "  line edge local points", signature.lineEdgeLocalPoints);
-    WritePointVectorDebugLog(debugLog, "  curve edge local points", signature.curveEdgeLocalPoints);
-    WritePointVectorDebugLog(debugLog, "  arc edge local points", signature.arcEdgeLocalPoints);
+    (*debugLog) << label << std::endl;
     WritePointVectorDebugLog(debugLog, "  full circle center local points", signature.fullCircleEdgeLocalPoints);
+    WritePointVectorDebugLog(debugLog, "  arc edge local points", signature.arcEdgeLocalPoints);
+    WritePointVectorDebugLog(debugLog, "  curve edge local points", signature.curveEdgeLocalPoints);
+    WritePointVectorDebugLog(debugLog, "  line edge local points", signature.lineEdgeLocalPoints);
 }
 
 bool PointsNearlyEqual(const Point3& reference, const Point3& candidate)
@@ -3583,10 +3712,10 @@ bool LocalCoordinateSignaturesMatch(
 {
     const LocalCoordinateSignature candidateVariant = ApplyCoordinateVariant(candidate, variantIndex);
 
-    if (!ComparePointValues(reference.lineEdgeLocalPoints, candidateVariant.lineEdgeLocalPoints, "local line edge point", rejectReason) ||
-        !ComparePointValues(reference.curveEdgeLocalPoints, candidateVariant.curveEdgeLocalPoints, "local curve edge point", rejectReason) ||
+    if (!ComparePointValues(reference.fullCircleEdgeLocalPoints, candidateVariant.fullCircleEdgeLocalPoints, "local full circle center", rejectReason) ||
         !ComparePointValues(reference.arcEdgeLocalPoints, candidateVariant.arcEdgeLocalPoints, "local arc edge endpoint", rejectReason) ||
-        !ComparePointValues(reference.fullCircleEdgeLocalPoints, candidateVariant.fullCircleEdgeLocalPoints, "local full circle center", rejectReason))
+        !ComparePointValues(reference.curveEdgeLocalPoints, candidateVariant.curveEdgeLocalPoints, "local curve edge point", rejectReason) ||
+        !ComparePointValues(reference.lineEdgeLocalPoints, candidateVariant.lineEdgeLocalPoints, "local line edge point", rejectReason))
     {
         return false;
     }
@@ -3946,8 +4075,8 @@ bool BodiesMatchByAnchorPlaneCoordinates(
 }
 
 bool CompareFingerprints(
-    const BodyFingerprint& reference,
-    const BodyFingerprint& candidate,
+    BodyFingerprint& reference,
+    BodyFingerprint& candidate,
     std::ofstream* debugLog,
     int* coordinateDebugStep,
     std::vector<tag_t>* activeDebugObjectTags,
@@ -3955,74 +4084,18 @@ bool CompareFingerprints(
     BodyMatchInfo* matchInfo,
     std::string& rejectReason)
 {
-    if (!NearlyEqual(reference.mass, candidate.mass, kMassTolerance))
-    {
-        std::ostringstream stream;
-        stream << "mass mismatch: ref=" << FormatDouble(reference.mass)
-               << ", cand=" << FormatDouble(candidate.mass);
-        rejectReason = stream.str();
-        return false;
-    }
-
-    if (reference.edgeCount != candidate.edgeCount)
-    {
-        std::ostringstream stream;
-        stream << "edge count mismatch: ref=" << reference.edgeCount
-               << ", cand=" << candidate.edgeCount;
-        rejectReason = stream.str();
-        return false;
-    }
-
-    if (reference.faceCount != candidate.faceCount)
-    {
-        std::ostringstream stream;
-        stream << "face count mismatch: ref=" << reference.faceCount
-               << ", cand=" << candidate.faceCount;
-        rejectReason = stream.str();
-        return false;
-    }
-
-    if (reference.lengthBuckets.size() != candidate.lengthBuckets.size())
-    {
-        std::ostringstream stream;
-        stream << "edge-length bucket count mismatch: ref=" << reference.lengthBuckets.size()
-               << ", cand=" << candidate.lengthBuckets.size();
-        rejectReason = stream.str();
-        return false;
-    }
-
-    for (std::size_t index = 0; index < reference.lengthBuckets.size(); ++index)
-    {
-        const LengthBucket& lhs = reference.lengthBuckets[index];
-        const LengthBucket& rhs = candidate.lengthBuckets[index];
-        if (!NearlyEqual(lhs.length, rhs.length, kLengthTolerance))
-        {
-            std::ostringstream stream;
-            stream << "edge-length bucket " << (index + 1) << " length mismatch: ref="
-                   << FormatDouble(lhs.length) << ", cand=" << FormatDouble(rhs.length);
-            rejectReason = stream.str();
-            return false;
-        }
-
-        if (lhs.count != rhs.count)
-        {
-            std::ostringstream stream;
-            stream << "edge-length bucket " << (index + 1) << " count mismatch: length="
-                   << FormatDouble(lhs.length) << ", ref=" << lhs.count
-                   << ", cand=" << rhs.count;
-            rejectReason = stream.str();
-            return false;
-        }
-    }
-
-    if (!CompareDistanceVectors(
-            reference.circleCenterDistances,
-            candidate.circleCenterDistances,
-            "centroid-full-circle-center distance",
-            rejectReason))
+    if (!CoarseBodyCountsMatch(reference, candidate, rejectReason))
     {
         return false;
     }
+
+    if (!MiddleTypedEdgeLengthsMatch(reference, candidate, rejectReason))
+    {
+        return false;
+    }
+
+    EnsurePlaneFaceFeatures(reference);
+    EnsurePlaneFaceFeatures(candidate);
 
     if (!BodiesMatchByAnchorPlaneCoordinates(
             reference,
@@ -4085,7 +4158,6 @@ SameBodySearchData BuildSameBodySearchData(
             if (debugLog != NULL)
             {
                 WriteFingerprintDebugLog(*debugLog, index, fingerprint);
-                WritePlaneFaceGroupsDebugLog(*debugLog, index, fingerprint);
             }
             data.fingerprints.push_back(fingerprint);
         }
@@ -4245,7 +4317,8 @@ public:
           assemblyList(NULL),
           assemblyListReady(false),
           suppressBodySelectionUpdate(false),
-          previewRowHighlightActive(false)
+          previewRowHighlightActive(false),
+          cachedSearchDataValid(false)
     {
         ResetPreviewDebugLog();
         WritePreviewDebugLog("constructor begin, dialogPath=" + GetDialogFullPath());
@@ -4289,6 +4362,9 @@ private:
     std::vector<NXOpen::TaggedObject*> searchSelectionObjects;
     bool suppressBodySelectionUpdate;
     bool previewRowHighlightActive;
+    SameBodySearchData cachedSearchData;
+    std::vector<tag_t> cachedSearchSelectionTags;
+    bool cachedSearchDataValid;
 
     void Initialize()
     {
@@ -4378,6 +4454,7 @@ private:
                 {
                     ClearAssemblyList();
                     previewSelectionTags.clear();
+                    ClearCachedSearchData();
                     WritePreviewDebugLog("Update routed to bodySelection clear");
                 }
                 else
@@ -4959,6 +5036,32 @@ private:
         return rows;
     }
 
+    void ClearCachedSearchData()
+    {
+        DeleteDebugCoordinateObjects(&cachedSearchData.activeDebugObjectTags);
+        cachedSearchData = SameBodySearchData();
+        cachedSearchSelectionTags.clear();
+        cachedSearchDataValid = false;
+        WritePreviewDebugLog("ClearCachedSearchData");
+    }
+
+    bool CachedSearchMatchesSelection(const std::vector<tag_t>& selectionTags) const
+    {
+        return cachedSearchDataValid && selectionTags == cachedSearchSelectionTags;
+    }
+
+    void StoreCachedSearchData(
+        const SameBodySearchData& data,
+        const std::vector<tag_t>& selectionTags)
+    {
+        ClearCachedSearchData();
+        cachedSearchData = data;
+        cachedSearchData.activeDebugObjectTags.clear();
+        cachedSearchSelectionTags = selectionTags;
+        cachedSearchDataValid = true;
+        WritePreviewDebugLog("StoreCachedSearchData");
+    }
+
     void RefreshAssemblyPreview()
     {
         WritePreviewDebugLog("RefreshAssemblyPreview begin");
@@ -4987,7 +5090,15 @@ private:
         if (selectedBodies.empty())
         {
             ClearAssemblyList();
+            ClearCachedSearchData();
             WritePreviewDebugLog("RefreshAssemblyPreview stopped: empty selection");
+            return;
+        }
+
+        if (CachedSearchMatchesSelection(selectionTags))
+        {
+            WritePreviewDebugLog("RefreshAssemblyPreview using cached search data");
+            PopulateAssemblyList(BuildPreviewRows(cachedSearchData.assemblyGroups));
             return;
         }
 
@@ -5001,6 +5112,7 @@ private:
             WritePreviewDebugLog(line.str());
         }
         DeleteDebugCoordinateObjects(&data.activeDebugObjectTags);
+        StoreCachedSearchData(data, selectionTags);
         PopulateAssemblyList(BuildPreviewRows(data.assemblyGroups));
         WritePreviewDebugLog("RefreshAssemblyPreview end");
     }
@@ -5035,7 +5147,19 @@ private:
         {
             ClearAssemblyList();
             previewSelectionTags.clear();
+            ClearCachedSearchData();
             WritePreviewDebugLog("BuildAssemblyPreviewFromSelection stopped: empty selection");
+            return;
+        }
+
+        const std::vector<tag_t> selectionTags = GetCurrentSelectionTags();
+        if (CachedSearchMatchesSelection(selectionTags))
+        {
+            WritePreviewDebugLog("BuildAssemblyPreviewFromSelection using cached search data");
+            PopulateAssemblyList(BuildPreviewRows(cachedSearchData.assemblyGroups));
+            previewSelectionTags = selectionTags;
+            StoreSearchSelectionFromBodySelection();
+            previewRowHighlightActive = false;
             return;
         }
 
@@ -5049,8 +5173,9 @@ private:
             WritePreviewDebugLog(line.str());
         }
         DeleteDebugCoordinateObjects(&data.activeDebugObjectTags);
+        StoreCachedSearchData(data, selectionTags);
         PopulateAssemblyList(BuildPreviewRows(data.assemblyGroups));
-        previewSelectionTags = GetCurrentSelectionTags();
+        previewSelectionTags = selectionTags;
         StoreSearchSelectionFromBodySelection();
         previewRowHighlightActive = false;
 
@@ -5157,6 +5282,53 @@ private:
         }
     }
 
+    void ExecuteCachedSameBodySearch()
+    {
+        WritePreviewDebugLog("ExecuteCachedSameBodySearch begin");
+        std::vector<tag_t> colorFailedTags;
+        AssemblyConversionResult assemblyConversionResult = {};
+        const std::vector<std::vector<tag_t> >& matchedGroups =
+            cachedSearchData.matchedGroups;
+        const std::vector<MatchedBodyGroup>& assemblyGroups =
+            cachedSearchData.assemblyGroups;
+
+        if (!cachedSearchData.coordinateDebugCanceled)
+        {
+            DeleteDebugCoordinateObjects(&cachedSearchData.activeDebugObjectTags);
+            if (gColorMatchedBodies)
+            {
+                ColorMatchedGroups(session, matchedGroups, colorFailedTags);
+            }
+            if (kConvertMatchedGroupsToAssembly)
+            {
+                const std::vector<std::string> componentNames =
+                    ResolveComponentNames(assemblyGroups);
+                assemblyConversionResult =
+                    ConvertMatchedGroupsToAssembly(session, assemblyGroups, componentNames);
+                {
+                    std::ostringstream line;
+                    line << "Cached assembly conversion convertedGroups="
+                         << assemblyConversionResult.convertedGroups
+                         << ", components=" << assemblyConversionResult.createdComponents
+                         << ", deletedOriginalBodies=" << assemblyConversionResult.deletedOriginalBodies
+                         << ", failedGroups=" << assemblyConversionResult.failedGroups;
+                    WritePreviewDebugLog(line.str());
+                }
+                PopulateAssemblyList(BuildPreviewRows(assemblyGroups));
+            }
+        }
+
+        {
+            std::ostringstream line;
+            line << "ExecuteCachedSameBodySearch end, matched="
+                 << matchedGroups.size()
+                 << ", assemblyInputGroups=" << assemblyGroups.size()
+                 << ", colorFailed=" << colorFailedTags.size()
+                 << ", convertedGroups=" << assemblyConversionResult.convertedGroups;
+            WritePreviewDebugLog(line.str());
+        }
+    }
+
     int ConvertSelectedBodies()
     {
         WritePreviewDebugLog("ConvertSelectedBodies begin");
@@ -5190,7 +5362,18 @@ private:
             StoreSearchSelectionFromBodySelection();
 
             UpdateSelectedOutputFolder();
-            RunSameBodySearch(selectedBodies);
+            const std::vector<tag_t> selectionTags = GetCurrentSelectionTags();
+            if (CachedSearchMatchesSelection(selectionTags))
+            {
+                WritePreviewDebugLog("ConvertSelectedBodies using cached search data");
+                ExecuteCachedSameBodySearch();
+                ClearCachedSearchData();
+            }
+            else
+            {
+                RunSameBodySearch(selectedBodies);
+                ClearCachedSearchData();
+            }
             WritePreviewDebugLog("ConvertSelectedBodies end");
             return 0;
         }
@@ -5396,12 +5579,6 @@ private:
                          << groupTags.size()
                          << Utf8Text("\xEF\xBC\x8C\xE6\xA0\x87\xE7\xAD\xBE\x3D");
                     AppendTags(line, groupTags);
-                    const BodyFingerprint* targetFingerprint = FindFingerprintByTag(fingerprints, groupTags[0]);
-                    if (targetFingerprint != NULL)
-                    {
-                        line << Utf8Text("\xEF\xBC\x8C\xE8\xB4\xA8\xE5\xBF\x83\x3D")
-                             << FormatPoint(targetFingerprint->centroid);
-                    }
                     WriteLineUtf8(listingWindow, line.str());
                 }
             }

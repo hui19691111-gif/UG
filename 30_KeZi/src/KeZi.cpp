@@ -1093,6 +1093,31 @@ void WriteStringAttribute(NXObject* object, const std::string& name, const std::
     }
 }
 
+void SetObjectNameSafe(Session* session, NXObject* object, const std::string& name)
+{
+    if (object == nullptr || name.empty())
+    {
+        return;
+    }
+
+    try
+    {
+        object->SetName(name.c_str());
+    }
+    catch (const NXException& ex)
+    {
+        Log(session, std::string("体名修改失败: ") + ex.Message());
+    }
+    catch (const std::exception& ex)
+    {
+        Log(session, std::string("体名修改失败: ") + ex.what());
+    }
+    catch (...)
+    {
+        Log(session, "体名修改失败: 未知错误");
+    }
+}
+
 std::string FirstAvailableAttribute(NXObject* primary, NXObject* secondary, const std::vector<std::string>& names)
 {
     for (const std::string& name : names)
@@ -3445,6 +3470,8 @@ private:
         {
             WriteStringAttribute(lastBody_, "编号", lastResolvedText_);
             Log(session_, std::string("已写入体属性 编号=") + lastResolvedText_);
+            SetObjectNameSafe(session_, lastBody_, lastResolvedText_);
+            Log(session_, std::string("已修改体名=") + lastResolvedText_);
         }
         if (TextTemplateHasSerial(lastTextTemplate_) && textValue_ != nullptr)
         {

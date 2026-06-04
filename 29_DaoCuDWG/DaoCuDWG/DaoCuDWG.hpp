@@ -22,6 +22,8 @@
 #include <uf_defs.h>
 #include <uf_ui_types.h>
 #include <iostream>
+#include <string>
+#include <vector>
 #include <afx.h>
 #include <shlwapi.h>
 #pragma comment (lib,"shlwapi.lib")
