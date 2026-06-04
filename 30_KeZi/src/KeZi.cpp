@@ -46,6 +46,8 @@
 #include <NXOpen/BlockStyler_Toggle.hxx>
 #include <NXOpen/BlockStyler_UIBlock.hxx>
 
+#include <NXOpen/Assemblies_Component.hxx>
+
 #include <uf.h>
 #include <uf_assem.h>
 #include <uf_modl.h>
@@ -103,7 +105,26 @@ const char* kDefaultConfigText =
     "流水号前缀=\r\n"
     "流水号样式=01\r\n"
     "起始号=1\r\n"
-    "补零位数=2\r\n";
+    "补零位数=2\r\n"
+    "字体=Arial\r\n"
+    "高度=10\r\n"
+    "深度=0.3\r\n"
+    "颜色=186\r\n"
+    "边界=0\r\n"
+    "边界深度=0.3\r\n"
+    "边界颜色=186\r\n"
+    "长度=100\r\n"
+    "W比例=100\r\n"
+    "锁定宽高比=1\r\n"
+    "剪切=0\r\n"
+    "文本层=254\r\n"
+    "凸起文本=0\r\n"
+    "V形文本=0\r\n"
+    "模式=0\r\n"
+    "长向居中=0\r\n"
+    "短向居中=0\r\n"
+    "X长边=0\r\n"
+    "X短边=0\r\n";
 
 struct KeZiConfig
 {
@@ -114,6 +135,25 @@ struct KeZiConfig
     std::string serialStyle = "01";
     int serialStart = 1;
     int serialPad = 2;
+    int mode = 0;
+    std::string fontName = "Arial";
+    double height = 10.0;
+    double depth = 0.3;
+    int textColor = 186;
+    int boundary = 0;
+    double boundaryDepth = 0.3;
+    int boundaryColor = 186;
+    double textLength = 100.0;
+    double widthScale = 100.0;
+    bool lockAspect = true;
+    double shear = 0.0;
+    int layer = 254;
+    bool embossed = false;
+    bool vShape = false;
+    bool centerLongSide = false;
+    bool centerShortSide = false;
+    bool xLongSide = false;
+    bool xShortSide = false;
 };
 
 void ApplyPlanarFaceSelectionFilter(BlockStyler::SelectObject* selection)
@@ -494,6 +534,34 @@ int ToInt(const std::string& value, const int fallback)
     }
 }
 
+double ToDouble(const std::string& value, const double fallback)
+{
+    try
+    {
+        return std::stod(value);
+    }
+    catch (...)
+    {
+        return fallback;
+    }
+}
+
+bool ToBool(const std::string& value, const bool fallback)
+{
+    const std::string text = Trim(value);
+    if (text == "1" || text == "true" || text == "True" || text == "TRUE" ||
+        text == "yes" || text == "Yes" || text == "YES")
+    {
+        return true;
+    }
+    if (text == "0" || text == "false" || text == "False" || text == "FALSE" ||
+        text == "no" || text == "No" || text == "NO")
+    {
+        return false;
+    }
+    return fallback;
+}
+
 std::string ValueOr(const std::map<std::string, std::string>& values,
                     const std::vector<std::string>& keys,
                     const std::string& fallback)
@@ -527,6 +595,25 @@ KeZiConfig LoadConfig()
     config.serialStyle = ValueOr(values, {"流水号样式", "serialStyle", "style"}, config.serialStyle);
     config.serialStart = ToInt(ValueOr(values, {"起始号", "startNumber", "serialStart"}, std::to_string(config.serialStart)), config.serialStart);
     config.serialPad = ToInt(ValueOr(values, {"补零位数", "serialPad", "padWidth"}, std::to_string(config.serialPad)), config.serialPad);
+    config.mode = ToInt(ValueOr(values, {"模式", "mode"}, std::to_string(config.mode)), config.mode);
+    config.fontName = ValueOr(values, {"字体", "fontName"}, config.fontName);
+    config.height = ToDouble(ValueOr(values, {"高度", "height"}, FormatNumber(config.height)), config.height);
+    config.depth = ToDouble(ValueOr(values, {"深度", "depth"}, FormatNumber(config.depth)), config.depth);
+    config.textColor = ToInt(ValueOr(values, {"颜色", "textColor"}, std::to_string(config.textColor)), config.textColor);
+    config.boundary = ToInt(ValueOr(values, {"边界", "boundary"}, std::to_string(config.boundary)), config.boundary);
+    config.boundaryDepth = ToDouble(ValueOr(values, {"边界深度", "boundaryDepth"}, FormatNumber(config.boundaryDepth)), config.boundaryDepth);
+    config.boundaryColor = ToInt(ValueOr(values, {"边界颜色", "boundaryColor"}, std::to_string(config.boundaryColor)), config.boundaryColor);
+    config.textLength = ToDouble(ValueOr(values, {"长度", "textLength"}, FormatNumber(config.textLength)), config.textLength);
+    config.widthScale = ToDouble(ValueOr(values, {"W比例", "widthScale"}, FormatNumber(config.widthScale)), config.widthScale);
+    config.lockAspect = ToBool(ValueOr(values, {"锁定宽高比", "lockAspect"}, config.lockAspect ? "1" : "0"), config.lockAspect);
+    config.shear = ToDouble(ValueOr(values, {"剪切", "shear"}, FormatNumber(config.shear)), config.shear);
+    config.layer = ToInt(ValueOr(values, {"文本层", "layer"}, std::to_string(config.layer)), config.layer);
+    config.embossed = ToBool(ValueOr(values, {"凸起文本", "embossed"}, config.embossed ? "1" : "0"), config.embossed);
+    config.vShape = ToBool(ValueOr(values, {"V形文本", "vShape"}, config.vShape ? "1" : "0"), config.vShape);
+    config.centerLongSide = ToBool(ValueOr(values, {"长向居中", "centerLongSide"}, config.centerLongSide ? "1" : "0"), config.centerLongSide);
+    config.centerShortSide = ToBool(ValueOr(values, {"短向居中", "centerShortSide"}, config.centerShortSide ? "1" : "0"), config.centerShortSide);
+    config.xLongSide = ToBool(ValueOr(values, {"X长边", "xLongSide"}, config.xLongSide ? "1" : "0"), config.xLongSide);
+    config.xShortSide = ToBool(ValueOr(values, {"X短边", "xShortSide"}, config.xShortSide ? "1" : "0"), config.xShortSide);
     if (config.attributeNames.empty())
     {
         config.attributeNames = {"编号", "PART_NO", "ITEM_NO", "Name"};
@@ -630,13 +717,8 @@ bool ReadToggle(Toggle* block, const bool fallback)
     return block == nullptr ? fallback : block->Value();
 }
 
-NXColor* ReadColor(Part* part, ObjectColorPicker* block, const int fallbackColor)
+int ReadColorIndex(ObjectColorPicker* block, const int fallbackColor)
 {
-    if (part == nullptr || part->Colors() == nullptr)
-    {
-        return nullptr;
-    }
-
     int color = fallbackColor;
     if (block != nullptr)
     {
@@ -646,7 +728,38 @@ NXColor* ReadColor(Part* part, ObjectColorPicker* block, const int fallbackColor
             color = values.front();
         }
     }
-    return part->Colors()->Find(color);
+    return color;
+}
+
+NXColor* ReadColor(Part* part, ObjectColorPicker* block, const int fallbackColor)
+{
+    if (part == nullptr || part->Colors() == nullptr)
+    {
+        return nullptr;
+    }
+
+    return part->Colors()->Find(ReadColorIndex(block, fallbackColor));
+}
+
+void SetEnumValue(Enumeration* block, const int value)
+{
+    if (block == nullptr)
+    {
+        return;
+    }
+    std::unique_ptr<PropertyList> properties(block->GetProperties());
+    if (properties)
+    {
+        properties->SetEnum("Value", value);
+    }
+}
+
+void SetColorValue(ObjectColorPicker* block, const int color)
+{
+    if (block != nullptr)
+    {
+        block->SetValue(std::vector<int>{color});
+    }
 }
 
 std::string ReadAttribute(NXObject* object, const std::string& name)
@@ -658,6 +771,10 @@ std::string ReadAttribute(NXObject* object, const std::string& name)
 
     try
     {
+        if (object->HasUserAttribute(name.c_str(), NXObject::AttributeTypeAny, -1))
+        {
+            return ToString(object->GetUserAttributeAsString(name.c_str(), NXObject::AttributeTypeAny, -1));
+        }
         if (object->HasUserAttribute(name.c_str(), NXObject::AttributeTypeString, -1))
         {
             return ToString(object->GetStringUserAttribute(name.c_str(), -1));
@@ -667,6 +784,297 @@ std::string ReadAttribute(NXObject* object, const std::string& name)
     {
     }
     return std::string();
+}
+
+std::wstring WideFromUtf8(const std::string& text)
+{
+    if (text.empty())
+    {
+        return std::wstring();
+    }
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+    if (needed <= 1)
+    {
+        return std::wstring();
+    }
+    std::wstring wide(static_cast<std::size_t>(needed - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wide.data(), needed);
+    return wide;
+}
+
+struct MenuDialogState
+{
+    std::vector<std::wstring> items;
+    int selected = -1;
+    bool done = false;
+    HWND list = nullptr;
+};
+
+LRESULT CALLBACK MenuDialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    constexpr int kListId = 1001;
+    MenuDialogState* state = reinterpret_cast<MenuDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message)
+    {
+    case WM_CREATE:
+    {
+        CREATESTRUCTW* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<MenuDialogState*>(create->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        state->list = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            L"LISTBOX",
+            nullptr,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+            10,
+            10,
+            300,
+            190,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kListId)),
+            reinterpret_cast<HINSTANCE>(&__ImageBase),
+            nullptr);
+        SendMessageW(state->list, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        for (const std::wstring& item : state->items)
+        {
+            SendMessageW(state->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
+        }
+        SendMessageW(state->list, LB_SETCURSEL, 0, 0);
+
+        HWND ok = CreateWindowExW(
+            0,
+            L"BUTTON",
+            L"确定",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            150,
+            210,
+            75,
+            26,
+            hwnd,
+            reinterpret_cast<HMENU>(IDOK),
+            reinterpret_cast<HINSTANCE>(&__ImageBase),
+            nullptr);
+        HWND cancel = CreateWindowExW(
+            0,
+            L"BUTTON",
+            L"取消",
+            WS_CHILD | WS_VISIBLE,
+            235,
+            210,
+            75,
+            26,
+            hwnd,
+            reinterpret_cast<HMENU>(IDCANCEL),
+            reinterpret_cast<HINSTANCE>(&__ImageBase),
+            nullptr);
+        SendMessageW(ok, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        SendMessageW(cancel, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (state != nullptr && LOWORD(wParam) == kListId && HIWORD(wParam) == LBN_DBLCLK)
+        {
+            state->selected = static_cast<int>(SendMessageW(state->list, LB_GETCURSEL, 0, 0));
+            state->done = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (state != nullptr && LOWORD(wParam) == IDOK)
+        {
+            state->selected = static_cast<int>(SendMessageW(state->list, LB_GETCURSEL, 0, 0));
+            state->done = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (state != nullptr && LOWORD(wParam) == IDCANCEL)
+        {
+            state->selected = -1;
+            state->done = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        if (state != nullptr)
+        {
+            state->selected = -1;
+            state->done = true;
+        }
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+int AskMenuIndex(const std::string& title, const std::vector<std::string>& items)
+{
+    if (items.empty())
+    {
+        return -1;
+    }
+
+    MenuDialogState state;
+    for (const std::string& item : items)
+    {
+        state.items.push_back(WideFromUtf8(item));
+    }
+
+    HINSTANCE instance = reinterpret_cast<HINSTANCE>(&__ImageBase);
+    static bool registered = false;
+    if (!registered)
+    {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = MenuDialogProc;
+        wc.hInstance = instance;
+        wc.lpszClassName = L"KeZiMenuDialog";
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        RegisterClassW(&wc);
+        registered = true;
+    }
+
+    HWND owner = GetActiveWindow();
+    RECT ownerRect = {};
+    GetWindowRect(owner, &ownerRect);
+    const int width = 340;
+    const int height = 285;
+    int x = ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2;
+    int y = ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2;
+    if (owner == nullptr || x < 0 || y < 0)
+    {
+        x = CW_USEDEFAULT;
+        y = CW_USEDEFAULT;
+    }
+
+    HWND hwnd = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        L"KeZiMenuDialog",
+        WideFromUtf8(title).c_str(),
+        WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        x,
+        y,
+        width,
+        height,
+        owner,
+        nullptr,
+        instance,
+        &state);
+    if (hwnd == nullptr)
+    {
+        return -1;
+    }
+
+    if (owner != nullptr)
+    {
+        EnableWindow(owner, FALSE);
+    }
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG msg = {};
+    while (!state.done && GetMessageW(&msg, nullptr, 0, 0) > 0)
+    {
+        if (!IsDialogMessageW(hwnd, &msg))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    if (owner != nullptr)
+    {
+        EnableWindow(owner, TRUE);
+        SetActiveWindow(owner);
+    }
+    return state.selected >= 0 && state.selected < static_cast<int>(items.size()) ? state.selected : -1;
+}
+
+std::string AskMenuItemPaged(const std::string& title, const std::vector<std::string>& items)
+{
+    if (items.empty())
+    {
+        return std::string();
+    }
+
+    constexpr std::size_t kPageSize = 12;
+    std::size_t page = 0;
+    while (true)
+    {
+        const std::size_t begin = page * kPageSize;
+        const std::size_t end = std::min(begin + kPageSize, items.size());
+        std::vector<std::string> pageItems;
+        std::vector<int> pageMap;
+        for (std::size_t i = begin; i < end; ++i)
+        {
+            pageItems.push_back(items[i]);
+            pageMap.push_back(static_cast<int>(i));
+        }
+        if (page > 0)
+        {
+            pageItems.push_back("上一页");
+            pageMap.push_back(-2);
+        }
+        if (end < items.size())
+        {
+            pageItems.push_back("下一页");
+            pageMap.push_back(-3);
+        }
+
+        const int selected = AskMenuIndex(title, pageItems);
+        if (selected < 0)
+        {
+            return std::string();
+        }
+        const int mapped = pageMap[static_cast<std::size_t>(selected)];
+        if (mapped == -2)
+        {
+            --page;
+            continue;
+        }
+        if (mapped == -3)
+        {
+            ++page;
+            continue;
+        }
+        return items[static_cast<std::size_t>(mapped)];
+    }
+}
+
+std::vector<std::string> UserAttributeNames(NXObject* object)
+{
+    std::vector<std::string> names;
+    if (object == nullptr)
+    {
+        return names;
+    }
+
+    try
+    {
+        const std::vector<NXObject::AttributeInformation> attributes = object->GetUserAttributes();
+        for (const NXObject::AttributeInformation& attribute : attributes)
+        {
+            if (attribute.Unset || attribute.OwnedBySystem)
+            {
+                continue;
+            }
+            std::string title = Trim(ToString(attribute.Title));
+            if (title.empty())
+            {
+                continue;
+            }
+            if (std::find(names.begin(), names.end(), title) == names.end())
+            {
+                names.push_back(title);
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+
+    std::sort(names.begin(), names.end());
+    return names;
 }
 
 void WriteStringAttribute(NXObject* object, const std::string& name, const std::string& value)
@@ -750,6 +1158,184 @@ NXObject* ResolveBodyFromFace(Face* face)
         return nullptr;
     }
     return dynamic_cast<NXObject*>(NXObjectManager::Get(bodyTag));
+}
+
+Part* SetWorkPartForFace(Session* session, Face* face)
+{
+    if (session == nullptr || face == nullptr)
+    {
+        return nullptr;
+    }
+
+    PartCollection* parts = session->Parts();
+    if (parts == nullptr)
+    {
+        return nullptr;
+    }
+
+    if (face->IsOccurrence())
+    {
+        Assemblies::Component* component = face->OwningComponent();
+        if (component != nullptr)
+        {
+            PartLoadStatus* loadStatus = nullptr;
+            parts->SetWorkComponent(
+                component,
+                PartCollection::RefsetOptionCurrent,
+                PartCollection::WorkComponentOptionGiven,
+                &loadStatus);
+            delete loadStatus;
+            return parts->Work();
+        }
+    }
+
+    BasePart* owningBasePart = face->OwningPart();
+    Part* owningPart = dynamic_cast<Part*>(owningBasePart);
+    if (owningPart != nullptr && parts->Work() != owningPart)
+    {
+        parts->SetWork(owningPart);
+    }
+    return parts->Work();
+}
+
+void RestoreWorkContext(PartCollection* parts, BasePart* previousWorkPart, Assemblies::Component* previousWorkComponent)
+{
+    if (parts == nullptr)
+    {
+        return;
+    }
+
+    try
+    {
+        if (previousWorkComponent != nullptr)
+        {
+            PartLoadStatus* loadStatus = nullptr;
+            parts->SetWorkComponent(
+                previousWorkComponent,
+                PartCollection::RefsetOptionCurrent,
+                PartCollection::WorkComponentOptionGiven,
+                &loadStatus);
+            delete loadStatus;
+        }
+        else if (previousWorkPart != nullptr)
+        {
+            parts->SetWork(previousWorkPart);
+        }
+        else
+        {
+            PartLoadStatus* loadStatus = nullptr;
+            parts->SetWorkComponent(nullptr, &loadStatus);
+            delete loadStatus;
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+class WorkContextGuard
+{
+public:
+    WorkContextGuard(Session* session, Face* targetFace)
+    {
+        if (session == nullptr || targetFace == nullptr)
+        {
+            return;
+        }
+        parts_ = session->Parts();
+        if (parts_ == nullptr)
+        {
+            return;
+        }
+        previousWorkPart_ = parts_->BaseWork();
+        previousWorkComponent_ = parts_->WorkComponent();
+        targetWorkPart_ = SetWorkPartForFace(session, targetFace);
+    }
+
+    ~WorkContextGuard()
+    {
+        Restore();
+    }
+
+    WorkContextGuard(const WorkContextGuard&) = delete;
+    WorkContextGuard& operator=(const WorkContextGuard&) = delete;
+
+    Part* WorkPart() const
+    {
+        return targetWorkPart_;
+    }
+
+    void Restore()
+    {
+        if (!restored_)
+        {
+            RestoreWorkContext(parts_, previousWorkPart_, previousWorkComponent_);
+            restored_ = true;
+        }
+    }
+
+private:
+    PartCollection* parts_ = nullptr;
+    BasePart* previousWorkPart_ = nullptr;
+    Assemblies::Component* previousWorkComponent_ = nullptr;
+    Part* targetWorkPart_ = nullptr;
+    bool restored_ = false;
+};
+
+Face* PrototypeFace(Face* face)
+{
+    if (face == nullptr || !face->IsOccurrence())
+    {
+        return face;
+    }
+
+    INXObject* prototype = face->Prototype();
+    Face* prototypeFace = dynamic_cast<Face*>(prototype);
+    return prototypeFace != nullptr ? prototypeFace : face;
+}
+
+Point3d ComponentPointToPrototype(Assemblies::Component* component, const Point3d& point)
+{
+    if (component == nullptr)
+    {
+        return point;
+    }
+
+    Point3d origin;
+    Matrix3x3 orientation;
+    component->GetPosition(&origin, &orientation);
+    const Vector3d delta(point.X - origin.X, point.Y - origin.Y, point.Z - origin.Z);
+    return Point3d(
+        delta.X * orientation.Xx + delta.Y * orientation.Xy + delta.Z * orientation.Xz,
+        delta.X * orientation.Yx + delta.Y * orientation.Yy + delta.Z * orientation.Yz,
+        delta.X * orientation.Zx + delta.Y * orientation.Zy + delta.Z * orientation.Zz);
+}
+
+Vector3d ComponentVectorToPrototype(Assemblies::Component* component, const Vector3d& vector)
+{
+    if (component == nullptr)
+    {
+        return vector;
+    }
+
+    Point3d origin;
+    Matrix3x3 orientation;
+    component->GetPosition(&origin, &orientation);
+    return Vector3d(
+        vector.X * orientation.Xx + vector.Y * orientation.Xy + vector.Z * orientation.Xz,
+        vector.X * orientation.Yx + vector.Y * orientation.Yy + vector.Z * orientation.Yz,
+        vector.X * orientation.Zx + vector.Y * orientation.Zy + vector.Z * orientation.Zz);
+}
+
+Point3d ProjectPointToFacePlane(const Point3d& facePoint, const Vector3d& faceNormal, const Point3d& point)
+{
+    const Vector3d normal = Normalize(faceNormal, Vector3d(0.0, 0.0, 1.0));
+    const Vector3d offset(point.X - facePoint.X, point.Y - facePoint.Y, point.Z - facePoint.Z);
+    const double distance = Dot(offset, normal);
+    return Point3d(
+        point.X - distance * normal.X,
+        point.Y - distance * normal.Y,
+        point.Z - distance * normal.Z);
 }
 
 std::string PartLeafName(Part* part)
@@ -850,7 +1436,7 @@ std::string SerialNumberText(const KeZiConfig& config)
             letters.insert(letters.begin(), static_cast<char>('A' + (value % 26)));
             value /= 26;
         }
-        return config.serialPrefix + letters;
+        return letters;
     }
 
     int width = config.serialPad;
@@ -861,7 +1447,6 @@ std::string SerialNumberText(const KeZiConfig& config)
     }
 
     std::ostringstream out;
-    out << config.serialPrefix;
     if (width > 1)
     {
         out << std::setw(width) << std::setfill('0');
@@ -992,6 +1577,27 @@ bool IncrementTextSerial(const std::string& text, std::string* nextText)
     return true;
 }
 
+bool LooksLikeSerialValue(const std::string& text)
+{
+    const std::string value = Trim(text);
+    if (value.empty())
+    {
+        return false;
+    }
+
+    const bool allDigits = std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isdigit(ch) != 0;
+    });
+    if (allDigits)
+    {
+        return true;
+    }
+
+    return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isalpha(ch) != 0;
+    });
+}
+
 bool RuleAlreadyHasTokenType(const std::string& ruleText, const std::string& token)
 {
     if (token == "{流水号}" || token == "{serial}")
@@ -1012,7 +1618,7 @@ bool RuleAlreadyHasTokenType(const std::string& ruleText, const std::string& tok
     }
     if (token.find("属性") != std::string::npos || token.find("attribute") != std::string::npos)
     {
-        return TextTemplateHasAttribute(ruleText);
+        return ruleText.find(token) != std::string::npos;
     }
     return ruleText.find(token) != std::string::npos;
 }
@@ -1079,6 +1685,70 @@ std::string RuleLabelText(std::string textTemplate)
     return Trim(textTemplate);
 }
 
+std::string RuleTextFromLabel(const std::string& label)
+{
+    std::string text = Trim(label);
+    if (text.empty())
+    {
+        return "{文本}";
+    }
+    if (TextTemplateHasRuleToken(text))
+    {
+        return text;
+    }
+
+    std::string result;
+    std::stringstream stream(text);
+    std::string item;
+    while (std::getline(stream, item, '+'))
+    {
+        item = Trim(item);
+        if (item.empty())
+        {
+            continue;
+        }
+
+        if (item == "文本" || item == "text")
+        {
+            result += "{文本}";
+        }
+        else if (item == "流水号" || item == "serial")
+        {
+            result += "{流水号}";
+        }
+        else if (item == "体名" || item == "body")
+        {
+            result += "{体名}";
+        }
+        else if (item == "文件名" || item == "file")
+        {
+            result += "{文件名}";
+        }
+        else if (item == "属性" || item == "attribute")
+        {
+            result += "{属性}";
+        }
+        else if (item.rfind("体属性:", 0) == 0)
+        {
+            result += "{" + item + "}";
+        }
+        else if (item.rfind("部件属性:", 0) == 0)
+        {
+            result += "{" + item + "}";
+        }
+        else if (item.rfind("属性:", 0) == 0)
+        {
+            result += "{" + item + "}";
+        }
+        else
+        {
+            result += item;
+        }
+    }
+
+    return result.empty() ? std::string("{文本}") : result;
+}
+
 bool SplitTextAndSerial(const std::string& value, std::string* textPart, std::string* serialPart)
 {
     if (textPart == nullptr || serialPart == nullptr)
@@ -1109,6 +1779,323 @@ bool SplitTextAndSerial(const std::string& value, std::string* textPart, std::st
     return false;
 }
 
+bool ExtractTrailingSerial(const std::string& value, std::string* serialPart)
+{
+    if (serialPart == nullptr)
+    {
+        return false;
+    }
+
+    const std::string trimmed = Trim(value);
+    if (trimmed.empty())
+    {
+        return false;
+    }
+
+    std::size_t end = trimmed.size();
+    std::size_t begin = end;
+    while (begin > 0 && std::isdigit(static_cast<unsigned char>(trimmed[begin - 1])))
+    {
+        --begin;
+    }
+    if (begin < end)
+    {
+        *serialPart = trimmed.substr(begin, end - begin);
+        return true;
+    }
+
+    begin = end;
+    while (begin > 0 && std::isupper(static_cast<unsigned char>(trimmed[begin - 1])))
+    {
+        --begin;
+    }
+    if (begin < end)
+    {
+        *serialPart = trimmed.substr(begin, end - begin);
+        return true;
+    }
+
+    return false;
+}
+
+struct TemplateToken
+{
+    enum class Kind
+    {
+        Text,
+        Serial,
+        Fixed
+    };
+
+    Kind kind = Kind::Fixed;
+    std::string value;
+};
+
+std::vector<std::string> RawTemplateTokens(const std::string& textTemplate)
+{
+    std::vector<std::string> tokens;
+    std::string::size_type start = 0;
+    while ((start = textTemplate.find('{', start)) != std::string::npos)
+    {
+        const std::string::size_type end = textTemplate.find('}', start);
+        if (end == std::string::npos)
+        {
+            break;
+        }
+        tokens.push_back(textTemplate.substr(start, end - start + 1));
+        start = end + 1;
+    }
+    return tokens;
+}
+
+bool IsTextToken(const std::string& token)
+{
+    return token == "{文本}" || token == "{text}";
+}
+
+bool IsSerialToken(const std::string& token)
+{
+    return token == "{流水号}" || token == "{serial}";
+}
+
+std::string AttributeNameFromToken(const std::string& token, const std::string& prefix)
+{
+    if (token.rfind(prefix, 0) != 0 || token.empty() || token.back() != '}')
+    {
+        return std::string();
+    }
+    return token.substr(prefix.size(), token.size() - prefix.size() - 1);
+}
+
+std::string ResolveFixedTokenValue(const std::string& token,
+                                   NXObject* body,
+                                   NXObject* partObject,
+                                   const std::string& bodyName,
+                                   const std::string& fileName,
+                                   const KeZiConfig& config)
+{
+    if (token == "{body}" || token == "{体名}")
+    {
+        return bodyName;
+    }
+    if (token == "{file}" || token == "{文件名}")
+    {
+        return fileName;
+    }
+    if (token == "{attribute}" || token == "{属性}")
+    {
+        return FirstAvailableAttribute(body, partObject, config.attributeNames);
+    }
+    if (token == "{属性名}")
+    {
+        return config.attributeNames.empty() ? std::string() : config.attributeNames.front();
+    }
+
+    const std::vector<std::pair<std::string, NXObject*>> attributePrefixes = {
+        {"{体属性:", body},
+        {"{body_attribute:", body},
+        {"{部件属性:", partObject},
+        {"{part_attribute:", partObject},
+        {"{属性:", body},
+        {"{attribute:", body},
+    };
+    for (const auto& entry : attributePrefixes)
+    {
+        const std::string name = AttributeNameFromToken(token, entry.first);
+        if (!name.empty())
+        {
+            std::string value = ReadAttribute(entry.second, name);
+            if (value.empty() && (entry.first == "{属性:" || entry.first == "{attribute:"))
+            {
+                value = ReadAttribute(partObject, name);
+            }
+            return value;
+        }
+    }
+
+    return token;
+}
+
+std::vector<TemplateToken> BuildTemplateTokens(const std::string& textTemplate,
+                                               NXObject* body,
+                                               NXObject* partObject,
+                                               const std::string& bodyName,
+                                               const std::string& fileName,
+                                               const KeZiConfig& config)
+{
+    std::vector<TemplateToken> tokens;
+    for (const std::string& rawToken : RawTemplateTokens(textTemplate))
+    {
+        TemplateToken token;
+        if (IsTextToken(rawToken))
+        {
+            token.kind = TemplateToken::Kind::Text;
+        }
+        else if (IsSerialToken(rawToken))
+        {
+            token.kind = TemplateToken::Kind::Serial;
+        }
+        else
+        {
+            token.kind = TemplateToken::Kind::Fixed;
+            token.value = ResolveFixedTokenValue(rawToken, body, partObject, bodyName, fileName, config);
+        }
+        tokens.push_back(token);
+    }
+    return tokens;
+}
+
+std::string JoinFixedTokens(const std::vector<TemplateToken>& tokens, std::size_t begin, std::size_t end)
+{
+    std::string result;
+    for (std::size_t i = begin; i < end && i < tokens.size(); ++i)
+    {
+        if (tokens[i].kind == TemplateToken::Kind::Fixed)
+        {
+            result += tokens[i].value;
+        }
+    }
+    return result;
+}
+
+bool StartsWithText(const std::string& value, const std::string& prefix)
+{
+    return prefix.empty() || value.rfind(prefix, 0) == 0;
+}
+
+bool EndsWithText(const std::string& value, const std::string& suffix)
+{
+    return suffix.empty() ||
+           (value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0);
+}
+
+void ResolveEditableValuesFromDisplay(const std::vector<TemplateToken>& tokens,
+                                      const std::string& displayText,
+                                      const KeZiConfig& config,
+                                      std::string* textValue,
+                                      std::string* serialValue)
+{
+    if (textValue == nullptr || serialValue == nullptr)
+    {
+        return;
+    }
+
+    *textValue = displayText;
+    *serialValue = SerialNumberText(config);
+
+    int textIndex = -1;
+    int serialIndex = -1;
+    for (std::size_t i = 0; i < tokens.size(); ++i)
+    {
+        if (tokens[i].kind == TemplateToken::Kind::Text)
+        {
+            textIndex = static_cast<int>(i);
+        }
+        else if (tokens[i].kind == TemplateToken::Kind::Serial)
+        {
+            serialIndex = static_cast<int>(i);
+        }
+    }
+
+    if (textIndex < 0 && serialIndex < 0)
+    {
+        return;
+    }
+
+    std::string editable = Trim(displayText);
+    const int firstEditable = textIndex >= 0 && serialIndex >= 0 ? std::min(textIndex, serialIndex) : std::max(textIndex, serialIndex);
+    const int lastEditable = textIndex >= 0 && serialIndex >= 0 ? std::max(textIndex, serialIndex) : std::max(textIndex, serialIndex);
+    const std::string prefix = JoinFixedTokens(tokens, 0, static_cast<std::size_t>(firstEditable));
+    const std::string suffix = JoinFixedTokens(tokens, static_cast<std::size_t>(lastEditable + 1), tokens.size());
+    if (StartsWithText(editable, prefix))
+    {
+        editable.erase(0, prefix.size());
+    }
+    if (EndsWithText(editable, suffix))
+    {
+        editable.erase(editable.size() - suffix.size());
+    }
+
+    if (textIndex >= 0 && serialIndex >= 0)
+    {
+        const std::string between = textIndex < serialIndex
+                                        ? JoinFixedTokens(tokens, static_cast<std::size_t>(textIndex + 1), static_cast<std::size_t>(serialIndex))
+                                        : JoinFixedTokens(tokens, static_cast<std::size_t>(serialIndex + 1), static_cast<std::size_t>(textIndex));
+        if (!between.empty())
+        {
+            const std::string::size_type split = editable.find(between);
+            if (split != std::string::npos)
+            {
+                if (textIndex < serialIndex)
+                {
+                    *textValue = editable.substr(0, split);
+                    *serialValue = editable.substr(split + between.size());
+                }
+                else
+                {
+                    *serialValue = editable.substr(0, split);
+                    *textValue = editable.substr(split + between.size());
+                }
+                return;
+            }
+        }
+
+        std::string textPart;
+        std::string serialPart;
+        if (textIndex < serialIndex && SplitTextAndSerial(editable, &textPart, &serialPart))
+        {
+            *textValue = textPart;
+            *serialValue = serialPart;
+            return;
+        }
+        if (serialIndex < textIndex)
+        {
+            std::string serialPart;
+            if (ExtractTrailingSerial(editable, &serialPart) && editable.size() >= serialPart.size())
+            {
+                *serialValue = serialPart;
+                *textValue = editable.substr(serialPart.size());
+                return;
+            }
+        }
+    }
+    else if (textIndex >= 0)
+    {
+        *textValue = editable;
+    }
+    else if (serialIndex >= 0)
+    {
+        std::string serialPart;
+        if (ExtractTrailingSerial(editable, &serialPart) && LooksLikeSerialValue(serialPart))
+        {
+            *serialValue = serialPart;
+        }
+    }
+}
+
+std::string ComposeTemplateDisplayText(const std::vector<TemplateToken>& tokens,
+                                       const std::string& textValue,
+                                       const std::string& serialValue)
+{
+    std::string result;
+    for (const TemplateToken& token : tokens)
+    {
+        if (token.kind == TemplateToken::Kind::Text)
+        {
+            result += textValue;
+        }
+        else if (token.kind == TemplateToken::Kind::Serial)
+        {
+            result += serialValue;
+        }
+        else
+        {
+            result += token.value;
+        }
+    }
+    return result;
+}
+
 std::string ExpandTextTemplate(const std::string& textTemplate,
                                const std::string& userText,
                                NXObject* body,
@@ -1119,24 +2106,14 @@ std::string ExpandTextTemplate(const std::string& textTemplate,
     NXObject* partObject = dynamic_cast<NXObject*>(part);
     const std::string bodyName = body == nullptr ? std::string() : ToString(body->Name());
     const std::string fileName = PartLeafName(part);
-    const bool hasTextToken = result.find("{文本}") != std::string::npos || result.find("{text}") != std::string::npos;
-    const bool hasSerialToken = TextTemplateHasSerial(result);
+    const std::vector<TemplateToken> tokens = BuildTemplateTokens(result, body, partObject, bodyName, fileName, config);
+    const bool hasTextToken = std::any_of(tokens.begin(), tokens.end(), [](const TemplateToken& token) { return token.kind == TemplateToken::Kind::Text; });
+    const bool hasSerialToken = std::any_of(tokens.begin(), tokens.end(), [](const TemplateToken& token) { return token.kind == TemplateToken::Kind::Serial; });
     std::string resolvedUserText = userText;
-    std::string serial = Trim(userText).empty() ? SerialNumberText(config) : Trim(userText);
-    if (hasTextToken && hasSerialToken)
+    std::string serial = SerialNumberText(config);
+    if (hasTextToken || hasSerialToken)
     {
-        std::string textPart;
-        std::string serialPart;
-        if (SplitTextAndSerial(userText, &textPart, &serialPart))
-        {
-            resolvedUserText = textPart;
-            serial = serialPart;
-        }
-        else
-        {
-            resolvedUserText = userText;
-            serial = SerialNumberText(config);
-        }
+        ResolveEditableValuesFromDisplay(tokens, userText, config, &resolvedUserText, &serial);
     }
 
     const auto replaceAll = [&result](const std::string& key, const std::string& replacement) {
@@ -1254,6 +2231,7 @@ private:
         centerShortSide_ = dynamic_cast<Toggle*>(top->FindBlock("centerShortSide"));
         xLongSide_ = dynamic_cast<Toggle*>(top->FindBlock("xLongSide"));
         xShortSide_ = dynamic_cast<Toggle*>(top->FindBlock("xShortSide"));
+        ruleValue_ = dynamic_cast<StringBlock*>(top->FindBlock("ruleValue"));
         textValue_ = dynamic_cast<StringBlock*>(top->FindBlock("textValue"));
         appendBodyName_ = dynamic_cast<Button*>(top->FindBlock("appendBodyName"));
         appendFileName_ = dynamic_cast<Button*>(top->FindBlock("appendFileName"));
@@ -1274,11 +2252,16 @@ private:
         embossedText_ = dynamic_cast<Toggle*>(top->FindBlock("embossedText"));
         verticalText_ = dynamic_cast<Toggle*>(top->FindBlock("verticalText"));
         editConfig_ = dynamic_cast<Button*>(top->FindBlock("editConfig"));
-        ruleText_ = Trim(config_.textTemplate).empty() ? std::string("{文本}") : config_.textTemplate;
-        if (Trim(ruleText_) == "{流水号}")
+        ruleText_ = config_.textTemplate;
+        if (Trim(ruleText_).empty() || Trim(ruleText_) == "{文本}" || Trim(ruleText_) == "{text}")
         {
-            ruleText_ = "{文本}";
+            ruleText_ = config_.text;
         }
+        if (Trim(ruleText_) == "{流水号}" || Trim(ruleText_) == "{serial}")
+        {
+            ruleText_ = config_.text;
+        }
+        ApplyConfigToDialog();
 
         if (manualFace_ != nullptr)
         {
@@ -1306,8 +2289,78 @@ private:
             }
             UpdateTextRuleLabel();
         }
+        UpdateRuleInputValue();
+        UpdateResolvedTextFromRule();
         UpdateUiState();
         Log(session_, "对话框初始化完成");
+    }
+
+    void ApplyConfigToDialog()
+    {
+        SetEnumValue(mode_, config_.mode);
+        SetEnumValue(boundary_, config_.boundary);
+        if (fontName_ != nullptr)
+        {
+            fontName_->SetValue(config_.fontName.c_str());
+        }
+        if (textHeight_ != nullptr)
+        {
+            textHeight_->SetValue(config_.height);
+        }
+        if (depth_ != nullptr)
+        {
+            depth_->SetValue(config_.depth);
+        }
+        SetColorValue(textColor_, config_.textColor);
+        if (boundaryDepth_ != nullptr)
+        {
+            boundaryDepth_->SetValue(config_.boundaryDepth);
+        }
+        SetColorValue(boundaryColor_, config_.boundaryColor);
+        if (margin_ != nullptr)
+        {
+            margin_->SetValue(config_.textLength);
+        }
+        if (wScale_ != nullptr)
+        {
+            wScale_->SetValue(config_.widthScale);
+        }
+        if (lockAspect_ != nullptr)
+        {
+            lockAspect_->SetValue(config_.lockAspect);
+        }
+        if (shear_ != nullptr)
+        {
+            shear_->SetValue(config_.shear);
+        }
+        if (textLayer_ != nullptr)
+        {
+            textLayer_->SetValue(config_.layer);
+        }
+        if (embossedText_ != nullptr)
+        {
+            embossedText_->SetValue(config_.embossed);
+        }
+        if (verticalText_ != nullptr)
+        {
+            verticalText_->SetValue(config_.vShape);
+        }
+        if (centerLongSide_ != nullptr)
+        {
+            centerLongSide_->SetValue(config_.centerLongSide);
+        }
+        if (centerShortSide_ != nullptr)
+        {
+            centerShortSide_->SetValue(config_.centerShortSide);
+        }
+        if (xLongSide_ != nullptr)
+        {
+            xLongSide_->SetValue(config_.xLongSide);
+        }
+        if (xShortSide_ != nullptr)
+        {
+            xShortSide_->SetValue(config_.xShortSide);
+        }
     }
 
     void DialogShownCb()
@@ -1325,6 +2378,8 @@ private:
         if (textValue_ != nullptr)
         {
             UpdateTextRuleLabel();
+            UpdateRuleInputValue();
+            UpdateResolvedTextFromRule();
             textValue_->Focus();
         }
     }
@@ -1339,6 +2394,24 @@ private:
 
     int UpdateCb(UIBlock* block)
     {
+        if (block == ruleValue_ && updatingRuleInput_)
+        {
+            return 0;
+        }
+        if (block == textValue_ && updatingResolvedText_)
+        {
+            return 0;
+        }
+
+        if (block == ruleValue_)
+        {
+            ruleText_ = ReadString(ruleValue_);
+            SaveCurrentRule();
+            UpdateResolvedTextFromRule();
+            RefreshPreview();
+            return 0;
+        }
+
         if (block == appendBodyName_)
         {
             Log(session_, "追加变量: 体名");
@@ -1359,10 +2432,7 @@ private:
         }
         else if (block == appendAttribute_)
         {
-            const std::string name = config_.attributeNames.empty() ? std::string("编号") : config_.attributeNames.front();
-            Log(session_, std::string("追加变量: 体属性:") + name);
-            AppendTextToken("{体属性:" + name + "}");
-            RefreshPreview();
+            ChooseAndAppendAttributeToken();
         }
         else if (block == rotate90Button_)
         {
@@ -1401,12 +2471,6 @@ private:
                  block == shear_ || block == textLayer_ || block == embossedText_ || block == verticalText_ ||
                  block == centerLongSide_ || block == centerShortSide_ || block == xLongSide_ || block == xShortSide_)
         {
-            if (block == textValue_ && Trim(ReadString(textValue_)).empty())
-            {
-                ruleText_ = "{文本}";
-                UpdateTextRuleLabel();
-                SaveCurrentRule();
-            }
             if (block == orientation_ || block == centerLongSide_ || block == centerShortSide_)
             {
                 SnapOrientationToCenterOptions();
@@ -1448,44 +2512,99 @@ private:
         {
             return;
         }
+        ruleText_ = ReadString(ruleValue_);
         if (RuleAlreadyHasTokenType(ruleText_, token))
         {
-            UpdateTextRuleLabel();
-            EnsureTextInputHasValue();
             SaveCurrentRule();
+            UpdateResolvedTextFromRule();
             return;
-        }
-        const std::string currentRule = Trim(ruleText_);
-        const bool hasUserText = textValue_ != nullptr && !Trim(ReadString(textValue_)).empty();
-        if (!TextTemplateHasRuleToken(ruleText_) ||
-            ((currentRule == "{文本}" || currentRule == "{text}") && !hasUserText))
-        {
-            ruleText_.clear();
         }
         ruleText_ += token;
         UpdateTextRuleLabel();
-        EnsureTextInputHasValue();
         SaveCurrentRule();
+        UpdateResolvedTextFromRule();
     }
 
     void UpdateTextRuleLabel()
     {
-        if (textValue_ == nullptr)
+        if (textValue_ != nullptr)
+        {
+            textValue_->SetLabel("文本");
+        }
+    }
+
+    void UpdateRuleInputValue()
+    {
+        if (ruleValue_ == nullptr)
         {
             return;
         }
-        textValue_->SetLabel(RuleLabelText(ruleText_).c_str());
+        if (ReadString(ruleValue_) == ruleText_)
+        {
+            return;
+        }
+        updatingRuleInput_ = true;
+        ruleValue_->SetValue(ruleText_.c_str());
+        updatingRuleInput_ = false;
     }
 
     void SaveCurrentRule()
     {
         std::string rule = Trim(ruleText_);
-        if (rule.empty())
-        {
-            rule = "{文本}";
-        }
         config_.textTemplate = rule;
         WriteConfigValue("模板", rule);
+        UpdateRuleInputValue();
+    }
+
+    static std::string BoolText(const bool value)
+    {
+        return value ? "1" : "0";
+    }
+
+    void SaveDialogValues()
+    {
+        const TextSettings settings = ReadSettings();
+        WriteConfigValue("模式", std::to_string(settings.mode));
+        WriteConfigValue("文本", settings.text);
+        WriteConfigValue("字体", settings.fontName);
+        WriteConfigValue("高度", FormatNumber(settings.height));
+        WriteConfigValue("深度", FormatNumber(settings.depth));
+        WriteConfigValue("颜色", std::to_string(ReadColorIndex(textColor_, config_.textColor)));
+        WriteConfigValue("边界", std::to_string(settings.boundary));
+        WriteConfigValue("边界深度", FormatNumber(settings.boundaryDepth));
+        WriteConfigValue("边界颜色", std::to_string(ReadColorIndex(boundaryColor_, config_.boundaryColor)));
+        WriteConfigValue("长度", FormatNumber(settings.textLength));
+        WriteConfigValue("W比例", FormatNumber(settings.widthScale));
+        WriteConfigValue("锁定宽高比", BoolText(settings.lockAspect));
+        WriteConfigValue("剪切", FormatNumber(settings.shear));
+        WriteConfigValue("文本层", std::to_string(settings.layer));
+        WriteConfigValue("凸起文本", BoolText(settings.embossed));
+        WriteConfigValue("V形文本", BoolText(settings.vShape));
+        WriteConfigValue("长向居中", BoolText(settings.centerLongSide));
+        WriteConfigValue("短向居中", BoolText(settings.centerShortSide));
+        WriteConfigValue("X长边", BoolText(settings.xLongSide));
+        WriteConfigValue("X短边", BoolText(settings.xShortSide));
+
+        config_.mode = settings.mode;
+        config_.text = settings.text;
+        config_.fontName = settings.fontName;
+        config_.height = settings.height;
+        config_.depth = settings.depth;
+        config_.textColor = ReadColorIndex(textColor_, config_.textColor);
+        config_.boundary = settings.boundary;
+        config_.boundaryDepth = settings.boundaryDepth;
+        config_.boundaryColor = ReadColorIndex(boundaryColor_, config_.boundaryColor);
+        config_.textLength = settings.textLength;
+        config_.widthScale = settings.widthScale;
+        config_.lockAspect = settings.lockAspect;
+        config_.shear = settings.shear;
+        config_.layer = settings.layer;
+        config_.embossed = settings.embossed;
+        config_.vShape = settings.vShape;
+        config_.centerLongSide = settings.centerLongSide;
+        config_.centerShortSide = settings.centerShortSide;
+        config_.xLongSide = settings.xLongSide;
+        config_.xShortSide = settings.xShortSide;
     }
 
     void EnsureTextInputHasValue()
@@ -1496,6 +2615,97 @@ private:
         }
         const std::string serialText = SerialNumberText(config_);
         textValue_->SetValue(serialText.c_str());
+    }
+
+    void AppendDisplayValueForToken(const std::string& token)
+    {
+        if (textValue_ == nullptr)
+        {
+            return;
+        }
+
+        if (token == "{流水号}" || token == "{serial}")
+        {
+            const std::string current = ReadString(textValue_);
+            const std::string serialText = SerialNumberText(config_);
+            updatingResolvedText_ = true;
+            textValue_->SetValue((current + serialText).c_str());
+            updatingResolvedText_ = false;
+        }
+    }
+
+    void SetTextInputResolvedValue(const std::string& value)
+    {
+        if (textValue_ == nullptr || ReadString(textValue_) == value)
+        {
+            return;
+        }
+
+        updatingResolvedText_ = true;
+        textValue_->SetValue(value.c_str());
+        updatingResolvedText_ = false;
+    }
+
+    void UpdateResolvedTextFromRule()
+    {
+        if (textValue_ == nullptr)
+        {
+            return;
+        }
+
+        const std::string rule = Trim(ruleText_);
+        if (rule.empty())
+        {
+            SetTextInputResolvedValue("");
+            return;
+        }
+
+        NXObject* body = lastBody_;
+        Part* part = lastWorkPart_;
+        if (Face* selectedFace = SelectedFace())
+        {
+            Face* face = PrototypeFace(selectedFace);
+            if (face != nullptr)
+            {
+                body = ResolveBodyFromFace(face);
+                part = dynamic_cast<Part*>(face->OwningPart());
+            }
+        }
+        if (part == nullptr)
+        {
+            part = session_ != nullptr && session_->Parts() != nullptr ? session_->Parts()->Work() : nullptr;
+        }
+
+        const std::string currentText = ReadString(textValue_);
+        const std::string resolved = ExpandTextTemplate(rule, currentText, body, part, config_);
+        SetTextInputResolvedValue(resolved);
+    }
+
+    bool IncrementDisplaySerialByRule(const std::string& displayText, std::string* nextText)
+    {
+        if (nextText == nullptr || !TextTemplateHasSerial(lastTextTemplate_))
+        {
+            return false;
+        }
+
+        Part* part = lastWorkPart_;
+        NXObject* partObject = dynamic_cast<NXObject*>(part);
+        const std::string bodyName = lastBody_ == nullptr ? std::string() : ToString(lastBody_->Name());
+        const std::string fileName = PartLeafName(part);
+        const std::vector<TemplateToken> tokens = BuildTemplateTokens(lastTextTemplate_, lastBody_, partObject, bodyName, fileName, config_);
+
+        std::string textPart;
+        std::string serialPart;
+        ResolveEditableValuesFromDisplay(tokens, displayText, config_, &textPart, &serialPart);
+
+        std::string nextSerial;
+        if (!IncrementTextSerial(serialPart, &nextSerial))
+        {
+            return false;
+        }
+
+        *nextText = ComposeTemplateDisplayText(tokens, textPart, nextSerial);
+        return true;
     }
 
     void RotateOrientationNinetyDegrees()
@@ -1525,6 +2735,29 @@ private:
 
     void UpdateUiState()
     {
+        const auto ensurePositive = [](DoubleBlock* block, const double fallback) {
+            if (block != nullptr && ReadDouble(block, fallback) <= 0.0)
+            {
+                block->SetValue(fallback);
+            }
+        };
+
+        if (textHeight_ != nullptr && depth_ != nullptr)
+        {
+            const double height = ReadDouble(textHeight_, 10.0);
+            const double depth = ReadDouble(depth_, 0.3);
+            if (height > 0.0 && height < 1.0 && depth > 1.0)
+            {
+                textHeight_->SetValue(depth);
+                depth_->SetValue(height);
+            }
+        }
+        ensurePositive(textHeight_, 10.0);
+        ensurePositive(depth_, 0.3);
+        ensurePositive(boundaryDepth_, 0.3);
+        ensurePositive(margin_, 100.0);
+        ensurePositive(wScale_, 100.0);
+
         const int boundaryValue = ReadEnumValue(boundary_);
         if (boundaryDepth_ != nullptr)
         {
@@ -1550,9 +2783,33 @@ private:
         settings.fontName = ReadString(fontName_);
         settings.height = ReadDouble(textHeight_, 10.0);
         settings.depth = ReadDouble(depth_, 0.3);
+        if (settings.height > 0.0 && settings.height < 1.0 && settings.depth > 1.0)
+        {
+            std::swap(settings.height, settings.depth);
+        }
         settings.boundaryDepth = ReadDouble(boundaryDepth_, 0.3);
         settings.textLength = ReadDouble(margin_, 0.0);
         settings.widthScale = ReadDouble(wScale_, 100.0);
+        if (settings.height <= 0.0)
+        {
+            settings.height = 10.0;
+        }
+        if (settings.depth <= 0.0)
+        {
+            settings.depth = 0.3;
+        }
+        if (settings.boundaryDepth <= 0.0)
+        {
+            settings.boundaryDepth = 0.3;
+        }
+        if (settings.textLength <= 0.0)
+        {
+            settings.textLength = 100.0;
+        }
+        if (settings.widthScale <= 0.0)
+        {
+            settings.widthScale = 100.0;
+        }
         settings.lockAspect = ReadToggle(lockAspect_, true);
         settings.shear = ReadDouble(shear_, 0.0);
         settings.layer = ReadInteger(textLayer_, 254);
@@ -1571,20 +2828,19 @@ private:
 
     std::string EffectiveTextTemplate(const TextSettings& settings) const
     {
-        (void)settings;
         const std::string dialogRule = Trim(ruleText_);
-        if (TextTemplateHasRuleToken(dialogRule))
+        if (!dialogRule.empty())
         {
             return ruleText_;
         }
 
         const std::string configuredRule = Trim(config_.textTemplate);
-        if (dialogRule.empty() && TextTemplateHasRuleToken(configuredRule))
+        if (!configuredRule.empty())
         {
             return config_.textTemplate;
         }
 
-        return "{文本}";
+        return settings.text.empty() ? std::string("{文本}") : settings.text;
     }
 
     Face* SelectedFace() const
@@ -1605,7 +2861,65 @@ private:
         return nullptr;
     }
 
-    Matrix3x3 TextMatrixFromDialog(Face* face, const Vector3d& faceNormal, const TextSettings& settings) const
+    void ChooseAndAppendAttributeToken()
+    {
+        Face* selectedFace = SelectedFace();
+        if (selectedFace == nullptr)
+        {
+            ShowError("刻字", "请先选择一个面，再选择属性变量。");
+            return;
+        }
+
+        const int sourceIndex = AskMenuIndex("选择属性来源", std::vector<std::string>{"体属性", "部件属性"});
+        if (sourceIndex < 0)
+        {
+            return;
+        }
+
+        Face* prototypeFace = PrototypeFace(selectedFace);
+        NXObject* target = nullptr;
+        std::string tokenPrefix;
+        std::string sourceName;
+        if (sourceIndex == 0)
+        {
+            target = ResolveBodyFromFace(prototypeFace);
+            tokenPrefix = "{体属性:";
+            sourceName = "体属性";
+        }
+        else
+        {
+            Part* part = nullptr;
+            if (prototypeFace != nullptr)
+            {
+                part = dynamic_cast<Part*>(prototypeFace->OwningPart());
+            }
+            target = dynamic_cast<NXObject*>(part);
+            tokenPrefix = "{部件属性:";
+            sourceName = "部件属性";
+        }
+
+        std::vector<std::string> names = UserAttributeNames(target);
+        if (names.empty())
+        {
+            ShowError("刻字", sourceName + "列表为空。");
+            return;
+        }
+
+        const std::string attributeName = AskMenuItemPaged("选择" + sourceName, names);
+        if (attributeName.empty())
+        {
+            return;
+        }
+
+        Log(session_, std::string("追加变量: ") + sourceName + ":" + attributeName);
+        AppendTextToken(tokenPrefix + attributeName + "}");
+        RefreshPreview();
+    }
+
+    Matrix3x3 TextMatrixFromDialog(Face* face,
+                                   const Vector3d& faceNormal,
+                                   const TextSettings& settings,
+                                   Assemblies::Component* component) const
     {
         Vector3d xAxis(1.0, 0.0, 0.0);
         Vector3d yAxis(0.0, 1.0, 0.0);
@@ -1614,6 +2928,8 @@ private:
             xAxis = orientation_->XAxis();
             yAxis = orientation_->YAxis();
         }
+        xAxis = ComponentVectorToPrototype(component, xAxis);
+        yAxis = ComponentVectorToPrototype(component, yAxis);
 
         Vector3d z = Normalize(faceNormal, Vector3d(0.0, 0.0, 1.0));
         Vector3d x = Normalize(ProjectToPlane(xAxis, z), Vector3d(1.0, 0.0, 0.0));
@@ -1903,12 +3219,18 @@ private:
             throw std::runtime_error("Text height, depth, length, and width ratio must be greater than 0.");
         }
 
-        Face* face = SelectedFace();
-        if (face == nullptr)
+        Face* selectedFace = SelectedFace();
+        if (selectedFace == nullptr)
         {
             throw std::runtime_error("Manual mode requires a selected engraving face.");
         }
         Log(session_, "已取得选择面");
+        Assemblies::Component* selectedComponent = selectedFace->IsOccurrence() ? selectedFace->OwningComponent() : nullptr;
+        Face* face = PrototypeFace(selectedFace);
+        if (face == nullptr)
+        {
+            throw std::runtime_error("Could not resolve prototype face of the selected assembly face.");
+        }
 
         Point3d facePoint;
         Vector3d faceNormal;
@@ -1921,17 +3243,33 @@ private:
                              std::isfinite(pickedPoint.Y) &&
                              std::isfinite(pickedPoint.Z);
         }
+        if (selectedComponent != nullptr && hasPickedPoint)
+        {
+            pickedPoint = ComponentPointToPrototype(selectedComponent, pickedPoint);
+        }
         if (!AskPlanarFaceData(face, hasPickedPoint ? &pickedPoint : nullptr, &facePoint, &faceNormal))
         {
             throw std::runtime_error("Selected face is not a valid planar engraving face.");
         }
-        const Point3d pickedOrigin = TextOriginFromPickPoint(facePoint, faceNormal);
 
-        Part* workPart = session_->Parts()->Work();
+        Point3d originReference = pickedPoint;
+        if (orientation_ != nullptr && orientation_->IsOriginSpecified())
+        {
+            originReference = orientation_->Origin();
+            if (selectedComponent != nullptr)
+            {
+                originReference = ComponentPointToPrototype(selectedComponent, originReference);
+            }
+        }
+        const Point3d pickedOrigin = ProjectPointToFacePlane(facePoint, faceNormal, originReference);
+
+        WorkContextGuard workContext(session_, selectedFace);
+        Part* workPart = workContext.WorkPart();
         if (workPart == nullptr)
         {
-            throw std::runtime_error("No work part.");
+            throw std::runtime_error("Could not set the selected component as work part.");
         }
+        Log(session_, std::string("目标叶子部件: ") + PartLeafName(workPart));
 
         NXObject* body = ResolveBodyFromFace(face);
         if (body == nullptr)
@@ -1962,9 +3300,10 @@ private:
             lastTextTemplate_ = textTemplate;
             lastResolvedText_ = textRule;
             lastBody_ = body;
+            lastWorkPart_ = workPart;
             Log(session_, std::string("解析刻字文本: ") + textRule);
             const Point3d textOrigin = ApplyCenterOptions(face, faceNormal, pickedOrigin, settings);
-            const Matrix3x3 textMatrix = TextMatrixFromDialog(face, faceNormal, settings);
+            const Matrix3x3 textMatrix = TextMatrixFromDialog(face, faceNormal, settings, selectedComponent);
 
             builder->SetInsertTextType(Tooling::InsertTextBuilder::InsertTypeThroughPoint);
             builder->SetLockAspectRatio(settings.lockAspect);
@@ -2036,6 +3375,7 @@ private:
                 *textUdoOut = textUdo;
             }
             Log(session_, "Builder 准备完成");
+            workContext.Restore();
             return builder;
         }
         catch (...)
@@ -2057,6 +3397,7 @@ private:
         try
         {
             previewBuilder_ = CreatePreparedBuilder(&previewUdo_);
+            SetTextInputResolvedValue(lastResolvedText_);
             Log(session_, "预览刷新完成");
         }
         catch (const NXException& ex)
@@ -2089,21 +3430,17 @@ private:
                 }
             });
 
-        if (previewBuilder_ != nullptr)
-        {
-            builder.reset(previewBuilder_);
-            previewBuilder_ = nullptr;
-            previewUdo_ = nullptr;
-        }
-        else
-        {
-            NXObject* textUdo = nullptr;
-            builder.reset(CreatePreparedBuilder(&textUdo));
-        }
+        ClearPreviewBuilder();
+        Face* selectedFace = SelectedFace();
+        WorkContextGuard workContext(session_, selectedFace);
+        NXObject* textUdo = nullptr;
+        builder.reset(CreatePreparedBuilder(&textUdo));
 
         builder->Commit();
+        workContext.Restore();
         Log(session_, "刻字 Commit 完成");
         SaveCurrentRule();
+        SaveDialogValues();
         if (lastBody_ != nullptr && !lastResolvedText_.empty())
         {
             WriteStringAttribute(lastBody_, "编号", lastResolvedText_);
@@ -2113,7 +3450,7 @@ private:
         {
             std::string nextText;
             const std::string currentText = ReadString(textValue_);
-            if (IncrementTextSerial(currentText, &nextText))
+            if (IncrementDisplaySerialByRule(currentText, &nextText))
             {
                 textValue_->SetValue(nextText.c_str());
                 config_.text = nextText;
@@ -2136,6 +3473,7 @@ private:
     Toggle* centerShortSide_ = nullptr;
     Toggle* xLongSide_ = nullptr;
     Toggle* xShortSide_ = nullptr;
+    StringBlock* ruleValue_ = nullptr;
     StringBlock* textValue_ = nullptr;
     Button* appendBodyName_ = nullptr;
     Button* appendFileName_ = nullptr;
@@ -2159,10 +3497,13 @@ private:
     Tooling::InsertTextBuilder* previewBuilder_ = nullptr;
     NXObject* previewUdo_ = nullptr;
     NXObject* lastBody_ = nullptr;
+    Part* lastWorkPart_ = nullptr;
     std::string lastResolvedText_;
     std::string lastTextTemplate_;
     std::string ruleText_;
     bool refreshingPreview_ = false;
+    bool updatingResolvedText_ = false;
+    bool updatingRuleInput_ = false;
     KeZiConfig config_;
 };
 

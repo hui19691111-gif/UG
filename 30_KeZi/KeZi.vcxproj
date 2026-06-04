@@ -61,7 +61,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libufun.lib;libnxopencpp.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_tooling.lib;libnxopenuicpp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libufun.lib;libnxopencpp.lib;libnxopencpp_assemblies.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_tooling.lib;libnxopenuicpp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -87,7 +87,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libufun.lib;libnxopencpp.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_tooling.lib;libnxopenuicpp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libufun.lib;libnxopencpp.lib;libnxopencpp_assemblies.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_tooling.lib;libnxopenuicpp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>
