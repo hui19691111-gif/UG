@@ -1128,6 +1128,9 @@ struct SectionLoop
 {
     int lineCount;
     int arcCount;
+    double width;
+    double height;
+    double area;
     std::vector<double> lineAngles;
 };
 
@@ -1400,9 +1403,23 @@ bool BuildSectionLoops(
         }
 
         SectionLoop loop = {};
+        double minX = DBL_MAX;
+        double maxX = -DBL_MAX;
+        double minY = DBL_MAX;
+        double maxY = -DBL_MAX;
         for (std::size_t index = 0; index < componentSegments.size(); ++index)
         {
             const SectionCurveSegment& segment = segments[static_cast<std::size_t>(componentSegments[index])];
+            const double* points[2] = {segment.first, segment.second};
+            for (int pointIndex = 0; pointIndex < 2; ++pointIndex)
+            {
+                const double x = Dot3(points[pointIndex], xAxis);
+                const double y = Dot3(points[pointIndex], yAxis);
+                minX = std::min(minX, x);
+                maxX = std::max(maxX, x);
+                minY = std::min(minY, y);
+                maxY = std::max(maxY, y);
+            }
             if (segment.line)
             {
                 ++loop.lineCount;
@@ -1413,6 +1430,13 @@ bool BuildSectionLoops(
                 ++loop.arcCount;
             }
         }
+        loop.width = maxX - minX;
+        loop.height = maxY - minY;
+        if (loop.width < loop.height)
+        {
+            std::swap(loop.width, loop.height);
+        }
+        loop.area = loop.width * loop.height;
         if (loop.lineCount > 0 || loop.arcCount > 0)
         {
             loops.push_back(loop);
@@ -1435,12 +1459,59 @@ bool IsRectangularTubeLoop(const SectionLoop& loop)
     return false;
 }
 
+bool EstimateThicknessFromSectionLoops(const std::vector<SectionLoop>& loops, double& thickness)
+{
+    thickness = 0.0;
+    std::vector<SectionLoop> acceptedLoops;
+    for (std::size_t index = 0; index < loops.size(); ++index)
+    {
+        if (IsRectangularTubeLoop(loops[index]) &&
+            loops[index].width > 0.5 &&
+            loops[index].height > 0.5)
+        {
+            acceptedLoops.push_back(loops[index]);
+        }
+    }
+
+    if (acceptedLoops.size() < 2)
+    {
+        return false;
+    }
+
+    std::sort(
+        acceptedLoops.begin(),
+        acceptedLoops.end(),
+        [](const SectionLoop& lhs, const SectionLoop& rhs)
+        {
+            return lhs.area > rhs.area;
+        });
+
+    const SectionLoop& outer = acceptedLoops[0];
+    for (std::size_t index = 1; index < acceptedLoops.size(); ++index)
+    {
+        const SectionLoop& inner = acceptedLoops[index];
+        const double widthThickness = (outer.width - inner.width) * 0.5;
+        const double heightThickness = (outer.height - inner.height) * 0.5;
+        if (widthThickness <= 0.05 || heightThickness <= 0.05)
+        {
+            continue;
+        }
+
+        const double rawThickness = (widthThickness + heightThickness) * 0.5;
+        thickness = RoundTo(rawThickness, 0.1);
+        return thickness > 0.0;
+    }
+
+    return false;
+}
+
 bool HasAcceptedRectangularSectionAt(
     tag_t bodyTag,
     double sectionPosition,
     const double lengthAxis[3],
     const double xAxis[3],
-    const double yAxis[3])
+    const double yAxis[3],
+    double* sectionThickness)
 {
     uf_list_p_t edgeList = NULL;
     if (UF_MODL_ask_body_edges(bodyTag, &edgeList) != 0 || edgeList == NULL)
@@ -1474,10 +1545,23 @@ bool HasAcceptedRectangularSectionAt(
             ++acceptedLoopCount;
         }
     }
-    return acceptedLoopCount >= 2;
+    if (acceptedLoopCount < 2)
+    {
+        return false;
+    }
+
+    if (sectionThickness != NULL)
+    {
+        double thickness = 0.0;
+        if (EstimateThicknessFromSectionLoops(loops, thickness))
+        {
+            *sectionThickness = thickness;
+        }
+    }
+    return true;
 }
 
-bool HasClosedRectangularTubeSections(tag_t bodyTag)
+bool HasClosedRectangularTubeSections(tag_t bodyTag, double* sectionThickness = NULL)
 {
     double lengthAxis[3] = {0.0, 0.0, 0.0};
     if (!EstimateMainLengthAxisFromEdges(bodyTag, lengthAxis))
@@ -1508,8 +1592,13 @@ bool HasClosedRectangularTubeSections(tag_t bodyTag)
     for (int index = 0; index < static_cast<int>(sizeof(fractions) / sizeof(fractions[0])); ++index)
     {
         const double sectionPosition = bodyMinProjection + span * fractions[index];
-        if (HasAcceptedRectangularSectionAt(bodyTag, sectionPosition, lengthAxis, xAxis, yAxis))
+        double thickness = 0.0;
+        if (HasAcceptedRectangularSectionAt(bodyTag, sectionPosition, lengthAxis, xAxis, yAxis, &thickness))
         {
+            if (sectionThickness != NULL && thickness > 0.0)
+            {
+                *sectionThickness = thickness;
+            }
             return true;
         }
     }
@@ -2344,10 +2433,13 @@ TubeRecord ClassifyBody(NXOpen::Body* body, double minimumRoundDiameter)
         record.length = dimensions[2];
     }
 
+    double sectionThickness = 0.0;
     if (ReclassifyTubeDimensionsBySpec(record.length, record.width, record.height) &&
-        HasClosedRectangularTubeSections(body->Tag()))
+        HasClosedRectangularTubeSections(body->Tag(), &sectionThickness))
     {
-        record.thickness = EstimateWallThicknessFromEdges(body->Tag(), record.width, record.height);
+        record.thickness = sectionThickness > 0.0
+            ? sectionThickness
+            : EstimateWallThicknessFromEdges(body->Tag(), record.width, record.height);
         record.kind = std::fabs(record.width - record.height) <= 1.0 ? TubeKindSquare : TubeKindRectangular;
         record.spec = BuildTubeSpec(record.width, record.height, record.thickness);
         return record;
@@ -2558,7 +2650,7 @@ private:
         SetDefaultText(squareStandardLengthBlock, "6.0");
         SetDefaultText(rectangularStandardLengthBlock, "6.0");
         SetDefaultText(roundStandardLengthBlock, "6.0");
-        SetDefaultText(roundMinimumDiameterBlock, "0");
+        SetDefaultText(roundMinimumDiameterBlock, "6.0");
         LoadMaterialEnum();
 
         if (bodySelection != NULL)

@@ -43,6 +43,7 @@
 #include <cmath>
 #include <exception>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <random>
 #include <set>
@@ -174,6 +175,10 @@ struct BodyFingerprint
     int edgeCount;
     int faceCount;
     std::vector<LengthBucket> lengthBuckets;
+    std::vector<double> fullCircleEdgeLengths;
+    std::vector<double> arcEdgeLengths;
+    std::vector<double> curveEdgeLengths;
+    std::vector<double> lineEdgeLengths;
     std::vector<Point3> vertexPoints;
     std::vector<Point3> circleCenterPoints;
     std::vector<double> circleCenterDistances;
@@ -1021,6 +1026,12 @@ std::vector<LengthBucket> BuildLengthBuckets(std::vector<double> lengths)
     return buckets;
 }
 
+std::vector<double> SortLengthsDescending(std::vector<double> lengths)
+{
+    std::sort(lengths.begin(), lengths.end(), std::greater<double>());
+    return lengths;
+}
+
 bool LengthBucketsMatch(
     const std::vector<LengthBucket>& referenceBuckets,
     const std::vector<LengthBucket>& candidateBuckets,
@@ -1352,7 +1363,38 @@ BodyFingerprint BuildFingerprint(NXOpen::Body* body)
     for (std::size_t index = 0; index < edges.size(); ++index)
     {
         NXOpen::Edge* edge = edges[index];
-        edgeLengths.push_back(AskEdgeLength(edge->Tag()));
+        const double edgeLength = AskEdgeLength(edge->Tag());
+        edgeLengths.push_back(edgeLength);
+
+        double firstVertex[3] = {};
+        double secondVertex[3] = {};
+        int vertexCount = 0;
+        if (UF_MODL_ask_edge_verts(edge->Tag(), firstVertex, secondVertex, &vertexCount) != 0)
+        {
+            vertexCount = 0;
+        }
+        double center[3] = {};
+        const NXOpen::Edge::EdgeType edgeType = edge->SolidEdgeType();
+        const bool hasCircularCenter = AskCircularEdgeCenter(edge->Tag(), center);
+        const bool isCircularEdge =
+            edgeType == NXOpen::Edge::EdgeTypeCircular || hasCircularCenter;
+        if (isCircularEdge && vertexCount == 0)
+        {
+            fingerprint.fullCircleEdgeLengths.push_back(edgeLength);
+        }
+        else if (isCircularEdge)
+        {
+            fingerprint.arcEdgeLengths.push_back(edgeLength);
+        }
+        else if (edgeType == NXOpen::Edge::EdgeTypeLinear)
+        {
+            fingerprint.lineEdgeLengths.push_back(edgeLength);
+        }
+        else
+        {
+            fingerprint.curveEdgeLengths.push_back(edgeLength);
+        }
+
         AppendEdgeGeometryPoints(
             edge,
             fingerprint.centroid,
@@ -1366,6 +1408,10 @@ BodyFingerprint BuildFingerprint(NXOpen::Body* body)
     }
 
     fingerprint.lengthBuckets = BuildLengthBuckets(edgeLengths);
+    fingerprint.fullCircleEdgeLengths = SortLengthsDescending(fingerprint.fullCircleEdgeLengths);
+    fingerprint.arcEdgeLengths = SortLengthsDescending(fingerprint.arcEdgeLengths);
+    fingerprint.curveEdgeLengths = SortLengthsDescending(fingerprint.curveEdgeLengths);
+    fingerprint.lineEdgeLengths = SortLengthsDescending(fingerprint.lineEdgeLengths);
     std::sort(fingerprint.circleCenterDistances.begin(), fingerprint.circleCenterDistances.end());
 
     std::vector<NXOpen::Face*> faces = body->GetFaces();
@@ -1705,10 +1751,10 @@ bool LocalCoordinateSignaturesMatch(
 {
     const LocalCoordinateSignature candidateVariant = ApplyCoordinateVariant(candidate, variantIndex);
 
-    if (!ComparePointValues(reference.lineEdgeLocalPoints, candidateVariant.lineEdgeLocalPoints, "local line edge point", rejectReason) ||
-        !ComparePointValues(reference.curveEdgeLocalPoints, candidateVariant.curveEdgeLocalPoints, "local curve edge point", rejectReason) ||
+    if (!ComparePointValues(reference.fullCircleEdgeLocalPoints, candidateVariant.fullCircleEdgeLocalPoints, "local full circle center", rejectReason) ||
         !ComparePointValues(reference.arcEdgeLocalPoints, candidateVariant.arcEdgeLocalPoints, "local arc edge endpoint", rejectReason) ||
-        !ComparePointValues(reference.fullCircleEdgeLocalPoints, candidateVariant.fullCircleEdgeLocalPoints, "local full circle center", rejectReason))
+        !ComparePointValues(reference.curveEdgeLocalPoints, candidateVariant.curveEdgeLocalPoints, "local curve edge point", rejectReason) ||
+        !ComparePointValues(reference.lineEdgeLocalPoints, candidateVariant.lineEdgeLocalPoints, "local line edge point", rejectReason))
     {
         return false;
     }
@@ -2056,28 +2102,15 @@ bool BodiesMatchByAnchorPlaneCoordinates(
     return false;
 }
 
-bool CompareFingerprints(
+bool RoughFingerprintsMatch(
     const BodyFingerprint& reference,
     const BodyFingerprint& candidate,
-    std::ofstream* debugLog,
-    int* coordinateDebugStep,
-    std::vector<tag_t>* activeDebugObjectTags,
-    bool* coordinateDebugCanceled,
     std::string& rejectReason)
 {
-    if (!NearlyEqual(reference.mass, candidate.mass, kMassTolerance))
-    {
-        std::ostringstream stream;
-        stream << "mass mismatch: ref=" << FormatDouble(reference.mass)
-               << ", cand=" << FormatDouble(candidate.mass);
-        rejectReason = stream.str();
-        return false;
-    }
-
     if (reference.edgeCount != candidate.edgeCount)
     {
         std::ostringstream stream;
-        stream << "edge count mismatch: ref=" << reference.edgeCount
+        stream << "rough edge count mismatch: ref=" << reference.edgeCount
                << ", cand=" << candidate.edgeCount;
         rejectReason = stream.str();
         return false;
@@ -2086,54 +2119,73 @@ bool CompareFingerprints(
     if (reference.faceCount != candidate.faceCount)
     {
         std::ostringstream stream;
-        stream << "face count mismatch: ref=" << reference.faceCount
+        stream << "rough face count mismatch: ref=" << reference.faceCount
                << ", cand=" << candidate.faceCount;
         rejectReason = stream.str();
         return false;
     }
 
-    if (reference.lengthBuckets.size() != candidate.lengthBuckets.size())
+    rejectReason.clear();
+    return true;
+}
+
+bool SortedLengthsMatch(
+    const std::vector<double>& referenceLengths,
+    const std::vector<double>& candidateLengths,
+    const char* className,
+    std::string& rejectReason)
+{
+    if (referenceLengths.size() != candidateLengths.size())
     {
         std::ostringstream stream;
-        stream << "edge-length bucket count mismatch: ref=" << reference.lengthBuckets.size()
-               << ", cand=" << candidate.lengthBuckets.size();
+        stream << "middle " << className << " edge count mismatch: ref="
+               << referenceLengths.size() << ", cand=" << candidateLengths.size();
         rejectReason = stream.str();
         return false;
     }
 
-    for (std::size_t index = 0; index < reference.lengthBuckets.size(); ++index)
+    for (std::size_t index = 0; index < referenceLengths.size(); ++index)
     {
-        const LengthBucket& lhs = reference.lengthBuckets[index];
-        const LengthBucket& rhs = candidate.lengthBuckets[index];
-        if (!NearlyEqual(lhs.length, rhs.length, kLengthTolerance))
+        if (!NearlyEqual(referenceLengths[index], candidateLengths[index], kLengthTolerance))
         {
             std::ostringstream stream;
-            stream << "edge-length bucket " << (index + 1) << " length mismatch: ref="
-                   << FormatDouble(lhs.length) << ", cand=" << FormatDouble(rhs.length);
-            rejectReason = stream.str();
-            return false;
-        }
-
-        if (lhs.count != rhs.count)
-        {
-            std::ostringstream stream;
-            stream << "edge-length bucket " << (index + 1) << " count mismatch: length="
-                   << FormatDouble(lhs.length) << ", ref=" << lhs.count
-                   << ", cand=" << rhs.count;
+            stream << "middle " << className << " edge length " << (index + 1)
+                   << " mismatch: ref=" << FormatDouble(referenceLengths[index])
+                   << ", cand=" << FormatDouble(candidateLengths[index]);
             rejectReason = stream.str();
             return false;
         }
     }
 
-    if (!CompareDistanceVectors(
-            reference.circleCenterDistances,
-            candidate.circleCenterDistances,
-            "centroid-full-circle-center distance",
-            rejectReason))
+    return true;
+}
+
+bool MiddleFingerprintsMatch(
+    const BodyFingerprint& reference,
+    const BodyFingerprint& candidate,
+    std::string& rejectReason)
+{
+    if (!SortedLengthsMatch(reference.fullCircleEdgeLengths, candidate.fullCircleEdgeLengths, "full circle", rejectReason) ||
+        !SortedLengthsMatch(reference.arcEdgeLengths, candidate.arcEdgeLengths, "arc", rejectReason) ||
+        !SortedLengthsMatch(reference.curveEdgeLengths, candidate.curveEdgeLengths, "curve", rejectReason) ||
+        !SortedLengthsMatch(reference.lineEdgeLengths, candidate.lineEdgeLengths, "line", rejectReason))
     {
         return false;
     }
 
+    rejectReason.clear();
+    return true;
+}
+
+bool RefinedFingerprintsMatch(
+    const BodyFingerprint& reference,
+    const BodyFingerprint& candidate,
+    std::ofstream* debugLog,
+    int* coordinateDebugStep,
+    std::vector<tag_t>* activeDebugObjectTags,
+    bool* coordinateDebugCanceled,
+    std::string& rejectReason)
+{
     if (!BodiesMatchByAnchorPlaneCoordinates(
             reference,
             candidate,
@@ -2244,7 +2296,43 @@ std::vector<std::vector<tag_t> > RunSameBodySearch(
                 }
 
                 std::string rejectReason;
-                if (!CompareFingerprints(
+                if (!RoughFingerprintsMatch(
+                        fingerprints[referenceIndex],
+                        fingerprints[candidateIndex],
+                        rejectReason))
+                {
+                    if (debugLog.is_open())
+                    {
+                        debugLog << "Compare failed: refIndex=" << (referenceIndex + 1)
+                                 << ", refTag=" << fingerprints[referenceIndex].tag
+                                 << ", candIndex=" << (candidateIndex + 1)
+                                 << ", candTag=" << fingerprints[candidateIndex].tag
+                                 << ", stage=rough"
+                                 << ", reason=" << rejectReason
+                                 << std::endl;
+                    }
+                    continue;
+                }
+
+                if (!MiddleFingerprintsMatch(
+                        fingerprints[referenceIndex],
+                        fingerprints[candidateIndex],
+                        rejectReason))
+                {
+                    if (debugLog.is_open())
+                    {
+                        debugLog << "Compare failed: refIndex=" << (referenceIndex + 1)
+                                 << ", refTag=" << fingerprints[referenceIndex].tag
+                                 << ", candIndex=" << (candidateIndex + 1)
+                                 << ", candTag=" << fingerprints[candidateIndex].tag
+                                 << ", stage=middle"
+                                 << ", reason=" << rejectReason
+                                 << std::endl;
+                    }
+                    continue;
+                }
+
+                if (!RefinedFingerprintsMatch(
                         fingerprints[referenceIndex],
                         fingerprints[candidateIndex],
                         &debugLog,
@@ -2259,6 +2347,7 @@ std::vector<std::vector<tag_t> > RunSameBodySearch(
                                  << ", refTag=" << fingerprints[referenceIndex].tag
                                  << ", candIndex=" << (candidateIndex + 1)
                                  << ", candTag=" << fingerprints[candidateIndex].tag
+                                 << ", stage=refined"
                                  << ", reason=" << rejectReason
                                  << std::endl;
                     }
