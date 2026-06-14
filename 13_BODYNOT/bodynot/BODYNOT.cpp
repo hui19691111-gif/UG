@@ -35,8 +35,11 @@
 //These includes are needed for the following template code
 //------------------------------------------------------------------------------
 #include "BODYNOT.hpp"
-#include "third_party/ZhaoFuNxLicenseGate/ZhaoFuNxLicenseGate.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
+#include "../../../protection/native/ZhihuiLicenseGuard.hpp"
 #include <windows.h>
+#include <stdexcept>
 #ifdef CreateDialog
 #undef CreateDialog
 #endif
@@ -271,6 +274,9 @@ bool TryReadBodyNoteFormatLine(const std::string& rawLine, std::string& formatTe
     formatText = DecodeConfigEscapes(line);
     return !formatText.empty();
 }
+
+bool SetStringUserAttribute(NXOpen::NXObject* object, const char* title, const std::string& value);
+
 bool HasAnyUserAttribute(NXOpen::NXObject* object, const char* title)
 {
     if (object == NULL || title == NULL)
@@ -628,8 +634,49 @@ std::string ReadMaterialReferenceText(NXOpen::Part* part, NXOpen::Body* body)
     return ReadMaterialText(part, body);
 }
 
+std::string ReadPartFileNameText(NXOpen::Part* part)
+{
+    if (part == NULL)
+    {
+        return "";
+    }
+    try
+    {
+        std::string fileName = LocaleTextToUtf8(part->Leaf().GetLocaleText());
+        const size_t dotPos = fileName.find_last_of('.');
+        if (dotPos != std::string::npos)
+        {
+            fileName = fileName.substr(0, dotPos);
+        }
+        return TrimText(fileName);
+    }
+    catch (...)
+    {
+    }
+    return "";
+}
+
+std::string ReadPartFileNameReferenceText(NXOpen::Part* part)
+{
+    const std::string fileName = ReadPartFileNameText(part);
+    if (fileName.empty())
+    {
+        return "";
+    }
+
+    const char* title = "\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D";
+    SetStringUserAttribute(part, title, fileName);
+    std::string fileNameReference = PartAttributeReferenceText(part, title);
+    if (!fileNameReference.empty())
+    {
+        return fileNameReference;
+    }
+    return fileName;
+}
+
 std::string BuildBodyNoteText(NXOpen::Part* part, NXOpen::Body* body, bool includeNumber)
 {
+    const std::string fileName = ReadPartFileNameReferenceText(part);
     const std::string material = ReadMaterialReferenceText(part, body);
     std::string thickness = ObjectAttributeReferenceText(body, "Z");
     if (thickness.empty())
@@ -649,6 +696,7 @@ std::string BuildBodyNoteText(NXOpen::Part* part, NXOpen::Body* body, bool inclu
     }
 
     std::string line = LoadBodyNoteFormat();
+    ReplaceAllText(line, "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}", fileName);
     ReplaceAllText(line, "{\xE7\xBC\x96\xE5\x8F\xB7=}", number.empty() ? "" : number + "=");
     ReplaceAllText(line, "{\xE7\xBC\x96\xE5\x8F\xB7}", number);
     ReplaceAllText(line, "{\xE6\x9D\x90\xE6\x96\x99}", material);
@@ -838,6 +886,25 @@ bool PrepareDraftNoteReferenceForToken(
     appendEqual = false;
     fallbackText.clear();
 
+    if (token == "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}")
+    {
+        const std::string fileName = ReadPartFileNameText(part);
+        if (!fileName.empty())
+        {
+            const char* title = "\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D";
+            SetStringUserAttribute(part, title, fileName);
+            if (HasAnyUserAttribute(part, title))
+            {
+                insert.kind = DraftNoteReferenceInsert::KindAttribute;
+                insert.owner = part;
+                insert.title = title;
+                return true;
+            }
+            fallbackText = fileName;
+        }
+        return false;
+    }
+
     if (token == "{\xE7\xBC\x96\xE5\x8F\xB7=}" || token == "{\xE7\xBC\x96\xE5\x8F\xB7}")
     {
         if (!includeNumber)
@@ -921,6 +988,7 @@ bool PrepareDraftNoteReferenceForToken(
 bool MatchDraftNoteToken(const std::string& format, size_t index, std::string& token)
 {
     const char* tokens[] = {
+        "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}",
         "{\xE7\xBC\x96\xE5\x8F\xB7=}",
         "{\xE7\xBC\x96\xE5\x8F\xB7}",
         "{\xE6\x9D\x90\xE6\x96\x99}",
@@ -1098,14 +1166,7 @@ void ShowAuthorizationMessage(const std::wstring& message)
 
 bool EnsureBodyNotAuthorized()
 {
-    std::wstring licenseMessage;
-    if (zhaofu::nxlicense::EnsureAuthorized(L"ZHIHUI.BODYNOT", L"实体标注", &licenseMessage))
-    {
-        return true;
-    }
-
-    ShowAuthorizationMessage(licenseMessage);
-    return false;
+    return zhihui_license_guard::EnsureAuthorized(L"ZHIHUI.BODYNOT", L"BODYNOT");
 }
 
 bool TryGetBodyTagFromParent(tag_t parentTag, tag_t* bodyTag)
@@ -1410,8 +1471,13 @@ BODYNOT::BODYNOT()
         BODYNOT::theUI = UI::GetUI();
         workPart = theSession->Parts()->Work();
         displayPart = theSession->Parts()->Display();
-        theDlxFileName = "BODYNOT.dlx";
-        theDialog = BODYNOT::theUI->CreateDialog(theDlxFileName);
+        const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_BODYNOT_DLX);
+        if (dlxPath.empty())
+        {
+            throw std::runtime_error("BODYNOT dialog resource is missing.");
+        }
+        theDlxFileName = NULL;
+        theDialog = BODYNOT::theUI->CreateDialog(dlxPath.c_str());
         // Registration of callback functions
         theDialog->AddApplyHandler(make_callback(this, &BODYNOT::apply_cb));
         theDialog->AddOkHandler(make_callback(this, &BODYNOT::ok_cb));

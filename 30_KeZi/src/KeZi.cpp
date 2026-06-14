@@ -1,8 +1,12 @@
 ﻿#include <NXOpen/BasePart.hxx>
 #include <NXOpen/Body.hxx>
+#include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/Builder.hxx>
 #include <NXOpen/Callback.hxx>
 #include <NXOpen/ColorManager.hxx>
+#include <NXOpen/Direction.hxx>
+#include <NXOpen/DirectionCollection.hxx>
+#include <NXOpen/DisplayableObject.hxx>
 #include <NXOpen/Expression.hxx>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/Face.hxx>
@@ -11,12 +15,14 @@
 #include <NXOpen/NXColor.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/ListingWindow.hxx>
+#include <NXOpen/Measurement.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObject.hxx>
 #include <NXOpen/NXObjectManager.hxx>
 #include <NXOpen/NXString.hxx>
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
+#include <NXOpen/SmartObject.hxx>
 #include <NXOpen/ScCollector.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
 #include <NXOpen/Selection.hxx>
@@ -46,17 +52,29 @@
 #include <NXOpen/BlockStyler_Toggle.hxx>
 #include <NXOpen/BlockStyler_UIBlock.hxx>
 
+#include <NXOpen/Assemblies_ComponentAssembly.hxx>
 #include <NXOpen/Assemblies_Component.hxx>
+#include <NXOpen/Assemblies_HideComponentBuilder.hxx>
+#include <NXOpen/Assemblies_ReplaceComponentBuilder.hxx>
+#include <NXOpen/Assemblies_AssemblyManager.hxx>
+#include <NXOpen/ErrorList.hxx>
+#include <NXOpen/PartSaveStatus.hxx>
+#include <NXOpen/SelectDisplayableObjectList.hxx>
+#include <NXOpen/SelectTaggedObjectList.hxx>
 
 #include <uf.h>
 #include <uf_assem.h>
+#include <uf_eval.h>
 #include <uf_modl.h>
 #include <uf_modl_types.h>
+#include <uf_obj.h>
 #include <uf_object_types.h>
+#include <uf_part.h>
 #include <uf_ui_types.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -67,6 +85,10 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../../../protection/native/ZhihuiLicenseGuard.hpp"
+#include "../resource.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -92,16 +114,99 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 namespace
 {
 constexpr double kVectorTolerance = 1.0e-6;
+constexpr double kSameBodyLengthTolerance = 0.05;
+constexpr double kSameBodyMassTolerance = 0.05;
+constexpr double kSameBodyDistanceTolerance = 0.05;
+constexpr double kSameBodyFaceAreaAbsoluteTolerance = 0.05;
+constexpr double kSameBodyFaceAreaRelativeTolerance = 0.0001;
+
+struct SameBodyPoint3
+{
+    double x;
+    double y;
+    double z;
+};
+
+struct SameBodyLengthBucket
+{
+    double length;
+    int count;
+};
+
+struct SameBodyFrame3
+{
+    SameBodyPoint3 origin;
+    SameBodyPoint3 xAxis;
+    SameBodyPoint3 yAxis;
+    SameBodyPoint3 zAxis;
+};
+
+struct SameBodyPlaneFaceFeature
+{
+    tag_t tag;
+    double area;
+    double perimeter;
+    int edgeCount;
+    std::vector<SameBodyLengthBucket> lengthBuckets;
+    SameBodyFrame3 frame;
+};
+
+struct SameBodyPlaneFaceGroup
+{
+    std::vector<size_t> faceIndexes;
+};
+
+struct SameBodyFingerprint
+{
+    Body* body;
+    tag_t tag;
+    double mass;
+    double centroid[3];
+    int edgeCount;
+    int faceCount;
+    std::vector<SameBodyLengthBucket> lengthBuckets;
+    std::vector<SameBodyPoint3> vertexPoints;
+    std::vector<SameBodyPoint3> circleCenterPoints;
+    std::vector<double> circleCenterDistances;
+    std::vector<SameBodyPoint3> lineEdgePoints;
+    std::vector<SameBodyPoint3> curveEdgePoints;
+    std::vector<SameBodyPoint3> arcEdgePoints;
+    std::vector<SameBodyPoint3> fullCircleEdgePoints;
+    std::vector<double> lineEdgeLengths;
+    std::vector<double> curveEdgeLengths;
+    std::vector<double> arcEdgeLengths;
+    std::vector<double> fullCircleEdgeLengths;
+    std::vector<SameBodyPlaneFaceFeature> planeFaces;
+    std::vector<SameBodyPlaneFaceGroup> planeFaceGroups;
+};
+
+struct SameBodyCoarseSignature
+{
+    double mass;
+    double principalMoments[3];
+    int edgeCount;
+    int faceCount;
+};
+
+struct SameBodyLocalCoordinateSignature
+{
+    SameBodyPoint3 centroid;
+    std::vector<SameBodyPoint3> vertexLocalPoints;
+    std::vector<SameBodyPoint3> lineEdgeLocalPoints;
+    std::vector<SameBodyPoint3> curveEdgeLocalPoints;
+    std::vector<SameBodyPoint3> arcEdgeLocalPoints;
+    std::vector<SameBodyPoint3> fullCircleEdgeLocalPoints;
+};
 
 const char* kDefaultConfigText =
     "\xEF\xBB\xBF; KeZi engraving text template configuration\r\n"
     "; 可用变量: {文件名} {体名} {属性} {部件属性:属性名} {体属性:属性名} {流水号} {文本}\r\n"
-    "; 示例: 模板={文件名}-{体名}-{体属性:编号}-{流水号}-{文本}\r\n"
+    "; 示例: 模板={文件名}-{体名}-{体属性:bianhao}-{流水号}-{文本}\r\n"
     "; 流水号样式可填 1、01、001 或 A；A 表示 A,B,C... 字母递增\r\n"
     "[KeZi]\r\n"
     "模板={文本}\r\n"
     "文本=\r\n"
-    "属性名=编号,PART_NO,ITEM_NO,Name\r\n"
+    "属性名=bianhao,PART_NO,ITEM_NO,Name\r\n"
     "流水号前缀=\r\n"
     "流水号样式=01\r\n"
     "起始号=1\r\n"
@@ -120,6 +225,9 @@ const char* kDefaultConfigText =
     "文本层=254\r\n"
     "凸起文本=0\r\n"
     "V形文本=0\r\n"
+    "编号设为部件名=0\r\n"
+    "刻相同=0\r\n"
+    "隐藏已刻字体=0\r\n"
     "模式=0\r\n"
     "长向居中=0\r\n"
     "短向居中=0\r\n"
@@ -130,7 +238,7 @@ struct KeZiConfig
 {
     std::string textTemplate = "{文本}";
     std::string text;
-    std::vector<std::string> attributeNames = {"编号", "PART_NO", "ITEM_NO", "Name"};
+    std::vector<std::string> attributeNames = {"bianhao", "PART_NO", "ITEM_NO", "Name"};
     std::string serialPrefix;
     std::string serialStyle = "01";
     int serialStart = 1;
@@ -150,6 +258,9 @@ struct KeZiConfig
     int layer = 254;
     bool embossed = false;
     bool vShape = false;
+    bool renameComponentToText = false;
+    bool engraveSameBodies = false;
+    bool hideEngravedText = false;
     bool centerLongSide = false;
     bool centerShortSide = false;
     bool xLongSide = false;
@@ -438,6 +549,7 @@ void ShowError(const char* title, const std::string& message)
 
 void Log(Session* session, const std::string& message)
 {
+#ifdef KEZI_ENABLE_DEBUG_LISTING
     try
     {
         if (session == nullptr || session->ListingWindow() == nullptr)
@@ -451,6 +563,10 @@ void Log(Session* session, const std::string& message)
     catch (...)
     {
     }
+#else
+    (void)session;
+    (void)message;
+#endif
 }
 
 std::filesystem::path PluginDirectory()
@@ -610,13 +726,16 @@ KeZiConfig LoadConfig()
     config.layer = ToInt(ValueOr(values, {"文本层", "layer"}, std::to_string(config.layer)), config.layer);
     config.embossed = ToBool(ValueOr(values, {"凸起文本", "embossed"}, config.embossed ? "1" : "0"), config.embossed);
     config.vShape = ToBool(ValueOr(values, {"V形文本", "vShape"}, config.vShape ? "1" : "0"), config.vShape);
+    config.renameComponentToText = ToBool(ValueOr(values, {"编号设为部件名", "renameComponentToText"}, config.renameComponentToText ? "1" : "0"), config.renameComponentToText);
+    config.engraveSameBodies = ToBool(ValueOr(values, {"刻相同", "engraveSameBodies"}, config.engraveSameBodies ? "1" : "0"), config.engraveSameBodies);
+    config.hideEngravedText = ToBool(ValueOr(values, {"隐藏已刻字体", "hideEngravedText"}, config.hideEngravedText ? "1" : "0"), config.hideEngravedText);
     config.centerLongSide = ToBool(ValueOr(values, {"长向居中", "centerLongSide"}, config.centerLongSide ? "1" : "0"), config.centerLongSide);
     config.centerShortSide = ToBool(ValueOr(values, {"短向居中", "centerShortSide"}, config.centerShortSide ? "1" : "0"), config.centerShortSide);
     config.xLongSide = ToBool(ValueOr(values, {"X长边", "xLongSide"}, config.xLongSide ? "1" : "0"), config.xLongSide);
     config.xShortSide = ToBool(ValueOr(values, {"X短边", "xShortSide"}, config.xShortSide ? "1" : "0"), config.xShortSide);
     if (config.attributeNames.empty())
     {
-        config.attributeNames = {"编号", "PART_NO", "ITEM_NO", "Name"};
+        config.attributeNames = {"bianhao", "PART_NO", "ITEM_NO", "Name"};
     }
     return config;
 }
@@ -1118,6 +1237,1272 @@ void SetObjectNameSafe(Session* session, NXObject* object, const std::string& na
     }
 }
 
+void ThrowSameBodyUfError(int errorCode)
+{
+    if (errorCode != 0)
+    {
+        throw NXException::Create(errorCode);
+    }
+}
+
+bool SameBodyNearlyEqual(double lhs, double rhs, double tolerance)
+{
+    return std::fabs(lhs - rhs) <= tolerance;
+}
+
+double SameBodyTolerance(double lhs, double rhs, double absoluteTolerance, double relativeTolerance)
+{
+    const double scale = std::max(std::fabs(lhs), std::fabs(rhs));
+    return std::max(absoluteTolerance, scale * relativeTolerance);
+}
+
+bool SameBodyFaceAreasEqual(double lhs, double rhs)
+{
+    return std::fabs(lhs - rhs) <= SameBodyTolerance(lhs, rhs, kSameBodyFaceAreaAbsoluteTolerance, kSameBodyFaceAreaRelativeTolerance);
+}
+
+bool SameBodyFaceAreaSignificantlyGreater(double lhs, double rhs)
+{
+    return lhs > rhs + SameBodyTolerance(lhs, rhs, kSameBodyFaceAreaAbsoluteTolerance, kSameBodyFaceAreaRelativeTolerance);
+}
+
+SameBodyPoint3 MakeSameBodyPoint3(double x, double y, double z)
+{
+    SameBodyPoint3 point = {};
+    point.x = x;
+    point.y = y;
+    point.z = z;
+    return point;
+}
+
+SameBodyPoint3 SameBodyPointFromArray(const double point[3])
+{
+    return MakeSameBodyPoint3(point[0], point[1], point[2]);
+}
+
+SameBodyPoint3 SameBodyPointFromNx(const Point3d& point)
+{
+    return MakeSameBodyPoint3(point.X, point.Y, point.Z);
+}
+
+SameBodyPoint3 SameBodySubtractPoints(const SameBodyPoint3& lhs, const SameBodyPoint3& rhs)
+{
+    return MakeSameBodyPoint3(lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z);
+}
+
+SameBodyPoint3 SameBodyScalePoint(const SameBodyPoint3& point, double scale)
+{
+    return MakeSameBodyPoint3(point.x * scale, point.y * scale, point.z * scale);
+}
+
+double SameBodyDotPoint(const SameBodyPoint3& lhs, const SameBodyPoint3& rhs)
+{
+    return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;
+}
+
+SameBodyPoint3 SameBodyCrossPoint(const SameBodyPoint3& lhs, const SameBodyPoint3& rhs)
+{
+    return MakeSameBodyPoint3(
+        lhs.y * rhs.z - lhs.z * rhs.y,
+        lhs.z * rhs.x - lhs.x * rhs.z,
+        lhs.x * rhs.y - lhs.y * rhs.x);
+}
+
+double SameBodyPointMagnitude(const SameBodyPoint3& point)
+{
+    return std::sqrt(SameBodyDotPoint(point, point));
+}
+
+bool NormalizeSameBodyPoint(SameBodyPoint3& point)
+{
+    const double magnitude = SameBodyPointMagnitude(point);
+    if (magnitude <= 1.0e-12)
+    {
+        return false;
+    }
+    point.x /= magnitude;
+    point.y /= magnitude;
+    point.z /= magnitude;
+    return true;
+}
+
+SameBodyPoint3 SameBodyProjectOutAxis(const SameBodyPoint3& vector, const SameBodyPoint3& axis)
+{
+    return SameBodySubtractPoints(vector, SameBodyScalePoint(axis, SameBodyDotPoint(vector, axis)));
+}
+
+double SameBodyDistanceBetweenPoints(const double lhs[3], const double rhs[3])
+{
+    const double dx = lhs[0] - rhs[0];
+    const double dy = lhs[1] - rhs[1];
+    const double dz = lhs[2] - rhs[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+double SameBodyDistanceBetweenPoints(const SameBodyPoint3& lhs, const SameBodyPoint3& rhs)
+{
+    return SameBodyPointMagnitude(SameBodySubtractPoints(lhs, rhs));
+}
+
+bool AddUniqueSameBodyPoint(std::vector<SameBodyPoint3>& points, const SameBodyPoint3& point)
+{
+    for (size_t index = 0; index < points.size(); ++index)
+    {
+        if (SameBodyDistanceBetweenPoints(points[index], point) <= kSameBodyDistanceTolerance)
+        {
+            return false;
+        }
+    }
+    points.push_back(point);
+    return true;
+}
+
+int AskSameBodyPartUnits(tag_t partTag)
+{
+    int units = UF_PART_METRIC;
+    if (UF_PART_ask_units(partTag, &units) != 0)
+    {
+        return UF_PART_METRIC;
+    }
+    return units;
+}
+
+int AskSameBodyOwningPartUnits(tag_t objectTag)
+{
+    tag_t owningPartTag = NULL_TAG;
+    if (UF_OBJ_ask_owning_part(objectTag, &owningPartTag) != 0 || owningPartTag == NULL_TAG)
+    {
+        return UF_PART_METRIC;
+    }
+    return AskSameBodyPartUnits(owningPartTag);
+}
+
+int GetSameBodyMassPropsUnitsCode(int partUnits)
+{
+    return partUnits == UF_PART_ENGLISH ? 1 : 3;
+}
+
+double ConvertSameBodyMassPropsLengthToPartUnits(double value, int partUnits, int massPropsUnitsCode)
+{
+    if (partUnits == UF_PART_ENGLISH)
+    {
+        return value;
+    }
+    if (massPropsUnitsCode == 3)
+    {
+        return value * 10.0;
+    }
+    if (massPropsUnitsCode == 4)
+    {
+        return value * 1000.0;
+    }
+    return value;
+}
+
+void AskSameBodyMassProperties(tag_t bodyTag, double* mass, double centroid[3], double principalMoments[3])
+{
+    double accuracyValues[11] = {0.99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    double massProps[47] = {};
+    double statistics[13] = {};
+    tag_t objects[1] = {bodyTag};
+    const int partUnits = AskSameBodyOwningPartUnits(bodyTag);
+    const int massPropsUnitsCode = GetSameBodyMassPropsUnitsCode(partUnits);
+
+    ThrowSameBodyUfError(UF_MODL_ask_mass_props_3d(objects, 1, 1, massPropsUnitsCode, 0.0, 1, accuracyValues, massProps, statistics));
+    if (mass != nullptr)
+    {
+        *mass = massProps[2];
+    }
+    if (centroid != nullptr)
+    {
+        centroid[0] = ConvertSameBodyMassPropsLengthToPartUnits(massProps[3], partUnits, massPropsUnitsCode);
+        centroid[1] = ConvertSameBodyMassPropsLengthToPartUnits(massProps[4], partUnits, massPropsUnitsCode);
+        centroid[2] = ConvertSameBodyMassPropsLengthToPartUnits(massProps[5], partUnits, massPropsUnitsCode);
+    }
+    if (principalMoments != nullptr)
+    {
+        principalMoments[0] = massProps[22];
+        principalMoments[1] = massProps[23];
+        principalMoments[2] = massProps[24];
+        std::sort(principalMoments, principalMoments + 3);
+    }
+}
+
+SameBodyCoarseSignature BuildSameBodyCoarseSignature(Body* body)
+{
+    SameBodyCoarseSignature signature = {};
+    AskSameBodyMassProperties(body->Tag(), &signature.mass, nullptr, signature.principalMoments);
+    signature.edgeCount = static_cast<int>(body->GetEdges().size());
+    signature.faceCount = static_cast<int>(body->GetFaces().size());
+    return signature;
+}
+
+bool SameBodyCoarseSignaturesMatch(const SameBodyCoarseSignature& reference, const SameBodyCoarseSignature& candidate)
+{
+    if (!SameBodyNearlyEqual(reference.mass, candidate.mass, kSameBodyMassTolerance) ||
+        reference.edgeCount != candidate.edgeCount ||
+        reference.faceCount != candidate.faceCount)
+    {
+        return false;
+    }
+    for (int index = 0; index < 3; ++index)
+    {
+        if (!SameBodyNearlyEqual(reference.principalMoments[index], candidate.principalMoments[index], kSameBodyMassTolerance))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+double AskSameBodyEdgeLength(tag_t edgeTag)
+{
+    double length = 0.0;
+    ThrowSameBodyUfError(UF_CURVE_ask_arc_length(edgeTag, 0.0, 1.0, UF_MODL_UNITS_PART, &length));
+    return length;
+}
+
+std::vector<SameBodyLengthBucket> BuildSameBodyLengthBuckets(std::vector<double> lengths)
+{
+    std::sort(lengths.begin(), lengths.end());
+    std::vector<SameBodyLengthBucket> buckets;
+    for (double length : lengths)
+    {
+        if (buckets.empty() || !SameBodyNearlyEqual(buckets.back().length, length, kSameBodyLengthTolerance))
+        {
+            SameBodyLengthBucket bucket = {};
+            bucket.length = length;
+            bucket.count = 1;
+            buckets.push_back(bucket);
+            continue;
+        }
+        SameBodyLengthBucket& bucket = buckets.back();
+        bucket.length = (bucket.length * bucket.count + length) / static_cast<double>(bucket.count + 1);
+        ++bucket.count;
+    }
+    return buckets;
+}
+
+bool SameBodyLengthBucketsMatch(const std::vector<SameBodyLengthBucket>& referenceBuckets, const std::vector<SameBodyLengthBucket>& candidateBuckets)
+{
+    if (referenceBuckets.size() != candidateBuckets.size())
+    {
+        return false;
+    }
+    for (size_t index = 0; index < referenceBuckets.size(); ++index)
+    {
+        if (referenceBuckets[index].count != candidateBuckets[index].count ||
+            !SameBodyNearlyEqual(referenceBuckets[index].length, candidateBuckets[index].length, kSameBodyLengthTolerance))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool AskSameBodyCircularEdgeCenter(tag_t edgeTag, double center[3])
+{
+    UF_EVAL_p_t evaluator = nullptr;
+    if (UF_EVAL_initialize(edgeTag, &evaluator) != 0 || evaluator == nullptr)
+    {
+        return false;
+    }
+    logical isArc = false;
+    const int isArcStatus = UF_EVAL_is_arc(evaluator, &isArc);
+    if (isArcStatus != 0 || !isArc)
+    {
+        UF_EVAL_free(evaluator);
+        return false;
+    }
+    UF_EVAL_arc_t arc = {};
+    const int arcStatus = UF_EVAL_ask_arc(evaluator, &arc);
+    UF_EVAL_free(evaluator);
+    if (arcStatus != 0)
+    {
+        return false;
+    }
+    center[0] = arc.center[0];
+    center[1] = arc.center[1];
+    center[2] = arc.center[2];
+    return true;
+}
+
+void AppendSameBodyEdgeVerticesToGroup(int vertexCount, const double firstVertex[3], const double secondVertex[3], std::vector<SameBodyPoint3>& points)
+{
+    if (vertexCount >= 1)
+    {
+        points.push_back(SameBodyPointFromArray(firstVertex));
+    }
+    if (vertexCount >= 2)
+    {
+        points.push_back(SameBodyPointFromArray(secondVertex));
+    }
+}
+
+void AppendUniqueSameBodyEdgeVertices(int vertexCount, const double firstVertex[3], const double secondVertex[3], std::vector<SameBodyPoint3>& vertexPoints)
+{
+    if (vertexCount >= 1)
+    {
+        AddUniqueSameBodyPoint(vertexPoints, SameBodyPointFromArray(firstVertex));
+    }
+    if (vertexCount >= 2)
+    {
+        AddUniqueSameBodyPoint(vertexPoints, SameBodyPointFromArray(secondVertex));
+    }
+}
+
+void AppendSameBodyEdgeGeometryPoints(
+    Edge* edge,
+    double edgeLength,
+    const double centroid[3],
+    std::vector<double>& circleCenterDistances,
+    std::vector<SameBodyPoint3>& vertexPoints,
+    std::vector<SameBodyPoint3>& circleCenterPoints,
+    std::vector<SameBodyPoint3>& lineEdgePoints,
+    std::vector<SameBodyPoint3>& curveEdgePoints,
+    std::vector<SameBodyPoint3>& arcEdgePoints,
+    std::vector<SameBodyPoint3>& fullCircleEdgePoints,
+    std::vector<double>& lineEdgeLengths,
+    std::vector<double>& curveEdgeLengths,
+    std::vector<double>& arcEdgeLengths,
+    std::vector<double>& fullCircleEdgeLengths)
+{
+    double firstVertex[3] = {};
+    double secondVertex[3] = {};
+    int vertexCount = 0;
+    if (UF_MODL_ask_edge_verts(edge->Tag(), firstVertex, secondVertex, &vertexCount) != 0)
+    {
+        vertexCount = 0;
+    }
+    AppendUniqueSameBodyEdgeVertices(vertexCount, firstVertex, secondVertex, vertexPoints);
+
+    const Edge::EdgeType edgeType = edge->SolidEdgeType();
+    double center[3] = {};
+    const bool hasCircularCenter = AskSameBodyCircularEdgeCenter(edge->Tag(), center);
+    const bool isCircularEdge = edgeType == Edge::EdgeTypeCircular || hasCircularCenter;
+    if (isCircularEdge && vertexCount == 0)
+    {
+        if (hasCircularCenter)
+        {
+            const SameBodyPoint3 centerPoint = SameBodyPointFromArray(center);
+            circleCenterPoints.push_back(centerPoint);
+            fullCircleEdgePoints.push_back(centerPoint);
+            fullCircleEdgeLengths.push_back(edgeLength);
+            circleCenterDistances.push_back(SameBodyDistanceBetweenPoints(centroid, center));
+        }
+        return;
+    }
+    if (isCircularEdge)
+    {
+        AppendSameBodyEdgeVerticesToGroup(vertexCount, firstVertex, secondVertex, arcEdgePoints);
+        arcEdgeLengths.push_back(edgeLength);
+        return;
+    }
+    if (edgeType == Edge::EdgeTypeLinear)
+    {
+        AppendSameBodyEdgeVerticesToGroup(vertexCount, firstVertex, secondVertex, lineEdgePoints);
+        lineEdgeLengths.push_back(edgeLength);
+    }
+    else
+    {
+        AppendSameBodyEdgeVerticesToGroup(vertexCount, firstVertex, secondVertex, curveEdgePoints);
+        curveEdgeLengths.push_back(edgeLength);
+    }
+}
+
+bool SameBodyPlaneFaceMatch(const SameBodyPlaneFaceFeature& reference, const SameBodyPlaneFaceFeature& candidate)
+{
+    return SameBodyFaceAreasEqual(reference.area, candidate.area) &&
+        SameBodyNearlyEqual(reference.perimeter, candidate.perimeter, kSameBodyLengthTolerance) &&
+        reference.edgeCount == candidate.edgeCount &&
+        SameBodyLengthBucketsMatch(reference.lengthBuckets, candidate.lengthBuckets);
+}
+
+bool BuildSameBodyFrameXAxisFromFaceEdges(Face* face, const SameBodyPoint3& zAxis, SameBodyPoint3& xAxis, std::vector<double>& edgeLengths)
+{
+    bool foundAxis = false;
+    double bestLength = 0.0;
+    std::vector<Edge*> faceEdges = face->GetEdges();
+    edgeLengths.reserve(faceEdges.size());
+    for (Edge* edge : faceEdges)
+    {
+        const double length = AskSameBodyEdgeLength(edge->Tag());
+        edgeLengths.push_back(length);
+        Point3d startPoint;
+        Point3d endPoint;
+        edge->GetVertices(&startPoint, &endPoint);
+        SameBodyPoint3 direction = SameBodySubtractPoints(SameBodyPointFromNx(endPoint), SameBodyPointFromNx(startPoint));
+        direction = SameBodyProjectOutAxis(direction, zAxis);
+        if (!NormalizeSameBodyPoint(direction))
+        {
+            continue;
+        }
+        if (!foundAxis || length > bestLength + kSameBodyLengthTolerance)
+        {
+            xAxis = direction;
+            bestLength = length;
+            foundAxis = true;
+        }
+    }
+    return foundAxis;
+}
+
+SameBodyPoint3 BuildSameBodyFallbackXAxis(const SameBodyPoint3& zAxis)
+{
+    SameBodyPoint3 reference = std::fabs(zAxis.x) < 0.8 ? MakeSameBodyPoint3(1.0, 0.0, 0.0) : MakeSameBodyPoint3(0.0, 1.0, 0.0);
+    SameBodyPoint3 xAxis = SameBodyCrossPoint(reference, zAxis);
+    if (!NormalizeSameBodyPoint(xAxis))
+    {
+        xAxis = MakeSameBodyPoint3(1.0, 0.0, 0.0);
+    }
+    return xAxis;
+}
+
+bool AskSameBodyFaceOutwardNormal(Face* face, SameBodyPoint3& normal)
+{
+    Session* session = Session::GetSession();
+    if (face == nullptr || session == nullptr || session->Parts() == nullptr || session->Parts()->Work() == nullptr)
+    {
+        return false;
+    }
+    Direction* direction = session->Parts()->Work()->Directions()->CreateDumbDirectionFace(face, SenseForward, SmartObject::UpdateOptionWithinModeling);
+    if (direction == nullptr)
+    {
+        return false;
+    }
+    const Vector3d vector = direction->Vector();
+    normal = MakeSameBodyPoint3(vector.X, vector.Y, vector.Z);
+    return NormalizeSameBodyPoint(normal);
+}
+
+bool BuildSameBodyPlanarFaceFeature(Face* face, SameBodyPlaneFaceFeature& feature)
+{
+    int faceType = 0;
+    if (face == nullptr || UF_MODL_ask_face_type(face->Tag(), &faceType) != 0 || faceType != UF_MODL_PLANAR_FACE)
+    {
+        return false;
+    }
+
+    int dataType = 0;
+    double point[3] = {};
+    double normal[3] = {};
+    double box[6] = {};
+    double radius = 0.0;
+    double radiusData = 0.0;
+    int normalDirection = 0;
+    ThrowSameBodyUfError(UF_MODL_ask_face_data(face->Tag(), &dataType, point, normal, box, &radius, &radiusData, &normalDirection));
+
+    SameBodyPoint3 zAxis = {};
+    if (!AskSameBodyFaceOutwardNormal(face, zAxis))
+    {
+        zAxis = SameBodyPointFromArray(normal);
+        if (normalDirection < 0)
+        {
+            zAxis = SameBodyScalePoint(zAxis, -1.0);
+        }
+    }
+    if (!NormalizeSameBodyPoint(zAxis))
+    {
+        return false;
+    }
+
+    std::vector<ISurface*> surfaces;
+    surfaces.push_back(face);
+    double area = 0.0;
+    double perimeter = 0.0;
+    double radiusDiameter = 0.0;
+    Point3d cog;
+    double minimumRadiusOfCurvature = 0.0;
+    double areaErrorEstimate = 0.0;
+    Point3d anchorPoint;
+    bool isApproximate = false;
+    Session::GetSession()->Measurement()->GetFaceProperties(surfaces, 0.99, Measurement::AlternateFaceRadius, true, &area, &perimeter, &radiusDiameter, &cog, &minimumRadiusOfCurvature, &areaErrorEstimate, &anchorPoint, &isApproximate);
+
+    std::vector<double> edgeLengths;
+    SameBodyPoint3 xAxis = {};
+    if (!BuildSameBodyFrameXAxisFromFaceEdges(face, zAxis, xAxis, edgeLengths))
+    {
+        xAxis = BuildSameBodyFallbackXAxis(zAxis);
+    }
+    SameBodyPoint3 yAxis = SameBodyCrossPoint(zAxis, xAxis);
+    if (!NormalizeSameBodyPoint(yAxis))
+    {
+        return false;
+    }
+    xAxis = SameBodyCrossPoint(yAxis, zAxis);
+    if (!NormalizeSameBodyPoint(xAxis))
+    {
+        return false;
+    }
+
+    feature.tag = face->Tag();
+    feature.area = area;
+    feature.perimeter = perimeter;
+    feature.edgeCount = static_cast<int>(edgeLengths.size());
+    feature.lengthBuckets = BuildSameBodyLengthBuckets(edgeLengths);
+    feature.frame.origin = SameBodyPointFromNx(cog);
+    feature.frame.xAxis = xAxis;
+    feature.frame.yAxis = yAxis;
+    feature.frame.zAxis = zAxis;
+    return true;
+}
+
+std::vector<SameBodyPlaneFaceGroup> BuildSameBodyPlaneFaceGroups(const std::vector<SameBodyPlaneFaceFeature>& planeFaces)
+{
+    std::vector<SameBodyPlaneFaceGroup> groups;
+    for (size_t faceIndex = 0; faceIndex < planeFaces.size(); ++faceIndex)
+    {
+        bool addedToGroup = false;
+        for (SameBodyPlaneFaceGroup& group : groups)
+        {
+            const SameBodyPlaneFaceFeature& groupFeature = planeFaces[group.faceIndexes[0]];
+            if (SameBodyPlaneFaceMatch(groupFeature, planeFaces[faceIndex]))
+            {
+                group.faceIndexes.push_back(faceIndex);
+                addedToGroup = true;
+                break;
+            }
+        }
+        if (!addedToGroup)
+        {
+            SameBodyPlaneFaceGroup group = {};
+            group.faceIndexes.push_back(faceIndex);
+            groups.push_back(group);
+        }
+    }
+    return groups;
+}
+
+SameBodyFingerprint BuildSameBodyFingerprint(Body* body)
+{
+    SameBodyFingerprint fingerprint = {};
+    fingerprint.body = body;
+    fingerprint.tag = body->Tag();
+    AskSameBodyMassProperties(fingerprint.tag, &fingerprint.mass, fingerprint.centroid, nullptr);
+
+    std::vector<Edge*> edges = body->GetEdges();
+    fingerprint.edgeCount = static_cast<int>(edges.size());
+    std::vector<double> edgeLengths;
+    edgeLengths.reserve(edges.size());
+    for (Edge* edge : edges)
+    {
+        const double edgeLength = AskSameBodyEdgeLength(edge->Tag());
+        edgeLengths.push_back(edgeLength);
+        AppendSameBodyEdgeGeometryPoints(edge, edgeLength, fingerprint.centroid, fingerprint.circleCenterDistances, fingerprint.vertexPoints, fingerprint.circleCenterPoints, fingerprint.lineEdgePoints, fingerprint.curveEdgePoints, fingerprint.arcEdgePoints, fingerprint.fullCircleEdgePoints, fingerprint.lineEdgeLengths, fingerprint.curveEdgeLengths, fingerprint.arcEdgeLengths, fingerprint.fullCircleEdgeLengths);
+    }
+    fingerprint.lengthBuckets = BuildSameBodyLengthBuckets(edgeLengths);
+    std::sort(fingerprint.circleCenterDistances.begin(), fingerprint.circleCenterDistances.end());
+    std::sort(fingerprint.fullCircleEdgeLengths.begin(), fingerprint.fullCircleEdgeLengths.end(), std::greater<double>());
+    std::sort(fingerprint.arcEdgeLengths.begin(), fingerprint.arcEdgeLengths.end(), std::greater<double>());
+    std::sort(fingerprint.curveEdgeLengths.begin(), fingerprint.curveEdgeLengths.end(), std::greater<double>());
+    std::sort(fingerprint.lineEdgeLengths.begin(), fingerprint.lineEdgeLengths.end(), std::greater<double>());
+
+    std::vector<Face*> faces = body->GetFaces();
+    fingerprint.faceCount = static_cast<int>(faces.size());
+    for (Face* face : faces)
+    {
+        SameBodyPlaneFaceFeature faceFeature = {};
+        if (BuildSameBodyPlanarFaceFeature(face, faceFeature))
+        {
+            fingerprint.planeFaces.push_back(faceFeature);
+        }
+    }
+    fingerprint.planeFaceGroups = BuildSameBodyPlaneFaceGroups(fingerprint.planeFaces);
+    return fingerprint;
+}
+
+SameBodyPoint3 TransformSameBodyWorldPointToLocal(const SameBodyFrame3& frame, const SameBodyPoint3& worldPoint)
+{
+    const SameBodyPoint3 delta = SameBodySubtractPoints(worldPoint, frame.origin);
+    return MakeSameBodyPoint3(SameBodyDotPoint(delta, frame.xAxis), SameBodyDotPoint(delta, frame.yAxis), SameBodyDotPoint(delta, frame.zAxis));
+}
+
+SameBodyPoint3 TransformSameBodyLocalPointToWorld(const SameBodyFrame3& frame, const SameBodyPoint3& localPoint)
+{
+    return MakeSameBodyPoint3(
+        frame.origin.x + localPoint.x * frame.xAxis.x + localPoint.y * frame.yAxis.x + localPoint.z * frame.zAxis.x,
+        frame.origin.y + localPoint.x * frame.xAxis.y + localPoint.y * frame.yAxis.y + localPoint.z * frame.zAxis.y,
+        frame.origin.z + localPoint.x * frame.xAxis.z + localPoint.y * frame.yAxis.z + localPoint.z * frame.zAxis.z);
+}
+
+SameBodyPoint3 TransformSameBodyWorldVectorToLocal(const SameBodyFrame3& frame, const SameBodyPoint3& worldVector)
+{
+    return MakeSameBodyPoint3(
+        SameBodyDotPoint(worldVector, frame.xAxis),
+        SameBodyDotPoint(worldVector, frame.yAxis),
+        SameBodyDotPoint(worldVector, frame.zAxis));
+}
+
+SameBodyPoint3 TransformSameBodyLocalVectorToWorld(const SameBodyFrame3& frame, const SameBodyPoint3& localVector)
+{
+    return MakeSameBodyPoint3(
+        localVector.x * frame.xAxis.x + localVector.y * frame.yAxis.x + localVector.z * frame.zAxis.x,
+        localVector.x * frame.xAxis.y + localVector.y * frame.yAxis.y + localVector.z * frame.zAxis.y,
+        localVector.x * frame.xAxis.z + localVector.y * frame.yAxis.z + localVector.z * frame.zAxis.z);
+}
+
+Point3d SameBodyPointToNx(const SameBodyPoint3& point)
+{
+    return Point3d(point.x, point.y, point.z);
+}
+
+Vector3d SameBodyVectorToNx(const SameBodyPoint3& vector)
+{
+    return Vector3d(vector.x, vector.y, vector.z);
+}
+
+SameBodyPoint3 SameBodyPointFromVector(const Vector3d& vector)
+{
+    return MakeSameBodyPoint3(vector.X, vector.Y, vector.Z);
+}
+
+void AppendSameBodyTransformedPoints(const SameBodyFrame3& frame, const std::vector<SameBodyPoint3>& worldPoints, std::vector<SameBodyPoint3>& localPoints)
+{
+    localPoints.reserve(worldPoints.size());
+    for (const SameBodyPoint3& point : worldPoints)
+    {
+        localPoints.push_back(TransformSameBodyWorldPointToLocal(frame, point));
+    }
+}
+
+SameBodyLocalCoordinateSignature BuildSameBodyLocalCoordinateSignature(const SameBodyFingerprint& fingerprint, const SameBodyFrame3& frame)
+{
+    SameBodyLocalCoordinateSignature signature = {};
+    signature.centroid = TransformSameBodyWorldPointToLocal(frame, SameBodyPointFromArray(fingerprint.centroid));
+    AppendSameBodyTransformedPoints(frame, fingerprint.vertexPoints, signature.vertexLocalPoints);
+    AppendSameBodyTransformedPoints(frame, fingerprint.lineEdgePoints, signature.lineEdgeLocalPoints);
+    AppendSameBodyTransformedPoints(frame, fingerprint.curveEdgePoints, signature.curveEdgeLocalPoints);
+    AppendSameBodyTransformedPoints(frame, fingerprint.arcEdgePoints, signature.arcEdgeLocalPoints);
+    AppendSameBodyTransformedPoints(frame, fingerprint.fullCircleEdgePoints, signature.fullCircleEdgeLocalPoints);
+    return signature;
+}
+
+SameBodyPoint3 ApplySameBodyCoordinateVariant(const SameBodyPoint3& point, int variantIndex)
+{
+    const bool swapXY = (variantIndex & 1) != 0;
+    const int signX = (variantIndex & 2) != 0 ? -1 : 1;
+    const int signY = (variantIndex & 4) != 0 ? -1 : 1;
+    const double sourceX = swapXY ? point.y : point.x;
+    const double sourceY = swapXY ? point.x : point.y;
+    return MakeSameBodyPoint3(static_cast<double>(signX) * sourceX, static_cast<double>(signY) * sourceY, point.z);
+}
+
+void ApplySameBodyPointVariant(const std::vector<SameBodyPoint3>& source, int variantIndex, std::vector<SameBodyPoint3>& target)
+{
+    target.reserve(source.size());
+    for (const SameBodyPoint3& point : source)
+    {
+        target.push_back(ApplySameBodyCoordinateVariant(point, variantIndex));
+    }
+}
+
+SameBodyLocalCoordinateSignature ApplySameBodyCoordinateVariant(const SameBodyLocalCoordinateSignature& signature, int variantIndex)
+{
+    SameBodyLocalCoordinateSignature result = {};
+    result.centroid = ApplySameBodyCoordinateVariant(signature.centroid, variantIndex);
+    ApplySameBodyPointVariant(signature.vertexLocalPoints, variantIndex, result.vertexLocalPoints);
+    ApplySameBodyPointVariant(signature.lineEdgeLocalPoints, variantIndex, result.lineEdgeLocalPoints);
+    ApplySameBodyPointVariant(signature.curveEdgeLocalPoints, variantIndex, result.curveEdgeLocalPoints);
+    ApplySameBodyPointVariant(signature.arcEdgeLocalPoints, variantIndex, result.arcEdgeLocalPoints);
+    ApplySameBodyPointVariant(signature.fullCircleEdgeLocalPoints, variantIndex, result.fullCircleEdgeLocalPoints);
+    return result;
+}
+
+double SameBodyPointAxisValue(const SameBodyPoint3& point, int axisIndex)
+{
+    if (axisIndex == 0)
+    {
+        return point.x;
+    }
+    if (axisIndex == 1)
+    {
+        return point.y;
+    }
+    return point.z;
+}
+
+std::vector<double> SortedSameBodyPointAxisValues(const std::vector<SameBodyPoint3>& points, int axisIndex)
+{
+    std::vector<double> values;
+    values.reserve(points.size());
+    for (const SameBodyPoint3& point : points)
+    {
+        values.push_back(SameBodyPointAxisValue(point, axisIndex));
+    }
+    std::sort(values.begin(), values.end());
+    return values;
+}
+
+bool CompareSameBodyPointValues(const std::vector<SameBodyPoint3>& referencePoints, const std::vector<SameBodyPoint3>& candidatePoints)
+{
+    if (referencePoints.size() != candidatePoints.size())
+    {
+        return false;
+    }
+    for (int axisIndex = 0; axisIndex < 3; ++axisIndex)
+    {
+        const std::vector<double> sortedReference = SortedSameBodyPointAxisValues(referencePoints, axisIndex);
+        const std::vector<double> sortedCandidate = SortedSameBodyPointAxisValues(candidatePoints, axisIndex);
+        for (size_t index = 0; index < sortedReference.size(); ++index)
+        {
+            if (!SameBodyNearlyEqual(sortedReference[index], sortedCandidate[index], kSameBodyDistanceTolerance))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool SameBodyLocalCoordinateSignaturesMatch(const SameBodyLocalCoordinateSignature& reference, const SameBodyLocalCoordinateSignature& candidate, int variantIndex)
+{
+    const SameBodyLocalCoordinateSignature candidateVariant = ApplySameBodyCoordinateVariant(candidate, variantIndex);
+    return CompareSameBodyPointValues(reference.lineEdgeLocalPoints, candidateVariant.lineEdgeLocalPoints) &&
+        CompareSameBodyPointValues(reference.curveEdgeLocalPoints, candidateVariant.curveEdgeLocalPoints) &&
+        CompareSameBodyPointValues(reference.arcEdgeLocalPoints, candidateVariant.arcEdgeLocalPoints) &&
+        CompareSameBodyPointValues(reference.fullCircleEdgeLocalPoints, candidateVariant.fullCircleEdgeLocalPoints);
+}
+
+int FindSameBodyMatchingPlaneFaceGroup(const SameBodyFingerprint& fingerprint, const SameBodyPlaneFaceFeature& referenceFace, size_t expectedCount)
+{
+    for (size_t groupIndex = 0; groupIndex < fingerprint.planeFaceGroups.size(); ++groupIndex)
+    {
+        const SameBodyPlaneFaceGroup& group = fingerprint.planeFaceGroups[groupIndex];
+        if (group.faceIndexes.size() != expectedCount || group.faceIndexes.empty())
+        {
+            continue;
+        }
+        const SameBodyPlaneFaceFeature& candidateFace = fingerprint.planeFaces[group.faceIndexes[0]];
+        if (SameBodyPlaneFaceMatch(referenceFace, candidateFace))
+        {
+            return static_cast<int>(groupIndex);
+        }
+    }
+    return -1;
+}
+
+int FindSameBodyLargestPlaneFaceGroup(const SameBodyFingerprint& fingerprint, size_t expectedCount)
+{
+    int bestGroupIndex = -1;
+    double bestArea = -1.0;
+    for (size_t groupIndex = 0; groupIndex < fingerprint.planeFaceGroups.size(); ++groupIndex)
+    {
+        const SameBodyPlaneFaceGroup& group = fingerprint.planeFaceGroups[groupIndex];
+        if (group.faceIndexes.size() != expectedCount || group.faceIndexes.empty())
+        {
+            continue;
+        }
+        const double area = fingerprint.planeFaces[group.faceIndexes[0]].area;
+        if (bestGroupIndex < 0 || SameBodyFaceAreaSignificantlyGreater(area, bestArea))
+        {
+            bestGroupIndex = static_cast<int>(groupIndex);
+            bestArea = area;
+        }
+    }
+    return bestGroupIndex;
+}
+
+bool TrySameBodyAnchorPlaneGroupMatch(const SameBodyFingerprint& reference, const SameBodyPlaneFaceGroup& referenceGroup, const SameBodyFingerprint& candidate, const SameBodyPlaneFaceGroup& candidateGroup)
+{
+    if (referenceGroup.faceIndexes.empty() || candidateGroup.faceIndexes.empty())
+    {
+        return false;
+    }
+    const SameBodyPlaneFaceFeature& referenceFace = reference.planeFaces[referenceGroup.faceIndexes[0]];
+    const SameBodyLocalCoordinateSignature referenceSignature = BuildSameBodyLocalCoordinateSignature(reference, referenceFace.frame);
+    for (size_t candIndex = 0; candIndex < candidateGroup.faceIndexes.size(); ++candIndex)
+    {
+        const SameBodyPlaneFaceFeature& candidateFace = candidate.planeFaces[candidateGroup.faceIndexes[candIndex]];
+        const SameBodyLocalCoordinateSignature candidateSignature = BuildSameBodyLocalCoordinateSignature(candidate, candidateFace.frame);
+        static const int zRotationVariants[] = {0, 3, 5, 6};
+        for (int variant : zRotationVariants)
+        {
+            if (SameBodyLocalCoordinateSignaturesMatch(referenceSignature, candidateSignature, variant))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool SameBodyAnchorsMatch(const SameBodyFingerprint& reference, const SameBodyFingerprint& candidate)
+{
+    for (size_t expectedCount = 1; expectedCount <= 2; ++expectedCount)
+    {
+        const int referenceGroupIndex = FindSameBodyLargestPlaneFaceGroup(reference, expectedCount);
+        if (referenceGroupIndex < 0)
+        {
+            continue;
+        }
+        const SameBodyPlaneFaceGroup& referenceGroup = reference.planeFaceGroups[static_cast<size_t>(referenceGroupIndex)];
+        const SameBodyPlaneFaceFeature& referenceFace = reference.planeFaces[referenceGroup.faceIndexes[0]];
+
+        int candidateGroupIndex = -1;
+        if (expectedCount == 1)
+        {
+            candidateGroupIndex = FindSameBodyMatchingPlaneFaceGroup(candidate, referenceFace, expectedCount);
+        }
+        else
+        {
+            candidateGroupIndex = FindSameBodyLargestPlaneFaceGroup(candidate, expectedCount);
+        }
+        if (candidateGroupIndex < 0)
+        {
+            if (expectedCount == 1)
+            {
+                continue;
+            }
+            return false;
+        }
+
+        const SameBodyPlaneFaceGroup& candidateGroup = candidate.planeFaceGroups[static_cast<size_t>(candidateGroupIndex)];
+        const SameBodyPlaneFaceFeature& candidateFace = candidate.planeFaces[candidateGroup.faceIndexes[0]];
+        if (expectedCount == 2 && !SameBodyPlaneFaceMatch(referenceFace, candidateFace))
+        {
+            return false;
+        }
+        if (TrySameBodyAnchorPlaneGroupMatch(reference, referenceGroup, candidate, candidateGroup))
+        {
+            return true;
+        }
+        if (expectedCount == 2)
+        {
+            return false;
+        }
+    }
+    return false;
+}
+
+bool SameBodyDistanceVectorsMatch(const std::vector<double>& referenceDistances, const std::vector<double>& candidateDistances)
+{
+    if (referenceDistances.size() != candidateDistances.size())
+    {
+        return false;
+    }
+    for (size_t index = 0; index < referenceDistances.size(); ++index)
+    {
+        if (!SameBodyNearlyEqual(referenceDistances[index], candidateDistances[index], kSameBodyDistanceTolerance))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SameBodyLengthSequenceMatch(const std::vector<double>& referenceLengths, const std::vector<double>& candidateLengths)
+{
+    if (referenceLengths.size() != candidateLengths.size())
+    {
+        return false;
+    }
+    for (size_t index = 0; index < referenceLengths.size(); ++index)
+    {
+        if (!SameBodyNearlyEqual(referenceLengths[index], candidateLengths[index], kSameBodyLengthTolerance))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SameBodyTypedEdgeLengthsMatch(const SameBodyFingerprint& reference, const SameBodyFingerprint& candidate)
+{
+    return SameBodyLengthSequenceMatch(reference.fullCircleEdgeLengths, candidate.fullCircleEdgeLengths) &&
+        SameBodyLengthSequenceMatch(reference.arcEdgeLengths, candidate.arcEdgeLengths) &&
+        SameBodyLengthSequenceMatch(reference.curveEdgeLengths, candidate.curveEdgeLengths) &&
+        SameBodyLengthSequenceMatch(reference.lineEdgeLengths, candidate.lineEdgeLengths);
+}
+
+bool SameBodyFingerprintsMatch(const SameBodyFingerprint& reference, const SameBodyFingerprint& candidate)
+{
+    return reference.edgeCount == candidate.edgeCount &&
+        reference.faceCount == candidate.faceCount &&
+        SameBodyTypedEdgeLengthsMatch(reference, candidate) &&
+        SameBodyAnchorsMatch(reference, candidate);
+}
+
+std::vector<Body*> CollectVisibleBodies(Part* part)
+{
+    std::vector<Body*> bodies;
+    if (part == nullptr || part->Bodies() == nullptr)
+    {
+        return bodies;
+    }
+    for (BodyCollection::iterator it = part->Bodies()->begin(); it != part->Bodies()->end(); ++it)
+    {
+        Body* body = *it;
+        if (body != nullptr && !body->IsBlanked())
+        {
+            bodies.push_back(body);
+        }
+    }
+    return bodies;
+}
+
+std::vector<Body*> FindMatchingVisibleBodies(Part* part, Body* referenceBody)
+{
+    std::vector<Body*> matches;
+    if (part == nullptr || referenceBody == nullptr || referenceBody->IsBlanked())
+    {
+        return matches;
+    }
+
+    bool referenceFingerprintReady = false;
+    SameBodyFingerprint referenceFingerprint = {};
+    for (Body* candidate : CollectVisibleBodies(part))
+    {
+        if (candidate == nullptr || candidate == referenceBody)
+        {
+            continue;
+        }
+        if (!referenceFingerprintReady)
+        {
+            referenceFingerprint = BuildSameBodyFingerprint(referenceBody);
+            referenceFingerprintReady = true;
+        }
+        const SameBodyFingerprint candidateFingerprint = BuildSameBodyFingerprint(candidate);
+        if (SameBodyFingerprintsMatch(referenceFingerprint, candidateFingerprint))
+        {
+            matches.push_back(candidate);
+        }
+    }
+    return matches;
+}
+
+bool IsAssemblyPart(Part* part)
+{
+    if (part == nullptr)
+    {
+        return false;
+    }
+
+    try
+    {
+        Assemblies::ComponentAssembly* assembly = part->ComponentAssembly();
+        return assembly != nullptr && assembly->RootComponent() != nullptr;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+bool IsAssemblyContext(Session* session)
+{
+    if (session == nullptr || session->Parts() == nullptr)
+    {
+        return false;
+    }
+
+    return IsAssemblyPart(session->Parts()->Display()) || IsAssemblyPart(session->Parts()->Work());
+}
+
+void SetComponentNameSafe(Session* session, Assemblies::Component* component, const std::string& name)
+{
+    if (component == nullptr || name.empty())
+    {
+        return;
+    }
+
+    try
+    {
+        component->SetName(name.c_str());
+    }
+    catch (const NXException& ex)
+    {
+        Log(session, std::string("部件名修改失败: ") + ex.Message());
+    }
+    catch (const std::exception& ex)
+    {
+        Log(session, std::string("部件名修改失败: ") + ex.what());
+    }
+    catch (...)
+    {
+        Log(session, "部件名修改失败: 未知错误");
+    }
+}
+
+std::string SafePartFileStem(std::string name)
+{
+    name = Trim(std::move(name));
+    for (char& ch : name)
+    {
+        const unsigned char uch = static_cast<unsigned char>(ch);
+        if (uch < 32 || ch == '<' || ch == '>' || ch == ':' || ch == '"' ||
+            ch == '/' || ch == '\\' || ch == '|' || ch == '?' || ch == '*')
+        {
+            ch = '_';
+        }
+    }
+    while (!name.empty() && (name.back() == ' ' || name.back() == '.'))
+    {
+        name.pop_back();
+    }
+    return name;
+}
+
+std::string PathToUtf8(const std::filesystem::path& path)
+{
+    const std::wstring wide = path.wstring();
+    if (wide.empty())
+    {
+        return std::string();
+    }
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (needed <= 1)
+    {
+        return std::string();
+    }
+    std::string utf8(static_cast<std::size_t>(needed - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, utf8.data(), needed, nullptr, nullptr);
+    return utf8;
+}
+
+std::string ComponentNameForInstance(std::string name)
+{
+    name = SafePartFileStem(std::move(name));
+    const size_t maxLen = static_cast<size_t>(UF_OBJ_NAME_NCHARS);
+    if (name.size() > maxLen)
+    {
+        name.resize(maxLen);
+    }
+    return name;
+}
+
+bool SamePath(const std::filesystem::path& lhs, const std::filesystem::path& rhs)
+{
+    if (lhs.empty() || rhs.empty())
+    {
+        return false;
+    }
+    try
+    {
+        return std::filesystem::equivalent(lhs, rhs);
+    }
+    catch (...)
+    {
+        return _wcsicmp(lhs.wstring().c_str(), rhs.wstring().c_str()) == 0;
+    }
+}
+
+void CollectComponentsByPrototypePath(Assemblies::Component* component, const std::filesystem::path& prototypePath, std::vector<Assemblies::Component*>& matches)
+{
+    if (component == nullptr || prototypePath.empty())
+    {
+        return;
+    }
+
+    try
+    {
+        BasePart* prototype = dynamic_cast<BasePart*>(component->Prototype());
+        if (prototype != nullptr)
+        {
+            const std::filesystem::path componentPath(WideFromUtf8(ToString(prototype->FullPath())));
+            if (SamePath(componentPath, prototypePath))
+            {
+                matches.push_back(component);
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+
+    try
+    {
+        for (Assemblies::Component* child : component->GetChildren())
+        {
+            CollectComponentsByPrototypePath(child, prototypePath, matches);
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+bool SaveAndCopyComponentPart(Session* session, Part* workPart, const std::string& name, std::filesystem::path* originalPath, std::filesystem::path* replacementPath, std::string* errorMessage)
+{
+    const auto fail = [&](const std::string& message) {
+        Log(session, message);
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = message;
+        }
+        return false;
+    };
+
+    const std::string safeName = SafePartFileStem(name);
+    if (workPart == nullptr || safeName.empty() || originalPath == nullptr || replacementPath == nullptr)
+    {
+        return fail("替换部件失败: 工作部件、编号或输出路径为空");
+    }
+
+    try
+    {
+        std::filesystem::path currentPath(WideFromUtf8(ToString(workPart->FullPath())));
+        if (currentPath.empty() || !currentPath.has_parent_path())
+        {
+            return fail("替换部件失败: 当前部件没有有效保存路径");
+        }
+
+        std::filesystem::path targetPath = currentPath.parent_path() / (safeName + ".prt");
+        if (_wcsicmp(currentPath.wstring().c_str(), targetPath.wstring().c_str()) == 0)
+        {
+            return true;
+        }
+        if (std::filesystem::exists(targetPath))
+        {
+            return fail(std::string("替换部件失败: 目标文件已存在，请先关闭或移走 ") + PathToUtf8(targetPath));
+        }
+
+        std::unique_ptr<PartSaveStatus> saveStatus(workPart->Save(BasePart::SaveComponentsFalse, BasePart::CloseAfterSaveFalse));
+        if (saveStatus && saveStatus->NumberUnsavedParts() > 0)
+        {
+            std::ostringstream oss;
+            oss << "替换部件失败: 保存刻字部件失败，未保存部件数=" << saveStatus->NumberUnsavedParts();
+            if (saveStatus->NumberUnsavedParts() > 0)
+            {
+                oss << ", 错误码=" << saveStatus->GetStatus(0);
+            }
+            return fail(oss.str());
+        }
+
+        std::filesystem::copy_file(currentPath, targetPath, std::filesystem::copy_options::none);
+        Log(session, std::string("已复制刻字部件=") + PathToUtf8(targetPath));
+        *originalPath = currentPath;
+        *replacementPath = targetPath;
+        return true;
+    }
+    catch (const NXException& ex)
+    {
+        return fail(std::string("复制替换部件失败: ") + ex.Message());
+    }
+    catch (const std::exception& ex)
+    {
+        return fail(std::string("复制替换部件失败: ") + ex.what());
+    }
+    catch (...)
+    {
+        return fail("复制替换部件失败: 未知错误");
+    }
+}
+
+bool ReplaceCopiedComponentPart(Session* session, const std::string& componentJournalId, const std::filesystem::path& originalPath, const std::filesystem::path& replacementPath, const std::string& name, std::vector<Assemblies::Component*>* replacedComponents, std::string* errorMessage)
+{
+    const auto fail = [&](const std::string& message) {
+        Log(session, message);
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = message;
+        }
+        return false;
+    };
+
+    const std::string safeName = SafePartFileStem(name);
+    if (componentJournalId.empty() || replacementPath.empty() || safeName.empty())
+    {
+        return fail("替换部件失败: 组件标识、替换文件或编号为空");
+    }
+
+    try
+    {
+
+        Part* assemblyPart = session != nullptr && session->Parts() != nullptr ? session->Parts()->Work() : nullptr;
+        if (assemblyPart == nullptr || assemblyPart->AssemblyManager() == nullptr)
+        {
+            return fail("替换部件失败: 当前工作部件不是有效装配");
+        }
+        if (assemblyPart->ComponentAssembly() == nullptr || assemblyPart->ComponentAssembly()->RootComponent() == nullptr)
+        {
+            return fail("替换部件失败: 当前工作部件没有有效装配根组件");
+        }
+
+        Assemblies::Component* component = nullptr;
+        try
+        {
+            component = dynamic_cast<Assemblies::Component*>(
+                assemblyPart->ComponentAssembly()->RootComponent()->FindObject(NXString(componentJournalId.c_str(), NXString::UTF8)));
+        }
+        catch (const NXException& ex)
+        {
+            return fail(std::string("替换部件失败: 重新定位组件失败: ") + ex.Message());
+        }
+        if (component == nullptr)
+        {
+            return fail("替换部件失败: 重新定位组件为空");
+        }
+
+        std::unique_ptr<Assemblies::ReplaceComponentBuilder, void (*)(Assemblies::ReplaceComponentBuilder*)> replaceBuilder(
+            assemblyPart->AssemblyManager()->CreateReplaceComponentBuilder(),
+            [](Assemblies::ReplaceComponentBuilder* value) {
+                if (value != nullptr)
+                {
+                    value->Destroy();
+                }
+            });
+        if (!replaceBuilder)
+        {
+            return fail("替换部件失败: 无法创建替换组件 Builder");
+        }
+
+        replaceBuilder->SetComponentNameType(Assemblies::ReplaceComponentBuilder::ComponentNameOptionAsSpecified);
+        replaceBuilder->SetComponentName(NXString(ComponentNameForInstance(safeName).c_str(), NXString::UTF8));
+        replaceBuilder->SetReplacementPart(NXString(PathToUtf8(replacementPath).c_str(), NXString::UTF8));
+        replaceBuilder->SetComponentReferenceSetType(Assemblies::ReplaceComponentBuilder::ComponentReferenceSetMaintain, NXString("", NXString::UTF8));
+        replaceBuilder->SetMaintainRelationships(true);
+        replaceBuilder->SetReplaceAllOccurrences(true);
+        const bool added = replaceBuilder->ComponentsToReplace()->Add(component);
+        if (!added)
+        {
+            return fail("替换部件失败: 组件加入替换列表失败");
+        }
+        std::unique_ptr<PartLoadStatus> loadStatus(replaceBuilder->RegisterReplacePartLoadStatus());
+        replaceBuilder->Commit();
+        std::unique_ptr<ErrorList> errors(replaceBuilder->GetErrorList());
+        if (errors && errors->Length() > 0)
+        {
+            std::ostringstream oss;
+            oss << "替换部件失败: ReplaceComponentBuilder 错误数=" << errors->Length();
+            return fail(oss.str());
+        }
+
+        Log(session, std::string("已替换组件为=") + PathToUtf8(replacementPath));
+        if (replacedComponents != nullptr)
+        {
+            replacedComponents->clear();
+            CollectComponentsByPrototypePath(assemblyPart->ComponentAssembly()->RootComponent(), replacementPath, *replacedComponents);
+        }
+        if (!originalPath.empty() && std::filesystem::exists(originalPath))
+        {
+            if (DeleteFileW(originalPath.wstring().c_str()) != 0)
+            {
+                Log(session, std::string("已从目录删除原部件=") + PathToUtf8(originalPath));
+            }
+            else
+            {
+                const DWORD err = GetLastError();
+                std::ostringstream oss;
+                oss << "目录删除原部件失败: Win32错误码=" << err << ", 文件=" << PathToUtf8(originalPath);
+                Log(session, oss.str());
+            }
+        }
+        return true;
+    }
+    catch (const NXException& ex)
+    {
+        return fail(std::string("替换部件失败: ") + ex.Message());
+    }
+    catch (const std::exception& ex)
+    {
+        return fail(std::string("替换部件失败: ") + ex.what());
+    }
+    catch (...)
+    {
+        return fail("替换部件失败: 未知错误");
+    }
+}
+
 std::string FirstAvailableAttribute(NXObject* primary, NXObject* secondary, const std::vector<std::string>& names)
 {
     for (const std::string& name : names)
@@ -1151,6 +2536,9 @@ struct TextSettings
     bool lockAspect = true;
     bool embossed = false;
     bool vShape = false;
+    bool renameComponentToText = false;
+    bool engraveSameBodies = false;
+    bool hideEngravedText = false;
     bool centerLongSide = false;
     bool centerShortSide = false;
     bool xLongSide = false;
@@ -2219,7 +3607,13 @@ public:
     {
         session_ = Session::GetSession();
         ui_ = UI::GetUI();
-        dialog_ = ui_->CreateDialog("KeZi.dlx");
+        const std::string dlxPath =
+            zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_KEZI_DLX);
+        if (dlxPath.empty())
+        {
+            throw std::runtime_error("KeZi dialog resource is missing.");
+        }
+        dialog_ = ui_->CreateDialog(dlxPath.c_str());
         dialog_->AddApplyHandler(make_callback(this, &KeZiDialog::ApplyCb));
         dialog_->AddOkHandler(make_callback(this, &KeZiDialog::OkCb));
         dialog_->AddCancelHandler(make_callback(this, &KeZiDialog::CancelCb));
@@ -2231,23 +3625,59 @@ public:
 
     ~KeZiDialog()
     {
+        Log(session_, "KeZiDialog析构开始");
         ClearPreviewBuilder();
-        delete dialog_;
+        Log(session_, "KeZiDialog析构: 跳过delete dialog，避免NX已释放后重复释放DialogCreator");
         dialog_ = nullptr;
+        Log(session_, "KeZiDialog析构完成");
     }
 
     int Show()
     {
-        dialog_->Show();
-        return 0;
+        Log(session_, "对话框Launch开始");
+        const int result = static_cast<int>(dialog_->Launch());
+        Log(session_, std::string("对话框Launch结束 result=") + std::to_string(result));
+        return result;
     }
 
 private:
     void InitializeCb()
     {
+        try
+        {
+            InitializeCbCore();
+        }
+        catch (const NXException& ex)
+        {
+            Log(session_, std::string("初始化对话框NX异常: ") + ex.Message());
+        }
+        catch (const std::exception& ex)
+        {
+            Log(session_, std::string("初始化对话框std异常: ") + ex.what());
+        }
+        catch (...)
+        {
+            Log(session_, "初始化对话框未知异常");
+        }
+    }
+
+    void InitializeCbCore()
+    {
         Log(session_, "初始化对话框");
+        const bool afterReplace = componentReplacedInApply_;
+        componentReplacedInApply_ = false;
+        suppressPreviewUntilSelection_ = afterReplace;
+        if (afterReplace)
+        {
+            Log(session_, "初始化对话框: Apply后重启，执行安全初始化");
+        }
+        Log(session_, "初始化对话框: LoadConfig开始");
         config_ = LoadConfig();
+        Log(session_, "初始化对话框: LoadConfig完成");
+        Log(session_, "初始化对话框: TopBlock开始");
         CompositeBlock* top = dialog_->TopBlock();
+        Log(session_, "初始化对话框: TopBlock完成");
+        Log(session_, "初始化对话框: FindBlock开始");
         mode_ = dynamic_cast<Enumeration*>(top->FindBlock("mode"));
         manualFace_ = dynamic_cast<BlockStyler::SelectObject*>(top->FindBlock("manualFace"));
         orientation_ = dynamic_cast<SpecifyOrientation*>(top->FindBlock("orientation"));
@@ -2276,7 +3706,12 @@ private:
         textLayer_ = dynamic_cast<IntegerBlock*>(top->FindBlock("textLayer"));
         embossedText_ = dynamic_cast<Toggle*>(top->FindBlock("embossedText"));
         verticalText_ = dynamic_cast<Toggle*>(top->FindBlock("verticalText"));
+        renameComponentToText_ = dynamic_cast<Toggle*>(top->FindBlock("renameComponentToText"));
+        engraveSameBodies_ = dynamic_cast<Toggle*>(top->FindBlock("engraveSameBodies"));
+        hideEngravedText_ = dynamic_cast<Toggle*>(top->FindBlock("hideEngravedText"));
         editConfig_ = dynamic_cast<Button*>(top->FindBlock("editConfig"));
+        Log(session_, "初始化对话框: FindBlock完成");
+        isAssemblyContext_ = IsAssemblyContext(session_);
         ruleText_ = config_.textTemplate;
         if (Trim(ruleText_).empty() || Trim(ruleText_) == "{文本}" || Trim(ruleText_) == "{text}")
         {
@@ -2286,15 +3721,36 @@ private:
         {
             ruleText_ = config_.text;
         }
+        Log(session_, "初始化对话框: ApplyConfigToDialog开始");
         ApplyConfigToDialog();
+        Log(session_, "初始化对话框: ApplyConfigToDialog完成");
 
         if (manualFace_ != nullptr)
         {
+            Log(session_, "初始化对话框: 设置选择块开始");
+            if (afterReplace)
+            {
+                try
+                {
+                    std::vector<TaggedObject*> emptySelection;
+                    manualFace_->SetSelectedObjects(emptySelection);
+                    Log(session_, "初始化对话框: 已清空Apply前旧选择");
+                }
+                catch (const NXException& ex)
+                {
+                    Log(session_, std::string("初始化对话框: 清空旧选择失败: ") + ex.Message());
+                }
+                catch (...)
+                {
+                    Log(session_, "初始化对话框: 清空旧选择失败: 未知异常");
+                }
+            }
             manualFace_->SetAutomaticProgression(false);
             manualFace_->SetMaximumScopeAsString("Within Work Part and Components");
             manualFace_->SetCreateInterpartLink(false);
             manualFace_->SetInterpartSelectionAsString("Simple");
             ApplyPlanarFaceSelectionFilter(manualFace_);
+            Log(session_, "初始化对话框: 设置选择块完成");
         }
         if (orientation_ != nullptr)
         {
@@ -2302,20 +3758,29 @@ private:
         }
         if (textValue_ != nullptr)
         {
-            const std::string currentText = ReadString(textValue_);
-            if (currentText.empty() && !config_.text.empty())
+            if (!config_.text.empty())
             {
                 textValue_->SetValue(config_.text.c_str());
             }
-            else if (currentText.empty() && TextTemplateHasSerial(ruleText_))
+            else if (TextTemplateHasSerial(ruleText_))
             {
                 const std::string serialText = SerialNumberText(config_);
                 textValue_->SetValue(serialText.c_str());
             }
             UpdateTextRuleLabel();
         }
+        Log(session_, "初始化对话框: UpdateRuleInputValue开始");
         UpdateRuleInputValue();
-        UpdateResolvedTextFromRule();
+        if (!afterReplace)
+        {
+            Log(session_, "初始化对话框: UpdateResolvedTextFromRule开始");
+            UpdateResolvedTextFromRule();
+        }
+        else
+        {
+            Log(session_, "初始化对话框: Apply后重启，跳过规则解析，等待重新选面");
+        }
+        Log(session_, "初始化对话框: UpdateUiState开始");
         UpdateUiState();
         Log(session_, "对话框初始化完成");
     }
@@ -2370,6 +3835,18 @@ private:
         {
             verticalText_->SetValue(config_.vShape);
         }
+        if (renameComponentToText_ != nullptr)
+        {
+            renameComponentToText_->SetValue(config_.renameComponentToText && isAssemblyContext_);
+        }
+        if (engraveSameBodies_ != nullptr)
+        {
+            engraveSameBodies_->SetValue(config_.engraveSameBodies && !isAssemblyContext_);
+        }
+        if (hideEngravedText_ != nullptr)
+        {
+            hideEngravedText_->SetValue(config_.hideEngravedText);
+        }
         if (centerLongSide_ != nullptr)
         {
             centerLongSide_->SetValue(config_.centerLongSide);
@@ -2391,6 +3868,7 @@ private:
     void DialogShownCb()
     {
         Log(session_, "对话框显示，读取当前控件值");
+        isAssemblyContext_ = IsAssemblyContext(session_);
         UpdateUiState();
         ApplyExclusiveAxisToggle(xLongSide_);
         ApplyExclusiveAxisToggle(xShortSide_);
@@ -2399,12 +3877,43 @@ private:
             orientation_->SetVisibleManipulatorHandles(0x47);
         }
         ApplyAxisModeToCurrentOrientation();
-        RefreshPreview();
+        if (!suppressPreviewUntilSelection_)
+        {
+            RefreshPreview();
+        }
+        else
+        {
+            Log(session_, "对话框显示: 等待重新选面，暂不刷新预览");
+        }
         if (textValue_ != nullptr)
         {
             UpdateTextRuleLabel();
             UpdateRuleInputValue();
-            UpdateResolvedTextFromRule();
+            if (!suppressPreviewUntilSelection_)
+            {
+                UpdateResolvedTextFromRule();
+            }
+            else
+            {
+                try
+                {
+                    updatingResolvedText_ = true;
+                    textValue_->SetValue(config_.text.c_str());
+                    updatingResolvedText_ = false;
+                    Log(session_, std::string("对话框显示: 已回填递增文本=") + config_.text);
+                }
+                catch (const NXException& ex)
+                {
+                    updatingResolvedText_ = false;
+                    Log(session_, std::string("对话框显示: 回填递增文本失败: ") + ex.Message());
+                }
+                catch (...)
+                {
+                    updatingResolvedText_ = false;
+                    Log(session_, "对话框显示: 回填递增文本失败: 未知异常");
+                }
+                Log(session_, "对话框显示: Apply后重启，跳过规则解析");
+            }
             textValue_->Focus();
         }
     }
@@ -2412,13 +3921,32 @@ private:
     int CancelCb()
     {
         Log(session_, "取消/关闭对话框");
-        SaveCurrentRule();
+        if (!suppressPreviewUntilSelection_)
+        {
+            SaveCurrentRule();
+        }
+        else
+        {
+            Log(session_, "取消/关闭对话框: Apply后重启状态，不保存旧控件模板");
+        }
         ClearPreviewBuilder();
         return 0;
     }
 
     int UpdateCb(UIBlock* block)
     {
+        if (applying_)
+        {
+            return 0;
+        }
+        if (suppressPreviewUntilSelection_ && block != manualFace_)
+        {
+            return 0;
+        }
+        if (block == manualFace_)
+        {
+            suppressPreviewUntilSelection_ = false;
+        }
         if (block == ruleValue_ && updatingRuleInput_)
         {
             return 0;
@@ -2507,27 +4035,44 @@ private:
 
     int ApplyCb()
     {
+        Log(session_, "ApplyCb进入");
+        applying_ = true;
         try
         {
             ApplyEngraving();
         }
         catch (const NXException& ex)
         {
+            applying_ = false;
             Log(session_, std::string("刻字失败: ") + ex.Message());
             ShowError("KeZi Engrave Text", std::string("Engraving failed: ") + ex.Message());
+            Log(session_, "ApplyCb异常返回=1");
             return 1;
         }
         catch (const std::exception& ex)
         {
+            applying_ = false;
             Log(session_, std::string("刻字失败: ") + ex.what());
             ShowError("KeZi Engrave Text", std::string("Engraving failed: ") + ex.what());
+            Log(session_, "ApplyCb异常返回=1");
             return 1;
         }
+        catch (...)
+        {
+            applying_ = false;
+            Log(session_, "刻字失败: 未知异常");
+            ShowError("刻字", "刻字失败: 未知异常");
+            Log(session_, "ApplyCb未知异常返回=1");
+            return 1;
+        }
+        applying_ = false;
+        Log(session_, "ApplyCb正常返回=0");
         return 0;
     }
 
     int OkCb()
     {
+        Log(session_, "OkCb进入");
         return ApplyCb();
     }
 
@@ -2605,6 +4150,9 @@ private:
         WriteConfigValue("文本层", std::to_string(settings.layer));
         WriteConfigValue("凸起文本", BoolText(settings.embossed));
         WriteConfigValue("V形文本", BoolText(settings.vShape));
+        WriteConfigValue("编号设为部件名", BoolText(settings.renameComponentToText));
+        WriteConfigValue("刻相同", BoolText(settings.engraveSameBodies));
+        WriteConfigValue("隐藏已刻字体", BoolText(settings.hideEngravedText));
         WriteConfigValue("长向居中", BoolText(settings.centerLongSide));
         WriteConfigValue("短向居中", BoolText(settings.centerShortSide));
         WriteConfigValue("X长边", BoolText(settings.xLongSide));
@@ -2626,6 +4174,9 @@ private:
         config_.layer = settings.layer;
         config_.embossed = settings.embossed;
         config_.vShape = settings.vShape;
+        config_.renameComponentToText = settings.renameComponentToText;
+        config_.engraveSameBodies = settings.engraveSameBodies;
+        config_.hideEngravedText = settings.hideEngravedText;
         config_.centerLongSide = settings.centerLongSide;
         config_.centerShortSide = settings.centerShortSide;
         config_.xLongSide = settings.xLongSide;
@@ -2713,6 +4264,12 @@ private:
             return false;
         }
 
+        const std::string trimmedDisplay = Trim(displayText);
+        if (IncrementTextSerial(trimmedDisplay, nextText))
+        {
+            return true;
+        }
+
         Part* part = lastWorkPart_;
         NXObject* partObject = dynamic_cast<NXObject*>(part);
         const std::string bodyName = lastBody_ == nullptr ? std::string() : ToString(lastBody_->Name());
@@ -2792,6 +4349,30 @@ private:
         {
             boundaryColor_->SetEnable(boundaryValue != 0);
         }
+        if (renameComponentToText_ != nullptr)
+        {
+            renameComponentToText_->SetShow(isAssemblyContext_);
+            renameComponentToText_->SetEnable(isAssemblyContext_);
+            if (!isAssemblyContext_)
+            {
+                renameComponentToText_->SetValue(false);
+            }
+        }
+        if (engraveSameBodies_ != nullptr)
+        {
+            const bool showForSinglePart = !isAssemblyContext_;
+            engraveSameBodies_->SetShow(showForSinglePart);
+            engraveSameBodies_->SetEnable(showForSinglePart);
+            if (!showForSinglePart)
+            {
+                engraveSameBodies_->SetValue(false);
+            }
+        }
+        if (hideEngravedText_ != nullptr)
+        {
+            hideEngravedText_->SetShow(true);
+            hideEngravedText_->SetEnable(true);
+        }
         const bool lockAspect = ReadToggle(lockAspect_, true);
         if (wScale_ != nullptr)
         {
@@ -2840,6 +4421,9 @@ private:
         settings.layer = ReadInteger(textLayer_, 254);
         settings.embossed = ReadToggle(embossedText_, false);
         settings.vShape = ReadToggle(verticalText_, false);
+        settings.renameComponentToText = isAssemblyContext_ && ReadToggle(renameComponentToText_, false);
+        settings.engraveSameBodies = !isAssemblyContext_ && ReadToggle(engraveSameBodies_, false);
+        settings.hideEngravedText = ReadToggle(hideEngravedText_, false);
         settings.centerLongSide = ReadToggle(centerLongSide_, false);
         settings.centerShortSide = ReadToggle(centerShortSide_, false);
         settings.xLongSide = ReadToggle(xLongSide_, false);
@@ -3060,6 +4644,7 @@ private:
 
     void ClearPreviewBuilder()
     {
+        Log(session_, "ClearPreviewBuilder进入");
         Tooling::InsertTextBuilder* builder = previewBuilder_;
         previewBuilder_ = nullptr;
         previewUdo_ = nullptr;
@@ -3067,11 +4652,41 @@ private:
         {
             try
             {
+                Log(session_, "ClearPreviewBuilder: Destroy预览Builder开始");
                 builder->Destroy();
+                Log(session_, "ClearPreviewBuilder: Destroy预览Builder完成");
+            }
+            catch (const NXException& ex)
+            {
+                Log(session_, std::string("ClearPreviewBuilder: Destroy预览Builder NX异常: ") + ex.Message());
             }
             catch (...)
             {
+                Log(session_, "ClearPreviewBuilder: Destroy预览Builder未知异常");
             }
+        }
+        Log(session_, "ClearPreviewBuilder退出");
+    }
+
+    void ClearManualSelectionAfterReplace()
+    {
+        if (manualFace_ == nullptr)
+        {
+            return;
+        }
+        try
+        {
+            std::vector<TaggedObject*> emptySelection;
+            manualFace_->SetSelectedObjects(emptySelection);
+            Log(session_, "已清空选择面，避免Apply后恢复旧组件选择");
+        }
+        catch (const NXException& ex)
+        {
+            Log(session_, std::string("清空选择面失败: ") + ex.Message());
+        }
+        catch (...)
+        {
+            Log(session_, "清空选择面失败: 未知异常");
         }
     }
 
@@ -3230,7 +4845,11 @@ private:
         Log(session_, "按居中开关调整方位原点");
     }
 
-    Tooling::InsertTextBuilder* CreatePreparedBuilder(NXObject** textUdoOut)
+    Tooling::InsertTextBuilder* CreatePreparedBuilder(NXObject** textUdoOut,
+                                                      Face* overrideSelectedFace = nullptr,
+                                                      const Point3d* overrideOriginReference = nullptr,
+                                                      const Matrix3x3* overrideMatrix = nullptr,
+                                                      const std::string* overrideText = nullptr)
     {
         Log(session_, "开始准备注塑模向导刻字 Builder");
         if (textUdoOut != nullptr)
@@ -3244,13 +4863,23 @@ private:
             throw std::runtime_error("Text height, depth, length, and width ratio must be greater than 0.");
         }
 
-        Face* selectedFace = SelectedFace();
+        Face* selectedFace = overrideSelectedFace != nullptr ? overrideSelectedFace : SelectedFace();
         if (selectedFace == nullptr)
         {
             throw std::runtime_error("Manual mode requires a selected engraving face.");
         }
         Log(session_, "已取得选择面");
         Assemblies::Component* selectedComponent = selectedFace->IsOccurrence() ? selectedFace->OwningComponent() : nullptr;
+        if (overrideSelectedFace != nullptr)
+        {
+            selectedComponent = nullptr;
+        }
+        lastComponent_ = selectedComponent;
+        lastComponentJournalId_.clear();
+        if (selectedComponent != nullptr)
+        {
+            lastComponentJournalId_ = ToString(selectedComponent->JournalIdentifier());
+        }
         Face* face = PrototypeFace(selectedFace);
         if (face == nullptr)
         {
@@ -3277,10 +4906,13 @@ private:
             throw std::runtime_error("Selected face is not a valid planar engraving face.");
         }
 
-        Point3d originReference = pickedPoint;
+        Point3d originReference = overrideOriginReference != nullptr ? *overrideOriginReference : pickedPoint;
         if (orientation_ != nullptr && orientation_->IsOriginSpecified())
         {
-            originReference = orientation_->Origin();
+            if (overrideOriginReference == nullptr)
+            {
+                originReference = orientation_->Origin();
+            }
             if (selectedComponent != nullptr)
             {
                 originReference = ComponentPointToPrototype(selectedComponent, originReference);
@@ -3317,7 +4949,7 @@ private:
         try
         {
             const std::string textTemplate = EffectiveTextTemplate(settings);
-            const std::string textRule = ExpandTextTemplate(textTemplate, settings.text, body, workPart, config_);
+            const std::string textRule = overrideText != nullptr ? *overrideText : ExpandTextTemplate(textTemplate, settings.text, body, workPart, config_);
             if (textRule.empty())
             {
                 throw std::runtime_error("Engraving text is empty.");
@@ -3327,8 +4959,10 @@ private:
             lastBody_ = body;
             lastWorkPart_ = workPart;
             Log(session_, std::string("解析刻字文本: ") + textRule);
-            const Point3d textOrigin = ApplyCenterOptions(face, faceNormal, pickedOrigin, settings);
-            const Matrix3x3 textMatrix = TextMatrixFromDialog(face, faceNormal, settings, selectedComponent);
+            const Point3d textOrigin = overrideOriginReference != nullptr
+                                           ? *overrideOriginReference
+                                           : ApplyCenterOptions(face, faceNormal, pickedOrigin, settings);
+            const Matrix3x3 textMatrix = overrideMatrix != nullptr ? *overrideMatrix : TextMatrixFromDialog(face, faceNormal, settings, selectedComponent);
 
             builder->SetInsertTextType(Tooling::InsertTextBuilder::InsertTypeThroughPoint);
             builder->SetLockAspectRatio(settings.lockAspect);
@@ -3443,48 +5077,399 @@ private:
         refreshingPreview_ = false;
     }
 
+    bool FindMatchingFaceForSameBody(Body* candidateBody,
+                                     const Face* referenceFace,
+                                     const Point3d& referenceFacePoint,
+                                     const Vector3d& referenceNormal,
+                                     Face** matchedFace,
+                                     Point3d* matchedFacePoint,
+                                     Vector3d* matchedNormal,
+                                     SameBodyPlaneFaceFeature* referenceFeatureOut = nullptr,
+                                     SameBodyPlaneFaceFeature* matchedFeatureOut = nullptr) const
+    {
+        if (candidateBody == nullptr || referenceFace == nullptr || matchedFace == nullptr || matchedFacePoint == nullptr || matchedNormal == nullptr)
+        {
+            return false;
+        }
+
+        SameBodyPlaneFaceFeature referenceFeature = {};
+        if (!BuildSameBodyPlanarFaceFeature(const_cast<Face*>(referenceFace), referenceFeature))
+        {
+            return false;
+        }
+
+        const Vector3d normalizedReferenceNormal = Normalize(referenceNormal, Vector3d(0.0, 0.0, 1.0));
+        Face* bestFace = nullptr;
+        Point3d bestPoint;
+        Vector3d bestNormal;
+        SameBodyPlaneFaceFeature bestFeature = {};
+        double bestDistance = std::numeric_limits<double>::max();
+        for (Face* candidateFace : candidateBody->GetFaces())
+        {
+            SameBodyPlaneFaceFeature candidateFeature = {};
+            if (!BuildSameBodyPlanarFaceFeature(candidateFace, candidateFeature) ||
+                !SameBodyPlaneFaceMatch(referenceFeature, candidateFeature))
+            {
+                continue;
+            }
+
+            Point3d candidatePoint;
+            Vector3d candidateNormal;
+            if (!AskPlanarFaceData(candidateFace, nullptr, &candidatePoint, &candidateNormal))
+            {
+                continue;
+            }
+
+            const Vector3d normalizedCandidateNormal = Normalize(candidateNormal, Vector3d(0.0, 0.0, 1.0));
+            if (Dot(normalizedReferenceNormal, normalizedCandidateNormal) < 0.95)
+            {
+                continue;
+            }
+
+            const double dx = candidatePoint.X - referenceFacePoint.X;
+            const double dy = candidatePoint.Y - referenceFacePoint.Y;
+            const double dz = candidatePoint.Z - referenceFacePoint.Z;
+            const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                bestFace = candidateFace;
+                bestPoint = candidatePoint;
+                bestNormal = candidateNormal;
+                bestFeature = candidateFeature;
+            }
+        }
+
+        if (bestFace == nullptr)
+        {
+            return false;
+        }
+        *matchedFace = bestFace;
+        *matchedFacePoint = bestPoint;
+        *matchedNormal = bestNormal;
+        if (referenceFeatureOut != nullptr)
+        {
+            *referenceFeatureOut = referenceFeature;
+        }
+        if (matchedFeatureOut != nullptr)
+        {
+            *matchedFeatureOut = bestFeature;
+        }
+        return true;
+    }
+
+    Point3d TransferSameBodyTextOrigin(const Point3d& referenceOrigin,
+                                       const SameBodyFrame3& referenceFrame,
+                                       const SameBodyFrame3& candidateFrame) const
+    {
+        const SameBodyPoint3 localPoint = TransformSameBodyWorldPointToLocal(referenceFrame, SameBodyPointFromNx(referenceOrigin));
+        return SameBodyPointToNx(TransformSameBodyLocalPointToWorld(candidateFrame, localPoint));
+    }
+
+    Matrix3x3 TransferSameBodyTextMatrix(const Matrix3x3& referenceMatrix,
+                                         const SameBodyFrame3& referenceFrame,
+                                         const SameBodyFrame3& candidateFrame) const
+    {
+        const SameBodyPoint3 refX = SameBodyPointFromVector(Vector3d(referenceMatrix.Xx, referenceMatrix.Xy, referenceMatrix.Xz));
+        const SameBodyPoint3 refY = SameBodyPointFromVector(Vector3d(referenceMatrix.Yx, referenceMatrix.Yy, referenceMatrix.Yz));
+        const SameBodyPoint3 refZ = SameBodyPointFromVector(Vector3d(referenceMatrix.Zx, referenceMatrix.Zy, referenceMatrix.Zz));
+
+        Vector3d x = SameBodyVectorToNx(TransformSameBodyLocalVectorToWorld(candidateFrame, TransformSameBodyWorldVectorToLocal(referenceFrame, refX)));
+        Vector3d y = SameBodyVectorToNx(TransformSameBodyLocalVectorToWorld(candidateFrame, TransformSameBodyWorldVectorToLocal(referenceFrame, refY)));
+        Vector3d z = SameBodyVectorToNx(TransformSameBodyLocalVectorToWorld(candidateFrame, TransformSameBodyWorldVectorToLocal(referenceFrame, refZ)));
+
+        z = Normalize(z, SameBodyVectorToNx(candidateFrame.zAxis));
+        x = Normalize(ProjectToPlane(x, z), SameBodyVectorToNx(candidateFrame.xAxis));
+        y = Normalize(Cross(z, x), SameBodyVectorToNx(candidateFrame.yAxis));
+        x = Normalize(Cross(y, z), x);
+        return MakeMatrix(x, y, z);
+    }
+
+    void HideEngravedBody(NXObject* object)
+    {
+        if (object == nullptr)
+        {
+            return;
+        }
+        try
+        {
+            DisplayableObject* displayable = dynamic_cast<DisplayableObject*>(object);
+            if (displayable != nullptr)
+            {
+                displayable->Blank();
+                return;
+            }
+        }
+        catch (...)
+        {
+        }
+        try
+        {
+            UF_OBJ_set_blank_status(object->Tag(), UF_OBJ_BLANKED);
+        }
+        catch (...)
+        {
+        }
+    }
+
+    void HideComponents(const std::vector<Assemblies::Component*>& components)
+    {
+        if (components.empty() || session_ == nullptr || session_->Parts() == nullptr)
+        {
+            return;
+        }
+
+        Part* assemblyPart = session_->Parts()->Work();
+        if (assemblyPart == nullptr || assemblyPart->AssemblyManager() == nullptr)
+        {
+            return;
+        }
+
+        std::vector<TaggedObject*> objects;
+        for (Assemblies::Component* component : components)
+        {
+            if (component != nullptr)
+            {
+                objects.push_back(component);
+            }
+        }
+        if (objects.empty())
+        {
+            return;
+        }
+
+        try
+        {
+            std::unique_ptr<Assemblies::HideComponentBuilder, void (*)(Assemblies::HideComponentBuilder*)> hideBuilder(
+                assemblyPart->AssemblyManager()->CreateHideComponentBuilder(),
+                [](Assemblies::HideComponentBuilder* value) {
+                    if (value != nullptr)
+                    {
+                        value->Destroy();
+                    }
+                });
+            if (hideBuilder != nullptr && hideBuilder->Components() != nullptr)
+            {
+                hideBuilder->Components()->SetArray(objects);
+                hideBuilder->Commit();
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    void CommitPreparedBuilder(Tooling::InsertTextBuilder* builder, NXObject* textUdo)
+    {
+        if (builder == nullptr)
+        {
+            return;
+        }
+        builder->Commit();
+    }
+
     void ApplyEngraving()
     {
         Log(session_, "开始提交刻字");
+        struct SameBodyEngravingTarget
+        {
+            Body* body = nullptr;
+            Face* face = nullptr;
+            Point3d origin;
+            Matrix3x3 matrix;
+        };
+
         std::unique_ptr<Tooling::InsertTextBuilder, void (*)(Tooling::InsertTextBuilder*)> builder(
             nullptr,
             [](Tooling::InsertTextBuilder* value) {
                 if (value != nullptr)
                 {
-                    value->Destroy();
+                    try
+                    {
+                        value->Destroy();
+                    }
+                    catch (...)
+                    {
+                    }
                 }
-            });
+        });
 
+        const std::string dialogTextAtApply = textValue_ == nullptr ? std::string() : Trim(ReadString(textValue_));
         ClearPreviewBuilder();
         Face* selectedFace = SelectedFace();
+        const TextSettings settings = ReadSettings();
+        const bool renameComponentToText = settings.renameComponentToText;
+        const bool engraveSameBodies = settings.engraveSameBodies;
+        const bool hideEngravedText = settings.hideEngravedText;
         WorkContextGuard workContext(session_, selectedFace);
         NXObject* textUdo = nullptr;
         builder.reset(CreatePreparedBuilder(&textUdo));
+        NXObject* committedBody = lastBody_;
+        Assemblies::Component* committedComponent = lastComponent_;
+        Part* committedWorkPart = lastWorkPart_;
+        Face* committedPrototypeFace = selectedFace != nullptr ? PrototypeFace(selectedFace) : nullptr;
+        Body* referenceBody = dynamic_cast<Body*>(committedBody);
+        Point3d referenceFacePoint;
+        Vector3d referenceFaceNormal;
+        Point3d referenceOrigin;
+        Matrix3x3 referenceMatrix;
+        bool hasSameBodyReference = false;
+        if (committedPrototypeFace != nullptr && referenceBody != nullptr && committedWorkPart != nullptr)
+        {
+            Point3d pickedPoint = manualFace_ != nullptr ? manualFace_->PickPoint() : Point3d(0.0, 0.0, 0.0);
+            if (selectedFace != nullptr && selectedFace->IsOccurrence() && selectedFace->OwningComponent() != nullptr)
+            {
+                pickedPoint = ComponentPointToPrototype(selectedFace->OwningComponent(), pickedPoint);
+            }
+            if (AskPlanarFaceData(committedPrototypeFace, &pickedPoint, &referenceFacePoint, &referenceFaceNormal))
+            {
+                referenceOrigin = ProjectPointToFacePlane(referenceFacePoint, referenceFaceNormal, orientation_ != nullptr && orientation_->IsOriginSpecified() ? orientation_->Origin() : pickedPoint);
+                referenceOrigin = ApplyCenterOptions(committedPrototypeFace, referenceFaceNormal, referenceOrigin, settings);
+                referenceMatrix = TextMatrixFromDialog(committedPrototypeFace, referenceFaceNormal, settings, selectedFace != nullptr && selectedFace->IsOccurrence() ? selectedFace->OwningComponent() : nullptr);
+                hasSameBodyReference = true;
+            }
+        }
+        const std::string committedComponentJournalId = lastComponentJournalId_;
+        const std::string committedText =
+            (!dialogTextAtApply.empty() && !TextTemplateHasRuleToken(dialogTextAtApply)) ? dialogTextAtApply : lastResolvedText_;
+        const std::string committedTemplate = lastTextTemplate_;
+        Log(session_, std::string("应用文本: 对话框=") + dialogTextAtApply + ", 解析=" + lastResolvedText_ + ", 使用=" + committedText);
 
-        builder->Commit();
-        workContext.Restore();
+        std::vector<SameBodyEngravingTarget> sameBodyTargets;
+        if (engraveSameBodies && hasSameBodyReference && committedWorkPart != nullptr && referenceBody != nullptr && !committedText.empty())
+        {
+            const std::vector<Body*> matchingBodies = FindMatchingVisibleBodies(committedWorkPart, referenceBody);
+            for (Body* sameBody : matchingBodies)
+            {
+                Face* sameFace = nullptr;
+                Point3d sameFacePoint;
+                Vector3d sameFaceNormal;
+                SameBodyPlaneFaceFeature referenceFeature = {};
+                SameBodyPlaneFaceFeature sameFeature = {};
+                if (!FindMatchingFaceForSameBody(sameBody, committedPrototypeFace, referenceFacePoint, referenceFaceNormal, &sameFace, &sameFacePoint, &sameFaceNormal, &referenceFeature, &sameFeature))
+                {
+                    continue;
+                }
+
+                SameBodyEngravingTarget target;
+                target.body = sameBody;
+                target.face = sameFace;
+                target.origin = TransferSameBodyTextOrigin(referenceOrigin, referenceFeature.frame, sameFeature.frame);
+                target.matrix = TransferSameBodyTextMatrix(referenceMatrix, referenceFeature.frame, sameFeature.frame);
+                sameBodyTargets.push_back(target);
+            }
+        }
+
+        CommitPreparedBuilder(builder.get(), textUdo);
         Log(session_, "刻字 Commit 完成");
+        if (committedBody != nullptr && !committedText.empty())
+        {
+            WriteStringAttribute(committedBody, "bianhao", committedText);
+            Log(session_, std::string("已写入体属性 bianhao=") + committedText);
+            SetObjectNameSafe(session_, committedBody, committedText);
+            Log(session_, std::string("已修改体名=") + committedText);
+            if (hideEngravedText && committedComponent == nullptr)
+            {
+                HideEngravedBody(committedBody);
+            }
+        }
+        Log(session_, "提交Builder销毁开始");
+        builder.reset();
+        Log(session_, "提交Builder销毁完成");
+        for (const SameBodyEngravingTarget& target : sameBodyTargets)
+        {
+            std::unique_ptr<Tooling::InsertTextBuilder, void (*)(Tooling::InsertTextBuilder*)> sameBuilder(
+                nullptr,
+                [](Tooling::InsertTextBuilder* value) {
+                    if (value != nullptr)
+                    {
+                        try { value->Destroy(); } catch (...) {}
+                    }
+                });
+            NXObject* sameTextUdo = nullptr;
+            sameBuilder.reset(CreatePreparedBuilder(&sameTextUdo, target.face, &target.origin, &target.matrix, &committedText));
+            CommitPreparedBuilder(sameBuilder.get(), sameTextUdo);
+            sameBuilder.reset();
+            WriteStringAttribute(target.body, "bianhao", committedText);
+            SetObjectNameSafe(session_, target.body, committedText);
+            if (hideEngravedText)
+            {
+                HideEngravedBody(target.body);
+            }
+        }
         SaveCurrentRule();
         SaveDialogValues();
-        if (lastBody_ != nullptr && !lastResolvedText_.empty())
-        {
-            WriteStringAttribute(lastBody_, "编号", lastResolvedText_);
-            Log(session_, std::string("已写入体属性 编号=") + lastResolvedText_);
-            SetObjectNameSafe(session_, lastBody_, lastResolvedText_);
-            Log(session_, std::string("已修改体名=") + lastResolvedText_);
-        }
-        if (TextTemplateHasSerial(lastTextTemplate_) && textValue_ != nullptr)
+        if (textValue_ != nullptr)
         {
             std::string nextText;
             const std::string currentText = ReadString(textValue_);
-            if (IncrementDisplaySerialByRule(currentText, &nextText))
+            const bool incremented = TextTemplateHasSerial(committedTemplate)
+                                         ? IncrementDisplaySerialByRule(currentText, &nextText)
+                                         : IncrementTextSerial(Trim(currentText), &nextText);
+            if (incremented)
             {
-                textValue_->SetValue(nextText.c_str());
                 config_.text = nextText;
                 WriteConfigValue("文本", nextText);
+                try
+                {
+                    updatingResolvedText_ = true;
+                    textValue_->SetValue(nextText.c_str());
+                    updatingResolvedText_ = false;
+                }
+                catch (...)
+                {
+                    updatingResolvedText_ = false;
+                }
                 Log(session_, std::string("流水号已递增为: ") + nextText);
             }
         }
+        std::filesystem::path originalPartPath;
+        std::filesystem::path replacementPartPath;
+        std::string replaceError;
+        const bool shouldReplaceComponent =
+            renameComponentToText && committedComponent != nullptr && !committedComponentJournalId.empty() && !committedText.empty();
+        bool copiedReplacementPart = false;
+        if (shouldReplaceComponent)
+        {
+            Log(session_, "准备保存并复制部件文件");
+            copiedReplacementPart = SaveAndCopyComponentPart(
+                session_,
+                lastWorkPart_,
+                committedText,
+                &originalPartPath,
+                &replacementPartPath,
+                &replaceError);
+        }
+
+        Log(session_, "准备恢复装配工作上下文");
+        workContext.Restore();
+        Log(session_, "已恢复装配工作上下文");
+        if (shouldReplaceComponent)
+        {
+            Log(session_, "准备替换装配组件引用");
+            std::vector<Assemblies::Component*> replacedComponents;
+            if (!copiedReplacementPart ||
+                !ReplaceCopiedComponentPart(session_, committedComponentJournalId, originalPartPath, replacementPartPath, committedText, &replacedComponents, &replaceError))
+            {
+                Log(session_, std::string("替换装配组件引用失败: ") + replaceError);
+                ShowError("刻字", replaceError);
+            }
+            else
+            {
+                Log(session_, "替换装配组件引用完成");
+                if (hideEngravedText)
+                {
+                    HideComponents(replacedComponents);
+                }
+                componentReplacedInApply_ = true;
+                ClearManualSelectionAfterReplace();
+            }
+        }
+        else if (hideEngravedText && committedComponent != nullptr)
+        {
+            HideComponents(std::vector<Assemblies::Component*>{committedComponent});
+        }
+        Log(session_, "ApplyEngraving完成");
     }
 
 private:
@@ -3520,25 +5505,42 @@ private:
     IntegerBlock* textLayer_ = nullptr;
     Toggle* embossedText_ = nullptr;
     Toggle* verticalText_ = nullptr;
+    Toggle* renameComponentToText_ = nullptr;
+    Toggle* engraveSameBodies_ = nullptr;
+    Toggle* hideEngravedText_ = nullptr;
     Button* editConfig_ = nullptr;
     Tooling::InsertTextBuilder* previewBuilder_ = nullptr;
     NXObject* previewUdo_ = nullptr;
     NXObject* lastBody_ = nullptr;
+    Assemblies::Component* lastComponent_ = nullptr;
     Part* lastWorkPart_ = nullptr;
+    std::string lastComponentJournalId_;
     std::string lastResolvedText_;
     std::string lastTextTemplate_;
     std::string ruleText_;
+    bool isAssemblyContext_ = false;
     bool refreshingPreview_ = false;
     bool updatingResolvedText_ = false;
     bool updatingRuleInput_ = false;
+    bool applying_ = false;
+    bool componentReplacedInApply_ = false;
+    bool suppressPreviewUntilSelection_ = false;
     KeZiConfig config_;
 };
 
 extern "C" DllExport void ufusr(char* /*param*/, int* /*retcod*/, int /*param_len*/)
 {
+    Log(Session::GetSession(), "========== ufusr进入 ==========");
+    if (!zhihui_license_guard::EnsureAuthorized(L"ZHIHUI.KEZI", L"KeZi"))
+    {
+        Log(Session::GetSession(), "授权失败，ufusr退出");
+        return;
+    }
+
     UfGuard uf;
     if (!uf.ok())
     {
+        Log(Session::GetSession(), "UF_initialize失败");
         ShowError("KeZi Engrave Text", "UF_initialize failed.");
         return;
     }
@@ -3547,15 +5549,24 @@ extern "C" DllExport void ufusr(char* /*param*/, int* /*retcod*/, int /*param_le
     {
         KeZiDialog dialog;
         dialog.Show();
+        Log(Session::GetSession(), "ufusr: dialog.Show返回");
     }
     catch (const NXException& ex)
     {
+        Log(Session::GetSession(), std::string("ufusr捕获NX异常: ") + ex.Message());
         ShowError("KeZi Engrave Text", ex.Message());
     }
     catch (const std::exception& ex)
     {
+        Log(Session::GetSession(), std::string("ufusr捕获std异常: ") + ex.what());
         ShowError("KeZi Engrave Text", ex.what());
     }
+    catch (...)
+    {
+        Log(Session::GetSession(), "ufusr捕获未知异常");
+        ShowError("刻字", "刻字发生未知异常，详情请查看日志。");
+    }
+    Log(Session::GetSession(), "========== ufusr退出 ==========");
 }
 
 extern "C" DllExport int ufusr_ask_unload()
@@ -3566,3 +5577,5 @@ extern "C" DllExport int ufusr_ask_unload()
 extern "C" DllExport void ufusr_cleanup(void)
 {
 }
+
+

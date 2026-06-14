@@ -41,6 +41,8 @@
 #undef CreateDialog
 
 #include "PiLian_Write_Prat_Attr.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 #include <NXOpen/Assemblies_Component.hxx>
 #include <NXOpen/Assemblies_ComponentAssembly.hxx>
 #include <NXOpen/BasePart.hxx>
@@ -220,6 +222,17 @@ namespace
         std::vector<std::string> customers;
         std::vector<std::string> colors;
         std::vector<std::string> materials;
+        std::string lastCustomer;
+        std::string lastModel;
+        std::string lastDrawingNo;
+        std::string lastColor;
+        std::string lastMaterial;
+        std::string lastQuantity;
+        std::string lastLayerStart;
+        std::string lastLayerEnd;
+        bool lastManualQuantity = false;
+        bool lastAssemblyQuantity = false;
+        bool lastLayerFilter = false;
     };
 
     enum class ConfigSection
@@ -227,7 +240,8 @@ namespace
         None,
         Customers,
         Colors,
-        Materials
+        Materials,
+        Dialog
     };
 
     DialogConfig LoadDialogConfig()
@@ -274,6 +288,10 @@ namespace
                 {
                     section = ConfigSection::Materials;
                 }
+                else if (sectionName == "Dialog")
+                {
+                    section = ConfigSection::Dialog;
+                }
                 else
                 {
                     section = ConfigSection::None;
@@ -292,6 +310,62 @@ namespace
             case ConfigSection::Materials:
                 AddUniqueText(config.materials, value);
                 break;
+            case ConfigSection::Dialog:
+            {
+                const std::string::size_type equal = value.find('=');
+                if (equal == std::string::npos)
+                {
+                    break;
+                }
+
+                const std::string key = Trim(value.substr(0, equal));
+                const std::string dialogValue = Trim(value.substr(equal + 1));
+                if (key == "Customer")
+                {
+                    config.lastCustomer = dialogValue;
+                }
+                else if (key == "Model")
+                {
+                    config.lastModel = dialogValue;
+                }
+                else if (key == "DrawingNo")
+                {
+                    config.lastDrawingNo = dialogValue;
+                }
+                else if (key == "Color")
+                {
+                    config.lastColor = dialogValue;
+                }
+                else if (key == "Material")
+                {
+                    config.lastMaterial = dialogValue;
+                }
+                else if (key == "ManualQuantity")
+                {
+                    config.lastManualQuantity = dialogValue == "1" || dialogValue == "true" || dialogValue == "True";
+                }
+                else if (key == "AssemblyQuantity")
+                {
+                    config.lastAssemblyQuantity = dialogValue == "1" || dialogValue == "true" || dialogValue == "True";
+                }
+                else if (key == "Quantity")
+                {
+                    config.lastQuantity = dialogValue;
+                }
+                else if (key == "LayerFilter")
+                {
+                    config.lastLayerFilter = dialogValue == "1" || dialogValue == "true" || dialogValue == "True";
+                }
+                else if (key == "LayerStart")
+                {
+                    config.lastLayerStart = dialogValue;
+                }
+                else if (key == "LayerEnd")
+                {
+                    config.lastLayerEnd = dialogValue;
+                }
+                break;
+            }
             default:
                 break;
             }
@@ -311,6 +385,43 @@ namespace
         }
 
         return config;
+    }
+
+    const char* BoolText(bool value)
+    {
+        return value ? "1" : "0";
+    }
+
+    void WriteDialogConfig(const DialogConfig& config)
+    {
+        const std::wstring path = ConfigFilePath();
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        if (!file)
+        {
+            throw std::runtime_error("Cannot save config file.");
+        }
+
+        const unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
+        file.write(reinterpret_cast<const char*>(bom), sizeof(bom));
+        file
+            << "# PiLian_Write_Prat_Attr configuration\r\n"
+            << "# One option per line. The dialog reloads these groups when opened.\r\n\r\n";
+        WriteConfigSection(file, "客户", config.customers.empty() ? DefaultCustomers() : config.customers);
+        WriteConfigSection(file, "颜色", config.colors.empty() ? DefaultColors() : config.colors);
+        WriteConfigSection(file, "材料", config.materials.empty() ? DefaultMaterials() : config.materials);
+        file
+            << "[Dialog]\r\n"
+            << "Customer=" << config.lastCustomer << "\r\n"
+            << "Model=" << config.lastModel << "\r\n"
+            << "DrawingNo=" << config.lastDrawingNo << "\r\n"
+            << "Color=" << config.lastColor << "\r\n"
+            << "Material=" << config.lastMaterial << "\r\n"
+            << "ManualQuantity=" << BoolText(config.lastManualQuantity) << "\r\n"
+            << "AssemblyQuantity=" << BoolText(config.lastAssemblyQuantity) << "\r\n"
+            << "Quantity=" << config.lastQuantity << "\r\n"
+            << "LayerFilter=" << BoolText(config.lastLayerFilter) << "\r\n"
+            << "LayerStart=" << config.lastLayerStart << "\r\n"
+            << "LayerEnd=" << config.lastLayerEnd << "\r\n";
     }
 
     std::string Utf8Text(const NXOpen::NXString& value)
@@ -397,6 +508,25 @@ namespace
 
         std::unique_ptr<NXOpen::BlockStyler::PropertyList> props(block->GetProperties());
         props->SetString("Value", NXOpen::NXString(value, NXOpen::NXString::UTF8));
+    }
+
+    std::string StringBlockValue(NXOpen::BlockStyler::StringBlock* block)
+    {
+        if (block == NULL)
+        {
+            return std::string();
+        }
+
+        std::unique_ptr<NXOpen::BlockStyler::PropertyList> props(block->GetProperties());
+        return Utf8Text(props->GetString("Value"));
+    }
+
+    void SetToggleValue(NXOpen::BlockStyler::Toggle* block, bool value)
+    {
+        if (block != NULL)
+        {
+            block->SetValue(value);
+        }
     }
 
     bool ToggleValue(NXOpen::BlockStyler::Toggle* block)
@@ -1240,8 +1370,19 @@ PiLian_Write_Prat_Attr::PiLian_Write_Prat_Attr()
     // Initialize the NX Open C++ API environment
     PiLian_Write_Prat_Attr::theSession = NXOpen::Session::GetSession();
     PiLian_Write_Prat_Attr::theUI = UI::GetUI();
-    theDlxFileName = "PiLian_Write_Prat_Attr.dlx";
-    theDialog = PiLian_Write_Prat_Attr::theUI->CreateDialog(theDlxFileName);
+    const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_PILIAN_WRITE_PRAT_ATTR_DLX);
+
+    if (dlxPath.empty())
+
+    {
+
+        throw std::runtime_error("PiLian_Write_Prat_Attr dialog resource is missing.");
+
+    }
+
+    theDlxFileName = NULL;
+
+    theDialog = PiLian_Write_Prat_Attr::theUI->CreateDialog(dlxPath.c_str());
     // Registration of callback functions
     theDialog->AddApplyHandler(make_callback(this, &PiLian_Write_Prat_Attr::apply_cb));
     theDialog->AddOkHandler(make_callback(this, &PiLian_Write_Prat_Attr::ok_cb));
@@ -1337,7 +1478,7 @@ HMODULE LoadProtectedLicenseGate()
         }
     }
 
-    HMODULE fixedModule = LoadLibraryW(L"D:\\UG鏅鸿緣閽ｉ噾鎻掍欢\\application\\ZhaoFuNxLicenseGate.dll");
+    HMODULE fixedModule = LoadLibraryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\application\\ZhaoFuNxLicenseGate.dll");
     if (fixedModule != NULL)
     {
         return fixedModule;
@@ -1464,10 +1605,6 @@ bool ValidateOwnModuleChecksum()
 #endif
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     
     if (!ValidateOwnModuleChecksum())
@@ -1645,6 +1782,22 @@ void PiLian_Write_Prat_Attr::dialogShown_cb()
         SetEnumValueFromAttribute(workPart, enum0, "\xE5\xAE\xA2\xE6\x88\xB7", config.customers);
         SetEnumValueFromAttribute(workPart, enum01, "\xE9\xA2\x9C\xE8\x89\xB2", config.colors);
         SetEnumValueFromAttribute(workPart, enum02, "\xE6\x9D\x90\xE6\x96\x99", config.materials);
+        SetEnumValueIfPresent(enum0, config.customers, config.lastCustomer);
+        SetEnumValueIfPresent(enum01, config.colors, config.lastColor);
+        SetEnumValueIfPresent(enum02, config.materials, config.lastMaterial);
+        SetStringBlockValue(string0, config.lastModel);
+        SetStringBlockValue(string02, config.lastDrawingNo);
+        SetToggleValue(toggleManualQuantity, config.lastManualQuantity);
+        SetToggleValue(toggleAssemblyQuantity, config.lastAssemblyQuantity);
+        SetToggleValue(toggleLayerFilter, config.lastLayerFilter);
+        if (config.lastManualQuantity && IsPositiveInteger(config.lastQuantity))
+        {
+            SetStringBlockValue(string03, config.lastQuantity);
+        }
+        SetStringBlockValue(stringLayerStart, config.lastLayerStart);
+        SetStringBlockValue(stringLayerEnd, config.lastLayerEnd);
+        RefreshQuantityInput(toggleManualQuantity, toggleAssemblyQuantity, string03, workPart);
+        RefreshLayerFilterInput(toggleLayerFilter, stringLayerStart, stringLayerEnd);
 
 //      PropertyList* string0Props = string0->GetProperties();
 //      string0Props->SetString("Value", workPart->FullPath());
@@ -1804,6 +1957,21 @@ int PiLian_Write_Prat_Attr::apply_cb()
                 partQuantityText,
                 bodyQuantityText);
         }
+
+
+        DialogConfig config = LoadDialogConfig();
+        config.lastCustomer = Utf8Text(Theenum0);
+        config.lastModel = Utf8Text(Thestring0);
+        config.lastDrawingNo = Utf8Text(Thestring02);
+        config.lastColor = Utf8Text(Theenum01);
+        config.lastMaterial = Utf8Text(Theenum02);
+        config.lastManualQuantity = ToggleValue(toggleManualQuantity);
+        config.lastAssemblyQuantity = IsToggleOn(toggleAssemblyQuantity);
+        config.lastQuantity = StringBlockValue(string03);
+        config.lastLayerFilter = IsToggleOn(toggleLayerFilter);
+        config.lastLayerStart = StringBlockValue(stringLayerStart);
+        config.lastLayerEnd = StringBlockValue(stringLayerEnd);
+        WriteDialogConfig(config);
 
 
         //int cc = 0;

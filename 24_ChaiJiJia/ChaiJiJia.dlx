@@ -26,10 +26,41 @@
       <Property id="AutoProgress" mask="0" name="AutoProgress" type="logical" group="Block Specific::" sname="AutomaticProgression" value="False" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"/>
     </PropertyList>
   </item>
+  <item id="squareTubeRValue" icon="styler_double.bmp" name="squareTubeRValue" type="uicomp" class="UICOMP_double" Expanded="1" presentation="Double">
+    <PropertyList id="id" mode="0">
+      <Property id="API Name" mask="16400" name="API Name" type="string" group="General::" sname="BlockID" value="squareTubeRValue" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="&#x65B9;&#x901A;R" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Value" mask="0" name="Value" type="double" group="Block Specific::" sname="Value" value="1.0" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+      <Property id="MinimumValue" mask="0" name="MinimumValue" type="double" group="Block Specific::" sname="MinimumValue" value="0.0" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+      <Property id="MaximumValue" mask="0" name="MaximumValue" type="double" group="Block Specific::" sname="MaximumValue" value="9999.0" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Increment" mask="0" name="Increment" type="double" group="Block Specific::" sname="Increment" value="0.1" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Top" loc="1" mask="16384" name="Top" type="attachment" group="Other::Attachments::" sname="Top" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+      <Property id="Left" loc="2" mask="16384" name="Left" type="attachment" group="Other::Attachments::" sname="Left" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+      <Property id="Right" loc="3" mask="16384" name="Right" type="attachment" group="Other::Attachments::" sname="Right" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+      <Property id="Bottom" loc="4" mask="16384" name="Bottom" type="attachment" group="Other::Attachments::" sname="Bottom" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+    </PropertyList>
+  </item>
+  <item id="springbackThicknessValue" icon="styler_double.bmp" name="springbackThicknessValue" type="uicomp" class="UICOMP_double" Expanded="1" presentation="Double">
+    <PropertyList id="id" mode="0">
+      <Property id="API Name" mask="16400" name="API Name" type="string" group="General::" sname="BlockID" value="springbackThicknessValue" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="&#x53CD;&#x5F39;&#x539A;&#x5EA6;" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Value" mask="0" name="Value" type="double" group="Block Specific::" sname="Value" value="1.0" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+      <Property id="MinimumValue" mask="0" name="MinimumValue" type="double" group="Block Specific::" sname="MinimumValue" value="0.0" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+      <Property id="MaximumValue" mask="0" name="MaximumValue" type="double" group="Block Specific::" sname="MaximumValue" value="9999.0" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Increment" mask="0" name="Increment" type="double" group="Block Specific::" sname="Increment" value="0.1" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Top" loc="1" mask="16384" name="Top" type="attachment" group="Other::Attachments::" sname="Top" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+      <Property id="Left" loc="2" mask="16384" name="Left" type="attachment" group="Other::Attachments::" sname="Left" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+      <Property id="Right" loc="3" mask="16384" name="Right" type="attachment" group="Other::Attachments::" sname="Right" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+      <Property id="Bottom" loc="4" mask="16384" name="Bottom" type="attachment" group="Other::Attachments::" sname="Bottom" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+    </PropertyList>
+  </item>
   <PropertyList id="id" mode="0">
     <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="拆机架"/>
     <Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="DockPolicy" mask="4096" name="DockPolicy" selected="0" sname="Dialog Sizing" source="1" type="enum"><Option name="Allow Resize" value="0"/><Option name="Follow Policy" value="1"/></Property>
     <Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="HideApply" mask="4096" name="HideApply" sname="HideApply" source="3" type="logical" value="False"/>
   </PropertyList>
 </Dialog>
-

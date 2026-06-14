@@ -1,7 +1,12 @@
 ﻿#include "HoleAttribute.hpp"
 #include "..\09_KonBiaoZu\src\ExcelRuleManager.hpp"
+#include "../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../../common/ZhihuiDialogMemory.hpp"
+#include "embedded_dialog_resources.h"
 
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -40,6 +45,16 @@ static std::string nxStringToString(const NXString& value)
 {
     const char* text = value.GetUTF8Text();
     return text == NULL ? std::string() : std::string(text);
+}
+
+static NXString utf8NxString(const std::string& text)
+{
+    return NXString(text.c_str(), NXString::UTF8);
+}
+
+static NXString utf8NxString(const char* text)
+{
+    return NXString(text == NULL ? "" : text, NXString::UTF8);
 }
 
 static std::string trim(const std::string& text)
@@ -440,7 +455,7 @@ static bool loadJsonRuleRecords(const std::string& path, std::vector<JsonRuleRec
     std::ifstream input(path, std::ios::binary);
     if (!input.is_open())
     {
-        error = "鏃犳硶鎵撳紑瑙勫垯閰嶇疆鏂囦欢: " + path;
+        error = "无法打开规则配置文件: " + path;
         return false;
     }
 
@@ -459,7 +474,7 @@ static bool loadJsonRuleRecords(const std::string& path, std::vector<JsonRuleRec
     size_t position = rulesKey == std::string::npos ? std::string::npos : json.find('[', rulesKey);
     if (position == std::string::npos)
     {
-        error = "瑙勫垯閰嶇疆鏂囦欢缂哄皯 rules 鏁扮粍: " + path;
+        error = "规则配置文件缺少 rules 数组: " + path;
         return false;
     }
     ++position;
@@ -473,7 +488,7 @@ static bool loadJsonRuleRecords(const std::string& path, std::vector<JsonRuleRec
         JsonRuleRecord record;
         if (!parseJsonRuleObject(json, position, record))
         {
-            error = "瑙勫垯閰嶇疆鏂囦欢鏍煎紡閿欒: " + path;
+            error = "规则配置文件格式错误: " + path;
             return false;
         }
         records.push_back(record);
@@ -1164,16 +1179,6 @@ static bool loadMatrixSheet(IDispatch* sheet, std::vector<HoleAttribute::SpecRul
     return true;
 }
 
-static NXString utf8NxString(const std::string& text)
-{
-    return NXString(text.c_str(), NXString::UTF8);
-}
-
-static NXString utf8NxString(const char* text)
-{
-    return NXString(text, NXString::UTF8);
-}
-
 static void setNodeColumnText(Node* node, int columnID, const std::string& text)
 {
     if (node != NULL)
@@ -1442,25 +1447,15 @@ static std::string parentDirectory(const std::string& path)
 
 static std::string resolveRuleWorkbookPath(const std::string& directory)
 {
-    std::vector<std::string> candidates;
-    if (!directory.empty())
-    {
-        candidates.push_back(directory + "\\DATA\\HoleAttributeRules.ini");
-        candidates.push_back(directory + "\\data\\HoleAttributeRules.ini");
-        candidates.push_back(parentDirectory(directory) + "\\DATA\\HoleAttributeRules.ini");
-        candidates.push_back(parentDirectory(directory) + "\\data\\HoleAttributeRules.ini");
-        candidates.push_back(directory + "\\HoleAttributeRules.ini");
-    }
-    candidates.push_back("D:\\UG智辉钣金插件\\DATA\\HoleAttributeRules.ini");
-    candidates.push_back("HoleAttributeRules.ini");
-
-    for (size_t i = 0; i < candidates.size(); ++i)
-    {
-        if (fileExists(candidates[i]))
-            return candidates[i];
-    }
-
-    return directory.empty() ? "HoleAttributeRules.ini" : directory + "\\DATA\\HoleAttributeRules.ini";
+    (void)directory;
+    std::string pluginRoot = "D:\\UG";
+    pluginRoot += "\xD6\xC7"; // Zhi, CP936
+    pluginRoot += "\xBB\xD4"; // Hui, CP936
+    pluginRoot += "\xEE\xD3"; // Ban, CP936
+    pluginRoot += "\xBD\xF0"; // Jin, CP936
+    pluginRoot += "\xB2\xE5"; // Cha, CP936
+    pluginRoot += "\xBC\xFE"; // Jian, CP936
+    return pluginRoot + "\\config\\KonBiaoZuRules.ini";
 }
 
 static void trySetStringProperty(UIBlock* block, const char* propertyName, const char* value)
@@ -1548,11 +1543,20 @@ HoleAttribute::HoleAttribute()
     HoleAttribute::theSession = Session::GetSession();
     HoleAttribute::theUI = UI::GetUI();
     std::string directory = moduleDirectory();
-    theDlxFileName = directory.empty() ? "HoleAttribute.dlx" : directory + "\\HoleAttribute.dlx";
+    theDlxFileName = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_HOLEATTRIBUTE_DLX);
+
+    if (theDlxFileName.empty())
+
+    {
+
+        throw std::runtime_error("HoleAttribute dialog resource is missing.");
+
+    }
     ruleManager = new KonBiaoZu::ExcelRuleManager("HoleAttributeRules.ini");
     ruleFileName = static_cast<KonBiaoZu::ExcelRuleManager*>(ruleManager)->WorkbookPath();
     if (ruleFileName.empty())
         ruleFileName = resolveRuleWorkbookPath(directory);
+
     theDialog = HoleAttribute::theUI->CreateDialog(theDlxFileName.c_str());
 
     theDialog->AddApplyHandler(make_callback(this, &HoleAttribute::apply_cb));
@@ -1632,7 +1636,7 @@ HMODULE LoadProtectedLicenseGate()
         }
     }
 
-    HMODULE fixedModule = LoadLibraryW(L"D:\\UG鏅鸿緣閽ｉ噾鎻掍欢\\application\\ZhaoFuNxLicenseGate.dll");
+    HMODULE fixedModule = LoadLibraryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\application\\ZhaoFuNxLicenseGate.dll");
     if (fixedModule != NULL)
     {
         return fixedModule;
@@ -1759,10 +1763,6 @@ bool ValidateOwnModuleChecksum()
 #endif
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     
     if (!ValidateOwnModuleChecksum())
@@ -1813,7 +1813,7 @@ extern "C" DllExport void ufusr(char* param, int* retcod, int param_len)
     {
         if (HoleAttribute::theUI != NULL)
         {
-            HoleAttribute::theUI->NXMessageBox()->Show("孔属性", NXMessageBox::DialogTypeError, ex.what());
+            HoleAttribute::theUI->NXMessageBox()->Show(utf8NxString("孔属性"), NXMessageBox::DialogTypeError, utf8NxString(ex.what()));
         }
     }
 
@@ -1851,6 +1851,7 @@ void HoleAttribute::initialize_cb()
 
         configureSelectionBlock();
         localizeDialogBlocks();
+        loadDialogMemory();
         refreshAutoRecognitionToggles();
         specRulesLoaded = false;
         loadSpecRules();
@@ -1897,6 +1898,7 @@ void HoleAttribute::dialogShown_cb()
 
 int HoleAttribute::apply_cb()
 {
+    saveDialogMemory();
     writeAllFaceAttributes();
     return 0;
 }
@@ -1923,6 +1925,7 @@ int HoleAttribute::update_cb(UIBlock* block)
         else if (block == autoTapHoleToggle || block == autoPemHoleToggle || block == autoCounterboreHoleToggle)
         {
             refreshAutoRecognitionToggles();
+            saveDialogMemory();
             ensureSpecRulesLoaded();
             if (autoTapHoleEnabled || autoPemHoleEnabled || autoCounterboreHoleEnabled)
             {
@@ -1939,7 +1942,7 @@ int HoleAttribute::update_cb(UIBlock* block)
             KonBiaoZu::ExcelRuleManager* manager = static_cast<KonBiaoZu::ExcelRuleManager*>(ruleManager);
             if (manager == NULL || !manager->OpenWorkbook(errorMessage))
             {
-                showError(errorMessage.empty() ? ("鏃犳硶鎵撳紑瑙勫垯琛細" + ruleFileName) : errorMessage);
+                showError(errorMessage.empty() ? ("无法打开规则表: " + ruleFileName) : errorMessage);
             }
             else
             {
@@ -2211,6 +2214,22 @@ void HoleAttribute::localizeDialogBlocks()
         UIBlock* block = dynamic_cast<UIBlock*>(theDialog->TopBlock()->FindBlock(hideBlockIds[i]));
         trySetVisible(block, false);
     }
+}
+
+void HoleAttribute::loadDialogMemory()
+{
+    const wchar_t* fileName = L"HoleAttribute_state.ini";
+    zhihui_dialog_memory::LoadLogical(fileName, L"autoTapHole", autoTapHoleToggle);
+    zhihui_dialog_memory::LoadLogical(fileName, L"autoPemHole", autoPemHoleToggle);
+    zhihui_dialog_memory::LoadLogical(fileName, L"autoCounterboreHole", autoCounterboreHoleToggle);
+}
+
+void HoleAttribute::saveDialogMemory()
+{
+    const wchar_t* fileName = L"HoleAttribute_state.ini";
+    zhihui_dialog_memory::SaveLogical(fileName, L"autoTapHole", autoTapHoleToggle);
+    zhihui_dialog_memory::SaveLogical(fileName, L"autoPemHole", autoPemHoleToggle);
+    zhihui_dialog_memory::SaveLogical(fileName, L"autoCounterboreHole", autoCounterboreHoleToggle);
 }
 
 void HoleAttribute::refreshAutoRecognitionToggles()
@@ -2834,8 +2853,8 @@ void HoleAttribute::writeGroupFaceAttributes(size_t groupIndex)
     HoleGroup& group = groups[groupIndex];
     for (size_t i = 0; i < group.faces.size(); ++i)
     {
-        deleteFaceStringAttributeIfExists(group.faces[i], "绫诲瀷");
-        deleteFaceStringAttributeIfExists(group.faces[i], "瑙勬牸");
+        deleteFaceStringAttributeIfExists(group.faces[i], "类型");
+        deleteFaceStringAttributeIfExists(group.faces[i], "规格");
         setFaceStringAttribute(group.faces[i], "类型", group.type);
         setFaceStringAttribute(group.faces[i], "规格", group.spec);
     }
@@ -2900,7 +2919,7 @@ void HoleAttribute::writeLine(const std::string& text)
 void HoleAttribute::showError(const std::string& text)
 {
     if (theUI != NULL)
-        theUI->NXMessageBox()->Show("孔属性", NXMessageBox::DialogTypeError, text);
+        theUI->NXMessageBox()->Show(utf8NxString("孔属性"), NXMessageBox::DialogTypeError, utf8NxString(text));
 }
 
 std::string HoleAttribute::specFor(const std::string& type, double diameter, double height)
@@ -3003,7 +3022,7 @@ std::string HoleAttribute::defaultType()
 std::string HoleAttribute::formatDiameter(double value) const
 {
     std::ostringstream stream;
-    stream << std::fixed << std::setprecision(3) << value;
+    stream << std::fixed << std::setprecision(2) << value;
     return stream.str();
 }
 
@@ -3018,7 +3037,7 @@ std::string HoleAttribute::defaultSpec(const std::string& type, double diameter)
 {
     std::ostringstream stream;
     if (type.empty() || type == "孔")
-        stream << "直径" << std::fixed << std::setprecision(1) << diameter;
+        stream << "直径" << std::fixed << std::setprecision(2) << diameter;
     else
         stream << type;
 

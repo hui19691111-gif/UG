@@ -1,10 +1,13 @@
 #include "AutoCreateThreeViews.hpp"
+#include "../../common/ZhihuiEmbeddedDialog.hpp"
+#include "embedded_dialog_resources.h"
 
 #ifdef CreateDialog
 #undef CreateDialog
 #endif
 
 #include <NXOpen/BlockStyler_PropertyList.hxx>
+#include <stdexcept>
 #include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/CoordinateSystem.hxx>
@@ -107,6 +110,7 @@
 #include <uf.h>
 #include <uf_curve.h>
 #include <uf_eval.h>
+#include <uf_assem.h>
 #include <uf_modl.h>
 #include <uf_modl_utilities.h>
 #include <uf_obj.h>
@@ -150,6 +154,7 @@ struct RequestValues
     bool dimensionHoleLocation = true;
     bool dimensionInnerClosedCurve = true;
     bool auxiliaryAutoCompact = false;
+    bool assemblyDrawing = false;
     std::string isoCorner = "TopLeft";
     std::string flatCorner = "BottomRight";
     bool technicalRequirementEnabled = false;
@@ -189,6 +194,45 @@ struct ModelBounds
     double sizeZ = 20.0;
     bool valid = false;
 };
+
+std::vector<tag_t> CollectVisibleSolidBodyTags(NXOpen::Part* part);
+
+void AccumulateBodyBounds(
+    tag_t bodyTag,
+    bool& initialized,
+    double minValues[3],
+    double maxValues[3])
+{
+    if (bodyTag == NULL_TAG)
+    {
+        return;
+    }
+
+    double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    if (UF_MODL_ask_bounding_box(bodyTag, box) != 0)
+    {
+        return;
+    }
+
+    if (!initialized)
+    {
+        minValues[0] = box[0];
+        minValues[1] = box[1];
+        minValues[2] = box[2];
+        maxValues[0] = box[3];
+        maxValues[1] = box[4];
+        maxValues[2] = box[5];
+        initialized = true;
+        return;
+    }
+
+    minValues[0] = std::min(minValues[0], box[0]);
+    minValues[1] = std::min(minValues[1], box[1]);
+    minValues[2] = std::min(minValues[2], box[2]);
+    maxValues[0] = std::max(maxValues[0], box[3]);
+    maxValues[1] = std::max(maxValues[1], box[4]);
+    maxValues[2] = std::max(maxValues[2], box[5]);
+}
 
 struct LayoutBounds
 {
@@ -239,6 +283,8 @@ struct CurveAssocCandidate
     NXOpen::Drawings::DraftingCurve* curve = nullptr;
     NXOpen::InferSnapType::SnapType snapType = NXOpen::InferSnapType::SnapTypeStart;
     NXOpen::Point3d modelPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
+    double drawingX = 0.0;
+    double drawingY = 0.0;
 };
 
 struct HoleCircleCandidate
@@ -248,6 +294,17 @@ struct HoleCircleCandidate
     double drawingRadius = 0.0;
     NXOpen::Point3d pickPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
     NXOpen::Point3d centerPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
+};
+
+struct HoleArcSegmentCandidate
+{
+    DraftingCurveExtent extent;
+    double modelRadius = 0.0;
+    double drawingRadius = 0.0;
+    NXOpen::Point3d centerPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
+    NXOpen::Point3d pickPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
+    double startAngle = 0.0;
+    double endAngle = 0.0;
 };
 
 struct HoleRuleRecord
@@ -289,6 +346,7 @@ struct LineSegmentCandidate
 struct LineProjectionFaceCandidate
 {
     tag_t faceTag = NULL_TAG;
+    tag_t bodyTag = NULL_TAG;
     NXOpen::Vector3d normal = NXOpen::Vector3d(0.0, 0.0, 0.0);
     NXOpen::Point3d planePoint = NXOpen::Point3d(0.0, 0.0, 0.0);
     LineSegmentCandidate line;
@@ -324,6 +382,11 @@ bool DraftingCurveHasShallowDetailParent(
     NXOpen::Part* part,
     ShallowDetailFilterCache& cache,
     const DraftingCurveExtent& extent);
+std::vector<DraftingCurveExtent> CollectDraftingCurveExtents(NXOpen::Drawings::DraftingView* view);
+double BoundsWidth(const LayoutBounds& bounds);
+double BoundsHeight(const LayoutBounds& bounds);
+double BoundsArea(const LayoutBounds& bounds);
+bool TryBuildVisibleCurveBounds(const std::vector<DraftingCurveExtent>& extents, LayoutBounds& bounds);
 
 struct FacePlaneSignature
 {
@@ -341,6 +404,17 @@ struct FacePairKey
     FacePlaneSignature firstPlane;
     FacePlaneSignature secondPlane;
     bool hasPlane = false;
+};
+
+struct MainViewFacePairRules
+{
+    NXOpen::Vector3d axes[3] = {
+        NXOpen::Vector3d(1.0, 0.0, 0.0),
+        NXOpen::Vector3d(0.0, 1.0, 0.0),
+        NXOpen::Vector3d(0.0, 0.0, 1.0)};
+    NXOpen::Point3d center = NXOpen::Point3d(0.0, 0.0, 0.0);
+    bool valid = false;
+    std::vector<FacePlaneSignature> usedPairedPlanes;
 };
 
 struct AutoViewDirection
@@ -957,10 +1031,8 @@ std::vector<std::filesystem::path> HoleRuleCandidatePaths()
 {
     const std::filesystem::path moduleDir = CurrentModuleDirectory();
     return {
-        moduleDir / "AutoCreateThreeViews.hole_rules.ini",
-        moduleDir / "KonBiaoZuRules.ini",
-        moduleDir / "data" / "KonBiaoZuRules.ini",
-        moduleDir.parent_path() / "data" / "KonBiaoZuRules.ini"};
+        moduleDir.parent_path() / "config" / "KonBiaoZuRules.ini",
+        moduleDir / "AutoCreateThreeViews.hole_rules.ini"};
 }
 
 const std::vector<HoleRuleRecord>& HoleRules(NXOpen::Session* session)
@@ -1413,18 +1485,24 @@ RequestValues ReadRequestFile(const std::filesystem::path& requestPath)
     request.flat = ParseBool(values, "flat", true);
     request.autoDimensions = ParseBool(values, "autoDimensions", true);
     request.dimensionOverall = ParseBool(values, "dimensionOverall", true);
-    request.dimensionLinear = ParseBool(values, "dimensionLinear", false);
-    request.dimensionAngle = ParseBool(values, "dimensionAngle", true);
+    request.dimensionLinear = false;
+    request.dimensionAngle = ParseBool(values, "dimensionAngle", false);
     request.dimensionHole = ParseBool(values, "dimensionHole", true);
     request.dimensionHoleLocation = ParseBool(values, "dimensionHoleLocation", true);
-    request.dimensionInnerClosedCurve = ParseBool(values, "dimensionInnerClosedCurve", true);
+    request.dimensionInnerClosedCurve = ParseBool(values, "dimensionInnerClosedCurve", false);
     request.auxiliaryAutoCompact = ParseBool(values, "auxAutoCompact", false);
+    request.assemblyDrawing = ParseBool(values, "assemblyDrawing", false);
     request.isoCorner = ReadText(values, "isoCorner", "TopLeft");
     request.flatCorner = ReadText(values, "flatCorner", "BottomRight");
     request.technicalRequirementEnabled = ParseBool(values, "technicalRequirementEnabled", false);
     request.technicalRequirementIndexed = ParseBool(values, "technicalRequirementIndexed", true);
     request.technicalRequirementCorner = ReadText(values, "technicalRequirementCorner", "TopLeft");
     request.technicalRequirementText = Trim(DecodeBase64OrOriginal(ReadText(values, "technicalRequirementText", "")));
+    if (request.assemblyDrawing)
+    {
+        request.dimensionAngle = false;
+        request.dimensionInnerClosedCurve = false;
+    }
     return request;
 }
 
@@ -1484,6 +1562,47 @@ std::string BuildRunResultText()
         text << "\n" << line;
     }
     return text.str();
+}
+
+struct RunResultSummary
+{
+    int success = 0;
+    int failed = 0;
+    int skipped = 0;
+    int progress = 0;
+};
+
+RunResultSummary SummarizeRunResults()
+{
+    RunResultSummary summary;
+    for (const std::string& line : g_runResultLines)
+    {
+        if (line.find("Progress:") != std::string::npos)
+        {
+            ++summary.progress;
+        }
+        else if (line.find("success") != std::string::npos ||
+                 line.find("Success") != std::string::npos ||
+                 line.find(u8"成功") != std::string::npos)
+        {
+            ++summary.success;
+        }
+        else if (line.find("skip") != std::string::npos ||
+                 line.find("Skip") != std::string::npos ||
+                 line.find(u8"跳过") != std::string::npos ||
+                 line.find(u8"璺宠繃") != std::string::npos)
+        {
+            ++summary.skipped;
+        }
+        else if (line.find("fail") != std::string::npos ||
+                 line.find("Fail") != std::string::npos ||
+                 line.find(u8"失败") != std::string::npos ||
+                 line.find(u8"澶辫触") != std::string::npos)
+        {
+            ++summary.failed;
+        }
+    }
+    return summary;
 }
 
 int LoadChineseDraftNoteFont(NXOpen::Session* session, NXOpen::Part* part)
@@ -1630,9 +1749,59 @@ bool HasPartName(NXOpen::Part* part)
 ModelBounds AskModelBounds(NXOpen::Part* part)
 {
     ModelBounds result;
-    if (part == nullptr || part->Bodies() == nullptr)
+    if (part == nullptr)
     {
         return result;
+    }
+
+    bool initialized = false;
+    double minValues[3] = {0.0, 0.0, 0.0};
+    double maxValues[3] = {0.0, 0.0, 0.0};
+
+    if (part->Bodies() != nullptr)
+    {
+        for (NXOpen::BodyCollection::iterator it = part->Bodies()->begin(); it != part->Bodies()->end(); ++it)
+        {
+            NXOpen::Body* body = *it;
+            if (body == nullptr || body->IsBlanked())
+            {
+                continue;
+            }
+            AccumulateBodyBounds(body->Tag(), initialized, minValues, maxValues);
+        }
+    }
+
+    if (!initialized)
+    {
+        const std::vector<tag_t> visibleBodyTags = CollectVisibleSolidBodyTags(part);
+        for (tag_t bodyTag : visibleBodyTags)
+        {
+            AccumulateBodyBounds(bodyTag, initialized, minValues, maxValues);
+        }
+    }
+
+    if (!initialized)
+    {
+        return result;
+    }
+
+    const double dx = std::max(1.0, maxValues[0] - minValues[0]);
+    const double dy = std::max(1.0, maxValues[1] - minValues[1]);
+    const double dz = std::max(1.0, maxValues[2] - minValues[2]);
+    result.width = std::max(dx, dy);
+    result.height = std::max(dy, dz);
+    result.sizeX = dx;
+    result.sizeY = dy;
+    result.sizeZ = dz;
+    result.valid = true;
+    return result;
+}
+
+bool AskModelBoundsCenter(NXOpen::Part* part, NXOpen::Point3d& center)
+{
+    if (part == nullptr || part->Bodies() == nullptr)
+    {
+        return false;
     }
 
     bool initialized = false;
@@ -1676,19 +1845,14 @@ ModelBounds AskModelBounds(NXOpen::Part* part)
 
     if (!initialized)
     {
-        return result;
+        return false;
     }
 
-    const double dx = std::max(1.0, maxValues[0] - minValues[0]);
-    const double dy = std::max(1.0, maxValues[1] - minValues[1]);
-    const double dz = std::max(1.0, maxValues[2] - minValues[2]);
-    result.width = std::max(dx, dy);
-    result.height = std::max(dy, dz);
-    result.sizeX = dx;
-    result.sizeY = dy;
-    result.sizeZ = dz;
-    result.valid = true;
-    return result;
+    center = NXOpen::Point3d(
+        (minValues[0] + maxValues[0]) * 0.5,
+        (minValues[1] + maxValues[1]) * 0.5,
+        (minValues[2] + maxValues[2]) * 0.5);
+    return true;
 }
 
 NXOpen::Vector3d AxisVector(int axis, double sign = 1.0)
@@ -2111,9 +2275,26 @@ bool HasVisibleSheetMetalBody(NXOpen::Part* part)
     return false;
 }
 
-bool TryReadPlanarFaceNormal(tag_t faceTag, NXOpen::Vector3d& normal)
+bool TryReadPlanarFacePointAndNormal(tag_t faceTag, NXOpen::Point3d* pointOnPlane, NXOpen::Vector3d& normal)
 {
     if (faceTag == NULL_TAG)
+    {
+        return false;
+    }
+
+    NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(faceTag));
+    if (face == nullptr)
+    {
+        return false;
+    }
+    try
+    {
+        if (face->SolidFaceType() != NXOpen::Face::FaceTypePlanar)
+        {
+            return false;
+        }
+    }
+    catch (...)
     {
         return false;
     }
@@ -2135,7 +2316,16 @@ bool TryReadPlanarFaceNormal(tag_t faceTag, NXOpen::Vector3d& normal)
         normalData[0] * static_cast<double>(normDir),
         normalData[1] * static_cast<double>(normDir),
         normalData[2] * static_cast<double>(normDir)));
+    if (pointOnPlane != nullptr)
+    {
+        *pointOnPlane = NXOpen::Point3d(point[0], point[1], point[2]);
+    }
     return VectorLength(normal) > 1.0e-6;
+}
+
+bool TryReadPlanarFaceNormal(tag_t faceTag, NXOpen::Vector3d& normal)
+{
+    return TryReadPlanarFacePointAndNormal(faceTag, nullptr, normal);
 }
 
 bool TryReadStraightEdgeDirection(tag_t edgeTag, const NXOpen::Point3d& referenceVertex, NXOpen::Vector3d& xDirection, double& edgeLength)
@@ -2459,6 +2649,857 @@ bool TryComputeAutoFrontDirectionFromSheetMetalFlatPattern(
 
     WriteLine(nullptr, "AutoCreateThreeViews: sheet metal flat pattern direction not found.");
     return false;
+}
+
+struct AssemblyOccurrenceTransform
+{
+    double m[4][4] = {
+        {1.0, 0.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0, 0.0},
+        {0.0, 0.0, 1.0, 0.0},
+        {0.0, 0.0, 0.0, 1.0}};
+};
+
+AssemblyOccurrenceTransform IdentityOccurrenceTransform()
+{
+    return AssemblyOccurrenceTransform();
+}
+
+AssemblyOccurrenceTransform MultiplyOccurrenceTransform(
+    const AssemblyOccurrenceTransform& parent,
+    const double child[4][4])
+{
+    AssemblyOccurrenceTransform result;
+    for (int row = 0; row < 4; ++row)
+    {
+        for (int col = 0; col < 4; ++col)
+        {
+            result.m[row][col] = 0.0;
+            for (int k = 0; k < 4; ++k)
+            {
+                result.m[row][col] += parent.m[row][k] * child[k][col];
+            }
+        }
+    }
+    return result;
+}
+
+NXOpen::Point3d TransformOccurrencePoint(
+    const AssemblyOccurrenceTransform& transform,
+    const double point[3])
+{
+    return NXOpen::Point3d(
+        transform.m[0][0] * point[0] + transform.m[0][1] * point[1] + transform.m[0][2] * point[2] + transform.m[0][3],
+        transform.m[1][0] * point[0] + transform.m[1][1] * point[1] + transform.m[1][2] * point[2] + transform.m[1][3],
+        transform.m[2][0] * point[0] + transform.m[2][1] * point[1] + transform.m[2][2] * point[2] + transform.m[2][3]);
+}
+
+NXOpen::Vector3d TransformOccurrenceVector(
+    const AssemblyOccurrenceTransform& transform,
+    const NXOpen::Vector3d& vector)
+{
+    return NXOpen::Vector3d(
+        transform.m[0][0] * vector.X + transform.m[0][1] * vector.Y + transform.m[0][2] * vector.Z,
+        transform.m[1][0] * vector.X + transform.m[1][1] * vector.Y + transform.m[1][2] * vector.Z,
+        transform.m[2][0] * vector.X + transform.m[2][1] * vector.Y + transform.m[2][2] * vector.Z);
+}
+
+void CollectLeafPartOccurrences(
+    tag_t occurrence,
+    const AssemblyOccurrenceTransform& parentTransform,
+    std::vector<std::pair<tag_t, AssemblyOccurrenceTransform>>& leaves)
+{
+    if (occurrence == NULL_TAG)
+    {
+        return;
+    }
+
+    double localTransform[4][4] = {
+        {1.0, 0.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0, 0.0},
+        {0.0, 0.0, 1.0, 0.0},
+        {0.0, 0.0, 0.0, 1.0}};
+    AssemblyOccurrenceTransform occurrenceTransform = parentTransform;
+    if (UF_ASSEM_ask_transform_of_occ(occurrence, localTransform) == 0)
+    {
+        occurrenceTransform = MultiplyOccurrenceTransform(parentTransform, localTransform);
+    }
+
+    int childCount = 0;
+    tag_t* children = nullptr;
+    childCount = UF_ASSEM_ask_part_occ_children(occurrence, &children);
+    if (childCount <= 0 || children == nullptr)
+    {
+        leaves.push_back({occurrence, occurrenceTransform});
+        return;
+    }
+
+    for (int index = 0; index < childCount; ++index)
+    {
+        if (children[index] != NULL_TAG)
+        {
+            CollectLeafPartOccurrences(children[index], occurrenceTransform, leaves);
+        }
+    }
+    UF_free(children);
+}
+
+bool IsSolidBodyTag(tag_t objectTag)
+{
+    if (objectTag == NULL_TAG)
+    {
+        return false;
+    }
+
+    int type = 0;
+    int subtype = 0;
+    if (UF_OBJ_ask_type_and_subtype(objectTag, &type, &subtype) != 0)
+    {
+        return false;
+    }
+    return type == UF_solid_type && subtype == UF_solid_body_subtype;
+}
+
+void AddUniqueBodyOccurrence(
+    tag_t bodyTag,
+    std::vector<tag_t>& bodyOccurrences,
+    std::set<tag_t>& seen)
+{
+    if (bodyTag == NULL_TAG || !IsSolidBodyTag(bodyTag) || seen.find(bodyTag) != seen.end())
+    {
+        return;
+    }
+
+    seen.insert(bodyTag);
+    bodyOccurrences.push_back(bodyTag);
+}
+
+std::vector<tag_t> CollectVisibleSolidBodyTags(NXOpen::Part* part)
+{
+    std::vector<tag_t> bodyTags;
+    std::set<tag_t> seenBodyTags;
+    if (part == nullptr)
+    {
+        return bodyTags;
+    }
+
+    if (part->Bodies() != nullptr)
+    {
+        for (NXOpen::BodyCollection::iterator it = part->Bodies()->begin(); it != part->Bodies()->end(); ++it)
+        {
+            NXOpen::Body* body = *it;
+            if (body == nullptr || body->IsBlanked())
+            {
+                continue;
+            }
+            AddUniqueBodyOccurrence(body->Tag(), bodyTags, seenBodyTags);
+        }
+    }
+
+    const tag_t rootOccurrence = UF_ASSEM_ask_root_part_occ(part->Tag());
+    if (rootOccurrence == NULL_TAG)
+    {
+        return bodyTags;
+    }
+
+    std::vector<std::pair<tag_t, AssemblyOccurrenceTransform>> leaves;
+    int rootChildCount = 0;
+    tag_t* rootChildren = nullptr;
+    rootChildCount = UF_ASSEM_ask_part_occ_children(rootOccurrence, &rootChildren);
+    if (rootChildCount <= 0 || rootChildren == nullptr)
+    {
+        return bodyTags;
+    }
+
+    const AssemblyOccurrenceTransform identity = IdentityOccurrenceTransform();
+    for (int index = 0; index < rootChildCount; ++index)
+    {
+        if (rootChildren[index] != NULL_TAG)
+        {
+            CollectLeafPartOccurrences(rootChildren[index], identity, leaves);
+        }
+    }
+    UF_free(rootChildren);
+
+    for (const auto& leaf : leaves)
+    {
+        const tag_t occurrence = leaf.first;
+        tag_t objectOccurrence = NULL_TAG;
+        while ((objectOccurrence = UF_ASSEM_cycle_ents_in_part_occ(occurrence, objectOccurrence)) != NULL_TAG)
+        {
+            AddUniqueBodyOccurrence(objectOccurrence, bodyTags, seenBodyTags);
+        }
+
+        const tag_t prototypeTag = UF_ASSEM_ask_prototype_of_occ(occurrence);
+        if (prototypeTag == NULL_TAG)
+        {
+            continue;
+        }
+
+        tag_t prototypeBody = NULL_TAG;
+        while (UF_OBJ_cycle_objs_in_part(prototypeTag, UF_solid_type, &prototypeBody) == 0 &&
+               prototypeBody != NULL_TAG)
+        {
+            if (!IsSolidBodyTag(prototypeBody))
+            {
+                continue;
+            }
+            AddUniqueBodyOccurrence(UF_ASSEM_find_occurrence(occurrence, prototypeBody), bodyTags, seenBodyTags);
+        }
+    }
+
+    return bodyTags;
+}
+
+std::string ReadObjectName(tag_t objectTag)
+{
+    if (objectTag == NULL_TAG)
+    {
+        return "";
+    }
+
+    NXOpen::NXObject* object = nullptr;
+    try
+    {
+        object = dynamic_cast<NXOpen::NXObject*>(NXOpen::NXObjectManager::Get(objectTag));
+    }
+    catch (...)
+    {
+        object = nullptr;
+    }
+    if (object != nullptr)
+    {
+        try
+        {
+            return object->Name().GetLocaleText();
+        }
+        catch (...)
+        {
+        }
+    }
+
+    char name[MAX_FSPEC_BUFSIZE] = {};
+    if (UF_OBJ_ask_name(objectTag, name) == 0)
+    {
+        return std::string(name);
+    }
+    return "";
+}
+
+bool BodyNameLooksLikeFastener(tag_t bodyTag)
+{
+    std::string text = ReadObjectName(bodyTag);
+    const tag_t prototype = UF_ASSEM_ask_prototype_of_occ(bodyTag);
+    if (prototype != NULL_TAG)
+    {
+        text += " ";
+        text += ReadObjectName(prototype);
+    }
+
+    return ContainsAnyKeyword(
+        text,
+        {
+            u8"螺母",
+            u8"螺钉",
+            u8"螺柱",
+            u8"螺栓",
+            "nut",
+            "screw",
+            "bolt",
+            "stud",
+            "fastener"});
+}
+
+std::vector<NXOpen::Point3d> CollectBodyEdgePoints(tag_t bodyTag)
+{
+    std::vector<NXOpen::Point3d> points;
+    if (bodyTag == NULL_TAG)
+    {
+        return points;
+    }
+
+    uf_list_p_t faceList = nullptr;
+    if (UF_MODL_ask_body_faces(bodyTag, &faceList) != 0 || faceList == nullptr)
+    {
+        return points;
+    }
+
+    int faceCount = 0;
+    UF_MODL_ask_list_count(faceList, &faceCount);
+    std::set<tag_t> seenEdges;
+    for (int faceIndex = 0; faceIndex < faceCount; ++faceIndex)
+    {
+        tag_t faceTag = NULL_TAG;
+        if (UF_MODL_ask_list_item(faceList, faceIndex, &faceTag) != 0 || faceTag == NULL_TAG)
+        {
+            continue;
+        }
+
+        uf_list_p_t edgeList = nullptr;
+        if (UF_MODL_ask_face_edges(faceTag, &edgeList) != 0 || edgeList == nullptr)
+        {
+            continue;
+        }
+
+        int edgeCount = 0;
+        UF_MODL_ask_list_count(edgeList, &edgeCount);
+        for (int edgeIndex = 0; edgeIndex < edgeCount; ++edgeIndex)
+        {
+            tag_t edgeTag = NULL_TAG;
+            if (UF_MODL_ask_list_item(edgeList, edgeIndex, &edgeTag) != 0 ||
+                edgeTag == NULL_TAG ||
+                seenEdges.find(edgeTag) != seenEdges.end())
+            {
+                continue;
+            }
+            seenEdges.insert(edgeTag);
+
+            double start[3] = {0.0, 0.0, 0.0};
+            double end[3] = {0.0, 0.0, 0.0};
+            int vertexCount = 0;
+            if (UF_MODL_ask_edge_verts(edgeTag, start, end, &vertexCount) == 0 && vertexCount >= 1)
+            {
+                points.push_back(NXOpen::Point3d(start[0], start[1], start[2]));
+                if (vertexCount >= 2)
+                {
+                    points.push_back(NXOpen::Point3d(end[0], end[1], end[2]));
+                }
+            }
+        }
+        UF_MODL_delete_list(&edgeList);
+    }
+
+    UF_MODL_delete_list(&faceList);
+    return points;
+}
+
+bool BodyGeometryLooksLikeFastener(tag_t bodyTag)
+{
+    if (bodyTag == NULL_TAG)
+    {
+        return false;
+    }
+
+    uf_list_p_t faceList = nullptr;
+    if (UF_MODL_ask_body_faces(bodyTag, &faceList) != 0 || faceList == nullptr)
+    {
+        return false;
+    }
+
+    const std::vector<NXOpen::Point3d> bodyPoints = CollectBodyEdgePoints(bodyTag);
+    bool matched = false;
+    int cylinderFaceCount = 0;
+    int strongCylinderCount = 0;
+    int faceCount = 0;
+    UF_MODL_ask_list_count(faceList, &faceCount);
+    for (int faceIndex = 0; faceIndex < faceCount; ++faceIndex)
+    {
+        tag_t faceTag = NULL_TAG;
+        if (UF_MODL_ask_list_item(faceList, faceIndex, &faceTag) != 0 || faceTag == NULL_TAG)
+        {
+            continue;
+        }
+
+        int faceType = 0;
+        double axisPoint[3] = {0.0, 0.0, 0.0};
+        double axisDirection[3] = {0.0, 0.0, 1.0};
+        double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        double radius = 0.0;
+        double radData = 0.0;
+        int normDir = 1;
+        if (UF_MODL_ask_face_data(faceTag, &faceType, axisPoint, axisDirection, box, &radius, &radData, &normDir) != 0 ||
+            faceType != UF_MODL_CYLINDRICAL_FACE ||
+            radius <= 1.0e-6)
+        {
+            continue;
+        }
+        ++cylinderFaceCount;
+
+        NXOpen::Vector3d axis(axisDirection[0], axisDirection[1], axisDirection[2]);
+        axis = NormalizeVector(axis);
+        if (VectorLength(axis) <= 1.0e-6)
+        {
+            continue;
+        }
+
+        double minProjection = std::numeric_limits<double>::max();
+        double maxProjection = -std::numeric_limits<double>::max();
+        for (const NXOpen::Point3d& point : bodyPoints)
+        {
+            const NXOpen::Vector3d delta(point.X - axisPoint[0], point.Y - axisPoint[1], point.Z - axisPoint[2]);
+            const double projection = DotVector(delta, axis);
+            minProjection = std::min(minProjection, projection);
+            maxProjection = std::max(maxProjection, projection);
+        }
+
+        const double height = minProjection <= maxProjection ? maxProjection - minProjection : 0.0;
+        const double diameter = radius * 2.0;
+        const double ratio = diameter > 1.0e-6 ? height / diameter : 0.0;
+        if (height > diameter * 0.30 + 1.0e-4 && ratio <= 12.0)
+        {
+            ++strongCylinderCount;
+        }
+    }
+
+    UF_MODL_delete_list(&faceList);
+    matched = strongCylinderCount > 0 && cylinderFaceCount >= 1;
+    return matched;
+}
+
+bool ShouldSkipFastenerBodyForParallelDimensions(tag_t bodyTag)
+{
+    try
+    {
+        return BodyNameLooksLikeFastener(bodyTag) || BodyGeometryLooksLikeFastener(bodyTag);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+bool AskSolidBodyTagBoundsCenter(NXOpen::Part* part, NXOpen::Point3d& center)
+{
+    const std::vector<tag_t> bodyTags = CollectVisibleSolidBodyTags(part);
+    if (bodyTags.empty())
+    {
+        return false;
+    }
+
+    bool initialized = false;
+    double minValues[3] = {0.0, 0.0, 0.0};
+    double maxValues[3] = {0.0, 0.0, 0.0};
+    for (tag_t bodyTag : bodyTags)
+    {
+        double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        if (UF_MODL_ask_bounding_box(bodyTag, box) != 0)
+        {
+            continue;
+        }
+
+        if (!initialized)
+        {
+            minValues[0] = box[0];
+            minValues[1] = box[1];
+            minValues[2] = box[2];
+            maxValues[0] = box[3];
+            maxValues[1] = box[4];
+            maxValues[2] = box[5];
+            initialized = true;
+        }
+        else
+        {
+            minValues[0] = std::min(minValues[0], box[0]);
+            minValues[1] = std::min(minValues[1], box[1]);
+            minValues[2] = std::min(minValues[2], box[2]);
+            maxValues[0] = std::max(maxValues[0], box[3]);
+            maxValues[1] = std::max(maxValues[1], box[4]);
+            maxValues[2] = std::max(maxValues[2], box[5]);
+        }
+    }
+
+    if (!initialized)
+    {
+        return false;
+    }
+
+    center = NXOpen::Point3d(
+        (minValues[0] + maxValues[0]) * 0.5,
+        (minValues[1] + maxValues[1]) * 0.5,
+        (minValues[2] + maxValues[2]) * 0.5);
+    return true;
+}
+
+bool TryComputeAutoFrontDirectionFromLeafAssemblyBodies(
+    NXOpen::Part* assemblyPart,
+    AutoViewDirection& result)
+{
+    if (assemblyPart == nullptr)
+    {
+        return false;
+    }
+
+    const tag_t rootOccurrence = UF_ASSEM_ask_root_part_occ(assemblyPart->Tag());
+    if (rootOccurrence == NULL_TAG)
+    {
+        return false;
+    }
+
+    std::vector<std::pair<tag_t, AssemblyOccurrenceTransform>> leaves;
+    int rootChildCount = 0;
+    tag_t* rootChildren = nullptr;
+    rootChildCount = UF_ASSEM_ask_part_occ_children(rootOccurrence, &rootChildren);
+    if (rootChildCount <= 0 || rootChildren == nullptr)
+    {
+        return false;
+    }
+
+    const AssemblyOccurrenceTransform identity = IdentityOccurrenceTransform();
+    for (int index = 0; index < rootChildCount; ++index)
+    {
+        if (rootChildren[index] != NULL_TAG)
+        {
+            CollectLeafPartOccurrences(rootChildren[index], identity, leaves);
+        }
+    }
+    UF_free(rootChildren);
+
+    struct AssemblyPlanarFaceCandidate
+    {
+        tag_t occurrence = NULL_TAG;
+        tag_t faceTag = NULL_TAG;
+        tag_t edgeTag = NULL_TAG;
+        NXOpen::Vector3d normal = NXOpen::Vector3d(0.0, 0.0, 0.0);
+        NXOpen::Vector3d xDirection = NXOpen::Vector3d(0.0, 0.0, 0.0);
+        double area = 0.0;
+        double edgeLength = 0.0;
+    };
+
+    AssemblyPlanarFaceCandidate best;
+    bool found = false;
+    int leafCount = 0;
+    int directObjectOccurrenceCount = 0;
+    int directBodyOccurrenceCount = 0;
+    int prototypeBodyCount = 0;
+    int mappedBodyOccurrenceCount = 0;
+    int bodyCount = 0;
+    int planarFaceCount = 0;
+
+    for (const auto& leaf : leaves)
+    {
+        const tag_t occurrence = leaf.first;
+        ++leafCount;
+
+        std::vector<tag_t> bodyOccurrences;
+        std::set<tag_t> seenBodyOccurrences;
+        tag_t objectOccurrence = NULL_TAG;
+        while ((objectOccurrence = UF_ASSEM_cycle_ents_in_part_occ(occurrence, objectOccurrence)) != NULL_TAG)
+        {
+            ++directObjectOccurrenceCount;
+            const size_t before = bodyOccurrences.size();
+            AddUniqueBodyOccurrence(objectOccurrence, bodyOccurrences, seenBodyOccurrences);
+            if (bodyOccurrences.size() > before)
+            {
+                ++directBodyOccurrenceCount;
+            }
+        }
+
+        const tag_t prototypeTag = UF_ASSEM_ask_prototype_of_occ(occurrence);
+        if (prototypeTag != NULL_TAG)
+        {
+            tag_t prototypeBody = NULL_TAG;
+            while (UF_OBJ_cycle_objs_in_part(prototypeTag, UF_solid_type, &prototypeBody) == 0 &&
+                   prototypeBody != NULL_TAG)
+            {
+                if (!IsSolidBodyTag(prototypeBody))
+                {
+                    continue;
+                }
+                ++prototypeBodyCount;
+
+                const tag_t mappedOccurrence = UF_ASSEM_find_occurrence(occurrence, prototypeBody);
+                const size_t before = bodyOccurrences.size();
+                AddUniqueBodyOccurrence(mappedOccurrence, bodyOccurrences, seenBodyOccurrences);
+                if (bodyOccurrences.size() > before)
+                {
+                    ++mappedBodyOccurrenceCount;
+                }
+            }
+        }
+
+        for (tag_t bodyOccurrence : bodyOccurrences)
+        {
+            ++bodyCount;
+
+            uf_list_p_t faceList = nullptr;
+            if (UF_MODL_ask_body_faces(bodyOccurrence, &faceList) != 0 || faceList == nullptr)
+            {
+                continue;
+            }
+
+            int faceCount = 0;
+            UF_MODL_ask_list_count(faceList, &faceCount);
+            for (int faceIndex = 0; faceIndex < faceCount; ++faceIndex)
+            {
+                tag_t faceTag = NULL_TAG;
+                if (UF_MODL_ask_list_item(faceList, faceIndex, &faceTag) != 0 || faceTag == NULL_TAG)
+                {
+                    continue;
+                }
+
+                int faceType = 0;
+                double point[3] = {0.0, 0.0, 0.0};
+                double normalData[3] = {0.0, 0.0, 0.0};
+                double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+                double radius = 0.0;
+                double radData = 0.0;
+                int normDir = 1;
+                if (UF_MODL_ask_face_data(faceTag, &faceType, point, normalData, box, &radius, &radData, &normDir) != 0 ||
+                    faceType != 22)
+                {
+                    continue;
+                }
+
+                NXOpen::Vector3d faceNormal(
+                    normalData[0] * static_cast<double>(normDir),
+                    normalData[1] * static_cast<double>(normDir),
+                    normalData[2] * static_cast<double>(normDir));
+                faceNormal = NormalizeVector(faceNormal);
+                if (VectorLength(faceNormal) < 1.0e-6)
+                {
+                    continue;
+                }
+                StabilizeDirectionSign(faceNormal);
+
+                double area = AskPlanarFaceArea(assemblyPart, faceTag);
+                if (area <= 1.0e-6)
+                {
+                    area = ApproximatePlanarFaceArea(normalData, box);
+                }
+                if (area <= 1.0e-6)
+                {
+                    continue;
+                }
+                ++planarFaceCount;
+
+                double longestEdge = 0.0;
+                tag_t longestEdgeTag = NULL_TAG;
+                NXOpen::Vector3d longestDirection(0.0, 0.0, 0.0);
+                uf_list_p_t edgeList = nullptr;
+                if (UF_MODL_ask_face_edges(faceTag, &edgeList) == 0 && edgeList != nullptr)
+                {
+                    int edgeCount = 0;
+                    UF_MODL_ask_list_count(edgeList, &edgeCount);
+                    for (int edgeIndex = 0; edgeIndex < edgeCount; ++edgeIndex)
+                    {
+                        tag_t edgeTag = NULL_TAG;
+                        if (UF_MODL_ask_list_item(edgeList, edgeIndex, &edgeTag) != 0 || edgeTag == NULL_TAG)
+                        {
+                            continue;
+                        }
+
+                        double start[3] = {0.0, 0.0, 0.0};
+                        double end[3] = {0.0, 0.0, 0.0};
+                        int vertexCount = 0;
+                        if (UF_MODL_ask_edge_verts(edgeTag, start, end, &vertexCount) != 0 ||
+                            vertexCount < 2 ||
+                            !IsStraightEdge(edgeTag, start, end))
+                        {
+                            continue;
+                        }
+
+                        NXOpen::Vector3d edgeVector(
+                            end[0] - start[0],
+                            end[1] - start[1],
+                            end[2] - start[2]);
+                        const double edgeLength = VectorLength(edgeVector);
+                        if (edgeLength <= longestEdge)
+                        {
+                            continue;
+                        }
+
+                        longestEdge = edgeLength;
+                        longestEdgeTag = edgeTag;
+                        longestDirection = edgeVector;
+                    }
+                    UF_MODL_delete_list(&edgeList);
+                }
+
+                if (longestEdge <= 1.0e-6 || longestEdgeTag == NULL_TAG)
+                {
+                    continue;
+                }
+                longestDirection = ProjectPerpendicular(longestDirection, faceNormal);
+                longestDirection = NormalizeVector(longestDirection);
+                if (VectorLength(longestDirection) < 1.0e-6)
+                {
+                    continue;
+                }
+                StabilizeDirectionSign(longestDirection);
+
+                if (!found ||
+                    area > best.area + 1.0e-6 ||
+                    (std::abs(area - best.area) <= 1.0e-6 && longestEdge > best.edgeLength))
+                {
+                    found = true;
+                    best.occurrence = occurrence;
+                    best.faceTag = faceTag;
+                    best.edgeTag = longestEdgeTag;
+                    best.normal = faceNormal;
+                    best.xDirection = longestDirection;
+                    best.area = area;
+                    best.edgeLength = longestEdge;
+                }
+            }
+
+            UF_MODL_delete_list(&faceList);
+        }
+    }
+
+    if (!found)
+    {
+        std::ostringstream line;
+        line << "AutoCreateThreeViews: assembly leaf front direction not found"
+             << ", leaves=" << leaves.size()
+             << ", visitedLeaves=" << leafCount
+             << ", objectOccurrences=" << directObjectOccurrenceCount
+             << ", directBodies=" << directBodyOccurrenceCount
+             << ", prototypeBodies=" << prototypeBodyCount
+             << ", mappedBodies=" << mappedBodyOccurrenceCount
+             << ", bodies=" << bodyCount
+             << ", planarFaces=" << planarFaceCount << ".";
+        WriteLine(nullptr, line.str());
+        return false;
+    }
+
+    result.normal = best.normal;
+    result.xDirection = best.xDirection;
+    if (DominantAxisName(result.normal) == "Y" && DominantAxisName(result.xDirection) == "X")
+    {
+        result.xDirection.X = -result.xDirection.X;
+        result.xDirection.Y = -result.xDirection.Y;
+        result.xDirection.Z = -result.xDirection.Z;
+    }
+    result.normalName = DominantAxisName(result.normal);
+    result.xName = DominantAxisName(result.xDirection);
+    result.faceArea = best.area;
+    result.edgeLength = best.edgeLength;
+    result.faceTag = best.faceTag;
+    result.edgeTag = best.edgeTag;
+    result.source = "assembly leaf component largest planar face + longest straight edge";
+    result.valid = true;
+
+    std::ostringstream line;
+    line << "AutoCreateThreeViews: selected assembly leaf front direction normal="
+         << result.normalName
+         << ", x="
+         << result.xName
+         << ", faceArea="
+         << result.faceArea
+         << ", edgeLength="
+         << result.edgeLength
+         << ", occurrence="
+         << static_cast<unsigned long long>(best.occurrence)
+         << ", faceTag="
+         << static_cast<unsigned long long>(result.faceTag)
+         << ", edgeTag="
+         << static_cast<unsigned long long>(result.edgeTag)
+         << ", leaves="
+         << leaves.size()
+         << ", objectOccurrences="
+         << directObjectOccurrenceCount
+         << ", directBodies="
+         << directBodyOccurrenceCount
+         << ", prototypeBodies="
+         << prototypeBodyCount
+         << ", mappedBodies="
+         << mappedBodyOccurrenceCount
+         << ".";
+    WriteLine(nullptr, line.str());
+    return true;
+}
+
+bool TryComputeAutoFrontDirectionFromOverallBoundingBox(
+    NXOpen::Part* part,
+    AutoViewDirection& result)
+{
+    const ModelBounds bounds = AskModelBounds(part);
+    if (!bounds.valid)
+    {
+        return false;
+    }
+
+    struct BoxProjectionCandidate
+    {
+        int normalAxis = 2;
+        int horizontalAxis = 0;
+        int verticalAxis = 1;
+        double area = 0.0;
+        double horizontalLength = 0.0;
+        double verticalLength = 0.0;
+    };
+
+    const double sizes[3] = {bounds.sizeX, bounds.sizeY, bounds.sizeZ};
+    std::vector<BoxProjectionCandidate> candidates;
+    for (int normalAxis = 0; normalAxis < 3; ++normalAxis)
+    {
+        int projectedAxes[2] = {0, 1};
+        int out = 0;
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            if (axis != normalAxis)
+            {
+                projectedAxes[out++] = axis;
+            }
+        }
+
+        BoxProjectionCandidate candidate;
+        candidate.normalAxis = normalAxis;
+        candidate.area = sizes[projectedAxes[0]] * sizes[projectedAxes[1]];
+        if (sizes[projectedAxes[0]] >= sizes[projectedAxes[1]])
+        {
+            candidate.horizontalAxis = projectedAxes[0];
+            candidate.verticalAxis = projectedAxes[1];
+        }
+        else
+        {
+            candidate.horizontalAxis = projectedAxes[1];
+            candidate.verticalAxis = projectedAxes[0];
+        }
+        candidate.horizontalLength = sizes[candidate.horizontalAxis];
+        candidate.verticalLength = sizes[candidate.verticalAxis];
+        candidates.push_back(candidate);
+    }
+
+    const BoxProjectionCandidate* best = nullptr;
+    for (const BoxProjectionCandidate& candidate : candidates)
+    {
+        if (best == nullptr ||
+            candidate.area > best->area + 1.0e-6 ||
+            (std::abs(candidate.area - best->area) <= 1.0e-6 &&
+             candidate.horizontalLength > best->horizontalLength + 1.0e-6))
+        {
+            best = &candidate;
+        }
+    }
+    if (best == nullptr || best->area <= 1.0e-6 || best->horizontalLength <= 1.0e-6)
+    {
+        return false;
+    }
+
+    result.normal = AxisVector(best->normalAxis, 1.0);
+    result.xDirection = AxisVector(best->horizontalAxis, 1.0);
+    StabilizeDirectionSign(result.normal);
+    StabilizeDirectionSign(result.xDirection);
+    result.normalName = DominantAxisName(result.normal);
+    result.xName = DominantAxisName(result.xDirection);
+    result.faceArea = best->area;
+    result.edgeLength = best->horizontalLength;
+    result.faceTag = NULL_TAG;
+    result.edgeTag = NULL_TAG;
+    result.source = "overall bounding box max projected area + longest projected direction";
+    result.valid = true;
+
+    std::ostringstream line;
+    line << "AutoCreateThreeViews: selected front overall bounding box normal="
+         << result.normalName
+         << ", x="
+         << result.xName
+         << ", projectionArea="
+         << result.faceArea
+         << ", horizontalLength="
+         << result.edgeLength
+         << ", verticalLength="
+         << best->verticalLength
+         << ", sizeX="
+         << bounds.sizeX
+         << ", sizeY="
+         << bounds.sizeY
+         << ", sizeZ="
+         << bounds.sizeZ
+         << ".";
+    WriteLine(nullptr, line.str());
+    return true;
 }
 
 bool TryComputeAutoFrontDirectionFromLargestPlanarFace(
@@ -2917,7 +3958,7 @@ std::string NormalizeFrontDirectionMode(const std::string& value)
     {
         return "manualFaceX";
     }
-    return "largestFaceLongestEdge";
+    return "overallBoxMaxArea";
 }
 
 std::string FrontDirectionFailureMessage(const std::string& mode)
@@ -2949,7 +3990,10 @@ AutoViewDirection ComputeFrontDirection(NXOpen::Part* part, const RequestValues&
         return result;
     }
 
-    TryComputeAutoFrontDirectionFromLargestPlanarFace(part, result);
+    if (!TryComputeAutoFrontDirectionFromOverallBoundingBox(part, result))
+    {
+        TryComputeAutoFrontDirectionFromLargestPlanarFace(part, result);
+    }
     return result;
 }
 
@@ -3431,6 +4475,313 @@ NXOpen::Drawings::BaseView* CreateBaseView(
     }
 }
 
+AutoViewDirection ReversedViewDirection(const AutoViewDirection& direction)
+{
+    AutoViewDirection reversed = direction;
+    reversed.normal.X = -reversed.normal.X;
+    reversed.normal.Y = -reversed.normal.Y;
+    reversed.normal.Z = -reversed.normal.Z;
+    reversed.xDirection.X = -reversed.xDirection.X;
+    reversed.xDirection.Y = -reversed.xDirection.Y;
+    reversed.xDirection.Z = -reversed.xDirection.Z;
+    reversed.normalName = DominantAxisName(reversed.normal);
+    reversed.xName = DominantAxisName(reversed.xDirection);
+    reversed.source += " + back-side curve comparison";
+    return reversed;
+}
+
+int CountVisibleDraftingCurveExtents(NXOpen::Drawings::DraftingView* view)
+{
+    return static_cast<int>(CollectDraftingCurveExtents(view).size());
+}
+
+void DeleteTemporaryDraftingViews(NXOpen::Part* part, const std::vector<NXOpen::Drawings::DraftingView*>& views)
+{
+    if (part == nullptr || part->DraftingViews() == nullptr || views.empty())
+    {
+        return;
+    }
+
+    try
+    {
+        part->DraftingViews()->DeleteViewsInOriginalPart(views);
+    }
+    catch (...)
+    {
+        for (NXOpen::Drawings::DraftingView* view : views)
+        {
+            if (view != nullptr)
+            {
+                UF_OBJ_delete_object(view->Tag());
+            }
+        }
+    }
+}
+
+void PreferBackSideIfMoreCurves(
+    NXOpen::Session* session,
+    NXOpen::Part* part,
+    AutoViewDirection& frontDirection,
+    double scaleDenominator)
+{
+    if (part == nullptr || !frontDirection.valid)
+    {
+        return;
+    }
+
+    const NXOpen::Point3d frontProbePoint(-5000.0, -5000.0, 0.0);
+    const NXOpen::Point3d backProbePoint(-5200.0, -5000.0, 0.0);
+    AutoViewDirection backDirection = ReversedViewDirection(frontDirection);
+    std::vector<NXOpen::Drawings::DraftingView*> temporaryViews;
+
+    NXOpen::Drawings::BaseView* frontProbe = CreateBaseView(
+        session,
+        part,
+        "front",
+        {"Top"},
+        frontProbePoint,
+        false,
+        scaleDenominator,
+        &frontDirection);
+    if (frontProbe != nullptr)
+    {
+        temporaryViews.push_back(frontProbe);
+    }
+
+    NXOpen::Drawings::BaseView* backProbe = CreateBaseView(
+        session,
+        part,
+        "front",
+        {"Top"},
+        backProbePoint,
+        false,
+        scaleDenominator,
+        &backDirection);
+    if (backProbe != nullptr)
+    {
+        temporaryViews.push_back(backProbe);
+    }
+
+    int frontCurveCount = -1;
+    int backCurveCount = -1;
+    try
+    {
+        if (!temporaryViews.empty())
+        {
+            part->DraftingViews()->UpdateViews(temporaryViews);
+        }
+        frontCurveCount = CountVisibleDraftingCurveExtents(frontProbe);
+        backCurveCount = CountVisibleDraftingCurveExtents(backProbe);
+    }
+    catch (...)
+    {
+    }
+
+    std::ostringstream line;
+    line << "AutoCreateThreeViews: front/back curve comparison frontCurves="
+         << frontCurveCount
+         << ", backCurves="
+         << backCurveCount;
+
+    if (backCurveCount > frontCurveCount)
+    {
+        frontDirection = backDirection;
+        line << ", selected=back.";
+    }
+    else
+    {
+        line << ", selected=front.";
+    }
+    WriteLine(session, line.str());
+
+    DeleteTemporaryDraftingViews(part, temporaryViews);
+}
+
+void PreferOverallBoxDirectionWithMostCurves(
+    NXOpen::Session* session,
+    NXOpen::Part* part,
+    AutoViewDirection& frontDirection,
+    double scaleDenominator)
+{
+    const ModelBounds bounds = AskModelBounds(part);
+    if (part == nullptr || !bounds.valid)
+    {
+        WriteLine(session, "AutoCreateThreeViews: drafting view boundary direction skipped; model bounds invalid.");
+        return;
+    }
+
+    struct BoxDirectionProbe
+    {
+        AutoViewDirection direction;
+        double area = 0.0;
+        double horizontalLength = 0.0;
+        double viewArea = 0.0;
+        double viewWidth = 0.0;
+        double viewHeight = 0.0;
+        int curveCount = -1;
+    };
+
+    const double sizes[3] = {bounds.sizeX, bounds.sizeY, bounds.sizeZ};
+    std::vector<BoxDirectionProbe> probes;
+    auto pushProbe = [&](const AutoViewDirection& direction, double area, double horizontalLength) {
+        BoxDirectionProbe probe;
+        probe.direction = direction;
+        probe.area = area;
+        probe.horizontalLength = horizontalLength;
+        probes.push_back(probe);
+    };
+    for (int normalAxis = 0; normalAxis < 3; ++normalAxis)
+    {
+        int projectedAxes[2] = {0, 1};
+        int out = 0;
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            if (axis != normalAxis)
+            {
+                projectedAxes[out++] = axis;
+            }
+        }
+
+        const int horizontalAxis =
+            sizes[projectedAxes[0]] >= sizes[projectedAxes[1]] ? projectedAxes[0] : projectedAxes[1];
+        const double area = sizes[projectedAxes[0]] * sizes[projectedAxes[1]];
+        const double horizontalLength = sizes[horizontalAxis];
+        if (area <= 1.0e-6 || horizontalLength <= 1.0e-6)
+        {
+            continue;
+        }
+
+        AutoViewDirection base;
+        base.normal = AxisVector(normalAxis, 1.0);
+        base.xDirection = AxisVector(horizontalAxis, 1.0);
+        StabilizeDirectionSign(base.normal);
+        StabilizeDirectionSign(base.xDirection);
+        base.normalName = DominantAxisName(base.normal);
+        base.xName = DominantAxisName(base.xDirection);
+        base.faceArea = area;
+        base.edgeLength = horizontalLength;
+        base.source = "drafting view curve bounds max area + longest x direction + visible curve count";
+        base.valid = true;
+
+        AutoViewDirection rotatedBase = base;
+        rotatedBase.xDirection = NormalizeVector(CrossVector(base.normal, base.xDirection));
+        if (VectorLength(rotatedBase.xDirection) > 1.0e-6)
+        {
+            rotatedBase.xName = DominantAxisName(rotatedBase.xDirection);
+            rotatedBase.source = base.source + " + rotated x";
+        }
+
+        pushProbe(base, area, horizontalLength);
+        if (rotatedBase.valid && VectorLength(rotatedBase.xDirection) > 1.0e-6)
+        {
+            pushProbe(rotatedBase, area, horizontalLength);
+        }
+
+        AutoViewDirection back = ReversedViewDirection(base);
+        back.source = base.source;
+        pushProbe(back, area, horizontalLength);
+
+        AutoViewDirection rotatedBack = ReversedViewDirection(rotatedBase);
+        rotatedBack.source = rotatedBase.source;
+        if (rotatedBack.valid && VectorLength(rotatedBack.xDirection) > 1.0e-6)
+        {
+            pushProbe(rotatedBack, area, horizontalLength);
+        }
+    }
+
+    if (probes.empty())
+    {
+        return;
+    }
+
+    std::vector<NXOpen::Drawings::DraftingView*> temporaryViews;
+    std::vector<NXOpen::Drawings::BaseView*> probeViews(probes.size(), nullptr);
+    for (size_t index = 0; index < probes.size(); ++index)
+    {
+        const NXOpen::Point3d probePoint(-5000.0 - static_cast<double>(index) * 200.0, -5400.0, 0.0);
+        NXOpen::Drawings::BaseView* probeView = CreateBaseView(
+            session,
+            part,
+            "front probe",
+            {"Top"},
+            probePoint,
+            false,
+            scaleDenominator,
+            &probes[index].direction);
+        probeViews[index] = probeView;
+        if (probeView != nullptr)
+        {
+            temporaryViews.push_back(probeView);
+        }
+    }
+
+    try
+    {
+        if (!temporaryViews.empty() && part->DraftingViews() != nullptr)
+        {
+            part->DraftingViews()->UpdateViews(temporaryViews);
+        }
+        for (size_t index = 0; index < probes.size(); ++index)
+        {
+            std::vector<DraftingCurveExtent> extents = CollectDraftingCurveExtents(probeViews[index]);
+            probes[index].curveCount = static_cast<int>(extents.size());
+            LayoutBounds curveBounds;
+            if (TryBuildVisibleCurveBounds(extents, curveBounds))
+            {
+                probes[index].viewWidth = BoundsWidth(curveBounds);
+                probes[index].viewHeight = BoundsHeight(curveBounds);
+                probes[index].viewArea = BoundsArea(curveBounds);
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+
+    size_t bestIndex = 0;
+    for (size_t index = 1; index < probes.size(); ++index)
+    {
+        const BoxDirectionProbe& candidate = probes[index];
+        const BoxDirectionProbe& best = probes[bestIndex];
+        const bool candidateLandscape = candidate.viewWidth >= candidate.viewHeight - 1.0e-6;
+        const bool bestLandscape = best.viewWidth >= best.viewHeight - 1.0e-6;
+        if (candidate.viewArea > best.viewArea + 1.0e-6 ||
+            (std::abs(candidate.viewArea - best.viewArea) <= 1.0e-6 &&
+             candidateLandscape && !bestLandscape) ||
+            (std::abs(candidate.viewArea - best.viewArea) <= 1.0e-6 &&
+             candidateLandscape == bestLandscape &&
+             candidate.curveCount > best.curveCount) ||
+            (std::abs(candidate.viewArea - best.viewArea) <= 1.0e-6 &&
+             candidateLandscape == bestLandscape &&
+             candidate.curveCount == best.curveCount &&
+             candidate.horizontalLength > best.horizontalLength + 1.0e-6))
+        {
+            bestIndex = index;
+        }
+    }
+
+    std::ostringstream line;
+    line << "AutoCreateThreeViews: drafting view boundary direction comparison";
+    for (size_t index = 0; index < probes.size(); ++index)
+    {
+        line << " [normal=" << probes[index].direction.normalName
+             << ", x=" << probes[index].direction.xName
+             << ", boxArea=" << probes[index].area
+             << ", length=" << probes[index].horizontalLength
+             << ", viewArea=" << probes[index].viewArea
+             << ", viewWidth=" << probes[index].viewWidth
+             << ", viewHeight=" << probes[index].viewHeight
+             << ", curves=" << probes[index].curveCount << "]";
+    }
+    line << ", selected normal=" << probes[bestIndex].direction.normalName
+         << ", x=" << probes[bestIndex].direction.xName
+         << ".";
+    WriteLine(session, line.str());
+
+    frontDirection = probes[bestIndex].direction;
+    DeleteTemporaryDraftingViews(part, temporaryViews);
+}
+
 NXOpen::Drawings::BaseView* CreateBaseViewFromModelingView(
     NXOpen::Session* session,
     NXOpen::Part* part,
@@ -3637,6 +4988,108 @@ void AccumulateBoundsPoint(LayoutBounds& bounds, double x, double y, bool& initi
     bounds.maxY = std::max(bounds.maxY, y);
 }
 
+bool EvaluateCurveDrawingPoint(
+    UF_EVAL_p_t evaluator,
+    tag_t viewTag,
+    double parameter,
+    double modelPoint[3],
+    double drawingPoint[2])
+{
+    if (evaluator == nullptr || viewTag == NULL_TAG)
+    {
+        return false;
+    }
+
+    double derivatives[3] = {0.0, 0.0, 0.0};
+    if (UF_EVAL_evaluate(evaluator, 0, parameter, modelPoint, derivatives) != 0)
+    {
+        return false;
+    }
+
+    return UF_VIEW_map_model_to_drawing(viewTag, modelPoint, drawingPoint) == 0;
+}
+
+bool EvaluateCurveDrawingCoordinate(
+    UF_EVAL_p_t evaluator,
+    tag_t viewTag,
+    double parameter,
+    bool useX,
+    double& value)
+{
+    double modelPoint[3] = {0.0, 0.0, 0.0};
+    double drawingPoint[2] = {0.0, 0.0};
+    if (!EvaluateCurveDrawingPoint(evaluator, viewTag, parameter, modelPoint, drawingPoint))
+    {
+        return false;
+    }
+
+    value = useX ? drawingPoint[0] : drawingPoint[1];
+    return true;
+}
+
+void AppendUniqueParameter(std::vector<double>& parameters, double parameter, double tolerance)
+{
+    for (double existing : parameters)
+    {
+        if (std::abs(existing - parameter) <= tolerance)
+        {
+            return;
+        }
+    }
+    parameters.push_back(parameter);
+}
+
+double RefineCurveCoordinateExtreme(
+    UF_EVAL_p_t evaluator,
+    tag_t viewTag,
+    double low,
+    double high,
+    bool useX,
+    bool findMaximum)
+{
+    if (high < low)
+    {
+        std::swap(low, high);
+    }
+
+    for (int iteration = 0; iteration < 48; ++iteration)
+    {
+        const double first = low + (high - low) / 3.0;
+        const double second = high - (high - low) / 3.0;
+        double firstValue = 0.0;
+        double secondValue = 0.0;
+        if (!EvaluateCurveDrawingCoordinate(evaluator, viewTag, first, useX, firstValue) ||
+            !EvaluateCurveDrawingCoordinate(evaluator, viewTag, second, useX, secondValue))
+        {
+            break;
+        }
+
+        if (findMaximum ? (firstValue < secondValue) : (firstValue > secondValue))
+        {
+            low = first;
+        }
+        else
+        {
+            high = second;
+        }
+    }
+
+    return (low + high) * 0.5;
+}
+
+std::vector<double> CollectDraftingCurveExtremeParameters(
+    UF_EVAL_p_t evaluator,
+    tag_t viewTag,
+    const double limits[2])
+{
+    std::vector<double> parameters;
+    const double parameterSpan = std::abs(limits[1] - limits[0]);
+    const double parameterTolerance = std::max(parameterSpan * 1.0e-7, 1.0e-9);
+    AppendUniqueParameter(parameters, limits[0], parameterTolerance);
+    AppendUniqueParameter(parameters, limits[1], parameterTolerance);
+    return parameters;
+}
+
 bool ExpandBoundsWithDraftingCurve(tag_t viewTag, tag_t curveTag, LayoutBounds& bounds, bool& initialized)
 {
     if (viewTag == NULL_TAG || curveTag == NULL_TAG)
@@ -3654,21 +5107,16 @@ bool ExpandBoundsWithDraftingCurve(tag_t viewTag, tag_t curveTag, LayoutBounds& 
     double limits[2] = {0.0, 0.0};
     if (UF_EVAL_ask_limits(evaluator, limits) == 0)
     {
-        const int sampleCount = 24;
-        double derivatives[3] = {0.0, 0.0, 0.0};
-        for (int i = 0; i <= sampleCount; ++i)
+        const std::vector<double> parameters =
+            CollectDraftingCurveExtremeParameters(evaluator, viewTag, limits);
+        for (double parameter : parameters)
         {
-            const double t = static_cast<double>(i) / static_cast<double>(sampleCount);
-            const double parameter = limits[0] + (limits[1] - limits[0]) * t;
             double modelPoint[3] = {0.0, 0.0, 0.0};
-            if (UF_EVAL_evaluate(evaluator, 0, parameter, modelPoint, derivatives) == 0)
+            double drawingPoint[2] = {0.0, 0.0};
+            if (EvaluateCurveDrawingPoint(evaluator, viewTag, parameter, modelPoint, drawingPoint))
             {
-                double drawingPoint[2] = {0.0, 0.0};
-                if (UF_VIEW_map_model_to_drawing(viewTag, modelPoint, drawingPoint) == 0)
-                {
-                    AccumulateBoundsPoint(bounds, drawingPoint[0], drawingPoint[1], initialized);
-                    expanded = true;
-                }
+                AccumulateBoundsPoint(bounds, drawingPoint[0], drawingPoint[1], initialized);
+                expanded = true;
             }
         }
     }
@@ -3792,6 +5240,33 @@ bool IsZeroDimensionValue(double value)
 double BoundsArea(const LayoutBounds& bounds)
 {
     return BoundsWidth(bounds) * BoundsHeight(bounds);
+}
+
+bool BoundsMissVisibleExtrema(const LayoutBounds& candidate, const LayoutBounds& visible, double tolerance)
+{
+    return candidate.minX > visible.minX + tolerance ||
+           candidate.minY > visible.minY + tolerance ||
+           candidate.maxX < visible.maxX - tolerance ||
+           candidate.maxY < visible.maxY - tolerance;
+}
+
+bool TryBuildVisibleCurveBounds(
+    const std::vector<DraftingCurveExtent>& extents,
+    LayoutBounds& bounds)
+{
+    bool initialized = false;
+    for (const DraftingCurveExtent& extent : extents)
+    {
+        if (!extent.initialized || extent.curve == nullptr || extent.tag == NULL_TAG)
+        {
+            continue;
+        }
+
+        AccumulateBoundsPoint(bounds, extent.bounds.minX, extent.bounds.minY, initialized);
+        AccumulateBoundsPoint(bounds, extent.bounds.maxX, extent.bounds.maxY, initialized);
+    }
+
+    return initialized;
 }
 
 double BottomTitleBlockReserve(double sheetHeight)
@@ -3995,6 +5470,73 @@ LayoutBounds BoundsForCreatedViews(const std::vector<CreatedView>& views)
     }
 
     return bounds;
+}
+
+void PromoteLargestAreaViewToFront(NXOpen::Session* session, std::vector<CreatedView>& views)
+{
+    if (views.empty())
+    {
+        return;
+    }
+
+    int frontIndex = -1;
+    int bestIndex = -1;
+    double frontArea = -1.0;
+    double bestArea = -1.0;
+    std::ostringstream log;
+    log << "AutoCreateThreeViews: final view area check";
+
+    for (int index = 0; index < static_cast<int>(views.size()); ++index)
+    {
+        CreatedView& created = views[static_cast<size_t>(index)];
+        if (created.view == nullptr)
+        {
+            continue;
+        }
+
+        const std::vector<DraftingCurveExtent> extents = CollectDraftingCurveExtents(created.view);
+        LayoutBounds bounds;
+        double area = 0.0;
+        double width = 0.0;
+        double height = 0.0;
+        if (TryBuildVisibleCurveBounds(extents, bounds))
+        {
+            width = BoundsWidth(bounds);
+            height = BoundsHeight(bounds);
+            area = BoundsArea(bounds);
+        }
+
+        log << " [" << created.label
+            << ", area=" << area
+            << ", width=" << width
+            << ", height=" << height
+            << ", curves=" << extents.size() << "]";
+
+        if (created.label == "front")
+        {
+            frontIndex = index;
+            frontArea = area;
+        }
+        if (area > bestArea + 1.0e-6)
+        {
+            bestArea = area;
+            bestIndex = index;
+        }
+    }
+
+    if (frontIndex >= 0 && bestIndex >= 0 && bestIndex != frontIndex && bestArea > frontArea + 1.0e-6)
+    {
+        std::swap(views[static_cast<size_t>(frontIndex)].label, views[static_cast<size_t>(bestIndex)].label);
+        std::swap(views[static_cast<size_t>(frontIndex)].plannedPoint, views[static_cast<size_t>(bestIndex)].plannedPoint);
+        log << ", promoted=" << views[static_cast<size_t>(frontIndex)].label
+            << ", oldFrontIndex=" << frontIndex
+            << ", newFrontIndex=" << bestIndex << ".";
+    }
+    else
+    {
+        log << ", promoted=none.";
+    }
+    WriteLine(session, log.str());
 }
 
 NXOpen::Drawings::DraftingView* FindCreatedView(const std::vector<CreatedView>& views, const std::string& label)
@@ -5389,23 +6931,60 @@ bool SelectOverallDimensionCurves(
     const std::vector<DraftingCurveExtent>& extents,
     const LayoutBounds& bounds,
     bool horizontalDimension,
+    double preferredCrossCoordinate,
     CurveAssocCandidate& first,
     CurveAssocCandidate& second)
 {
-    const double totalWidth = std::max(1.0, BoundsWidth(bounds));
-    const double totalHeight = std::max(1.0, BoundsHeight(bounds));
-    const double tolerance = std::max(0.2, std::max(totalWidth, totalHeight) * 0.01);
-    bool firstFound = false;
-    bool secondFound = false;
-    double firstMetric = std::numeric_limits<double>::max();
-    double secondMetric = std::numeric_limits<double>::max();
-    const double firstTarget = horizontalDimension ? bounds.maxX : bounds.maxY;
-    const double secondTarget = horizontalDimension ? bounds.minX : bounds.minY;
+    if (view == nullptr || view->Tag() == NULL_TAG)
+    {
+        return false;
+    }
 
-    auto useSampledPoint = [&](const DraftingCurveExtent& extent,
-                               bool forFirst,
-                               double target,
-                               bool useMax) {
+    struct ExtremePointCandidate
+    {
+        NXOpen::Drawings::DraftingCurve* curve = nullptr;
+        NXOpen::InferSnapType::SnapType snapType = NXOpen::InferSnapType::SnapTypeCurve;
+        NXOpen::Point3d modelPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
+        double drawingX = 0.0;
+        double drawingY = 0.0;
+        int sampleIndex = 0;
+        int sampleCount = 0;
+    };
+
+    std::vector<ExtremePointCandidate> candidates;
+    LayoutBounds visibleBounds;
+    bool visibleInitialized = false;
+
+    auto addCandidate = [&](const DraftingCurveExtent& extent,
+                            const double modelPoint[3],
+                            double drawingX,
+                            double drawingY,
+                            int sampleIndex,
+                            int sampleCount) {
+        ExtremePointCandidate candidate;
+        candidate.curve = extent.curve;
+        candidate.modelPoint = NXOpen::Point3d(modelPoint[0], modelPoint[1], modelPoint[2]);
+        candidate.drawingX = drawingX;
+        candidate.drawingY = drawingY;
+        candidate.sampleIndex = sampleIndex;
+        candidate.sampleCount = sampleCount;
+        if (sampleIndex == 0)
+        {
+            candidate.snapType = NXOpen::InferSnapType::SnapTypeStart;
+        }
+        else if (sampleIndex == sampleCount)
+        {
+            candidate.snapType = NXOpen::InferSnapType::SnapTypeEnd;
+        }
+        else
+        {
+            candidate.snapType = NXOpen::InferSnapType::SnapTypeCurve;
+        }
+        candidates.push_back(candidate);
+        AccumulateBoundsPoint(visibleBounds, drawingX, drawingY, visibleInitialized);
+    };
+
+    auto collectSampledPoints = [&](const DraftingCurveExtent& extent) {
         UF_EVAL_p_t evaluator = nullptr;
         if (UF_EVAL_initialize(extent.tag, &evaluator) != 0 || evaluator == nullptr)
         {
@@ -5419,83 +6998,33 @@ bool SelectOverallDimensionCurves(
             return;
         }
 
-        const int sampleCount = 96;
-        bool foundSample = false;
-        int bestIndex = 0;
-        double bestCoord = useMax ? -std::numeric_limits<double>::max() : std::numeric_limits<double>::max();
-        double bestModelPoint[3] = {0.0, 0.0, 0.0};
-        double bestDrawingPoint[2] = {0.0, 0.0};
-        double derivatives[3] = {0.0, 0.0, 0.0};
-        for (int i = 0; i <= sampleCount; ++i)
+        const std::vector<double> parameters =
+            CollectDraftingCurveExtremeParameters(evaluator, view->Tag(), limits);
+        const double parameterSpan = std::abs(limits[1] - limits[0]);
+        const double endTolerance = std::max(parameterSpan * 1.0e-7, 1.0e-9);
+        for (double parameter : parameters)
         {
-            const double t = static_cast<double>(i) / static_cast<double>(sampleCount);
-            const double parameter = limits[0] + (limits[1] - limits[0]) * t;
             double modelPoint[3] = {0.0, 0.0, 0.0};
-            if (UF_EVAL_evaluate(evaluator, 0, parameter, modelPoint, derivatives) != 0)
-            {
-                continue;
-            }
-
             double drawingPoint[2] = {0.0, 0.0};
-            if (UF_VIEW_map_model_to_drawing(view->Tag(), modelPoint, drawingPoint) != 0)
+            if (EvaluateCurveDrawingPoint(evaluator, view->Tag(), parameter, modelPoint, drawingPoint))
             {
-                continue;
-            }
-
-            const double coord = horizontalDimension ? drawingPoint[0] : drawingPoint[1];
-            if (!foundSample || (useMax ? coord > bestCoord : coord < bestCoord))
-            {
-                foundSample = true;
-                bestIndex = i;
-                bestCoord = coord;
-                bestModelPoint[0] = modelPoint[0];
-                bestModelPoint[1] = modelPoint[1];
-                bestModelPoint[2] = modelPoint[2];
-                bestDrawingPoint[0] = drawingPoint[0];
-                bestDrawingPoint[1] = drawingPoint[1];
+                int sampleIndex = -1;
+                int sampleCount = 0;
+                if (std::abs(parameter - limits[0]) <= endTolerance)
+                {
+                    sampleIndex = 0;
+                    sampleCount = 1;
+                }
+                else if (std::abs(parameter - limits[1]) <= endTolerance)
+                {
+                    sampleIndex = 1;
+                    sampleCount = 1;
+                }
+                addCandidate(extent, modelPoint, drawingPoint[0], drawingPoint[1], sampleIndex, sampleCount);
             }
         }
 
         UF_EVAL_free(evaluator);
-        if (!foundSample)
-        {
-            return;
-        }
-
-        const double distance = std::abs(bestCoord - target);
-        if (distance > tolerance)
-        {
-            return;
-        }
-
-        const double crossCoord = horizontalDimension ? bestDrawingPoint[1] : bestDrawingPoint[0];
-        const double crossCenter = horizontalDimension
-            ? (bounds.minY + bounds.maxY) * 0.5
-            : (bounds.minX + bounds.maxX) * 0.5;
-        const double score = distance * 10000.0 + std::abs(crossCoord - crossCenter);
-
-        CurveAssocCandidate& targetCandidate = forFirst ? first : second;
-        bool& targetFound = forFirst ? firstFound : secondFound;
-        double& targetMetric = forFirst ? firstMetric : secondMetric;
-        if (!targetFound || score < targetMetric)
-        {
-            targetFound = true;
-            targetMetric = score;
-            targetCandidate.curve = extent.curve;
-            if (bestIndex == 0)
-            {
-                targetCandidate.snapType = NXOpen::InferSnapType::SnapTypeStart;
-            }
-            else if (bestIndex == sampleCount)
-            {
-                targetCandidate.snapType = NXOpen::InferSnapType::SnapTypeEnd;
-            }
-            else
-            {
-                targetCandidate.snapType = NXOpen::InferSnapType::SnapTypeCurve;
-            }
-            targetCandidate.modelPoint = NXOpen::Point3d(bestModelPoint[0], bestModelPoint[1], bestModelPoint[2]);
-        }
     };
 
     for (const DraftingCurveExtent& extent : extents)
@@ -5505,8 +7034,56 @@ bool SelectOverallDimensionCurves(
             continue;
         }
 
-        useSampledPoint(extent, true, firstTarget, true);
-        useSampledPoint(extent, false, secondTarget, false);
+        collectSampledPoints(extent);
+    }
+
+    if (!visibleInitialized || candidates.empty())
+    {
+        return false;
+    }
+
+    const double totalWidth = std::max(1.0, BoundsWidth(visibleBounds));
+    const double totalHeight = std::max(1.0, BoundsHeight(visibleBounds));
+    const double tolerance = std::max(0.05, std::max(totalWidth, totalHeight) * 0.002);
+    const double firstTarget = horizontalDimension ? bounds.maxX : bounds.maxY;
+    const double secondTarget = horizontalDimension ? bounds.minX : bounds.minY;
+    bool firstFound = false;
+    bool secondFound = false;
+    double firstMetric = std::numeric_limits<double>::max();
+    double secondMetric = std::numeric_limits<double>::max();
+
+    auto useExtremeCandidate = [&](const ExtremePointCandidate& candidate,
+                                   bool forFirst,
+                                   double target) {
+        const double coord = horizontalDimension ? candidate.drawingX : candidate.drawingY;
+        const double distance = std::abs(coord - target);
+        if (distance > tolerance)
+        {
+            return;
+        }
+
+        const double crossCoord = horizontalDimension ? candidate.drawingY : candidate.drawingX;
+        const double score = distance * 100000.0 + std::abs(crossCoord - preferredCrossCoordinate);
+
+        CurveAssocCandidate& targetCandidate = forFirst ? first : second;
+        bool& targetFound = forFirst ? firstFound : secondFound;
+        double& targetMetric = forFirst ? firstMetric : secondMetric;
+        if (!targetFound || score < targetMetric)
+        {
+            targetFound = true;
+            targetMetric = score;
+            targetCandidate.curve = candidate.curve;
+            targetCandidate.snapType = candidate.snapType;
+            targetCandidate.modelPoint = candidate.modelPoint;
+            targetCandidate.drawingX = candidate.drawingX;
+            targetCandidate.drawingY = candidate.drawingY;
+        }
+    };
+
+    for (const ExtremePointCandidate& candidate : candidates)
+    {
+        useExtremeCandidate(candidate, true, firstTarget);
+        useExtremeCandidate(candidate, false, secondTarget);
     }
 
     return firstFound && secondFound && first.curve != nullptr && second.curve != nullptr;
@@ -5532,7 +7109,8 @@ bool CreateHorizontalOverallDimension(
 
     CurveAssocCandidate first;
     CurveAssocCandidate second;
-    if (!SelectOverallDimensionCurves(view, extents, bounds, true, first, second))
+    const double originY = bounds.maxY + offset;
+    if (!SelectOverallDimensionCurves(view, extents, bounds, true, originY, first, second))
     {
         WriteLine(session, "AutoCreateThreeViews: auto dimension horizontal overall failed; left/right boundary curves not found.");
         return false;
@@ -5558,10 +7136,18 @@ bool CreateHorizontalOverallDimension(
         builder->Origin()->Origin()->SetValue(
             nullptr,
             nullView,
-            NXOpen::Point3d((bounds.minX + bounds.maxX) * 0.5, bounds.maxY + offset, 0.0));
+            NXOpen::Point3d((bounds.minX + bounds.maxX) * 0.5, originY, 0.0));
         builder->Commit();
         builder->Destroy();
-        WriteLine(session, "AutoCreateThreeViews: auto dimension horizontal overall created.");
+        std::ostringstream log;
+        log << "AutoCreateThreeViews: auto dimension horizontal overall created"
+            << " leftCurve=" << static_cast<unsigned long long>(second.curve != nullptr ? second.curve->Tag() : NULL_TAG)
+            << ", leftDrawing=(" << second.drawingX << "," << second.drawingY << ")"
+            << ", rightCurve=" << static_cast<unsigned long long>(first.curve != nullptr ? first.curve->Tag() : NULL_TAG)
+            << ", rightDrawing=(" << first.drawingX << "," << first.drawingY << ")"
+            << ", targetMinX=" << bounds.minX
+            << ", targetMaxX=" << bounds.maxX << ".";
+        WriteLine(session, log.str());
         return true;
     }
     catch (const NXOpen::NXException& ex)
@@ -5598,7 +7184,8 @@ bool CreateVerticalOverallDimension(
 
     CurveAssocCandidate first;
     CurveAssocCandidate second;
-    if (!SelectOverallDimensionCurves(view, extents, bounds, false, first, second))
+    const double originX = bounds.minX - offset;
+    if (!SelectOverallDimensionCurves(view, extents, bounds, false, originX, first, second))
     {
         WriteLine(session, "AutoCreateThreeViews: auto dimension vertical overall failed; bottom/top boundary curves not found.");
         return false;
@@ -5624,10 +7211,18 @@ bool CreateVerticalOverallDimension(
         builder->Origin()->Origin()->SetValue(
             nullptr,
             nullView,
-            NXOpen::Point3d(bounds.minX - offset, (bounds.minY + bounds.maxY) * 0.5, 0.0));
+            NXOpen::Point3d(originX, (bounds.minY + bounds.maxY) * 0.5, 0.0));
         builder->Commit();
         builder->Destroy();
-        WriteLine(session, "AutoCreateThreeViews: auto dimension vertical overall created.");
+        std::ostringstream log;
+        log << "AutoCreateThreeViews: auto dimension vertical overall created"
+            << " bottomCurve=" << static_cast<unsigned long long>(second.curve != nullptr ? second.curve->Tag() : NULL_TAG)
+            << ", bottomDrawing=(" << second.drawingX << "," << second.drawingY << ")"
+            << ", topCurve=" << static_cast<unsigned long long>(first.curve != nullptr ? first.curve->Tag() : NULL_TAG)
+            << ", topDrawing=(" << first.drawingX << "," << first.drawingY << ")"
+            << ", targetMinY=" << bounds.minY
+            << ", targetMaxY=" << bounds.maxY << ".";
+        WriteLine(session, log.str());
         return true;
     }
     catch (const NXOpen::NXException& ex)
@@ -7262,6 +8857,100 @@ bool CentersAreClose(const NXOpen::Point3d& a, const NXOpen::Point3d& b, double 
     return std::abs(a.X - b.X) <= tolerance && std::abs(a.Y - b.Y) <= tolerance;
 }
 
+double NormalizeAngleRadians(double angle)
+{
+    const double twoPi = 6.28318530717958647692;
+    double normalized = std::fmod(angle, twoPi);
+    if (normalized < 0.0)
+    {
+        normalized += twoPi;
+    }
+    return normalized;
+}
+
+double ArcCoverageRadians(double startAngle, double endAngle)
+{
+    const double twoPi = 6.28318530717958647692;
+    double span = endAngle - startAngle;
+    while (span < 0.0)
+    {
+        span += twoPi;
+    }
+    while (span > twoPi)
+    {
+        span -= twoPi;
+    }
+    return span;
+}
+
+bool ArcSegmentsCoverFullCircle(const std::vector<HoleArcSegmentCandidate>& segments)
+{
+    if (segments.empty())
+    {
+        return false;
+    }
+
+    const double twoPi = 6.28318530717958647692;
+    const double tolerance = 0.035;
+    std::vector<std::pair<double, double>> intervals;
+    for (const HoleArcSegmentCandidate& segment : segments)
+    {
+        const double span = ArcCoverageRadians(segment.startAngle, segment.endAngle);
+        if (span >= twoPi - tolerance)
+        {
+            return true;
+        }
+        if (span <= tolerance)
+        {
+            continue;
+        }
+
+        const double start = NormalizeAngleRadians(segment.startAngle);
+        double end = start + span;
+        if (end <= twoPi + tolerance)
+        {
+            intervals.push_back({start, std::min(end, twoPi)});
+        }
+        else
+        {
+            intervals.push_back({start, twoPi});
+            intervals.push_back({0.0, end - twoPi});
+        }
+    }
+
+    if (intervals.empty())
+    {
+        return false;
+    }
+
+    std::sort(intervals.begin(), intervals.end(), [](const auto& a, const auto& b) {
+        if (std::abs(a.first - b.first) > 1.0e-9)
+        {
+            return a.first < b.first;
+        }
+        return a.second < b.second;
+    });
+
+    double coveredStart = intervals.front().first;
+    double coveredEnd = intervals.front().second;
+    double coveredTotal = 0.0;
+    for (size_t index = 1; index < intervals.size(); ++index)
+    {
+        if (intervals[index].first <= coveredEnd + tolerance)
+        {
+            coveredEnd = std::max(coveredEnd, intervals[index].second);
+        }
+        else
+        {
+            coveredTotal += std::max(0.0, coveredEnd - coveredStart);
+            coveredStart = intervals[index].first;
+            coveredEnd = intervals[index].second;
+        }
+    }
+    coveredTotal += std::max(0.0, coveredEnd - coveredStart);
+    return coveredTotal >= twoPi - tolerance;
+}
+
 std::vector<HoleCircleCandidate> CollectHoleCircleCandidates(
     NXOpen::Session* session,
     NXOpen::Part* workPart,
@@ -7276,22 +8965,27 @@ std::vector<HoleCircleCandidate> CollectHoleCircleCandidates(
         return holes;
     }
 
-    int skippedShallowDetailCurves = 0;
+    int skippedInvalid = 0;
+    int skippedEval = 0;
+    int skippedNotArc = 0;
+    int skippedNotFullCircle = 0;
+    int skippedMap = 0;
+    int skippedRadius = 0;
+    int skippedOutside = 0;
+    int skippedDuplicate = 0;
+    std::vector<HoleArcSegmentCandidate> arcSegments;
     for (const DraftingCurveExtent& extent : extents)
     {
         if (!extent.initialized || extent.curve == nullptr || extent.tag == NULL_TAG)
         {
-            continue;
-        }
-        if (DraftingCurveHasShallowDetailParent(workPart, shallowCache, extent))
-        {
-            ++skippedShallowDetailCurves;
+            ++skippedInvalid;
             continue;
         }
 
         UF_EVAL_p_t evaluator = nullptr;
         if (UF_EVAL_initialize(extent.tag, &evaluator) != 0 || evaluator == nullptr)
         {
+            ++skippedEval;
             continue;
         }
 
@@ -7299,13 +8993,15 @@ std::vector<HoleCircleCandidate> CollectHoleCircleCandidates(
         if (UF_EVAL_is_arc(evaluator, &isArc) != 0 || !isArc)
         {
             UF_EVAL_free(evaluator);
+            ++skippedNotArc;
             continue;
         }
 
         UF_EVAL_arc_t arcData{};
-        if (UF_EVAL_ask_arc(evaluator, &arcData) != 0 || !arcData.is_periodic || arcData.radius <= 0.0)
+        if (UF_EVAL_ask_arc(evaluator, &arcData) != 0 || arcData.radius <= 0.0)
         {
             UF_EVAL_free(evaluator);
+            ++skippedNotFullCircle;
             continue;
         }
 
@@ -7320,15 +9016,7 @@ std::vector<HoleCircleCandidate> CollectHoleCircleCandidates(
         UF_EVAL_free(evaluator);
         if (!mappedCenter || !mappedPick)
         {
-            continue;
-        }
-
-        const double width = BoundsWidth(extent.bounds);
-        const double height = BoundsHeight(extent.bounds);
-        const double maxSize = std::max(width, height);
-        const double minSize = std::min(width, height);
-        if (maxSize <= 0.0 || minSize <= 0.0 || minSize / maxSize < 0.75)
-        {
+            ++skippedMap;
             continue;
         }
 
@@ -7337,6 +9025,7 @@ std::vector<HoleCircleCandidate> CollectHoleCircleCandidates(
             (pickDrawing[1] - centerDrawing[1]) * (pickDrawing[1] - centerDrawing[1]));
         if (drawingRadius <= 0.0)
         {
+            ++skippedRadius;
             continue;
         }
 
@@ -7346,15 +9035,77 @@ std::vector<HoleCircleCandidate> CollectHoleCircleCandidates(
             centerDrawing[1] <= bounds.minY + inset ||
             centerDrawing[1] >= bounds.maxY - inset)
         {
+            ++skippedOutside;
             continue;
         }
 
-        NXOpen::Point3d center(centerDrawing[0], centerDrawing[1], 0.0);
+        HoleArcSegmentCandidate segment;
+        segment.extent = extent;
+        segment.modelRadius = arcData.radius;
+        segment.drawingRadius = drawingRadius;
+        segment.centerPoint = NXOpen::Point3d(centerDrawing[0], centerDrawing[1], 0.0);
+        segment.pickPoint = NXOpen::Point3d(pickDrawing[0], pickDrawing[1], 0.0);
+        segment.startAngle = arcData.limits[0];
+        segment.endAngle = arcData.limits[1];
+        arcSegments.push_back(segment);
+    }
+
+    std::vector<bool> consumed(arcSegments.size(), false);
+    int arcGroups = 0;
+    int fullCircleGroups = 0;
+    for (size_t index = 0; index < arcSegments.size(); ++index)
+    {
+        if (consumed[index])
+        {
+            continue;
+        }
+
+        std::vector<size_t> groupIndexes;
+        std::vector<HoleArcSegmentCandidate> groupSegments;
+        for (size_t candidateIndex = index; candidateIndex < arcSegments.size(); ++candidateIndex)
+        {
+            if (consumed[candidateIndex])
+            {
+                continue;
+            }
+            const double radiusTolerance = std::max(0.02, arcSegments[index].modelRadius * 0.002);
+            const double centerTolerance = std::max(0.1, arcSegments[index].drawingRadius * 0.25);
+            if (std::abs(arcSegments[candidateIndex].modelRadius - arcSegments[index].modelRadius) <= radiusTolerance &&
+                CentersAreClose(arcSegments[candidateIndex].centerPoint, arcSegments[index].centerPoint, centerTolerance))
+            {
+                groupIndexes.push_back(candidateIndex);
+                groupSegments.push_back(arcSegments[candidateIndex]);
+            }
+        }
+
+        for (size_t groupIndex : groupIndexes)
+        {
+            consumed[groupIndex] = true;
+        }
+        ++arcGroups;
+        if (!ArcSegmentsCoverFullCircle(groupSegments))
+        {
+            ++skippedNotFullCircle;
+            continue;
+        }
+        ++fullCircleGroups;
+
+        const HoleArcSegmentCandidate* representative = &groupSegments.front();
+        for (const HoleArcSegmentCandidate& segment : groupSegments)
+        {
+            if (segment.centerPoint.X < representative->centerPoint.X ||
+                (std::abs(segment.centerPoint.X - representative->centerPoint.X) <= 0.01 &&
+                 segment.centerPoint.Y > representative->centerPoint.Y))
+            {
+                representative = &segment;
+            }
+        }
+
         bool duplicate = false;
         for (const HoleCircleCandidate& existing : holes)
         {
-            if (std::abs(existing.modelRadius - arcData.radius) <= 0.02 &&
-                CentersAreClose(existing.centerPoint, center, std::max(0.1, drawingRadius * 0.25)))
+            if (std::abs(existing.modelRadius - representative->modelRadius) <= 0.02 &&
+                CentersAreClose(existing.centerPoint, representative->centerPoint, std::max(0.1, representative->drawingRadius * 0.25)))
             {
                 duplicate = true;
                 break;
@@ -7362,21 +9113,34 @@ std::vector<HoleCircleCandidate> CollectHoleCircleCandidates(
         }
         if (duplicate)
         {
+            ++skippedDuplicate;
             continue;
         }
 
         HoleCircleCandidate hole;
-        hole.curve = extent.curve;
-        hole.modelRadius = arcData.radius;
-        hole.drawingRadius = drawingRadius;
-        hole.centerPoint = center;
-        hole.pickPoint = NXOpen::Point3d(pickDrawing[0], pickDrawing[1], 0.0);
+        hole.curve = representative->extent.curve;
+        hole.modelRadius = representative->modelRadius;
+        hole.drawingRadius = representative->drawingRadius;
+        hole.centerPoint = representative->centerPoint;
+        hole.pickPoint = representative->pickPoint;
         holes.push_back(hole);
     }
 
     std::ostringstream log;
-    log << "AutoCreateThreeViews: hole candidates from drafting view, count=" << holes.size()
-        << ", skippedShallowDetailCurves=" << skippedShallowDetailCurves << ".";
+    log << "AutoCreateThreeViews: hole candidates from drafting view"
+        << ", extents=" << extents.size()
+        << ", arcSegments=" << arcSegments.size()
+        << ", arcGroups=" << arcGroups
+        << ", fullCircleGroups=" << fullCircleGroups
+        << ", count=" << holes.size()
+        << ", skippedInvalid=" << skippedInvalid
+        << ", skippedEval=" << skippedEval
+        << ", skippedNotArc=" << skippedNotArc
+        << ", skippedNotFullCircle=" << skippedNotFullCircle
+        << ", skippedMap=" << skippedMap
+        << ", skippedRadius=" << skippedRadius
+        << ", skippedOutside=" << skippedOutside
+        << ", skippedDuplicate=" << skippedDuplicate << ".";
     WriteLine(session, log.str());
     return holes;
 }
@@ -7987,7 +9751,8 @@ void CreateFrontHoleLocationDimensions(
     const int locatableRows = static_cast<int>(std::count_if(rows.begin(), rows.end(), [](const std::vector<HoleCircleCandidate>& row) {
         return !row.empty();
     }));
-    if (locatableRows > 0 && SelectOverallDimensionCurves(view, extents, bounds, true, rightBoundary, leftBoundary))
+    if (locatableRows > 0 &&
+        SelectOverallDimensionCurves(view, extents, bounds, true, (bounds.minY + bounds.maxY) * 0.5, rightBoundary, leftBoundary))
     {
         for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex)
         {
@@ -8042,7 +9807,8 @@ void CreateFrontHoleLocationDimensions(
     const int locatableColumns = static_cast<int>(std::count_if(columns.begin(), columns.end(), [](const std::vector<HoleCircleCandidate>& column) {
         return !column.empty();
     }));
-    if (locatableColumns > 0 && SelectOverallDimensionCurves(view, extents, bounds, false, topBoundary, bottomBoundary))
+    if (locatableColumns > 0 &&
+        SelectOverallDimensionCurves(view, extents, bounds, false, (bounds.minX + bounds.maxX) * 0.5, topBoundary, bottomBoundary))
     {
         for (size_t columnIndex = 0; columnIndex < columns.size(); ++columnIndex)
         {
@@ -8423,6 +10189,28 @@ NXOpen::Point3d LineModelMidPoint(const LineSegmentCandidate& line)
         (line.startModel.Z + line.endModel.Z) * 0.5);
 }
 
+NXOpen::Point3d LineModelPointNearDimensionOrigin(
+    const LineSegmentCandidate& line,
+    NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethod method,
+    const NXOpen::Point3d& origin)
+{
+    if (method == NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodHorizontal)
+    {
+        return std::abs(line.startY - origin.Y) <= std::abs(line.endY - origin.Y)
+            ? line.startModel
+            : line.endModel;
+    }
+
+    if (method == NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodVertical)
+    {
+        return std::abs(line.startX - origin.X) <= std::abs(line.endX - origin.X)
+            ? line.startModel
+            : line.endModel;
+    }
+
+    return LineModelMidPoint(line);
+}
+
 NXOpen::Face* FaceObjectFromTag(tag_t faceTag)
 {
     if (faceTag == NULL_TAG)
@@ -8495,8 +10283,8 @@ bool CreateFacePairDimension(
 
     try
     {
-        builder->FirstAssociativity()->SetValue(firstFace, view, LineModelMidPoint(first.line));
-        builder->SecondAssociativity()->SetValue(secondFace, view, LineModelMidPoint(second.line));
+        builder->FirstAssociativity()->SetValue(firstFace, view, LineModelPointNearDimensionOrigin(first.line, method, origin));
+        builder->SecondAssociativity()->SetValue(secondFace, view, LineModelPointNearDimensionOrigin(second.line, method, origin));
         builder->Style()->DimensionStyle()->SetTextCentered(true);
         builder->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
         builder->Measurement()->SetMethod(method);
@@ -9184,6 +10972,400 @@ bool ContainsFacePairKey(const std::vector<FacePairKey>& keys, const FacePairKey
     return false;
 }
 
+std::vector<tag_t> AskEdgeFaceTags(tag_t edgeTag);
+
+bool TryMakeFacePlaneSignatureFromTag(tag_t faceTag, FacePlaneSignature& signature)
+{
+    signature = FacePlaneSignature();
+    if (faceTag == NULL_TAG)
+    {
+        return false;
+    }
+
+    int faceType = 0;
+    double point[3] = {0.0, 0.0, 0.0};
+    double normalData[3] = {0.0, 0.0, 0.0};
+    double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double radius = 0.0;
+    double radData = 0.0;
+    int normDir = 1;
+    if (UF_MODL_ask_face_data(faceTag, &faceType, point, normalData, box, &radius, &radData, &normDir) != 0 ||
+        faceType != 22)
+    {
+        return false;
+    }
+
+    NXOpen::Vector3d normal(
+        normalData[0] * static_cast<double>(normDir),
+        normalData[1] * static_cast<double>(normDir),
+        normalData[2] * static_cast<double>(normDir));
+    normal = NormalizeVector(normal);
+    if (VectorLength(normal) < 1.0e-6)
+    {
+        return false;
+    }
+
+    signature = MakeFacePlaneSignature(normal, NXOpen::Point3d(point[0], point[1], point[2]));
+    return signature.valid;
+}
+
+void AppendFacePlaneSignatureFromTag(
+    std::vector<FacePlaneSignature>& signatures,
+    tag_t faceTag)
+{
+    FacePlaneSignature signature;
+    if (TryMakeFacePlaneSignatureFromTag(faceTag, signature) &&
+        !ContainsFacePlaneSignature(signatures, signature))
+    {
+        signatures.push_back(signature);
+    }
+}
+
+std::vector<FacePlaneSignature> CollectClosedCurveParentFacePlanes(
+    const std::vector<ClosedCurveLoopCandidate>& loops)
+{
+    std::vector<FacePlaneSignature> signatures;
+    for (const ClosedCurveLoopCandidate& loop : loops)
+    {
+        for (const DraftingCurveExtent& extent : loop.extents)
+        {
+            if (extent.tag == NULL_TAG)
+            {
+                continue;
+            }
+
+            int parentCount = 0;
+            tag_t* parents = nullptr;
+            if (UF_DRAW_ask_drafting_curve_parents(extent.tag, &parentCount, &parents) != 0 ||
+                parentCount <= 0 ||
+                parents == nullptr)
+            {
+                continue;
+            }
+
+            for (int index = 0; index < parentCount; ++index)
+            {
+                const tag_t parentTag = parents[index];
+                if (parentTag == NULL_TAG)
+                {
+                    continue;
+                }
+
+                const std::vector<tag_t> edgeFaces = AskEdgeFaceTags(parentTag);
+                for (tag_t faceTag : edgeFaces)
+                {
+                    AppendFacePlaneSignatureFromTag(signatures, faceTag);
+                }
+            }
+
+            UF_free(parents);
+        }
+    }
+
+    return signatures;
+}
+
+struct InnerLoopAdjacentFaces
+{
+    std::vector<tag_t> faceTags;
+    int innerLoopEdges = 0;
+    int parentFacesWithInnerLoops = 0;
+};
+
+InnerLoopAdjacentFaces CollectModelInnerLoopAdjacentFaceTags(NXOpen::Part* part)
+{
+    InnerLoopAdjacentFaces result;
+    if (part == nullptr)
+    {
+        return result;
+    }
+
+    const std::vector<tag_t> bodyTags = CollectVisibleSolidBodyTags(part);
+    for (tag_t bodyTag : bodyTags)
+    {
+        uf_list_p_t faceList = nullptr;
+        if (UF_MODL_ask_body_faces(bodyTag, &faceList) != 0 || faceList == nullptr)
+        {
+            continue;
+        }
+
+        int faceCount = 0;
+        UF_MODL_ask_list_count(faceList, &faceCount);
+        for (int faceIndex = 0; faceIndex < faceCount; ++faceIndex)
+        {
+            tag_t faceTag = NULL_TAG;
+            if (UF_MODL_ask_list_item(faceList, faceIndex, &faceTag) != 0 || faceTag == NULL_TAG)
+            {
+                continue;
+            }
+
+            uf_loop_p_t loopList = nullptr;
+            if (UF_MODL_ask_face_loops(faceTag, &loopList) != 0 || loopList == nullptr)
+            {
+                continue;
+            }
+
+            int loopCount = 0;
+            UF_MODL_ask_loop_list_count(loopList, &loopCount);
+            bool hasInnerLoop = false;
+            for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)
+            {
+                int loopType = 0;
+                uf_list_p_t edgeList = nullptr;
+                if (UF_MODL_ask_loop_list_item(loopList, loopIndex, &loopType, &edgeList) != 0 ||
+                    edgeList == nullptr ||
+                    loopType != 2)
+                {
+                    continue;
+                }
+
+                hasInnerLoop = true;
+                int edgeCount = 0;
+                UF_MODL_ask_list_count(edgeList, &edgeCount);
+                for (int edgeIndex = 0; edgeIndex < edgeCount; ++edgeIndex)
+                {
+                    tag_t edgeTag = NULL_TAG;
+                    if (UF_MODL_ask_list_item(edgeList, edgeIndex, &edgeTag) != 0 || edgeTag == NULL_TAG)
+                    {
+                        continue;
+                    }
+
+                    ++result.innerLoopEdges;
+                    const std::vector<tag_t> adjacentFaces = AskEdgeFaceTags(edgeTag);
+                    for (tag_t adjacentFace : adjacentFaces)
+                    {
+                        if (adjacentFace != NULL_TAG &&
+                            adjacentFace != faceTag &&
+                            !ContainsTag(result.faceTags, adjacentFace))
+                        {
+                            result.faceTags.push_back(adjacentFace);
+                        }
+                    }
+                }
+            }
+
+            if (hasInnerLoop)
+            {
+                ++result.parentFacesWithInnerLoops;
+            }
+
+            UF_MODL_delete_loop_list(&loopList);
+        }
+
+        UF_MODL_delete_list(&faceList);
+    }
+
+    return result;
+}
+
+MainViewFacePairRules BuildMainViewFacePairRules(
+    NXOpen::Session* session,
+    NXOpen::Part* workPart,
+    const AutoViewDirection& frontDirection)
+{
+    MainViewFacePairRules rules;
+    NXOpen::Vector3d viewX = NormalizeVector(frontDirection.xDirection);
+    NXOpen::Vector3d viewZ = NormalizeVector(frontDirection.normal);
+    viewX = NormalizeVector(ProjectPerpendicular(viewX, viewZ));
+    NXOpen::Vector3d viewY = NormalizeVector(CrossVector(viewZ, viewX));
+    if (VectorLength(viewX) < 1.0e-6 || VectorLength(viewY) < 1.0e-6 || VectorLength(viewZ) < 1.0e-6)
+    {
+        WriteLine(session, "AutoCreateThreeViews: main-view face-pair rules disabled; invalid front direction basis.");
+        return rules;
+    }
+
+    rules.axes[0] = viewX;
+    rules.axes[1] = viewY;
+    rules.axes[2] = viewZ;
+    rules.valid = true;
+    if (!AskModelBoundsCenter(workPart, rules.center) &&
+        !AskSolidBodyTagBoundsCenter(workPart, rules.center))
+    {
+        rules.center = NXOpen::Point3d(0.0, 0.0, 0.0);
+        WriteLine(session, "AutoCreateThreeViews: main-view face-pair rules use origin as model center; body bounds unavailable.");
+    }
+
+    std::ostringstream log;
+    log << "AutoCreateThreeViews: main-view face-pair rules enabled"
+        << " centerX=" << rules.center.X
+        << ", centerY=" << rules.center.Y
+        << ", centerZ=" << rules.center.Z
+        << ", xAxis=(" << rules.axes[0].X << "," << rules.axes[0].Y << "," << rules.axes[0].Z << ")"
+        << ", yAxis=(" << rules.axes[1].X << "," << rules.axes[1].Y << "," << rules.axes[1].Z << ")"
+        << ", zAxis=(" << rules.axes[2].X << "," << rules.axes[2].Y << "," << rules.axes[2].Z << ").";
+    WriteLine(session, log.str());
+    return rules;
+}
+
+bool TryClassifyMainViewAxisSide(
+    const MainViewFacePairRules& rules,
+    const LineProjectionFaceCandidate& face,
+    int& axisIndex,
+    int& side)
+{
+    if (!rules.valid)
+    {
+        return false;
+    }
+
+    const NXOpen::Vector3d normal = NormalizeVector(face.normal);
+    if (VectorLength(normal) < 1.0e-6)
+    {
+        return false;
+    }
+
+    double bestAlignment = 0.0;
+    int bestAxis = -1;
+    for (int index = 0; index < 3; ++index)
+    {
+        const double alignment = std::abs(DotVector(normal, rules.axes[index]));
+        if (alignment > bestAlignment)
+        {
+            bestAlignment = alignment;
+            bestAxis = index;
+        }
+    }
+    if (bestAxis < 0 || bestAlignment < 0.995)
+    {
+        return false;
+    }
+
+    const NXOpen::Vector3d centerToPlane(
+        face.planePoint.X - rules.center.X,
+        face.planePoint.Y - rules.center.Y,
+        face.planePoint.Z - rules.center.Z);
+    const double signedOffset = DotVector(centerToPlane, rules.axes[bestAxis]);
+    const double zoneTolerance = 0.05;
+    if (std::abs(signedOffset) <= zoneTolerance)
+    {
+        return false;
+    }
+
+    axisIndex = bestAxis;
+    side = signedOffset > 0.0 ? 1 : -1;
+    return true;
+}
+
+bool IsAllowedByMainViewFacePairRules(
+    const MainViewFacePairRules* rules,
+    const LineProjectionFaceCandidate& first,
+    const LineProjectionFaceCandidate& second,
+    bool pairMeasuresX,
+    double drawingZoneCenter,
+    std::string* rejectReason = nullptr)
+{
+    if (rules == nullptr || !rules->valid)
+    {
+        return true;
+    }
+
+    int firstAxis = -1;
+    int secondAxis = -1;
+    int firstSide = 0;
+    int secondSide = 0;
+    if (!TryClassifyMainViewAxisSide(*rules, first, firstAxis, firstSide) ||
+        !TryClassifyMainViewAxisSide(*rules, second, secondAxis, secondSide))
+    {
+        if (rejectReason != nullptr)
+        {
+            *rejectReason = "notMainAxisParallelOrCenterPlane";
+        }
+        return false;
+    }
+    if (firstAxis != secondAxis)
+    {
+        if (rejectReason != nullptr)
+        {
+            *rejectReason = "differentMainAxis";
+        }
+        return false;
+    }
+    if (firstSide != secondSide)
+    {
+        // Main-view pairing is partitioned by the drawing zone. Opposite faces
+        // can lie on different model-center sides while still sharing a valid
+        // X-/Y-zone datum in the view.
+    }
+
+    const double firstDrawingOffset = pairMeasuresX
+        ? first.centerX - drawingZoneCenter
+        : first.centerY - drawingZoneCenter;
+    const double secondDrawingOffset = pairMeasuresX
+        ? second.centerX - drawingZoneCenter
+        : second.centerY - drawingZoneCenter;
+    const double drawingZoneTolerance = 0.05;
+    if (std::abs(firstDrawingOffset) <= drawingZoneTolerance ||
+        std::abs(secondDrawingOffset) <= drawingZoneTolerance)
+    {
+        if (rejectReason != nullptr)
+        {
+            *rejectReason = pairMeasuresX ? "nearDrawingXCenter" : "nearDrawingYCenter";
+        }
+        return false;
+    }
+
+    const int firstDrawingSide = firstDrawingOffset > 0.0 ? 1 : -1;
+    const int secondDrawingSide = secondDrawingOffset > 0.0 ? 1 : -1;
+    if (firstDrawingSide != secondDrawingSide)
+    {
+        if (rejectReason != nullptr)
+        {
+            *rejectReason = pairMeasuresX ? "differentDrawingXZone" : "differentDrawingYZone";
+        }
+        return false;
+    }
+
+    const double normalDot = DotVector(NormalizeVector(first.normal), NormalizeVector(second.normal));
+    if (normalDot > -0.995)
+    {
+        if (rejectReason != nullptr)
+        {
+            *rejectReason = "notOppositeNormals";
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool UsesGloballyPairedFacePlane(
+    const MainViewFacePairRules* rules,
+    const LineProjectionFaceCandidate& first,
+    const LineProjectionFaceCandidate& second)
+{
+    if (rules == nullptr || !rules->valid)
+    {
+        return false;
+    }
+
+    const FacePlaneSignature firstPlane = MakeFacePlaneSignature(first.normal, first.planePoint);
+    const FacePlaneSignature secondPlane = MakeFacePlaneSignature(second.normal, second.planePoint);
+    return ContainsFacePlaneSignature(rules->usedPairedPlanes, firstPlane) ||
+           ContainsFacePlaneSignature(rules->usedPairedPlanes, secondPlane);
+}
+
+void RememberGloballyPairedFacePlanes(
+    MainViewFacePairRules* rules,
+    const LineProjectionFaceCandidate& first,
+    const LineProjectionFaceCandidate& second)
+{
+    if (rules == nullptr || !rules->valid)
+    {
+        return;
+    }
+
+    const FacePlaneSignature firstPlane = MakeFacePlaneSignature(first.normal, first.planePoint);
+    const FacePlaneSignature secondPlane = MakeFacePlaneSignature(second.normal, second.planePoint);
+    if (firstPlane.valid && !ContainsFacePlaneSignature(rules->usedPairedPlanes, firstPlane))
+    {
+        rules->usedPairedPlanes.push_back(firstPlane);
+    }
+    if (secondPlane.valid && !ContainsFacePlaneSignature(rules->usedPairedPlanes, secondPlane))
+    {
+        rules->usedPairedPlanes.push_back(secondPlane);
+    }
+}
+
 void MarkOuterContourDatumFaces(
     std::vector<LineProjectionFaceCandidate>& faces,
     const LayoutBounds& bounds,
@@ -9337,12 +11519,7 @@ bool IsSmallDimensionGap(double modelGap, double sheetMetalThickness)
         return false;
     }
 
-    if (sheetMetalThickness > 1.0e-6)
-    {
-        return modelGap <= std::max(3.0, sheetMetalThickness * 3.0);
-    }
-
-    return modelGap <= 3.0;
+    return modelGap < 5.0;
 }
 
 bool IsPlateThicknessOffsetFromUsedFace(
@@ -9487,30 +11664,7 @@ std::vector<LineProjectionFaceCandidate> CollectPlateThicknessOffsetFaces(
 
 bool TryReadPlanarFacePlane(tag_t faceTag, NXOpen::Vector3d& normal, NXOpen::Point3d& pointOnPlane)
 {
-    if (faceTag == NULL_TAG)
-    {
-        return false;
-    }
-
-    int faceType = 0;
-    double point[3] = {0.0, 0.0, 0.0};
-    double normalData[3] = {0.0, 0.0, 0.0};
-    double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-    double radius = 0.0;
-    double radData = 0.0;
-    int normDir = 1;
-    if (UF_MODL_ask_face_data(faceTag, &faceType, point, normalData, box, &radius, &radData, &normDir) != 0 ||
-        faceType != 22)
-    {
-        return false;
-    }
-
-    normal = NormalizeVector(NXOpen::Vector3d(
-        normalData[0] * static_cast<double>(normDir),
-        normalData[1] * static_cast<double>(normDir),
-        normalData[2] * static_cast<double>(normDir)));
-    pointOnPlane = NXOpen::Point3d(point[0], point[1], point[2]);
-    return VectorLength(normal) > 1.0e-6;
+    return TryReadPlanarFacePointAndNormal(faceTag, &pointOnPlane, normal);
 }
 
 std::vector<tag_t> AskBodyFaceTagsForFace(tag_t faceTag)
@@ -10183,6 +12337,16 @@ std::vector<LineProjectionFaceCandidate> CollapseSamePlaneFaceCandidates(
             {
                 continue;
             }
+            const double overlapTolerance = 0.05;
+            const bool projectedRegionsOverlap =
+                existing.maxX >= face.minX - overlapTolerance &&
+                face.maxX >= existing.minX - overlapTolerance &&
+                existing.maxY >= face.minY - overlapTolerance &&
+                face.maxY >= existing.minY - overlapTolerance;
+            if (!projectedRegionsOverlap)
+            {
+                continue;
+            }
 
             if (PreferSamePlaneFaceCandidate(existing, face))
             {
@@ -10317,25 +12481,9 @@ bool TryBuildLineProjectionFaceCandidate(
         return false;
     }
 
-    int faceType = 0;
-    double point[3] = {0.0, 0.0, 0.0};
-    double normalData[3] = {0.0, 0.0, 0.0};
-    double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-    double radius = 0.0;
-    double radData = 0.0;
-    int normDir = 1;
-    if (UF_MODL_ask_face_data(faceTag, &faceType, point, normalData, box, &radius, &radData, &normDir) != 0 ||
-        faceType != 22)
-    {
-        return false;
-    }
-
-    NXOpen::Vector3d faceNormal(
-        normalData[0] * static_cast<double>(normDir),
-        normalData[1] * static_cast<double>(normDir),
-        normalData[2] * static_cast<double>(normDir));
-    faceNormal = NormalizeVector(faceNormal);
-    if (VectorLength(faceNormal) < 1.0e-6)
+    NXOpen::Vector3d faceNormal(0.0, 0.0, 0.0);
+    NXOpen::Point3d facePoint(0.0, 0.0, 0.0);
+    if (!TryReadPlanarFacePlane(faceTag, faceNormal, facePoint))
     {
         return false;
     }
@@ -10477,7 +12625,7 @@ bool TryBuildLineProjectionFaceCandidate(
     LineProjectionFaceCandidate faceCandidate;
     faceCandidate.faceTag = faceTag;
     faceCandidate.normal = faceNormal;
-    faceCandidate.planePoint = NXOpen::Point3d(point[0], point[1], point[2]);
+    faceCandidate.planePoint = facePoint;
     faceCandidate.horizontalLine = horizontalLine;
     faceCandidate.verticalLine = verticalLine;
     faceCandidate.angledLine = !horizontalLine && !verticalLine;
@@ -10518,31 +12666,40 @@ std::vector<LineProjectionFaceCandidate> CollectLineProjectionFaceCandidates(
     const std::string& label,
     const std::vector<LineSegmentCandidate>& lines,
     double axisTolerance,
-    ShallowDetailFilterCache* shallowCache = nullptr)
+    ShallowDetailFilterCache* shallowCache = nullptr,
+    bool skipShallowDetailFaces = true)
 {
     std::vector<LineProjectionFaceCandidate> candidates;
-    if (part == nullptr || part->Bodies() == nullptr || view == nullptr || lines.empty())
+    if (part == nullptr || view == nullptr || lines.empty())
     {
         return candidates;
     }
 
     ShallowDetailFilterCache localShallowCache;
     ShallowDetailFilterCache& activeShallowCache = shallowCache != nullptr ? *shallowCache : localShallowCache;
-    EnsureShallowDetailFilterCache(part, activeShallowCache);
+    if (skipShallowDetailFaces)
+    {
+        EnsureShallowDetailFilterCache(part, activeShallowCache);
+    }
 
     int planarFaces = 0;
     int matchedFaces = 0;
     int skippedShallowDetailFaces = 0;
-    for (NXOpen::BodyCollection::iterator it = part->Bodies()->begin(); it != part->Bodies()->end(); ++it)
+    int skippedFastenerBodies = 0;
+    int edgeParentFaces = 0;
+    int skippedDuplicateEdgeParentFaces = 0;
+    const std::vector<tag_t> bodyTags = CollectVisibleSolidBodyTags(part);
+    std::set<tag_t> matchedFaceTags;
+    for (tag_t bodyTag : bodyTags)
     {
-        NXOpen::Body* body = *it;
-        if (body == nullptr || body->IsBlanked())
+        if (ShouldSkipFastenerBodyForParallelDimensions(bodyTag))
         {
+            ++skippedFastenerBodies;
             continue;
         }
 
         uf_list_p_t faceList = nullptr;
-        if (UF_MODL_ask_body_faces(body->Tag(), &faceList) != 0 || faceList == nullptr)
+        if (UF_MODL_ask_body_faces(bodyTag, &faceList) != 0 || faceList == nullptr)
         {
             continue;
         }
@@ -10574,24 +12731,161 @@ std::vector<LineProjectionFaceCandidate> CollectLineProjectionFaceCandidates(
             {
                 continue;
             }
-            if (IsCachedShallowDetailFace(part, activeShallowCache, candidate.faceTag))
+            if (skipShallowDetailFaces &&
+                IsCachedShallowDetailFace(part, activeShallowCache, candidate.faceTag))
             {
                 ++skippedShallowDetailFaces;
                 continue;
             }
 
+            candidate.bodyTag = bodyTag;
             candidates.push_back(candidate);
+            matchedFaceTags.insert(candidate.faceTag);
             ++matchedFaces;
         }
 
         UF_MODL_delete_list(&faceList);
     }
 
+    const double minimumLineLength = std::max(1.0, axisTolerance * 5.0);
+    for (const LineSegmentCandidate& line : lines)
+    {
+        if (line.curve == nullptr || line.length < minimumLineLength)
+        {
+            continue;
+        }
+
+        double directionX = line.endX - line.startX;
+        double directionY = line.endY - line.startY;
+        if (Normalize2D(directionX, directionY) <= 1.0e-6)
+        {
+            continue;
+        }
+        if (directionX < -1.0e-8 ||
+            (std::abs(directionX) <= 1.0e-8 && directionY < -1.0e-8))
+        {
+            directionX = -directionX;
+            directionY = -directionY;
+        }
+
+        const double normalX = -directionY;
+        const double normalY = directionX;
+        const double centerX = (line.startX + line.endX) * 0.5;
+        const double centerY = (line.startY + line.endY) * 0.5;
+        const double lineOffset = normalX * centerX + normalY * centerY;
+        const double startAlong = line.startX * directionX + line.startY * directionY;
+        const double endAlong = line.endX * directionX + line.endY * directionY;
+        const double minAlong = std::min(startAlong, endAlong);
+        const double maxAlong = std::max(startAlong, endAlong);
+        const bool horizontalLine =
+            std::abs(directionY) <= std::max(0.002, axisTolerance / std::max(line.length, 1.0));
+        const bool verticalLine =
+            std::abs(directionX) <= std::max(0.002, axisTolerance / std::max(line.length, 1.0));
+
+        std::vector<tag_t> parentFaceTags;
+        int parentCount = 0;
+        tag_t* parents = nullptr;
+        if (UF_DRAW_ask_drafting_curve_parents(line.curve->Tag(), &parentCount, &parents) != 0 ||
+            parentCount <= 0 ||
+            parents == nullptr)
+        {
+            continue;
+        }
+
+        for (int parentIndex = 0; parentIndex < parentCount; ++parentIndex)
+        {
+            const tag_t parentTag = parents[parentIndex];
+            if (parentTag == NULL_TAG)
+            {
+                continue;
+            }
+            NXOpen::Vector3d parentNormal(0.0, 0.0, 0.0);
+            if (TryReadPlanarFaceNormal(parentTag, parentNormal) &&
+                !ContainsTag(parentFaceTags, parentTag))
+            {
+                parentFaceTags.push_back(parentTag);
+            }
+
+            const std::vector<tag_t> edgeFaces = AskEdgeFaceTagsCached(parentTag, activeShallowCache);
+            for (tag_t edgeFaceTag : edgeFaces)
+            {
+                if (edgeFaceTag != NULL_TAG && !ContainsTag(parentFaceTags, edgeFaceTag))
+                {
+                    parentFaceTags.push_back(edgeFaceTag);
+                }
+            }
+        }
+        UF_free(parents);
+
+        for (tag_t faceTag : parentFaceTags)
+        {
+            tag_t bodyTag = NULL_TAG;
+            if (UF_MODL_ask_face_body(faceTag, &bodyTag) != 0 || bodyTag == NULL_TAG)
+            {
+                continue;
+            }
+            if (ShouldSkipFastenerBodyForParallelDimensions(bodyTag))
+            {
+                ++skippedFastenerBodies;
+                continue;
+            }
+            if (matchedFaceTags.find(faceTag) != matchedFaceTags.end())
+            {
+                ++skippedDuplicateEdgeParentFaces;
+                continue;
+            }
+            if (skipShallowDetailFaces &&
+                IsCachedShallowDetailFace(part, activeShallowCache, faceTag))
+            {
+                ++skippedShallowDetailFaces;
+                continue;
+            }
+
+            NXOpen::Vector3d faceNormal(0.0, 0.0, 0.0);
+            NXOpen::Point3d facePoint(0.0, 0.0, 0.0);
+            if (!TryReadPlanarFacePlane(faceTag, faceNormal, facePoint))
+            {
+                continue;
+            }
+
+            LineProjectionFaceCandidate candidate;
+            candidate.faceTag = faceTag;
+            candidate.bodyTag = bodyTag;
+            candidate.normal = faceNormal;
+            candidate.planePoint = facePoint;
+            candidate.line = line;
+            candidate.horizontalLine = horizontalLine;
+            candidate.verticalLine = verticalLine;
+            candidate.angledLine = !horizontalLine && !verticalLine;
+            candidate.directionX = directionX;
+            candidate.directionY = directionY;
+            candidate.normalX = normalX;
+            candidate.normalY = normalY;
+            candidate.lineOffset = lineOffset;
+            candidate.minAlong = minAlong;
+            candidate.maxAlong = maxAlong;
+            candidate.minX = line.minX;
+            candidate.maxX = line.maxX;
+            candidate.minY = line.minY;
+            candidate.maxY = line.maxY;
+            candidate.centerX = centerX;
+            candidate.centerY = centerY;
+            candidate.length = line.length;
+            candidates.push_back(candidate);
+            matchedFaceTags.insert(faceTag);
+            ++edgeParentFaces;
+        }
+    }
+
     std::ostringstream log;
     log << "AutoCreateThreeViews: " << label << " face-to-face candidate collection"
         << " planarFaces=" << planarFaces
         << ", matchedFaces=" << matchedFaces
+        << ", edgeParentFaces=" << edgeParentFaces
+        << ", skippedDuplicateEdgeParentFaces=" << skippedDuplicateEdgeParentFaces
         << ", skippedShallowDetailFaces=" << skippedShallowDetailFaces
+        << ", skippedFastenerBodies=" << skippedFastenerBodies
+        << ", bodies=" << bodyTags.size()
         << ", axisTolerance=" << axisTolerance << ".";
     WriteLine(session, log.str());
     return candidates;
@@ -10961,6 +13255,43 @@ bool TryFindClosedCurveFacePair(
     return true;
 }
 
+struct ProjectedViewLinearDatumRule
+{
+    bool valid = false;
+    bool verticalMeasurement = false;
+    bool useHighDatum = false;
+};
+
+ProjectedViewLinearDatumRule GetProjectedViewLinearDatumRule(const std::string& viewLabel, bool firstAngle)
+{
+    ProjectedViewLinearDatumRule rule;
+    if (viewLabel == "bottom" || viewLabel == "back bottom")
+    {
+        rule.valid = true;
+        rule.verticalMeasurement = true;
+        rule.useHighDatum = firstAngle;
+    }
+    else if (viewLabel == "top")
+    {
+        rule.valid = true;
+        rule.verticalMeasurement = true;
+        rule.useHighDatum = !firstAngle;
+    }
+    else if (viewLabel == "right")
+    {
+        rule.valid = true;
+        rule.verticalMeasurement = false;
+        rule.useHighDatum = firstAngle;
+    }
+    else if (viewLabel == "left")
+    {
+        rule.valid = true;
+        rule.verticalMeasurement = false;
+        rule.useHighDatum = !firstAngle;
+    }
+    return rule;
+}
+
 void CreateViewFaceToFaceDimensions(
     NXOpen::Session* session,
     NXOpen::Part* workPart,
@@ -10974,7 +13305,10 @@ void CreateViewFaceToFaceDimensions(
     bool& smallPlateThicknessDimensionCreated,
     const std::vector<LineProjectionFaceCandidate>& overallDimensionDatumFaces,
     const std::vector<LineProjectionFaceCandidate>& overallDimensionThicknessFaces,
-    const std::vector<ClosedCurveDimensionRecord>& closedCurveDimensionRecords)
+    const std::vector<ClosedCurveDimensionRecord>& closedCurveDimensionRecords,
+    bool useClosedCurveLoopSkip,
+    bool firstAngle,
+    MainViewFacePairRules* mainViewFacePairRules)
 {
     const double width = BoundsWidth(bounds);
     const double height = BoundsHeight(bounds);
@@ -10987,7 +13321,7 @@ void CreateViewFaceToFaceDimensions(
     const std::vector<LineSegmentCandidate> lines = CollectLineSegments(view, extents);
     const double axisTolerance = std::max(0.15, std::max(width, height) * 0.004);
     std::vector<LineProjectionFaceCandidate> faces =
-        CollectLineProjectionFaceCandidates(session, workPart, view, viewLabel, lines, axisTolerance);
+        CollectLineProjectionFaceCandidates(session, workPart, view, viewLabel, lines, axisTolerance, nullptr, false);
     if (faces.size() < 2)
     {
         WriteLine(session, "AutoCreateThreeViews: " + viewLabel + " face-to-face dimensions skipped; less than 2 usable planar faces.");
@@ -11027,6 +13361,19 @@ void CreateViewFaceToFaceDimensions(
         return;
     }
 
+    ShallowDetailFilterCache localShallowCache;
+    std::vector<ClosedCurveLoopCandidate> closedCurveSkipLoops;
+    if (useClosedCurveLoopSkip)
+    {
+        closedCurveSkipLoops =
+            CollectClosedCurveLoops(session, workPart, localShallowCache, view, extents, bounds, viewLabel + " linear skip");
+    }
+    const InnerLoopAdjacentFaces innerLoopAdjacentFaces =
+        CollectModelInnerLoopAdjacentFaceTags(workPart);
+    auto isInnerLoopAdjacentFace = [&](const LineProjectionFaceCandidate& face) {
+        return ContainsTag(innerLoopAdjacentFaces.faceTags, face.faceTag);
+    };
+
     struct FacePair
     {
         size_t first = 0;
@@ -11048,6 +13395,313 @@ void CreateViewFaceToFaceDimensions(
     const double minimumGap = std::max(0.03, axisTolerance * 0.35);
     const double boundsCenterX = (bounds.minX + bounds.maxX) * 0.5;
     const double boundsCenterY = (bounds.minY + bounds.maxY) * 0.5;
+    int rejectedByMainAxisRules = 0;
+    int rejectedInnerClosedCurveFaces = 0;
+    int skippedNonOverallDatumPairs = 0;
+    struct MainViewDatumGroup
+    {
+        bool measuresX = true;
+        int axis = -1;
+        int mainSide = 0;
+        int drawingSide = 0;
+        double distance = 0.0;
+        double length = 0.0;
+        tag_t faceTag = NULL_TAG;
+        double minX = 0.0;
+        double minY = 0.0;
+        double maxX = 0.0;
+        double maxY = 0.0;
+        FacePlaneSignature plane;
+    };
+
+    std::vector<MainViewDatumGroup> mainViewDatumGroups;
+    const bool requireMainViewDatumPair =
+        viewLabel == "front" &&
+        mainViewFacePairRules != nullptr &&
+        mainViewFacePairRules->valid;
+    const ProjectedViewLinearDatumRule projectedDatumRule =
+        viewLabel == "front" ? ProjectedViewLinearDatumRule{} : GetProjectedViewLinearDatumRule(viewLabel, firstAngle);
+    const double projectedDatumTolerance =
+        std::max(0.08, std::max(width, height) * 0.002);
+    double projectedDatumCoordinate = 0.0;
+    bool hasProjectedDatumCoordinate = false;
+    double projectedDatumBoundaryCoordinate = 0.0;
+    bool hasProjectedDatumBoundaryCoordinate = false;
+    if (requireMainViewDatumPair)
+    {
+        const double drawingZoneTolerance = 0.05;
+        for (const LineProjectionFaceCandidate& face : overallDimensionDatumFaces)
+        {
+            if (face.angledLine)
+            {
+                continue;
+            }
+            int axis = -1;
+            int mainSide = 0;
+            if (!TryClassifyMainViewAxisSide(*mainViewFacePairRules, face, axis, mainSide))
+            {
+                continue;
+            }
+            const bool measuresX = !face.horizontalLine;
+            const double drawingOffset = measuresX
+                ? face.centerX - boundsCenterX
+                : face.centerY - boundsCenterY;
+            if (std::abs(drawingOffset) <= drawingZoneTolerance)
+            {
+                continue;
+            }
+
+            const int drawingSide = drawingOffset > 0.0 ? 1 : -1;
+            const double distance = std::abs(drawingOffset);
+            const FacePlaneSignature plane = MakeFacePlaneSignature(face.normal, face.planePoint);
+            if (!plane.valid)
+            {
+                continue;
+            }
+
+            bool merged = false;
+            for (MainViewDatumGroup& group : mainViewDatumGroups)
+            {
+                const bool samePlane = SameFacePlaneSignature(group.plane, plane);
+                if (group.measuresX != measuresX ||
+                    group.axis != axis ||
+                    group.mainSide != mainSide ||
+                    group.drawingSide != drawingSide ||
+                    !samePlane)
+                {
+                    continue;
+                }
+
+                if (face.length > group.length)
+                {
+                    group.distance = distance;
+                    group.length = face.length;
+                    group.faceTag = face.faceTag;
+                    group.minX = face.minX;
+                    group.minY = face.minY;
+                    group.maxX = face.maxX;
+                    group.maxY = face.maxY;
+                    group.plane = plane;
+                }
+                merged = true;
+                break;
+            }
+            if (!merged)
+            {
+                MainViewDatumGroup group;
+                group.measuresX = measuresX;
+                group.axis = axis;
+                group.mainSide = mainSide;
+                group.drawingSide = drawingSide;
+                group.distance = distance;
+                group.length = face.length;
+                group.faceTag = face.faceTag;
+                group.minX = face.minX;
+                group.minY = face.minY;
+                group.maxX = face.maxX;
+                group.maxY = face.maxY;
+                group.plane = plane;
+                mainViewDatumGroups.push_back(group);
+            }
+        }
+
+        std::ostringstream datumLog;
+        datumLog << "AutoCreateThreeViews: " << viewLabel
+            << " main-view max-outline datum groups"
+            << " sourceDatumFaces=" << overallDimensionDatumFaces.size()
+            << ", groups=" << mainViewDatumGroups.size();
+        for (const MainViewDatumGroup& group : mainViewDatumGroups)
+        {
+            datumLog << " [face=" << static_cast<unsigned long long>(group.faceTag)
+                << ", measures=" << (group.measuresX ? "X" : "Y")
+                << ", axis=" << group.axis
+                << ", mainSide=" << group.mainSide
+                << ", drawingSide=" << group.drawingSide
+                << ", distance=" << group.distance
+                << ", length=" << group.length
+                << ", bounds=(" << group.minX << "," << group.minY << "," << group.maxX << "," << group.maxY << ")]";
+        }
+        datumLog << ".";
+        WriteLine(session, datumLog.str());
+    }
+
+    auto findMainViewDatumPlane = [&](const LineProjectionFaceCandidate& face, bool measuresX) {
+        FacePlaneSignature empty;
+        if (!requireMainViewDatumPair)
+        {
+            return empty;
+        }
+        int axis = -1;
+        int mainSide = 0;
+        if (!TryClassifyMainViewAxisSide(*mainViewFacePairRules, face, axis, mainSide))
+        {
+            return empty;
+        }
+        const double drawingOffset = measuresX
+            ? face.centerX - boundsCenterX
+            : face.centerY - boundsCenterY;
+        if (std::abs(drawingOffset) <= 0.05)
+        {
+            return empty;
+        }
+        const int drawingSide = drawingOffset > 0.0 ? 1 : -1;
+        for (const MainViewDatumGroup& group : mainViewDatumGroups)
+        {
+            if (group.measuresX == measuresX &&
+                group.axis == axis &&
+                group.mainSide == mainSide &&
+                group.drawingSide == drawingSide)
+            {
+                return group.plane;
+            }
+        }
+        return empty;
+    };
+
+    auto isMainViewDatumFace = [&](const LineProjectionFaceCandidate& face) {
+        const FacePlaneSignature signature = MakeFacePlaneSignature(face.normal, face.planePoint);
+        if (!signature.valid)
+        {
+            return false;
+        }
+        for (const MainViewDatumGroup& group : mainViewDatumGroups)
+        {
+            if (SameFacePlaneSignature(group.plane, signature))
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (projectedDatumRule.valid)
+    {
+        projectedDatumBoundaryCoordinate = projectedDatumRule.verticalMeasurement
+            ? (projectedDatumRule.useHighDatum ? bounds.maxY : bounds.minY)
+            : (projectedDatumRule.useHighDatum ? bounds.maxX : bounds.minX);
+        for (const LineProjectionFaceCandidate& face : faces)
+        {
+            if (projectedDatumRule.verticalMeasurement)
+            {
+                if (!face.horizontalLine)
+                {
+                    continue;
+                }
+                const double coord = face.centerY;
+                if (!hasProjectedDatumCoordinate ||
+                    (projectedDatumRule.useHighDatum
+                        ? coord > projectedDatumCoordinate
+                        : coord < projectedDatumCoordinate))
+                {
+                    projectedDatumCoordinate = coord;
+                    hasProjectedDatumCoordinate = true;
+                }
+            }
+            else
+            {
+                if (!face.verticalLine)
+                {
+                    continue;
+                }
+                const double coord = face.centerX;
+                if (!hasProjectedDatumCoordinate ||
+                    (projectedDatumRule.useHighDatum
+                        ? coord > projectedDatumCoordinate
+                        : coord < projectedDatumCoordinate))
+                {
+                    projectedDatumCoordinate = coord;
+                    hasProjectedDatumCoordinate = true;
+                }
+            }
+        }
+        if (hasProjectedDatumCoordinate)
+        {
+            const double datumBoundaryDelta = std::abs(projectedDatumCoordinate - projectedDatumBoundaryCoordinate);
+            if (datumBoundaryDelta > std::max(projectedDatumTolerance * 2.0, axisTolerance))
+            {
+                std::ostringstream datumMismatchLog;
+                datumMismatchLog << "AutoCreateThreeViews: " << viewLabel
+                    << " projected datum candidate is not on view outer boundary"
+                    << " measurement=" << (projectedDatumRule.verticalMeasurement ? "Y" : "X")
+                    << ", side=" << (projectedDatumRule.useHighDatum ? "max" : "min")
+                    << ", candidateCoord=" << projectedDatumCoordinate
+                    << ", boundaryCoord=" << projectedDatumBoundaryCoordinate
+                    << ", delta=" << datumBoundaryDelta
+                    << ", tolerance=" << projectedDatumTolerance
+                    << ".";
+                WriteLine(session, datumMismatchLog.str());
+            }
+        }
+    }
+    auto isProjectedDatumFace = [&](const LineProjectionFaceCandidate& face) {
+        if (!projectedDatumRule.valid || !hasProjectedDatumCoordinate)
+        {
+            return false;
+        }
+        if (projectedDatumRule.verticalMeasurement)
+        {
+            if (!face.horizontalLine)
+            {
+                return false;
+            }
+            return std::abs(face.centerY - projectedDatumCoordinate) <= projectedDatumTolerance;
+        }
+        if (!face.verticalLine)
+        {
+            return false;
+        }
+        return std::abs(face.centerX - projectedDatumCoordinate) <= projectedDatumTolerance;
+    };
+    std::map<std::string, int> mainAxisRejectReasons;
+    int skippedProjectedViewWrongDirection = 0;
+    int skippedProjectedViewNoDatum = 0;
+    int diagnosticRejectLogs = 0;
+    const int maxDiagnosticRejectLogs = 80;
+    auto isDiagnosticGap = [&](double modelGap, double drawingGap) {
+        if (std::abs(modelGap - 15.0) <= 0.35 ||
+            std::abs(modelGap - 10.0) <= 0.35)
+        {
+            return true;
+        }
+        const double drawing15 = 15.0 / 4.0;
+        const double drawing10 = 10.0 / 4.0;
+        return std::abs(drawingGap - drawing15) <= std::max(0.08, axisTolerance * 0.5) ||
+            std::abs(drawingGap - drawing10) <= std::max(0.08, axisTolerance * 0.5);
+    };
+    auto logDiagnosticPairReject = [&](const char* stage,
+                                       const LineProjectionFaceCandidate& a,
+                                       const LineProjectionFaceCandidate& b,
+                                       double drawingGap,
+                                       double modelGap,
+                                       const std::string& reason) {
+        if (diagnosticRejectLogs >= maxDiagnosticRejectLogs ||
+            !isDiagnosticGap(modelGap, drawingGap))
+        {
+            return;
+        }
+        ++diagnosticRejectLogs;
+        std::ostringstream pairLog;
+        pairLog << "AutoCreateThreeViews: " << viewLabel
+            << " diagnostic face pair rejected"
+            << " stage=" << stage
+            << ", reason=" << reason
+            << ", firstFace=" << static_cast<unsigned long long>(a.faceTag)
+            << ", secondFace=" << static_cast<unsigned long long>(b.faceTag)
+            << ", firstBody=" << static_cast<unsigned long long>(a.bodyTag)
+            << ", secondBody=" << static_cast<unsigned long long>(b.bodyTag)
+            << ", firstLine=" << (a.horizontalLine ? "H" : (a.verticalLine ? "V" : "A"))
+            << ", secondLine=" << (b.horizontalLine ? "H" : (b.verticalLine ? "V" : "A"))
+            << ", normalDot=" << DotVector(NormalizeVector(a.normal), NormalizeVector(b.normal))
+            << ", drawingGap=" << drawingGap
+            << ", modelGap=" << modelGap
+            << ", firstCenter=(" << a.centerX << "," << a.centerY << ")"
+            << ", secondCenter=(" << b.centerX << "," << b.centerY << ")"
+            << ", firstBounds=(" << a.minX << "," << a.minY << "," << a.maxX << "," << a.maxY << ")"
+            << ", secondBounds=(" << b.minX << "," << b.minY << "," << b.maxX << "," << b.maxY << ")"
+            << ", firstOuterDatum=" << (a.outerContourDatum ? "yes" : "no")
+            << ", secondOuterDatum=" << (b.outerContourDatum ? "yes" : "no")
+            << ".";
+        WriteLine(session, pairLog.str());
+    };
     for (size_t i = 0; i < faces.size(); ++i)
     {
         for (size_t j = i + 1; j < faces.size(); ++j)
@@ -11058,6 +13712,17 @@ void CreateViewFaceToFaceDimensions(
             {
                 continue;
             }
+            if (a.bodyTag == NULL_TAG || b.bodyTag == NULL_TAG || a.bodyTag != b.bodyTag)
+            {
+                logDiagnosticPairReject("body", a, b, std::abs(a.lineOffset - b.lineOffset), 0.0, "differentBody");
+                continue;
+            }
+
+            if (isInnerLoopAdjacentFace(a) || isInnerLoopAdjacentFace(b))
+            {
+                ++rejectedInnerClosedCurveFaces;
+                continue;
+            }
 
             const double lineDirectionAlignment =
                 std::abs(Dot2D(a.directionX, a.directionY, b.directionX, b.directionY));
@@ -11066,10 +13731,68 @@ void CreateViewFaceToFaceDimensions(
                 continue;
             }
 
-            const double normalAlignment = std::abs(DotVector(a.normal, b.normal));
-            if (normalAlignment < 0.995)
+            const double normalDot = DotVector(NormalizeVector(a.normal), NormalizeVector(b.normal));
+            const double diagnosticDrawingGap = std::abs(a.lineOffset - b.lineOffset);
+            double diagnosticModelGap = 0.0;
+            TryComputeModelFaceGap(a, b, diagnosticModelGap);
+            if (normalDot > -0.995)
             {
+                logDiagnosticPairReject("normal", a, b, diagnosticDrawingGap, diagnosticModelGap, "notOppositeNormals");
                 continue;
+            }
+
+            const bool pairMeasuresX = !a.horizontalLine;
+            const double drawingZoneCenter = pairMeasuresX ? boundsCenterX : boundsCenterY;
+            std::string mainAxisRejectReason;
+            if (requireMainViewDatumPair &&
+                !IsAllowedByMainViewFacePairRules(mainViewFacePairRules, a, b, pairMeasuresX, drawingZoneCenter, &mainAxisRejectReason))
+            {
+                ++rejectedByMainAxisRules;
+                if (!mainAxisRejectReason.empty())
+                {
+                    ++mainAxisRejectReasons[mainAxisRejectReason];
+                }
+                logDiagnosticPairReject("mainAxisRule", a, b, diagnosticDrawingGap, diagnosticModelGap, mainAxisRejectReason);
+                continue;
+            }
+            if (projectedDatumRule.valid)
+            {
+                const bool pairVerticalMeasurement = a.horizontalLine;
+                if (pairVerticalMeasurement != projectedDatumRule.verticalMeasurement)
+                {
+                    ++skippedProjectedViewWrongDirection;
+                    logDiagnosticPairReject("projectedDirection", a, b, diagnosticDrawingGap, diagnosticModelGap, "wrongMeasurementDirection");
+                    continue;
+                }
+                const bool aDatum = isProjectedDatumFace(a);
+                const bool bDatum = isProjectedDatumFace(b);
+                if (aDatum == bDatum)
+                {
+                    ++skippedProjectedViewNoDatum;
+                    logDiagnosticPairReject("projectedDatum", a, b, diagnosticDrawingGap, diagnosticModelGap, aDatum ? "bothDatum" : "noDatum");
+                    continue;
+                }
+            }
+
+            const FacePlaneSignature mainViewDatumPlane = findMainViewDatumPlane(a, pairMeasuresX);
+            if (requireMainViewDatumPair)
+            {
+                if (!mainViewDatumPlane.valid)
+                {
+                    ++skippedNonOverallDatumPairs;
+                    logDiagnosticPairReject("mainDatum", a, b, diagnosticDrawingGap, diagnosticModelGap, "noDatumPlaneForZone");
+                    continue;
+                }
+                const FacePlaneSignature aPlane = MakeFacePlaneSignature(a.normal, a.planePoint);
+                const FacePlaneSignature bPlane = MakeFacePlaneSignature(b.normal, b.planePoint);
+                const bool aDatum = SameFacePlaneSignature(aPlane, mainViewDatumPlane);
+                const bool bDatum = SameFacePlaneSignature(bPlane, mainViewDatumPlane);
+                if (aDatum == bDatum)
+                {
+                    ++skippedNonOverallDatumPairs;
+                    logDiagnosticPairReject("mainDatum", a, b, diagnosticDrawingGap, diagnosticModelGap, aDatum ? "bothDatumPlanes" : "neitherDatumPlane");
+                    continue;
+                }
             }
 
             FacePair pair;
@@ -11082,9 +13805,30 @@ void CreateViewFaceToFaceDimensions(
             pair.overlapMax = std::min(a.maxAlong, b.maxAlong);
 
             const double overlap = pair.overlapMax - pair.overlapMin;
-            if (pair.gap < minimumGap || overlap < std::max(1.0, std::min(a.length, b.length) * 0.20))
+            const double requiredOverlap = std::max(1.0, std::min(a.length, b.length) * 0.20);
+            const double allowedSeparatedOverlapGap = std::max(1.2, axisTolerance * 8.0);
+            const bool allowProjectedDatumSeparatedPair =
+                projectedDatumRule.valid &&
+                overlap >= -allowedSeparatedOverlapGap;
+            if (pair.gap < minimumGap || (!allowProjectedDatumSeparatedPair && overlap < requiredOverlap))
             {
+                logDiagnosticPairReject("gapOverlap", a, b, pair.gap, pair.modelGap, "smallGapOrInsufficientOverlap");
                 continue;
+            }
+            if (allowProjectedDatumSeparatedPair && overlap < requiredOverlap)
+            {
+                if (a.maxAlong < b.minAlong)
+                {
+                    const double nearestMid = (a.maxAlong + b.minAlong) * 0.5;
+                    pair.overlapMin = nearestMid;
+                    pair.overlapMax = nearestMid;
+                }
+                else if (b.maxAlong < a.minAlong)
+                {
+                    const double nearestMid = (b.maxAlong + a.minAlong) * 0.5;
+                    pair.overlapMin = nearestMid;
+                    pair.overlapMax = nearestMid;
+                }
             }
 
             double modelGap = 0.0;
@@ -11147,9 +13891,6 @@ void CreateViewFaceToFaceDimensions(
     const double laneStep = 7.0;
     int created = 0;
     std::vector<ClosedCurveDimensionRecord> closedCurveSkipRecords = closedCurveDimensionRecords;
-    ShallowDetailFilterCache localShallowCache;
-    const std::vector<ClosedCurveLoopCandidate> closedCurveSkipLoops =
-        CollectClosedCurveLoops(session, workPart, localShallowCache, view, extents, bounds, viewLabel + " linear skip");
     for (const ClosedCurveLoopCandidate& loop : closedCurveSkipLoops)
     {
         ClosedCurveDimensionRecord horizontalRecord;
@@ -11214,7 +13955,9 @@ void CreateViewFaceToFaceDimensions(
     int skippedOverallDatumThicknessFaces = 0;
     int skippedOppositeDatumNearOverallPairs = 0;
     int skippedProjectionLineReuse = 0;
+    int skippedGlobalPairedFaceReuse = 0;
     int skippedClosedCurveParallelPairs = 0;
+    int skippedInnerClosedCurveFaces = 0;
     int insidePlacedToAvoidCrossing = 0;
 
     struct FaceProjectionLineSignature
@@ -11289,6 +14032,10 @@ void CreateViewFaceToFaceDimensions(
         }
     };
 
+    auto isInnerClosedCurveFace = [&](const LineProjectionFaceCandidate& face) {
+        return isInnerLoopAdjacentFace(face);
+    };
+
     auto isCoveredByClosedCurveDimension = [&](const FacePair& pair,
                                                const LineProjectionFaceCandidate& first,
                                                const LineProjectionFaceCandidate& second) {
@@ -11361,6 +14108,14 @@ void CreateViewFaceToFaceDimensions(
         if (overallSpan <= 1.0e-6 || pair.gap < overallSpan * 0.82)
         {
             return false;
+        }
+        if (projectedDatumRule.valid)
+        {
+            const double sameOverallGapTolerance = std::max(0.05, axisTolerance * 0.1);
+            if (std::abs(pair.gap - overallSpan) > sameOverallGapTolerance)
+            {
+                return false;
+            }
         }
 
         const double lowBoundary = pair.verticalMeasurement ? bounds.minY : bounds.minX;
@@ -11450,66 +14205,113 @@ void CreateViewFaceToFaceDimensions(
         const FacePairKey pairKey = MakeFacePairKey(first, second);
         const bool usesCurrentViewDatum = first.outerContourDatum || second.outerContourDatum;
         const bool bothCurrentViewDatum = first.outerContourDatum && second.outerContourDatum;
+        const bool firstOverallDatum = isMainViewDatumFace(first) || isProjectedDatumFace(first);
+        const bool secondOverallDatum = isMainViewDatumFace(second) || isProjectedDatumFace(second);
+        const FacePlaneSignature firstPlane = MakeFacePlaneSignature(first.normal, first.planePoint);
+        const FacePlaneSignature secondPlane = MakeFacePlaneSignature(second.normal, second.planePoint);
         if (ContainsFacePairKey(usedViewFacePairs, pairKey))
         {
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "usedViewFacePair");
             continue;
         }
-        if ((bothCurrentViewDatum || !usesCurrentViewDatum) && ContainsFacePairKey(usedFacePairs, pairKey))
+        if (ContainsFacePairKey(usedFacePairs, pairKey))
         {
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "usedGlobalFacePair");
+            continue;
+        }
+        auto isGloballyPairedPlane = [&](const FacePlaneSignature& plane) {
+            return mainViewFacePairRules != nullptr &&
+                plane.valid &&
+                ContainsFacePlaneSignature(mainViewFacePairRules->usedPairedPlanes, plane);
+        };
+        const bool firstGloballyPaired = isGloballyPairedPlane(firstPlane);
+        const bool secondGloballyPaired = isGloballyPairedPlane(secondPlane);
+        if (requireMainViewDatumPair &&
+            ((!firstOverallDatum && firstGloballyPaired) ||
+             (!secondOverallDatum && secondGloballyPaired)))
+        {
+            ++skippedGlobalPairedFaceReuse;
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "globallyPairedPlaneReuse");
             continue;
         }
 
-        const FacePlaneSignature firstPlane = MakeFacePlaneSignature(first.normal, first.planePoint);
-        const FacePlaneSignature secondPlane = MakeFacePlaneSignature(second.normal, second.planePoint);
         const bool isPlateThicknessDimension =
             IsPlateThicknessGap(pair.modelGap, sheetMetalThickness);
         if (isPlateThicknessDimension && smallPlateThicknessDimensionCreated)
         {
             ++skippedDuplicatePlateThickness;
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "duplicatePlateThickness");
             continue;
         }
-        if (!isPlateThicknessDimension && IsSmallDimensionGap(pair.modelGap, sheetMetalThickness))
+        if (!isPlateThicknessDimension &&
+            IsSmallDimensionGap(pair.modelGap, sheetMetalThickness))
         {
             ++skippedSmallNonThickness;
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "smallNonThickness");
             continue;
         }
         if (ContainsSamePlaneFaceCandidate(overallDimensionThicknessFaces, first) ||
             ContainsSamePlaneFaceCandidate(overallDimensionThicknessFaces, second))
         {
             ++skippedOverallDatumThicknessFaces;
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "overallDatumThicknessFace");
             continue;
+        }
+        if (bothCurrentViewDatum)
+        {
+            const double overallSpan = pair.verticalMeasurement ? height : width;
+            const double sameOverallGapTolerance = std::max(0.05, axisTolerance * 0.1);
+            if (overallSpan > 1.0e-6 &&
+                std::abs(pair.gap - overallSpan) <= sameOverallGapTolerance)
+            {
+                ++skippedOppositeDatumNearOverallPairs;
+                logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "duplicateOverallDatumPair");
+                continue;
+            }
         }
         if (isCoveredByClosedCurveDimension(pair, first, second))
         {
             ++skippedClosedCurveParallelPairs;
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "coveredByClosedCurveDimension");
+            continue;
+        }
+        if (isInnerClosedCurveFace(first) || isInnerClosedCurveFace(second))
+        {
+            ++skippedInnerClosedCurveFaces;
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "innerClosedCurveFace");
             continue;
         }
         if (isOppositeDatumNearOverallPair(pair, first, second))
         {
             ++skippedOppositeDatumNearOverallPairs;
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "oppositeDatumNearOverall");
             continue;
         }
         if (IsPlateThicknessOffsetFromUsedFace(first, overallDimensionDatumFaces, sheetMetalThickness, true) ||
             IsPlateThicknessOffsetFromUsedFace(second, overallDimensionDatumFaces, sheetMetalThickness, true))
         {
             ++skippedOverallDatumThicknessOffsetPairs;
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "overallDatumThicknessOffset");
             continue;
         }
         if (IsPlateThicknessOffsetFromUsedFace(first, usedDimensionFaces, sheetMetalThickness) ||
             IsPlateThicknessOffsetFromUsedFace(second, usedDimensionFaces, sheetMetalThickness))
         {
             ++skippedPlateThicknessOffsetPairs;
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "usedFaceThicknessOffset");
             continue;
         }
-        if ((!first.outerContourDatum && containsProjectionLineSignature(makeProjectionLineSignature(first))) ||
-            (!second.outerContourDatum && containsProjectionLineSignature(makeProjectionLineSignature(second))))
+        if ((!first.outerContourDatum && !firstOverallDatum && containsProjectionLineSignature(makeProjectionLineSignature(first))) ||
+            (!second.outerContourDatum && !secondOverallDatum && containsProjectionLineSignature(makeProjectionLineSignature(second))))
         {
             ++skippedProjectionLineReuse;
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "projectionLineReuse");
             continue;
         }
-        if ((!first.outerContourDatum && ContainsFacePlaneSignature(usedPlanes, firstPlane)) ||
-            (!second.outerContourDatum && ContainsFacePlaneSignature(usedPlanes, secondPlane)))
+        if ((!first.outerContourDatum && !firstOverallDatum && ContainsFacePlaneSignature(usedPlanes, firstPlane)) ||
+            (!second.outerContourDatum && !secondOverallDatum && ContainsFacePlaneSignature(usedPlanes, secondPlane)))
         {
+            logDiagnosticPairReject("createSkip", first, second, pair.gap, pair.modelGap, "usedPlaneReuse");
             continue;
         }
 
@@ -11570,9 +14372,13 @@ void CreateViewFaceToFaceDimensions(
                 CountDimensionExtensionCrossings(lines, lower.line, upper.line, rightPickX, upper.centerY, bounds.maxX + outsideOffset, upper.centerY, axisTolerance);
             const bool preferLeftSide = insidePickX <= boundsCenterX;
             const bool useInside = isPlateThicknessDimension && leftCrossings > 0 && rightCrossings > 0;
-            const bool useLeftSide = !useInside &&
+            bool useLeftSide = !useInside &&
                 (leftCrossings < rightCrossings ||
                  (leftCrossings == rightCrossings && preferLeftSide));
+            if (!useInside && projectedDatumRule.valid && projectedDatumRule.verticalMeasurement)
+            {
+                useLeftSide = false;
+            }
             const double pickX = useInside ? insidePickX : (useLeftSide ? leftPickX : rightPickX);
             footprint.side = useLeftSide ? -1 : 1;
             if (useInside)
@@ -11632,9 +14438,13 @@ void CreateViewFaceToFaceDimensions(
                 CountDimensionExtensionCrossings(lines, left.line, right.line, right.centerX, topPickY, right.centerX, bounds.maxY + outsideOffset, axisTolerance);
             const bool preferBottomSide = insidePickY <= boundsCenterY;
             const bool useInside = isPlateThicknessDimension && bottomCrossings > 0 && topCrossings > 0;
-            const bool useBottomSide = !useInside &&
+            bool useBottomSide = !useInside &&
                 (bottomCrossings < topCrossings ||
                  (bottomCrossings == topCrossings && preferBottomSide));
+            if (!useInside && projectedDatumRule.valid && !projectedDatumRule.verticalMeasurement)
+            {
+                useBottomSide = !projectedDatumRule.useHighDatum;
+            }
             const double pickY = useInside ? insidePickY : (useBottomSide ? bottomPickY : topPickY);
             footprint.side = useBottomSide ? -1 : 1;
             if (useInside)
@@ -11682,24 +14492,40 @@ void CreateViewFaceToFaceDimensions(
         {
             const int firstUseCount = ++faceDimensionUseCounts[first.faceTag];
             const int secondUseCount = ++faceDimensionUseCounts[second.faceTag];
-            if (!first.outerContourDatum && firstPlane.valid &&
+            if (!first.outerContourDatum && !firstOverallDatum && firstPlane.valid &&
                 !ContainsFacePlaneSignature(usedPlanes, firstPlane))
             {
                 usedPlanes.push_back(firstPlane);
             }
-            if (!second.outerContourDatum && secondPlane.valid &&
+            if (!second.outerContourDatum && !secondOverallDatum && secondPlane.valid &&
                 !ContainsFacePlaneSignature(usedPlanes, secondPlane))
             {
                 usedPlanes.push_back(secondPlane);
             }
             rememberDimensionFace(first);
             rememberDimensionFace(second);
-            rememberProjectionLine(first);
-            rememberProjectionLine(second);
-            if (!usesCurrentViewDatum)
+            if (!firstOverallDatum)
             {
-                usedFacePairs.push_back(pairKey);
+                rememberProjectionLine(first);
             }
+            if (!secondOverallDatum)
+            {
+                rememberProjectionLine(second);
+            }
+            if (mainViewFacePairRules != nullptr)
+            {
+                if (!firstOverallDatum && firstPlane.valid &&
+                    !ContainsFacePlaneSignature(mainViewFacePairRules->usedPairedPlanes, firstPlane))
+                {
+                    mainViewFacePairRules->usedPairedPlanes.push_back(firstPlane);
+                }
+                if (!secondOverallDatum && secondPlane.valid &&
+                    !ContainsFacePlaneSignature(mainViewFacePairRules->usedPairedPlanes, secondPlane))
+                {
+                    mainViewFacePairRules->usedPairedPlanes.push_back(secondPlane);
+                }
+            }
+            usedFacePairs.push_back(pairKey);
             usedViewFacePairs.push_back(pairKey);
             usedFootprints.push_back(footprint);
             if (isPlateThicknessDimension)
@@ -11714,6 +14540,7 @@ void CreateViewFaceToFaceDimensions(
                 << ", firstUseCount=" << firstUseCount
                 << ", secondFace=" << static_cast<unsigned long long>(second.faceTag)
                 << ", secondUseCount=" << secondUseCount
+                << ", normalDot=" << DotVector(NormalizeVector(first.normal), NormalizeVector(second.normal))
                 << ", modelGap=" << pair.modelGap
                 << ", drawingGap=" << pair.gap
                 << ", angled=" << (pair.angledMeasurement ? "yes" : "no")
@@ -11750,6 +14577,18 @@ void CreateViewFaceToFaceDimensions(
     repeatedFaces << ".";
     WriteLine(session, repeatedFaces.str());
 
+    if (!mainAxisRejectReasons.empty())
+    {
+        std::ostringstream reasons;
+        reasons << "AutoCreateThreeViews: " << viewLabel << " main-axis reject reasons";
+        for (const auto& entry : mainAxisRejectReasons)
+        {
+            reasons << " " << entry.first << "=" << entry.second;
+        }
+        reasons << ".";
+        WriteLine(session, reasons.str());
+    }
+
     std::ostringstream log;
     log << "AutoCreateThreeViews: " << viewLabel << " face-to-face dimensions finished"
         << " rawFaces=" << rawFaceCount
@@ -11757,6 +14596,15 @@ void CreateViewFaceToFaceDimensions(
         << ", outerDatumFaces=" << outerDatumFaces
         << ", pairs=" << pairs.size()
         << ", created=" << created
+        << ", rejectedByMainAxisRules=" << rejectedByMainAxisRules
+        << ", rejectedInnerClosedCurveFaces=" << rejectedInnerClosedCurveFaces
+        << ", skippedNonOverallDatumPairs=" << skippedNonOverallDatumPairs
+        << ", skippedProjectedViewWrongDirection=" << skippedProjectedViewWrongDirection
+        << ", skippedProjectedViewNoDatum=" << skippedProjectedViewNoDatum
+        << ", projectedDatumRule=" << (projectedDatumRule.valid ? "yes" : "no")
+        << ", projectedDatumMeasurement=" << (projectedDatumRule.verticalMeasurement ? "Y" : "X")
+        << ", projectedDatumSide=" << (projectedDatumRule.useHighDatum ? "max" : "min")
+        << ", projectedDatumCoord=" << (hasProjectedDatumCoordinate ? projectedDatumCoordinate : 0.0)
         << ", sheetMetalThickness=" << sheetMetalThickness
         << ", smallPlateThicknessCreated=" << (smallPlateThicknessDimensionCreated ? "yes" : "no")
         << ", skippedDuplicatePlateThickness=" << skippedDuplicatePlateThickness
@@ -11766,7 +14614,9 @@ void CreateViewFaceToFaceDimensions(
         << ", skippedOverallDatumThicknessFaces=" << skippedOverallDatumThicknessFaces
         << ", skippedOppositeDatumNearOverallPairs=" << skippedOppositeDatumNearOverallPairs
         << ", skippedProjectionLineReuse=" << skippedProjectionLineReuse
+        << ", skippedGlobalPairedFaceReuse=" << skippedGlobalPairedFaceReuse
         << ", skippedClosedCurveParallelPairs=" << skippedClosedCurveParallelPairs
+        << ", skippedInnerClosedCurveFaces=" << skippedInnerClosedCurveFaces
         << ", insidePlacedToAvoidCrossing=" << insidePlacedToAvoidCrossing
         << ", usedViewFacePairs=" << usedViewFacePairs.size()
         << ", usedPlanes=" << usedPlanes.size()
@@ -11774,6 +14624,10 @@ void CreateViewFaceToFaceDimensions(
         << ", overallDatumFaces=" << overallDimensionDatumFaces.size()
         << ", overallThicknessFaces=" << overallDimensionThicknessFaces.size()
         << ", usedProjectionLines=" << usedProjectionLines.size()
+        << ", globalPairedPlanes=" << (mainViewFacePairRules != nullptr ? mainViewFacePairRules->usedPairedPlanes.size() : 0)
+        << ", innerLoopParentFaces=" << innerLoopAdjacentFaces.parentFacesWithInnerLoops
+        << ", innerLoopEdges=" << innerLoopAdjacentFaces.innerLoopEdges
+        << ", innerLoopAdjacentFaceTags=" << innerLoopAdjacentFaces.faceTags.size()
         << ", faceUseCountEntries=" << faceDimensionUseCounts.size()
         << ", globalFacePairs=" << usedFacePairs.size()
         << ", pairOrder=nearestFaceFirst"
@@ -12792,12 +15646,9 @@ void CreateLocalVerticalStepDimensions(
 bool ShouldCreateHorizontalOverallForView(const std::string& label)
 {
     return label == "front" ||
-           label == "top" ||
-           label == "bottom" ||
            label == "left" ||
            label == "right" ||
-           label == "back" ||
-           label == "back bottom";
+           label == "back";
 }
 
 bool ShouldCreateVerticalOverallForView(const std::string& label)
@@ -12805,9 +15656,6 @@ bool ShouldCreateVerticalOverallForView(const std::string& label)
     return label == "front" ||
            label == "top" ||
            label == "bottom" ||
-           label == "left" ||
-           label == "right" ||
-           label == "back" ||
            label == "back bottom";
 }
 
@@ -12815,7 +15663,8 @@ void CreateProjectedOverallDimensions(
     NXOpen::Session* session,
     NXOpen::Part* workPart,
     const RequestValues& request,
-    const std::vector<CreatedView>& createdProjectedViews)
+    const std::vector<CreatedView>& createdProjectedViews,
+    const AutoViewDirection& frontDirection)
 {
     if (!request.autoDimensions)
     {
@@ -12832,20 +15681,18 @@ void CreateProjectedOverallDimensions(
         return;
     }
 
-    const double sheetMetalThickness = AskVisibleSheetMetalThickness(workPart);
-    bool smallPlateThicknessDimensionCreated = false;
-    {
-        std::ostringstream log;
-        log << "AutoCreateThreeViews: geometric plate thickness for small dimensions="
-            << sheetMetalThickness << ".";
-        WriteLine(session, log.str());
-    }
-
     std::vector<FacePairKey> usedFacePairs;
     std::vector<FacePairKey> usedAngleFacePairs;
     std::vector<double> annotatedTappedHoleDiameters;
     ShallowDetailFilterCache shallowCache;
-    EnsureShallowDetailFilterCache(workPart, shallowCache);
+    bool shallowCacheReady = false;
+    auto ensureShallowCache = [&]() {
+        if (!shallowCacheReady)
+        {
+            EnsureShallowDetailFilterCache(workPart, shallowCache);
+            shallowCacheReady = true;
+        }
+    };
     for (const CreatedView& created : createdProjectedViews)
     {
         if (created.view == nullptr)
@@ -12866,10 +15713,30 @@ void CreateProjectedOverallDimensions(
         const double offset = std::max(8.0, request.viewSpacing * 0.6);
         const std::vector<DraftingCurveExtent> extents = CollectDraftingCurveExtents(created.view);
         LayoutBounds overallBounds = bounds;
+        bool hasVisibleCurveBounds = false;
         bool hasOuterContourBounds = false;
         std::vector<DraftingCurveExtent> overallCurveExtents;
         if (request.dimensionOverall)
         {
+            ensureShallowCache();
+            LayoutBounds visibleCurveBounds;
+            if (TryBuildVisibleCurveBounds(extents, visibleCurveBounds))
+            {
+                overallBounds = visibleCurveBounds;
+                hasVisibleCurveBounds = true;
+                std::ostringstream visibleLog;
+                visibleLog << "AutoCreateThreeViews: " << created.label
+                    << " overall all visible curve bounds"
+                    << " minX=" << overallBounds.minX
+                    << ", minY=" << overallBounds.minY
+                    << ", maxX=" << overallBounds.maxX
+                    << ", maxY=" << overallBounds.maxY
+                    << ", width=" << BoundsWidth(overallBounds)
+                    << ", height=" << BoundsHeight(overallBounds)
+                    << ", curves=" << extents.size() << ".";
+                WriteLine(session, visibleLog.str());
+            }
+
             LayoutBounds outerBounds;
             if (TryFindOverallVisibleCurveBounds(
                     session,
@@ -12880,16 +15747,34 @@ void CreateProjectedOverallDimensions(
                     outerBounds,
                     &overallCurveExtents))
             {
-                overallBounds = outerBounds;
                 hasOuterContourBounds = true;
+                const double visibleExtremaTolerance =
+                    std::max(0.10, std::max(BoundsWidth(overallBounds), BoundsHeight(overallBounds)) * 0.002);
+                if (hasVisibleCurveBounds &&
+                    BoundsMissVisibleExtrema(outerBounds, overallBounds, visibleExtremaTolerance))
+                {
+                    std::ostringstream fallbackLog;
+                    fallbackLog << "AutoCreateThreeViews: " << created.label
+                        << " overall filtered outer curve bounds miss visible extrema; use all visible curve bounds"
+                        << ", tolerance=" << visibleExtremaTolerance
+                        << ", visibleMinX=" << overallBounds.minX
+                        << ", visibleMinY=" << overallBounds.minY
+                        << ", visibleMaxX=" << overallBounds.maxX
+                        << ", visibleMaxY=" << overallBounds.maxY
+                        << ", outerMinX=" << outerBounds.minX
+                        << ", outerMinY=" << outerBounds.minY
+                        << ", outerMaxX=" << outerBounds.maxX
+                        << ", outerMaxY=" << outerBounds.maxY << ".";
+                    WriteLine(session, fallbackLog.str());
+                    hasOuterContourBounds = false;
+                    overallCurveExtents.clear();
+                }
             }
         }
         const std::vector<DraftingCurveExtent>& overallDimensionExtents =
-            overallCurveExtents.empty() ? extents : overallCurveExtents;
+            extents;
         const double axisTolerance = std::max(0.15, std::max(BoundsWidth(overallBounds), BoundsHeight(overallBounds)) * 0.004);
         std::vector<LineProjectionFaceCandidate> overallFaces;
-        std::vector<LineProjectionFaceCandidate> overallDimensionDatumFaces;
-        std::vector<LineProjectionFaceCandidate> overallDimensionThicknessFaces;
         std::vector<ClosedCurveDimensionRecord> closedCurveDimensionRecords;
         FacePairKey horizontalOverallPairKey;
         FacePairKey verticalOverallPairKey;
@@ -12897,10 +15782,9 @@ void CreateProjectedOverallDimensions(
         std::vector<LineProjectionFaceCandidate> verticalOverallPairFaces;
         bool hasHorizontalOverallPair = false;
         bool hasVerticalOverallPair = false;
-        if (createHorizontal ||
-            createVertical ||
-            request.dimensionInnerClosedCurve)
+        if (request.dimensionInnerClosedCurve)
         {
+            ensureShallowCache();
             const std::vector<LineSegmentCandidate> lines = CollectLineSegments(created.view, extents);
             overallFaces =
                 CollectLineProjectionFaceCandidates(session, workPart, created.view, created.label + " overall", lines, axisTolerance, &shallowCache);
@@ -12957,162 +15841,53 @@ void CreateProjectedOverallDimensions(
             << ", offset=" << offset << ".";
         WriteLine(session, log.str());
 
-        bool horizontalOverallRemembered = false;
-        bool verticalOverallRemembered = false;
-        auto rememberOverallDimensionFaces = [&](bool horizontalMeasurement,
-                                                 const std::vector<LineProjectionFaceCandidate>& pairFaces) {
-            for (const LineProjectionFaceCandidate& face : pairFaces)
-            {
-                AppendUniquePlaneFaceCandidate(overallDimensionDatumFaces, face);
-            }
-
-            const std::vector<LineProjectionFaceCandidate> boundaryFaces =
-                CollectOverallBoundaryDatumFaces(overallFaces, overallBounds, horizontalMeasurement, axisTolerance);
-            for (const LineProjectionFaceCandidate& face : boundaryFaces)
-            {
-                AppendUniquePlaneFaceCandidate(overallDimensionDatumFaces, face);
-            }
-
-            std::ostringstream faceLog;
-            faceLog << "AutoCreateThreeViews: " << created.label
-                << (horizontalMeasurement ? " horizontal" : " vertical")
-                << " overall remembered datum faces"
-                << " pairFaces=" << pairFaces.size()
-                << ", boundaryFaces=" << boundaryFaces.size()
-                << ", totalDatumFaces=" << overallDimensionDatumFaces.size() << ".";
-            WriteLine(session, faceLog.str());
-            if (horizontalMeasurement)
-            {
-                horizontalOverallRemembered = true;
-            }
-            else
-            {
-                verticalOverallRemembered = true;
-            }
-        };
-
         if (createHorizontal)
         {
-            if (hasHorizontalOverallPair && ContainsFacePairKey(usedFacePairs, horizontalOverallPairKey))
+            bool dimensionCreated = CreateHorizontalOverallDimension(
+                session,
+                workPart,
+                created.view,
+                overallBounds,
+                extents,
+                offset);
+            if (dimensionCreated)
             {
-                WriteLine(session, "AutoCreateThreeViews: " + created.label + " horizontal overall skipped; face pair already dimensioned.");
-            }
-            else if (!hasHorizontalOverallPair && created.label != "front")
-            {
-                WriteLine(session, "AutoCreateThreeViews: " + created.label + " horizontal overall skipped; no model face pair found.");
-            }
-            else
-            {
-                bool dimensionCreated = false;
-                if (hasHorizontalOverallPair && horizontalOverallPairFaces.size() >= 2)
+                if (hasHorizontalOverallPair)
                 {
-                    dimensionCreated = CreateFacePairDimension(
-                        session,
-                        workPart,
-                        created.view,
-                        horizontalOverallPairFaces[0],
-                        horizontalOverallPairFaces[1],
-                        NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodHorizontal,
-                        NXOpen::Point3d((overallBounds.minX + overallBounds.maxX) * 0.5, overallBounds.maxY + offset, 0.0),
-                        created.label + " horizontal overall");
-                }
-                if (!dimensionCreated)
-                {
-                    dimensionCreated = CreateHorizontalOverallDimension(
-                        session,
-                        workPart,
-                        created.view,
-                        overallBounds,
-                        overallDimensionExtents,
-                        offset);
-                }
-                if (dimensionCreated)
-                {
-                    if (hasHorizontalOverallPair)
-                    {
-                        usedFacePairs.push_back(horizontalOverallPairKey);
-                    }
-                    rememberOverallDimensionFaces(true, horizontalOverallPairFaces);
+                    usedFacePairs.push_back(horizontalOverallPairKey);
                 }
             }
         }
         if (createVertical)
         {
-            if (hasVerticalOverallPair && ContainsFacePairKey(usedFacePairs, verticalOverallPairKey))
-            {
-                WriteLine(session, "AutoCreateThreeViews: " + created.label + " vertical overall skipped; face pair already dimensioned.");
-            }
-            else if (!hasVerticalOverallPair && created.label != "front")
-            {
-                WriteLine(session, "AutoCreateThreeViews: " + created.label + " vertical overall skipped; no model face pair found.");
-            }
-            else
-            {
-                bool dimensionCreated = false;
-                if (hasVerticalOverallPair && verticalOverallPairFaces.size() >= 2)
-                {
-                    dimensionCreated = CreateFacePairDimension(
-                        session,
-                        workPart,
-                        created.view,
-                        verticalOverallPairFaces[0],
-                        verticalOverallPairFaces[1],
-                        NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodVertical,
-                        NXOpen::Point3d(overallBounds.minX - offset, (overallBounds.minY + overallBounds.maxY) * 0.5, 0.0),
-                        created.label + " vertical overall");
-                }
-                if (!dimensionCreated)
-                {
-                    dimensionCreated = CreateVerticalOverallDimension(
-                        session,
-                        workPart,
-                        created.view,
-                        overallBounds,
-                        overallDimensionExtents,
-                        offset);
-                }
-                if (dimensionCreated)
-                {
-                    if (hasVerticalOverallPair)
-                    {
-                        usedFacePairs.push_back(verticalOverallPairKey);
-                    }
-                    rememberOverallDimensionFaces(false, verticalOverallPairFaces);
-                }
-            }
-        }
-        overallDimensionThicknessFaces =
-            CollectPlateThicknessOffsetFaces(overallFaces, overallDimensionDatumFaces, sheetMetalThickness);
-        {
-            std::ostringstream exclusionLog;
-            exclusionLog << "AutoCreateThreeViews: " << created.label
-                << " overall thickness exclusion faces"
-                << " datumFaces=" << overallDimensionDatumFaces.size()
-                << ", thicknessFaces=" << overallDimensionThicknessFaces.size() << ".";
-            WriteLine(session, exclusionLog.str());
-        }
-        if (request.dimensionOverall)
-        {
-            CreateViewPlateThicknessDimension(
+            bool dimensionCreated = CreateVerticalOverallDimension(
                 session,
                 workPart,
                 created.view,
-                created.label,
-                overallFaces,
-                bounds,
-                offset,
-                sheetMetalThickness);
+                overallBounds,
+                extents,
+                offset);
+            if (dimensionCreated)
+            {
+                if (hasVerticalOverallPair)
+                {
+                    usedFacePairs.push_back(verticalOverallPairKey);
+                }
+            }
         }
         if (request.dimensionHole)
         {
+            ensureShallowCache();
             CreateFrontHoleDiameterDimensions(session, workPart, shallowCache, created.view, extents, bounds, offset, annotatedTappedHoleDiameters);
         }
         if (request.dimensionHoleLocation)
         {
+            ensureShallowCache();
             CreateFrontHoleLocationDimensions(session, workPart, shallowCache, created.view, extents, bounds, offset);
         }
         if (request.dimensionInnerClosedCurve)
         {
+            ensureShallowCache();
             CreateClosedCurveMaxDimensions(
                 session,
                 workPart,
@@ -13126,12 +15901,9 @@ void CreateProjectedOverallDimensions(
                 usedFacePairs,
                 closedCurveDimensionRecords);
         }
-        if (request.dimensionLinear)
-        {
-            WriteLine(session, "AutoCreateThreeViews: " + created.label + " horizontal/vertical pair dimensions skipped; pair annotation is disabled.");
-        }
         if (request.dimensionAngle)
         {
+            ensureShallowCache();
             CreateViewAngleDimensions(
                 session,
                 workPart,
@@ -14119,6 +16891,21 @@ void ShowAutoCreateThreeViewsRunResults()
 {
     try
     {
+        const RunResultSummary summary = SummarizeRunResults();
+        const int total = summary.success + summary.failed + summary.skipped;
+        std::wostringstream text;
+        text << L"运行完成\n"
+             << L"总数: " << total << L"\n"
+             << L"成功: " << summary.success << L"\n"
+             << L"失败: " << summary.failed << L"\n"
+             << L"跳过: " << summary.skipped;
+        if (total == 0 && summary.progress > 0)
+        {
+            text << L"\n已处理: " << summary.progress;
+        }
+        MessageBoxW(nullptr, text.str().c_str(), L"自动创建三视图", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+        return;
+
         NXOpen::UI* ui = NXOpen::UI::GetUI();
         if (ui != nullptr && ui->NXMessageBox() != nullptr)
         {
@@ -14136,7 +16923,17 @@ AutoCreateThreeViewsDialog::AutoCreateThreeViewsDialog()
       session_(NXOpen::Session::GetSession()),
       dialog_(nullptr)
 {
-    dialog_ = ui_->CreateDialog(GetDialogFilePath().c_str());
+    const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_AUTOCREATETHREEVIEWS_DLX);
+
+    if (dlxPath.empty())
+
+    {
+
+        throw std::runtime_error("AutoCreateThreeViews dialog resource is missing.");
+
+    }
+
+    dialog_ = ui_->CreateDialog(dlxPath.c_str());
     dialog_->AddInitializeHandler(NXOpen::make_callback(this, &AutoCreateThreeViewsDialog::initialize_cb));
     dialog_->AddDialogShownHandler(NXOpen::make_callback(this, &AutoCreateThreeViewsDialog::dialog_shown_cb));
     dialog_->AddUpdateHandler(NXOpen::make_callback(this, &AutoCreateThreeViewsDialog::update_cb));
@@ -14388,10 +17185,26 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
 
         const std::string partLabel = PartResultName(workPart);
         const RequestValues request = ReadRequestFile(requestPath);
+        WriteLine(session, "AutoCreateThreeViews: execute request work part=" + partLabel + ".");
         const ModelBounds bounds = AskModelBounds(workPart);
         const std::string frontDirectionMode = NormalizeFrontDirectionMode(request.frontDirectionMode);
-        const AutoViewDirection frontDirection = ComputeFrontDirection(workPart, request);
-        if (!frontDirection.valid)
+        AutoViewDirection frontDirection;
+        if (!request.assemblyDrawing)
+        {
+            frontDirection = ComputeFrontDirection(workPart, request);
+        }
+        else
+        {
+            if (!TryComputeAutoFrontDirectionFromOverallBoundingBox(workPart, frontDirection))
+            {
+                TryComputeAutoFrontDirectionFromLeafAssemblyBodies(workPart, frontDirection);
+            }
+            if (!frontDirection.valid)
+            {
+                WriteLine(session, "AutoCreateThreeViews: assembly leaf front direction not found; fallback to Top model view as front view.");
+            }
+        }
+        if (!frontDirection.valid && !request.assemblyDrawing)
         {
             const std::string failureMessage = FrontDirectionFailureMessage(frontDirectionMode);
             WriteLine(session, "AutoCreateThreeViews: front view not created; " + failureMessage);
@@ -14406,6 +17219,23 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             WriteLine(session, "AutoCreateThreeViews: " + message);
             AddAutoCreateThreeViewsRunResultLine(message);
             return 1;
+        }
+        try
+        {
+            session->ApplicationSwitchImmediate("UG_APP_DRAFTING");
+            workPart->Drafting()->EnterDraftingApplication();
+            sheet->Open();
+            UF_DRAW_open_drawing(sheet->Tag());
+            UF_DISP_make_display_up_to_date();
+            WriteLine(session, "AutoCreateThreeViews: current drafting sheet opened before view creation.");
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            WriteLine(session, std::string("AutoCreateThreeViews: open current drafting sheet failed, NXException: ") + ex.Message() + ".");
+        }
+        catch (...)
+        {
+            WriteLine(session, "AutoCreateThreeViews: open current drafting sheet failed.");
         }
 
         double sheetLength = 297.0;
@@ -14422,6 +17252,11 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         const double temporarySheetScaleDenominator = 100.0;
         ApplyDrawingSheetScale(session, workPart, sheet, temporarySheetScaleDenominator);
         const double viewScaleDenominator = temporarySheetScaleDenominator;
+        PreferOverallBoxDirectionWithMostCurves(session, workPart, frontDirection, viewScaleDenominator);
+        if (!frontDirection.valid && !request.assemblyDrawing)
+        {
+            PreferBackSideIfMoreCurves(session, workPart, frontDirection, viewScaleDenominator);
+        }
 
         int createdCount = 0;
         const std::vector<PlannedView> plannedViews =
@@ -14444,7 +17279,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                 planned.point,
                 false,
                 viewScaleDenominator,
-                &frontDirection);
+                frontDirection.valid ? &frontDirection : nullptr);
             if (frontView != nullptr)
             {
                 createdProjectedViews.push_back({planned.label, planned.point, frontView});
@@ -14532,10 +17367,6 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                 }
             }
 
-            if (workPart->DraftingViews() != nullptr)
-            {
-                workPart->DraftingViews()->UpdateViews(NXOpen::Drawings::DraftingViewCollection::ViewUpdateOptionAll);
-            }
         }
         else
         {
@@ -14574,6 +17405,11 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             }
         }
 
+        if (workPart->DraftingViews() != nullptr)
+        {
+            workPart->DraftingViews()->UpdateViews(NXOpen::Drawings::DraftingViewCollection::ViewUpdateOptionAll);
+        }
+        ArrangeCreatedProjectedViews(request, createdProjectedViews, sheetLength, sheetHeight);
         if (workPart->DraftingViews() != nullptr)
         {
             workPart->DraftingViews()->UpdateViews(NXOpen::Drawings::DraftingViewCollection::ViewUpdateOptionAll);
@@ -14626,7 +17462,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         {
             workPart->DraftingViews()->UpdateViews(NXOpen::Drawings::DraftingViewCollection::ViewUpdateOptionAll);
         }
-        CreateProjectedOverallDimensions(session, workPart, request, createdProjectedViews);
+        CreateProjectedOverallDimensions(session, workPart, request, createdProjectedViews, frontDirection);
         CreateFlatPatternOverallDimensions(session, workPart, request, auxiliaryViews);
         CreateFlatPatternNoteBelowView(session, workPart, request, auxiliaryViews);
         CreateTechnicalRequirementNote(session, workPart, request, sheetLength, sheetHeight);

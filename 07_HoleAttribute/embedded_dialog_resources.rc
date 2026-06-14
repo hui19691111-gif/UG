@@ -1,3 +1,4 @@
 #include "embedded_dialog_resources.h"
 
 IDR_ZH_DLX_HOLEATTRIBUTE_DLX RCDATA "HoleAttribute.dlx"
+IDR_ZH_DLX_KONBIAOZU_RULES_EDITOR_DLX RCDATA "../09_KonBiaoZu/dialog/KonBiaoZuRulesEditor.dlx"

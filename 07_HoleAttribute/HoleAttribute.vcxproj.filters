@@ -48,7 +48,6 @@
     <None Include="..\09_KonBiaoZu\dialog\KonBiaoZuRulesEditor.dlx">
       <Filter>UI</Filter>
     </None>
-    <None Include="data\HoleAttributeRules.ini" />
     <None Include="README.md" />
   </ItemGroup>
 </Project>

@@ -1,6 +1,10 @@
 #include "KonBiaoZuDialog.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 
 #include <NXOpen/BlockStyler_BlockDialog.hxx>
+#include <stdexcept>
+#include <string>
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/DisplayableObject.hxx>
 #include <NXOpen/NXException.hxx>
@@ -162,7 +166,17 @@ namespace KonBiaoZu
         std::string errorMessage;
         rules_.LoadRules(errorMessage);
 
-        dialog_ = ui_->CreateDialog(GetDialogFilePath().c_str());
+        const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_KONBIAOZU_DLX);
+
+        if (dlxPath.empty())
+
+        {
+
+            throw std::runtime_error("KonBiaoZu dialog resource is missing.");
+
+        }
+
+        dialog_ = ui_->CreateDialog(dlxPath.c_str());
         dialog_->AddInitializeHandler(NXOpen::make_callback(this, &KonBiaoZuDialog::initialize_cb));
         dialog_->AddUpdateHandler(NXOpen::make_callback(this, &KonBiaoZuDialog::update_cb));
         dialog_->AddApplyHandler(NXOpen::make_callback(this, &KonBiaoZuDialog::apply_cb));

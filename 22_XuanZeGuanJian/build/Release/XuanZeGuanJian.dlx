@@ -1,6 +1,6 @@
-<?xml version="1.0" encoding="UTF-8"?>
+﻿<?xml version="1.0" encoding="UTF-8"?>
 
-<Dialog ContainerItems="17" Expanded="1" NX="8.5.0" id="Dialog" name="Dialog" title="G:\UG智辉钣金插件_源码精简_20260602\features\22_XuanZeGuanJian\XuanZeGuanJian.dlx" type="uicomp" version="1.0.0">
+<Dialog ContainerItems="17" Expanded="1" NX="8.5.0" id="Dialog" name="Dialog" title="XuanZeGuanJian.dlx" type="uicomp" version="1.0.0">
   <item Expanded="1" class="UICOMP_selection" icon="selection_cursor.bmp" id="bodySelection" name="bodySelection" presentation="Select Object" type="uicomp">
     <PropertyList id="id" mode="0">
       <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="API Name" mask="16656" name="API Name" sname="BlockID" source="3" type="string" value="bodySelection"/>

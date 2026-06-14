@@ -35,9 +35,14 @@
 //These includes are needed for the following template code
 //------------------------------------------------------------------------------
 #include "BanJjinCaiBian.hpp"
+#include "../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../../common/ZhihuiDialogMemory.hpp"
+#include "embedded_dialog_resources.h"
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <stdexcept>
+#include <string>
 #ifdef CreateDialog
 #undef CreateDialog
 #endif
@@ -219,6 +224,29 @@ namespace
     {
         return bendInnerR < 0.0 ? 0.0 : bendInnerR;
     }
+
+    void LoadBanJjinCaiBianDialogMemory(
+        NXOpen::BlockStyler::Enumeration* enum0,
+        NXOpen::BlockStyler::DoubleBlock* cutGap,
+        NXOpen::BlockStyler::DoubleBlock* bendInnerR)
+    {
+        const wchar_t* fileName = L"BanJjinCaiBian_state.ini";
+        zhihui_dialog_memory::LoadEnum(fileName, L"mode", enum0);
+        zhihui_dialog_memory::LoadDouble(fileName, L"cutGap", cutGap);
+        zhihui_dialog_memory::LoadDouble(fileName, L"bendInnerR", bendInnerR);
+    }
+
+    void SaveBanJjinCaiBianDialogMemory(
+        NXOpen::BlockStyler::Enumeration* enum0,
+        NXOpen::BlockStyler::DoubleBlock* cutGap,
+        NXOpen::BlockStyler::DoubleBlock* bendInnerR)
+    {
+        const wchar_t* fileName = L"BanJjinCaiBian_state.ini";
+        zhihui_dialog_memory::SaveEnum(fileName, L"mode", enum0);
+        zhihui_dialog_memory::SaveDouble(fileName, L"cutGap", cutGap);
+        zhihui_dialog_memory::SaveDouble(fileName, L"bendInnerR", bendInnerR);
+    }
+
     NXOpen::Vector3d NormalizeToVector3d(const NXOpen::Point3d& vector)
     {
         const double length = VectorLength(vector);
@@ -4416,25 +4444,11 @@ BanJjinCaiBian::BanJjinCaiBian()
         recentPointCoord2 = NXOpen::Point3d(0.0, 0.0, 0.0);
         cutGap = NULL;
         bendInnerR = NULL;
-        const std::string moduleDirectory = GetModuleDirectory();
-        std::string dlxPath = "BanJjinCaiBian.dlx";
-
-        if (!moduleDirectory.empty())
+        const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_BANJJINCAIBIAN_DLX);
+        if (dlxPath.empty())
         {
-            const std::string projectDirectory = GetProjectDirectoryFromModuleDirectory(moduleDirectory);
-            const std::string projectDlxPath = projectDirectory + "\\BanJjinCaiBian.dlx";
-            const std::string moduleDlxPath = moduleDirectory + "\\BanJjinCaiBian.dlx";
-
-            if (!projectDirectory.empty() && FileExists(projectDlxPath))
-            {
-                dlxPath = projectDlxPath;
-            }
-            else if (FileExists(moduleDlxPath))
-            {
-                dlxPath = moduleDlxPath;
-            }
+            throw std::runtime_error("BanJjinCaiBian dialog resource is missing.");
         }
-
         std::strncpy(theDlxFileName, dlxPath.c_str(), sizeof(theDlxFileName) - 1);
         theDlxFileName[sizeof(theDlxFileName) - 1] = '\0';
         theDialog = BanJjinCaiBian::theUI->CreateDialog(theDlxFileName);
@@ -4539,7 +4553,7 @@ HMODULE LoadProtectedLicenseGate()
         }
     }
 
-    HMODULE fixedModule = LoadLibraryW(L"D:\\UGÖÇ»ÔîÓ½ð²å¼þ\\application\\ZhaoFuNxLicenseGate.dll");
+    HMODULE fixedModule = LoadLibraryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\application\\ZhaoFuNxLicenseGate.dll");
     if (fixedModule != NULL)
     {
         return fixedModule;
@@ -4664,10 +4678,6 @@ bool ValidateOwnModuleChecksum()
 #endif
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
 
     if (!ValidateOwnModuleChecksum())
@@ -4823,6 +4833,7 @@ void BanJjinCaiBian::initialize_cb()
             delete enumProps;
             enumProps = NULL;
         }
+        LoadBanJjinCaiBianDialogMemory(enum0, cutGap, bendInnerR);
     }
     catch(exception& ex)
     {
@@ -4857,6 +4868,7 @@ int BanJjinCaiBian::apply_cb()
     int errorCode = 0;
     try
     {
+        SaveBanJjinCaiBianDialogMemory(enum0, cutGap, bendInnerR);
         NXOpen::Part *workPart = theSession->Parts()->Work();
         if (workPart == NULL)
         {

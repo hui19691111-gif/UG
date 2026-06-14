@@ -83,10 +83,6 @@ void ShowLicenseDeniedMessage(const wchar_t* title, const wchar_t* message)
 
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     HMODULE module = LoadProtectedLicenseGate();
     if (module == NULL)

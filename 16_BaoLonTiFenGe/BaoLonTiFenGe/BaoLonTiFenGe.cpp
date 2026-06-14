@@ -35,6 +35,8 @@
 //These includes are needed for the following template code
 //------------------------------------------------------------------------------
 #include "BaoLonTiFenGe.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 #include "F:\BaiduSyncdisk\UGKaiFa(9.29)\custom_function.h"
 #include "F:\BaiduSyncdisk\UGKaiFa(9.29)\UG_TouWenJian.h"
 #include "F:\BaiduSyncdisk\UGKaiFa(9.29)\custom_function.cpp"
@@ -45,6 +47,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <stdexcept>
+#include <string>
 #ifdef CreateDialog
 #undef CreateDialog
 #endif
@@ -115,10 +119,6 @@ HMODULE LoadProtectedLicenseGate()
 
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     HMODULE module = LoadProtectedLicenseGate();
     if (module == NULL)
@@ -148,8 +148,13 @@ BaoLonTiFenGe::BaoLonTiFenGe()
         // Initialize the NX Open C++ API environment
         BaoLonTiFenGe::theSession = NXOpen::Session::GetSession();
         BaoLonTiFenGe::theUI = UI::GetUI();
-        theDlxFileName = "BaoLonTiFenGe.dlx";
-        theDialog = BaoLonTiFenGe::theUI->CreateDialog(theDlxFileName);
+        const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_BAOLONTIFENGE_DLX);
+        if (dlxPath.empty())
+        {
+            throw std::runtime_error("BaoLonTiFenGe dialog resource is missing.");
+        }
+        theDlxFileName = NULL;
+        theDialog = BaoLonTiFenGe::theUI->CreateDialog(dlxPath.c_str());
         selectionBody = NULL;
         isUpdatingSelection = false;
         // Registration of callback functions

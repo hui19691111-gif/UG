@@ -96,6 +96,26 @@
   <ItemGroup>
     <ClCompile Include="src\FanTonGMK.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="embedded_dialog_resources.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="FanTonGMK.dlx">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="FanTon1.bmp">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="FanTon2.bmp">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="FanTon1Icon.bmp">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="FanTon2Icon.bmp">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>

@@ -122,10 +122,11 @@
     <None Include="NX2412.props" />
     <None Include="dialog\KonBiaoZuDialogSpec.md" />
     <None Include="dialog\KonBiaoZuRulesEditor.dlx" />
-    <None Include="data\KonBiaoZuRules.ini">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
+  <ItemGroup>
+    <ResourceCompile Include="embedded_dialog_resources.rc" />
+    <ClInclude Include="embedded_dialog_resources.h" />
+  </ItemGroup>
 </Project>

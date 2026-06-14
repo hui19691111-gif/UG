@@ -38,9 +38,48 @@
 #include "UG_TouWenJian.h"
 #include "custom_function.h"
 #include "custom_function.cpp"
+#include <algorithm>
 #include <cmath>
+#include <stdexcept>
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../../../common/ZhihuiDialogMemory.hpp"
+#include "../../../protection/native/ZhihuiLicenseGuard.hpp"
+#include "../embedded_dialog_resources.h"
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
+
+namespace
+{
+void LoadKaKouDialogMemory(
+    NXOpen::BlockStyler::Enumeration* enum0,
+    NXOpen::BlockStyler::UIBlock* linearDim03,
+    NXOpen::BlockStyler::UIBlock* linearDim0,
+    NXOpen::BlockStyler::UIBlock* linearDim01,
+    NXOpen::BlockStyler::UIBlock* linearDim02)
+{
+    const wchar_t* fileName = L"KaKou_state.ini";
+    zhihui_dialog_memory::LoadEnum(fileName, L"mode", enum0);
+    zhihui_dialog_memory::LoadDouble(fileName, L"linearDim03", linearDim03);
+    zhihui_dialog_memory::LoadDouble(fileName, L"linearDim0", linearDim0);
+    zhihui_dialog_memory::LoadDouble(fileName, L"linearDim01", linearDim01);
+    zhihui_dialog_memory::LoadDouble(fileName, L"linearDim02", linearDim02);
+}
+
+void SaveKaKouDialogMemory(
+    NXOpen::BlockStyler::Enumeration* enum0,
+    NXOpen::BlockStyler::UIBlock* linearDim03,
+    NXOpen::BlockStyler::UIBlock* linearDim0,
+    NXOpen::BlockStyler::UIBlock* linearDim01,
+    NXOpen::BlockStyler::UIBlock* linearDim02)
+{
+    const wchar_t* fileName = L"KaKou_state.ini";
+    zhihui_dialog_memory::SaveEnum(fileName, L"mode", enum0);
+    zhihui_dialog_memory::SaveDouble(fileName, L"linearDim03", linearDim03);
+    zhihui_dialog_memory::SaveDouble(fileName, L"linearDim0", linearDim0);
+    zhihui_dialog_memory::SaveDouble(fileName, L"linearDim01", linearDim01);
+    zhihui_dialog_memory::SaveDouble(fileName, L"linearDim02", linearDim02);
+}
+}
 
 //------------------------------------------------------------------------------
 // Initialize static variables
@@ -57,8 +96,12 @@ kakou::kakou()
         // Initialize the NX Open C++ API environment
         kakou::theSession = NXOpen::Session::GetSession();
         kakou::theUI = UI::GetUI();
-        theDlxFileName = "kakou.dlx";
-        theDialog = kakou::theUI->CreateDialog(theDlxFileName);
+        theDlxFileName = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_KAKOU_DLX);
+        if (theDlxFileName.empty())
+        {
+            throw std::runtime_error("kakou dialog resource is missing.");
+        }
+        theDialog = kakou::theUI->CreateDialog(theDlxFileName.c_str());
         // Registration of callback functions
         theDialog->AddApplyHandler(make_callback(this, &kakou::apply_cb));
         theDialog->AddOkHandler(make_callback(this, &kakou::ok_cb));
@@ -107,6 +150,11 @@ kakou::~kakou()
 //------------------------------------------------------------------------------
 extern "C" DllExport void  ufusr(char *param, int *retcod, int param_len)
 {
+    if (!zhihui_license_guard::EnsureAuthorized(L"ZHIHUI.KAKOU", L"KaKou"))
+    {
+        return;
+    }
+
     kakou *thekakou = NULL;
     try
     {
@@ -206,6 +254,7 @@ void kakou::initialize_cb()
         linear_dim02 = dynamic_cast<NXOpen::BlockStyler::LinearDimension*>(theDialog->TopBlock()->FindBlock("linear_dim02"));
         selection0 = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("selection0"));
         manip0 = dynamic_cast<NXOpen::BlockStyler::SpecifyOrientation*>(theDialog->TopBlock()->FindBlock("manip0"));
+        LoadKaKouDialogMemory(enum0, linear_dim03, linear_dim0, linear_dim01, linear_dim02);
 
         //设置过滤
         Selection::SelectionAction action = Selection::SelectionActionClearAndEnableSpecific;
@@ -253,8 +302,231 @@ double mtx[9];
 double HouDu1 = 100;
 Body* Body1;
 Body* Bodytool;
+bool g_previewCommitted = false;
 
 NXOpen::Point* point_Zon;
+
+static double VectorLength(const NXOpen::Vector3d& vector)
+{
+    return std::sqrt(vector.X * vector.X + vector.Y * vector.Y + vector.Z * vector.Z);
+}
+
+static bool FaceNormal(NXOpen::Face* face, NXOpen::Vector3d& normal)
+{
+    if (face == NULL)
+    {
+        return false;
+    }
+
+    try
+    {
+        NXOpen::Direction* direction = workPart->Directions()->CreateDirection(face, NXOpen::SenseForward, NXOpen::SmartObject::UpdateOptionWithinModeling);
+        normal = direction->Vector();
+        return VectorLength(normal) > 1.0e-6;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+static bool AreFaceNormalsParallel(NXOpen::Face* firstFace, NXOpen::Face* secondFace)
+{
+    NXOpen::Vector3d firstNormal;
+    NXOpen::Vector3d secondNormal;
+    if (!FaceNormal(firstFace, firstNormal) || !FaceNormal(secondFace, secondNormal))
+    {
+        return false;
+    }
+
+    const double firstLength = VectorLength(firstNormal);
+    const double secondLength = VectorLength(secondNormal);
+    if (firstLength <= 1.0e-6 || secondLength <= 1.0e-6)
+    {
+        return false;
+    }
+
+    const double dotValue =
+        (firstNormal.X * secondNormal.X +
+            firstNormal.Y * secondNormal.Y +
+            firstNormal.Z * secondNormal.Z) /
+        (firstLength * secondLength);
+    return std::fabs(dotValue) >= 0.999;
+}
+
+static NXOpen::Face* OtherFaceOnEdge(NXOpen::Edge* edge, NXOpen::Face* excludedFace)
+{
+    if (edge == NULL)
+    {
+        return NULL;
+    }
+
+    std::vector<NXOpen::Face*> edgeFaces = edge->GetFaces();
+    for (size_t i = 0; i < edgeFaces.size(); ++i)
+    {
+        if (edgeFaces[i] != NULL && (excludedFace == NULL || edgeFaces[i]->Tag() != excludedFace->Tag()))
+        {
+            return edgeFaces[i];
+        }
+    }
+    return NULL;
+}
+
+static double MinimumDistance(NXOpen::NXObject* firstObject, NXOpen::NXObject* secondObject)
+{
+    if (firstObject == NULL || secondObject == NULL)
+    {
+        return 1.0e100;
+    }
+
+    try
+    {
+        NXOpen::MeasureDistance* distance = workPart->MeasureManager()->NewDistance(NULL, NXOpen::MeasureManager::MeasureTypeMinimum, firstObject, secondObject);
+        return distance->Value();
+    }
+    catch (...)
+    {
+        return 1.0e100;
+    }
+}
+
+static std::vector<NXOpen::Body*> FindParallelTouchingBodies(
+    NXOpen::Body* sourceBody,
+    NXOpen::Face* sideFace,
+    double touchTolerance)
+{
+    std::vector<NXOpen::Body*> candidates;
+    if (sourceBody == NULL || sideFace == NULL)
+    {
+        return candidates;
+    }
+
+    NXOpen::BodyCollection* bodyCollector = workPart->Bodies();
+    for (NXOpen::BodyCollection::iterator it = bodyCollector->begin(); it != bodyCollector->end(); ++it)
+    {
+        NXOpen::Body* candidateBody = *it;
+        if (candidateBody == NULL || candidateBody->Tag() == sourceBody->Tag())
+        {
+            continue;
+        }
+
+        bool matched = false;
+        std::vector<NXOpen::Face*> candidateFaces = candidateBody->GetFaces();
+        for (size_t faceIndex = 0; faceIndex < candidateFaces.size() && !matched; ++faceIndex)
+        {
+            NXOpen::Face* candidateFace = candidateFaces[faceIndex];
+            if (candidateFace == NULL || !AreFaceNormalsParallel(sideFace, candidateFace))
+            {
+                continue;
+            }
+
+            if (MinimumDistance(sideFace, candidateFace) <= touchTolerance)
+            {
+                candidates.push_back(candidateBody);
+                matched = true;
+            }
+        }
+    }
+
+    return candidates;
+}
+
+static NXOpen::Body* ResolveToolBodyByCutIntersection(
+    const std::vector<NXOpen::Body*>& candidates,
+    const std::vector<NXOpen::Features::Feature*>& cutFeatures,
+    NXOpen::Face* sideFace)
+{
+    if (candidates.empty())
+    {
+        return NULL;
+    }
+    if (candidates.size() == 1)
+    {
+        return candidates[0];
+    }
+
+    NXOpen::Body* bestBody = NULL;
+    double bestDistance = 1.0e100;
+    for (size_t candidateIndex = 0; candidateIndex < candidates.size(); ++candidateIndex)
+    {
+        NXOpen::Body* candidateBody = candidates[candidateIndex];
+        if (candidateBody == NULL)
+        {
+            continue;
+        }
+
+        double candidateDistance = 1.0e100;
+        for (size_t featureIndex = 0; featureIndex < cutFeatures.size(); ++featureIndex)
+        {
+            NXOpen::Features::Feature* feature = cutFeatures[featureIndex];
+            if (feature == NULL)
+            {
+                continue;
+            }
+
+            std::vector<NXOpen::Body*> featureBodies = feature->GetBodies();
+            for (size_t bodyIndex = 0; bodyIndex < featureBodies.size(); ++bodyIndex)
+            {
+                candidateDistance = std::min(candidateDistance, MinimumDistance(candidateBody, featureBodies[bodyIndex]));
+            }
+        }
+
+        if (candidateDistance < 0.01)
+        {
+            return candidateBody;
+        }
+        if (sideFace != NULL)
+        {
+            candidateDistance = std::min(candidateDistance, MinimumDistance(sideFace, candidateBody));
+        }
+        if (candidateDistance < bestDistance)
+        {
+            bestDistance = candidateDistance;
+            bestBody = candidateBody;
+        }
+    }
+
+    return bestBody;
+}
+
+static void ClearPreviewFeaturesIfNeeded()
+{
+    if (vFeature1.empty())
+    {
+        return;
+    }
+
+    if (!g_previewCommitted)
+    {
+        std::vector<NXOpen::TaggedObject*> objects;
+        objects.reserve(vFeature1.size());
+        for (size_t i = 0; i < vFeature1.size(); ++i)
+        {
+            if (vFeature1[i] != NULL)
+            {
+                objects.push_back(vFeature1[i]);
+            }
+        }
+        if (!objects.empty())
+        {
+            custom_del(objects);
+        }
+    }
+
+    vFeature1.clear();
+}
+
+static void MarkPreviewCommitted()
+{
+    vFeature1.clear();
+    edge1_TAG.clear();
+    g_previewCommitted = true;
+}
+
+static void MarkPreviewCreated()
+{
+    g_previewCommitted = false;
+}
 //------------------------------------------------------------------------------
 //Callback Name: dialogShown_cb
 //This callback is executed just before the dialog launch. Thus any value set 
@@ -281,7 +553,14 @@ int kakou::apply_cb()
     int errorCode = 0;
     try
     {
+        SaveKaKouDialogMemory(enum0, linear_dim03, linear_dim0, linear_dim01, linear_dim02);
         UF_initialize();
+        if (vFeature1.empty() || Body1 == NULL || Bodytool == NULL)
+        {
+            kakou::theUI->NXMessageBox()->Show("卡口", NXOpen::NXMessageBox::DialogTypeError, "请先选择面并生成卡口预览。");
+            UF_terminate();
+            return 1;
+        }
 
         int num_result=0;
         tag_t* resulting_bodies=NULL;
@@ -328,6 +607,7 @@ int kakou::apply_cb()
             custom_boolean(Body1, Vbody0, Features::Feature::BooleanType::BooleanTypeUnite, Feature1a, false, false);
             custom_boolean(Bodytool, Vbody1, Features::Feature::BooleanType::BooleanTypeSubtract, Feature1a, false, false);
         }
+        MarkPreviewCommitted();
 
         UF_terminate();
 
@@ -357,14 +637,7 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
             if (vFeature1.size()>0)
             {
-
-                vector<NXOpen::TaggedObject* > objects1;
-                for (size_t i = 0; i < vFeature1.size(); i++)
-                {
-
-                    objects1.push_back(vFeature1[i]);
-                }
-                custom_del(objects1);
+                ClearPreviewFeaturesIfNeeded();
                 goto abcde;
             }
 
@@ -373,13 +646,7 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
         {
             if (vFeature1.size() > 0)
             {
-                vector<NXOpen::TaggedObject* > objects1;
-                for (size_t i = 0; i < vFeature1.size(); i++)
-                {
-
-                    objects1.push_back(vFeature1[i]);
-                }
-                custom_del(objects1);
+                ClearPreviewFeaturesIfNeeded();
                 goto abcde;
             }
         }
@@ -387,13 +654,7 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
         {
             if (vFeature1.size() > 0)
             {
-                vector<NXOpen::TaggedObject* > objects1;
-                for (size_t i = 0; i < vFeature1.size(); i++)
-                {
-
-                    objects1.push_back(vFeature1[i]);
-                }
-                custom_del(objects1);
+                ClearPreviewFeaturesIfNeeded();
                 goto abcde;
             }
         }
@@ -401,13 +662,7 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
         {
             if (vFeature1.size() > 0)
             {
-                vector<NXOpen::TaggedObject* > objects1;
-                for (size_t i = 0; i < vFeature1.size(); i++)
-                {
-
-                    objects1.push_back(vFeature1[i]);
-                }
-                custom_del(objects1);
+                ClearPreviewFeaturesIfNeeded();
                 goto abcde;
             }
         }
@@ -415,13 +670,7 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
         {
             if (vFeature1.size() > 0)
             {
-                vector<NXOpen::TaggedObject* > objects1;
-                for (size_t i = 0; i < vFeature1.size(); i++)
-                {
-
-                    objects1.push_back(vFeature1[i]);
-                }
-                custom_del(objects1);
+                ClearPreviewFeaturesIfNeeded();
                 goto abcde;
             }
         }
@@ -431,13 +680,7 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
         abcde:
             if (vFeature1.size() > 0)
             {
-                vector<NXOpen::TaggedObject* > objects1;
-                for (size_t i = 0; i < vFeature1.size(); i++)
-                {
-
-                    objects1.push_back(vFeature1[i]);
-                }
-                custom_del(objects1);
+                ClearPreviewFeaturesIfNeeded();
             }
 
             if (enum0->GetProperties()->GetEnum("Value") !=0)
@@ -475,15 +718,9 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
             if (edge1_TAG.size()>0)
             {
-                std::vector<NXOpen::TaggedObject*> objects1(2);
-
-                objects1[0] = Feature1;
-                objects1[1] = Feature2;
-
-                custom_del(objects1);
+                ClearPreviewFeaturesIfNeeded();
  
                 edge1_TAG.clear();
-                HouDu1 = 100;
             }
             PropertyList* selection0Props = selection0->GetProperties();
             edge1_TAG = selection0Props->GetTaggedObjectVector("SelectedObjects");
@@ -495,6 +732,8 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 UF_terminate();
                 return 0;
             }
+            MarkPreviewCreated();
+            HouDu1 = 100;
 
             NXOpen::Face* selectedFace = dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(edge1_TAG[0]->Tag()));
             if (selectedFace == NULL)
@@ -543,12 +782,9 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
             Body1 = edge1->GetBody();
             vector< Edge*>Vedge1= Body1->GetEdges();
             vector< Face*>VFace1 = edge1->GetFaces();
+            NXOpen::Face* sideFaceForToolBody = OtherFaceOnEdge(edge1, selectedFace);
 
             std::vector<double> area1;
-
-            BodyCollection* bodycollector = workPart->Bodies();
-            NXOpen::BodyCollection::iterator Ite = bodycollector->begin();
-            Body* WorkBody;
 
             NXOpen::Unit* areaUnit(dynamic_cast<NXOpen::Unit*>(workPart->UnitCollection()->FindObject("SquareMilliMeter")));
             NXOpen::Unit* lengthUnit(dynamic_cast<NXOpen::Unit*>(workPart->UnitCollection()->FindObject("MilliMeter")));
@@ -625,6 +861,16 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 return 0;
             }
 
+            std::vector<NXOpen::Body*> toolBodyCandidates = FindParallelTouchingBodies(Body1, sideFaceForToolBody, 0.5);
+            if (toolBodyCandidates.empty())
+            {
+                workPart->Points()->DeletePoint(point1);
+                kakou::theUI->NXMessageBox()->Show("卡口", NXOpen::NXMessageBox::DialogTypeError, "未找到与靠近点击边的侧面相贴并平行的母口体。");
+                UF_terminate();
+                return 0;
+            }
+            Bodytool = toolBodyCandidates[0];
+
             workPart->Points()->DeletePoint(point1);
             for (size_t c = 0; c < VFace1.size(); c++)
             {
@@ -644,18 +890,6 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 manip0->SetYAxis(direction1->Vector());
                 direction1 = workPart->Directions()->CreateDirection(VFace1[0], NXOpen::SenseForward, NXOpen::SmartObject::UpdateOptionWithinModeling);
                 manip0->SetXAxis(direction1->Vector());
-
-                for (; Ite != bodycollector->end(); ++Ite)
-                {
-                    WorkBody = (*Ite);
-                    MeasureDistance* measureDistance2;
-                    measureDistance2 = workPart->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, thicknessFace, WorkBody);
-                    double distance2 = measureDistance2->Value();//获取测量的值
-                    if (distance2 < 0.5 && WorkBody->Tag() != Body1->Tag())
-                    {
-                        Bodytool=WorkBody;
-                    }
-                }
             }
             else
             {
@@ -664,19 +898,6 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 manip0->SetYAxis(direction1->Vector());
                 direction1 = workPart->Directions()->CreateDirection(VFace1[1], NXOpen::SenseForward, NXOpen::SmartObject::UpdateOptionWithinModeling);
                 manip0->SetXAxis(direction1->Vector());
-
-                for (; Ite != bodycollector->end(); ++Ite)
-                {
-                    WorkBody = (*Ite);
-                    MeasureDistance* measureDistance2;
-                    measureDistance2 = workPart->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, thicknessFace, WorkBody);
-                    double distance2 = measureDistance2->Value();//获取测量的值
-                    if (distance2 < 0.5&& WorkBody->Tag()!= Body1->Tag())
-                    {
-                        Bodytool = WorkBody;
-                    }
-
-                }
 
             }
 
@@ -828,6 +1049,22 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
                         }
                     }
                 }
+            }
+            {
+                std::vector<NXOpen::Features::Feature*> cutFeatures;
+                for (size_t featureIndex = 1; featureIndex < vFeature1.size(); featureIndex += 2)
+                {
+                    cutFeatures.push_back(vFeature1[featureIndex]);
+                }
+
+                NXOpen::Body* resolvedToolBody = ResolveToolBodyByCutIntersection(toolBodyCandidates, cutFeatures, sideFaceForToolBody);
+                if (resolvedToolBody == NULL)
+                {
+                    kakou::theUI->NXMessageBox()->Show("卡口", NXOpen::NXMessageBox::DialogTypeError, "未能从相贴平行体中确定母口求差体。");
+                    UF_terminate();
+                    return 0;
+                }
+                Bodytool = resolvedToolBody;
             }
             UF_terminate();
         }

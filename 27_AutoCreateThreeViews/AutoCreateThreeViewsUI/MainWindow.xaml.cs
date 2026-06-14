@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using System.IO;
 using System.Text;
@@ -25,6 +26,10 @@ public partial class MainWindow : Window
     private static readonly string DefaultTechnicalRequirementsPath = Path.Combine(AppContext.BaseDirectory, "Assets", "technical_requirements.default.cfg");
     private static readonly string UserTechnicalRequirementsPath = Path.Combine(AppContext.BaseDirectory, "technical_requirements.user.cfg");
     private bool isUpdatingPreview;
+    private readonly DispatcherTimer progressTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
+    private Window? progressWindow;
+    private TextBlock? progressWindowTextBlock;
+    private ProgressBar? progressWindowBar;
 
     static MainWindow()
     {
@@ -34,6 +39,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        LoadViewButtonImages();
         NormalizeTemplatePaths();
 
         topViewContent = TopViewButton.Content;
@@ -44,6 +50,48 @@ public partial class MainWindow : Window
         LoadTechnicalRequirements();
         LoadAssemblyTree();
         LoadSavedOptions();
+
+        progressTimer.Tick += ProgressTimer_Tick;
+    }
+
+    private void LoadViewButtonImages()
+    {
+        LoadImage(TopViewButtonImage, "top.png");
+        LoadImage(LeftPositionViewButtonImage, "left.png");
+        LoadImage(FrontViewButtonImage, "front.png");
+        LoadImage(RightPositionViewButtonImage, "right.png");
+        LoadImage(BackViewButtonImage, "back.png");
+        LoadImage(BottomViewButtonImage, "bottom.png");
+        LoadImage(BackBottomViewButtonImage, "backbottom.png");
+        LoadImage(IsoAuxViewImage, "iso.png");
+        LoadImage(FlatAuxViewImage, "flat.png");
+
+        LoadImage(PreviewTopViewImage, "top.png");
+        LoadImage(PreviewLeftPositionViewImage, "left.png");
+        LoadImage(PreviewFrontViewImage, "front.png");
+        LoadImage(PreviewRightPositionViewImage, "right.png");
+        LoadImage(PreviewBackViewImage, "back.png");
+        LoadImage(PreviewBackBottomViewImage, "backbottom.png");
+        LoadImage(PreviewBottomViewImage, "bottom.png");
+        LoadImage(PreviewIsoViewImage, "iso.png");
+        LoadImage(PreviewFlatViewImage, "flat.png");
+    }
+
+    private static void LoadImage(Image image, string fileName)
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "Assets", "ViewButtons", fileName);
+        if (!File.Exists(path))
+        {
+            return;
+        }
+
+        BitmapImage bitmap = new();
+        bitmap.BeginInit();
+        bitmap.CacheOption = BitmapCacheOption.OnLoad;
+        bitmap.UriSource = new Uri(path, UriKind.Absolute);
+        bitmap.EndInit();
+        bitmap.Freeze();
+        image.Source = bitmap;
     }
 
     private void CloseButton_Click(object sender, RoutedEventArgs e)
@@ -123,14 +171,192 @@ public partial class MainWindow : Window
 
     private void GenerateButton_Click(object sender, RoutedEventArgs e)
     {
+        bool progressStarted = false;
         try
         {
+            if (ShouldShowProgressForCurrentRequest())
+            {
+                StartProgressMonitor();
+                progressStarted = true;
+            }
             WriteCreateDrawingRequest();
-            Close();
+            Hide();
         }
         catch (Exception ex)
         {
+            if (progressStarted)
+            {
+                StopProgressMonitor("Failed.");
+            }
+            else
+            {
+                GenerateButton.IsEnabled = true;
+            }
             MessageBox.Show(ex.Message, "\u81ea\u52a8\u521b\u5efa\u4e09\u89c6\u56fe", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private bool ShouldShowProgressForCurrentRequest()
+    {
+        if (!assemblySelectionAvailable)
+        {
+            return false;
+        }
+
+        List<AssemblyNode> checkedNodes = GetCheckedAssemblyNodes();
+        if (checkedNodes.Count == 0 && selectedAssemblyNode != null)
+        {
+            checkedNodes.Add(selectedAssemblyNode);
+        }
+
+        if (checkedNodes.Count > 1)
+        {
+            return true;
+        }
+
+        if (checkedNodes.Count != 1)
+        {
+            return false;
+        }
+
+        AssemblyNode node = checkedNodes[0];
+        return IsRootAssemblyNode(node) && node.TreeItem != null && node.TreeItem.Items.Count > 0;
+    }
+
+    private void StartProgressMonitor()
+    {
+        string progressPath = GetProgressPath();
+        try
+        {
+            if (File.Exists(progressPath))
+            {
+                File.Delete(progressPath);
+            }
+        }
+        catch
+        {
+        }
+
+        ShowProgressWindow();
+        SetProgressDisplay("Preparing drawing...", 0, 0, true);
+        GenerateButton.IsEnabled = false;
+        progressTimer.Start();
+    }
+
+    private void StopProgressMonitor(string message)
+    {
+        progressTimer.Stop();
+        SetProgressDisplay(message, 1, 1, false);
+        GenerateButton.IsEnabled = true;
+    }
+
+    private void ShowProgressWindow()
+    {
+        if (progressWindow != null)
+        {
+            progressWindow.Show();
+            progressWindow.Activate();
+            return;
+        }
+
+        progressWindowTextBlock = new TextBlock
+        {
+            Text = "Preparing drawing...",
+            Foreground = new SolidColorBrush(Color.FromRgb(64, 80, 96)),
+            Margin = new Thickness(0, 0, 0, 12),
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        progressWindowBar = new ProgressBar
+        {
+            Height = 18,
+            Minimum = 0,
+            Maximum = 100,
+            Value = 0,
+            IsIndeterminate = true
+        };
+        StackPanel panel = new()
+        {
+            Margin = new Thickness(22)
+        };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "\u751f\u6210\u56fe\u7eb8",
+            FontSize = 16,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = new SolidColorBrush(Color.FromRgb(29, 45, 58)),
+            Margin = new Thickness(0, 0, 0, 12)
+        });
+        panel.Children.Add(progressWindowTextBlock);
+        panel.Children.Add(progressWindowBar);
+
+        progressWindow = new Window
+        {
+            Title = "\u751f\u6210\u56fe\u7eb8",
+            Width = 440,
+            Height = 160,
+            ResizeMode = ResizeMode.NoResize,
+            WindowStartupLocation = WindowStartupLocation.CenterScreen,
+            Topmost = true,
+            Content = panel
+        };
+        progressWindow.Show();
+    }
+
+    private void SetProgressDisplay(string message, int current, int total, bool indeterminate)
+    {
+        if (progressWindowTextBlock != null)
+        {
+            progressWindowTextBlock.Text = total > 0 ? $"{message} ({current}/{total})" : message;
+        }
+        if (progressWindowBar != null)
+        {
+            progressWindowBar.IsIndeterminate = indeterminate;
+            if (total > 0)
+            {
+                progressWindowBar.Maximum = total;
+                progressWindowBar.Value = Math.Max(0, Math.Min(current, total));
+            }
+            else
+            {
+                progressWindowBar.Value = 0;
+            }
+        }
+    }
+
+    private void ProgressTimer_Tick(object? sender, EventArgs e)
+    {
+        string progressPath = GetProgressPath();
+        if (!File.Exists(progressPath))
+        {
+            return;
+        }
+
+        try
+        {
+            Dictionary<string, string> values = ReadKeyValueFile(progressPath);
+            int current = ParseInt(values.TryGetValue("current", out string? currentText) ? currentText : "", 0);
+            int total = ParseInt(values.TryGetValue("total", out string? totalText) ? totalText : "", 0);
+            string message = values.TryGetValue("message", out string? messageText) ? messageText : "Drawing...";
+            bool done = values.TryGetValue("done", out string? doneText) && IsTruthy(doneText);
+
+            if (total > 0)
+            {
+                SetProgressDisplay(message, current, total, false);
+            }
+            else
+            {
+                SetProgressDisplay(message, current, total, true);
+            }
+
+            if (done)
+            {
+                StopProgressMonitor("Drawing finished.");
+                progressWindow?.Close();
+                Close();
+            }
+        }
+        catch
+        {
         }
     }
 
@@ -1014,7 +1240,7 @@ public partial class MainWindow : Window
             ["flatCorner"] = GetCorner(FlatTopLeftButton, FlatTopRightButton, FlatBottomLeftButton, FlatBottomRightButton),
             ["autoDimensions"] = BoolText(AnyDimensionEnabled()),
             ["dimensionOverall"] = BoolText(DimensionOverallCheckBox.IsChecked == true),
-            ["dimensionLinear"] = "0",
+            ["dimensionLinear"] = BoolText(false),
             ["dimensionAngle"] = BoolText(DimensionAngleCheckBox.IsChecked == true),
             ["dimensionHole"] = BoolText(DimensionHoleCheckBox.IsChecked == true),
             ["dimensionHoleLocation"] = BoolText(DimensionHoleLocationCheckBox.IsChecked == true),
@@ -1301,9 +1527,16 @@ public partial class MainWindow : Window
 
     private TreeViewItem CreateAssemblyTreeItem(AssemblyNode node)
     {
-        string headerText = string.IsNullOrWhiteSpace(node.PartPath)
-            ? node.Name
-            : $"{node.Name}  [{Path.GetFileNameWithoutExtension(node.PartPath)}]";
+        string partStem = string.IsNullOrWhiteSpace(node.PartPath)
+            ? ""
+            : Path.GetFileNameWithoutExtension(node.PartPath);
+        string displayName = CleanAssemblyDisplayName(node.Name, partStem);
+        string compareName = Path.GetFileNameWithoutExtension(displayName);
+        string headerText = string.IsNullOrWhiteSpace(partStem) ||
+            string.Equals(displayName, partStem, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(compareName, partStem, StringComparison.OrdinalIgnoreCase)
+                ? displayName
+                : $"{displayName}  [{partStem}]";
 
         CheckBox checkBox = new()
         {
@@ -1359,17 +1592,26 @@ public partial class MainWindow : Window
             : $"{selectedAssemblyNode.Name} - {selectedAssemblyNode.PartPath}{suffix}";
     }
 
+    private static string CleanAssemblyDisplayName(string name, string partStem)
+    {
+        string text = name?.Trim() ?? "";
+        bool corrupt = text.Contains('\uFFFD') || text.Contains("???") || text.Contains("���");
+        if ((corrupt || string.IsNullOrWhiteSpace(text)) && !string.IsNullOrWhiteSpace(partStem))
+        {
+            return partStem;
+        }
+
+        return text;
+    }
+
     private void SetAllAssemblyNodeChecks(bool isChecked)
     {
         isUpdatingAssemblyChecks = true;
         try
         {
-            foreach (TreeViewItem item in EnumerateTreeItems(AssemblyTree.Items))
+            foreach (AssemblyNode node in GetSelectableAssemblyNodes())
             {
-                if (item.Tag is AssemblyNode node)
-                {
-                    SetAssemblyNodeChecked(node, isChecked);
-                }
+                SetAssemblyNodeChecked(node, isChecked);
             }
         }
         finally
@@ -1460,10 +1702,27 @@ public partial class MainWindow : Window
             .Select(item => item.Tag)
             .OfType<AssemblyNode>()
             .ToList();
+        List<AssemblyNode> rootNodes = nodes
+            .Where(IsRootAssemblyNode)
+            .ToList();
         List<AssemblyNode> leafNodes = nodes
             .Where(node => node.TreeItem == null || node.TreeItem.Items.Count == 0)
             .ToList();
-        return leafNodes.Count > 0 ? leafNodes : nodes;
+        if (leafNodes.Count == 0)
+        {
+            return nodes;
+        }
+
+        return rootNodes
+            .Concat(leafNodes)
+            .Distinct()
+            .ToList();
+    }
+
+    private static bool IsRootAssemblyNode(AssemblyNode node)
+    {
+        return string.IsNullOrWhiteSpace(node.ParentOccurrenceTag) ||
+               string.Equals(node.ParentOccurrenceTag, "0", StringComparison.OrdinalIgnoreCase);
     }
 
     private void UpdateAssemblyParentCheckStates()
@@ -1471,7 +1730,7 @@ public partial class MainWindow : Window
         List<TreeViewItem> items = EnumerateTreeItems(AssemblyTree.Items).Reverse().ToList();
         foreach (TreeViewItem item in items)
         {
-            if (item.Items.Count == 0 || item.Tag is not AssemblyNode node)
+            if (item.Items.Count == 0 || item.Tag is not AssemblyNode node || IsRootAssemblyNode(node))
             {
                 continue;
             }
@@ -1533,7 +1792,7 @@ public partial class MainWindow : Window
             return value;
         }
 
-        StringBuilder builder = new();
+        List<byte> bytes = new();
         for (int i = 0; i < value.Length; ++i)
         {
             if (value[i] == '%' &&
@@ -1542,16 +1801,17 @@ public partial class MainWindow : Window
                 Uri.IsHexDigit(value[i + 2]))
             {
                 string hex = value.Substring(i + 1, 2);
-                builder.Append((char)Convert.ToInt32(hex, 16));
+                bytes.Add((byte)Convert.ToInt32(hex, 16));
                 i += 2;
             }
             else
             {
-                builder.Append(value[i]);
+                byte[] textBytes = Encoding.UTF8.GetBytes(value[i].ToString());
+                bytes.AddRange(textBytes);
             }
         }
 
-        return builder.ToString();
+        return Encoding.UTF8.GetString(bytes.ToArray());
     }
 
     private void LoadSavedOptions()
@@ -1646,7 +1906,7 @@ public partial class MainWindow : Window
                 ["isoCorner"] = GetCorner(IsoTopLeftButton, IsoTopRightButton, IsoBottomLeftButton, IsoBottomRightButton),
                 ["flatCorner"] = GetCorner(FlatTopLeftButton, FlatTopRightButton, FlatBottomLeftButton, FlatBottomRightButton),
                 ["dimensionOverall"] = BoolText(DimensionOverallCheckBox.IsChecked == true),
-                ["dimensionLinear"] = "0",
+                ["dimensionLinear"] = BoolText(false),
                 ["dimensionAngle"] = BoolText(DimensionAngleCheckBox.IsChecked == true),
                 ["dimensionHole"] = BoolText(DimensionHoleCheckBox.IsChecked == true),
                 ["dimensionHoleLocation"] = BoolText(DimensionHoleLocationCheckBox.IsChecked == true),
@@ -2111,6 +2371,18 @@ public partial class MainWindow : Window
         return value ? "1" : "0";
     }
 
+    private static bool IsTruthy(string value)
+    {
+        return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int ParseInt(string value, int fallback)
+    {
+        return int.TryParse(value, out int parsed) ? parsed : fallback;
+    }
+
     private bool AnyDimensionEnabled()
     {
         return DimensionOverallCheckBox.IsChecked == true ||
@@ -2140,6 +2412,13 @@ public partial class MainWindow : Window
         }
 
         return Path.Combine(AppContext.BaseDirectory, "AutoCreateThreeViews.request");
+    }
+
+    private static string GetProgressPath()
+    {
+        string requestPath = GetRequestPath();
+        string? directory = Path.GetDirectoryName(requestPath);
+        return Path.Combine(directory ?? AppContext.BaseDirectory, "AutoCreateThreeViews.progress");
     }
 
     private static string GetAssemblyManifestPath()

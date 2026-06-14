@@ -1,0 +1,5 @@
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\31_FanTonGMK\build\Release\FanTonGMK.dlx
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\31_FanTonGMK\build\Release\FanTon1.bmp
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\31_FanTonGMK\build\Release\FanTon2.bmp
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\31_FanTonGMK\build\Release\FanTon1Icon.bmp
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\31_FanTonGMK\build\Release\FanTon2Icon.bmp

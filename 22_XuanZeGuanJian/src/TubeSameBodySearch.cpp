@@ -166,6 +166,12 @@ struct PlaneFaceGroup
     std::vector<std::size_t> faceIndexes;
 };
 
+struct PlaneFaceCandidate
+{
+    NXOpen::Face* face;
+    double weight;
+};
+
 struct BodyFingerprint
 {
     NXOpen::Body* body;
@@ -188,6 +194,7 @@ struct BodyFingerprint
     std::vector<Point3> fullCircleEdgePoints;
     std::vector<PlaneFaceFeature> planeFaces;
     std::vector<PlaneFaceGroup> planeFaceGroups;
+    bool planeFeaturesBuilt;
 };
 
 void ThrowUfError(int errorCode)
@@ -1338,11 +1345,50 @@ std::vector<PlaneFaceGroup> BuildPlaneFaceGroups(const std::vector<PlaneFaceFeat
     return groups;
 }
 
+bool AskPlanarFaceCandidate(NXOpen::Face* face, PlaneFaceCandidate& candidate)
+{
+    int faceType = 0;
+    if (face == NULL || UF_MODL_ask_face_type(face->Tag(), &faceType) != 0 || faceType != UF_MODL_PLANAR_FACE)
+    {
+        return false;
+    }
+
+    int dataType = 0;
+    double point[3] = {};
+    double normal[3] = {};
+    double box[6] = {};
+    double radius = 0.0;
+    double radiusData = 0.0;
+    int normalDirection = 0;
+    if (UF_MODL_ask_face_data(
+            face->Tag(),
+            &dataType,
+            point,
+            normal,
+            box,
+            &radius,
+            &radiusData,
+            &normalDirection) != 0)
+    {
+        return false;
+    }
+
+    double dims[3] = {
+        std::fabs(box[3] - box[0]),
+        std::fabs(box[4] - box[1]),
+        std::fabs(box[5] - box[2])};
+    std::sort(dims, dims + 3);
+    candidate.face = face;
+    candidate.weight = dims[1] * dims[2];
+    return candidate.weight > 0.0;
+}
+
 BodyFingerprint BuildFingerprint(NXOpen::Body* body)
 {
     BodyFingerprint fingerprint = {};
     fingerprint.body = body;
     fingerprint.tag = body->Tag();
+    fingerprint.planeFeaturesBuilt = false;
     AskBodyMassProperties(
         fingerprint.tag,
         &fingerprint.mass,
@@ -1416,18 +1462,49 @@ BodyFingerprint BuildFingerprint(NXOpen::Body* body)
 
     std::vector<NXOpen::Face*> faces = body->GetFaces();
     fingerprint.faceCount = static_cast<int>(faces.size());
-    fingerprint.planeFaces.reserve(faces.size());
+
+    return fingerprint;
+}
+
+void EnsurePlaneFaceFeatures(BodyFingerprint& fingerprint)
+{
+    if (fingerprint.planeFeaturesBuilt || fingerprint.body == NULL)
+    {
+        return;
+    }
+
+    std::vector<NXOpen::Face*> faces = fingerprint.body->GetFaces();
+    fingerprint.faceCount = static_cast<int>(faces.size());
+    fingerprint.planeFaces.clear();
+    fingerprint.planeFaceGroups.clear();
+
+    std::vector<PlaneFaceCandidate> candidates;
+    candidates.reserve(faces.size());
     for (std::size_t index = 0; index < faces.size(); ++index)
     {
+        PlaneFaceCandidate candidate = {};
+        if (AskPlanarFaceCandidate(faces[index], candidate))
+        {
+            candidates.push_back(candidate);
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const PlaneFaceCandidate& lhs, const PlaneFaceCandidate& rhs)
+    {
+        return lhs.weight > rhs.weight;
+    });
+
+    const std::size_t maxFeatureFaces = std::min<std::size_t>(candidates.size(), 8);
+    fingerprint.planeFaces.reserve(maxFeatureFaces);
+    for (std::size_t index = 0; index < maxFeatureFaces; ++index)
+    {
         PlaneFaceFeature faceFeature = {};
-        if (BuildPlanarFaceFeature(faces[index], faceFeature))
+        if (BuildPlanarFaceFeature(candidates[index].face, faceFeature))
         {
             fingerprint.planeFaces.push_back(faceFeature);
         }
     }
     fingerprint.planeFaceGroups = BuildPlaneFaceGroups(fingerprint.planeFaces);
-
-    return fingerprint;
+    fingerprint.planeFeaturesBuilt = true;
 }
 
 const BodyFingerprint* FindFingerprintByTag(
@@ -1963,14 +2040,17 @@ bool TryAnchorPlaneGroupMatch(
 }
 
 bool BodiesMatchByAnchorPlaneCoordinates(
-    const BodyFingerprint& reference,
-    const BodyFingerprint& candidate,
+    BodyFingerprint& reference,
+    BodyFingerprint& candidate,
     std::ofstream* debugLog,
     int* coordinateDebugStep,
     std::vector<tag_t>* activeDebugObjectTags,
     bool* coordinateDebugCanceled,
     std::string& rejectReason)
 {
+    EnsurePlaneFaceFeatures(reference);
+    EnsurePlaneFaceFeatures(candidate);
+
     std::string firstAnchorRejectReason;
     for (std::size_t expectedCount = 1; expectedCount <= 2; ++expectedCount)
     {
@@ -2178,8 +2258,8 @@ bool MiddleFingerprintsMatch(
 }
 
 bool RefinedFingerprintsMatch(
-    const BodyFingerprint& reference,
-    const BodyFingerprint& candidate,
+    BodyFingerprint& reference,
+    BodyFingerprint& candidate,
     std::ofstream* debugLog,
     int* coordinateDebugStep,
     std::vector<tag_t>* activeDebugObjectTags,

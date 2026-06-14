@@ -13,4 +13,10 @@ cl /nologo /LD /EHsc /std:c++17 /O2 /MD /DNDEBUG /DWIN32 /D_WINDOWS /D_USRDLL /D
   "%PROJECT_DIR%\src\FanTonGMK.cpp" ^
   /Fe"%PROJECT_DIR%\build_manual\FanTonGMK.dll" ^
   /Fo"%PROJECT_DIR%\build_manual\FanTonGMK.obj" ^
-  /link /LIBPATH:"%UGII_BASE_DIR%\UGOPEN" libufun.lib libnxopencpp.lib libnxopencpp_features.lib libnxopenuicpp.lib shell32.lib user32.lib
+  /link /LIBPATH:"%UGII_BASE_DIR%\UGOPEN" libufun.lib libnxopencpp.lib libnxopencpp_features.lib libnxopencpp_tooling.lib libnxopenuicpp.lib shell32.lib user32.lib
+
+copy /Y "%PROJECT_DIR%\FanTonGMK.dlx" "%PROJECT_DIR%\build_manual\FanTonGMK.dlx" >nul
+copy /Y "%PROJECT_DIR%\FanTon1.bmp" "%PROJECT_DIR%\build_manual\FanTon1.bmp" >nul
+copy /Y "%PROJECT_DIR%\FanTon2.bmp" "%PROJECT_DIR%\build_manual\FanTon2.bmp" >nul
+copy /Y "%PROJECT_DIR%\FanTon1Icon.bmp" "%PROJECT_DIR%\build_manual\FanTon1Icon.bmp" >nul
+copy /Y "%PROJECT_DIR%\FanTon2Icon.bmp" "%PROJECT_DIR%\build_manual\FanTon2Icon.bmp" >nul

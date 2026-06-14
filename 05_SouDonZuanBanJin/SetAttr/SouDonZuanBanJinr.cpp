@@ -35,6 +35,9 @@
 //These includes are needed for the following template code
 //------------------------------------------------------------------------------
 #include "SouDonZuanBanJin.hpp"
+#include "../../common/ZhihuiBendRulesIni.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -42,11 +45,14 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <commdlg.h>
+#pragma comment(lib, "Comdlg32.lib")
 #ifdef CreateDialog
 #undef CreateDialog
 #endif
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -72,13 +78,15 @@ bool directionEdgeRequired(false);
 
 namespace
 {
-    const char* BendFactorConfigFileName = "PiLianZuanBanJin_bend_factor_config.json";
+    const char* BendFactorConfigFileName = "PiLianZuanBanJin_bend_factor_rules.ini";
+    const char* MarkedFaceAttributeTitle = "\xE6\xA0\x87\xE8\xAE\xB0\xE9\x9D\xA2";
 
     struct BendRule
     {
         bool enabled;
         bool fallback;
         std::string name;
+        std::string material;
         std::string method;
         std::string note;
         double value;
@@ -131,6 +139,7 @@ namespace
         double currentK;
         double targetK;
         double targetRadius;
+        std::string material;
 
         BendFaceRecord()
             : face(NULL), thickness(0.0), innerRadius(0.0), angleDeg(0.0),
@@ -210,10 +219,39 @@ namespace
         return buffer.str();
     }
 
+    std::string ReadAllTextW(const std::wstring& path)
+    {
+        FILE* file = NULL;
+        if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || file == NULL)
+        {
+            return std::string();
+        }
+
+        std::string text;
+        if (fseek(file, 0, SEEK_END) == 0)
+        {
+            const long size = ftell(file);
+            if (size > 0 && fseek(file, 0, SEEK_SET) == 0)
+            {
+                text.resize(static_cast<size_t>(size));
+                const size_t read = fread(&text[0], 1, static_cast<size_t>(size), file);
+                text.resize(read);
+            }
+        }
+        fclose(file);
+        return text;
+    }
+
     std::string DirectoryName2(const std::string& fullPath)
     {
         size_t slash = fullPath.find_last_of("\\/");
         return slash == std::string::npos ? std::string(".") : fullPath.substr(0, slash);
+    }
+
+    std::wstring DirectoryNameW2(const std::wstring& fullPath)
+    {
+        size_t slash = fullPath.find_last_of(L"\\/");
+        return slash == std::wstring::npos ? std::wstring(L".") : fullPath.substr(0, slash);
     }
 
     std::string CombinePath2(const std::string& left, const std::string& right)
@@ -230,6 +268,12 @@ namespace
     bool FileExists2(const std::string& path)
     {
         DWORD attrs = GetFileAttributesA(path.c_str());
+        return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    }
+
+    bool FileExistsW2(const std::wstring& path)
+    {
+        DWORD attrs = GetFileAttributesW(path.c_str());
         return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
     }
 
@@ -250,23 +294,50 @@ namespace
         return std::string(".");
     }
 
-    std::string FindBendFactorConfigPath()
+    std::wstring CombinePathW2(const std::wstring& left, const std::wstring& right)
     {
-        std::string moduleDir = ModuleDirectory2();
-        std::vector<std::string> paths;
-        paths.push_back(CombinePath2(moduleDir, std::string("..\\config\\") + BendFactorConfigFileName));
-        paths.push_back(CombinePath2(moduleDir, BendFactorConfigFileName));
-        paths.push_back(std::string("D:\\UG智辉钣金插件\\config\\") + BendFactorConfigFileName);
-        paths.push_back(std::string("D:\\UG智辉钣金插件\\application\\") + BendFactorConfigFileName);
-        for (size_t i = 0; i < paths.size(); ++i)
+        if (left.empty())
         {
-            if (FileExists2(paths[i]))
+            return right;
+        }
+
+        wchar_t tail = left[left.size() - 1];
+        return (tail == L'\\' || tail == L'/') ? left + right : left + L"\\" + right;
+    }
+
+    std::wstring ModuleDirectoryW2()
+    {
+        HMODULE selfModule = NULL;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&ModuleDirectoryW2), &selfModule))
+        {
+            wchar_t path[MAX_PATH] = { 0 };
+            DWORD length = GetModuleFileNameW(selfModule, path, MAX_PATH);
+            if (length > 0 && length < MAX_PATH)
             {
-                return paths[i];
+                return DirectoryNameW2(path);
             }
         }
 
-        return std::string();
+        return std::wstring(L".");
+    }
+
+    std::string FindBendFactorConfigPath()
+    {
+        std::string path = CombinePath2(CombinePath2(ModuleDirectory2(), "..\\config"), BendFactorConfigFileName);
+        return FileExists2(path) ? path : std::string();
+    }
+
+    std::wstring FindBendFactorConfigPathW()
+    {
+        std::wstring path = CombinePathW2(CombinePathW2(ModuleDirectoryW2(), L"..\\config"), L"PiLianZuanBanJin_bend_factor_rules.ini");
+        if (FileExistsW2(path))
+        {
+            return path;
+        }
+
+        path = L"D:\\UG智辉钣金插件\\config\\PiLianZuanBanJin_bend_factor_rules.ini";
+        return FileExistsW2(path) ? path : std::wstring();
     }
 
     bool ExtractJsonBool(const std::string& text, const std::string& name, bool defaultValue)
@@ -450,45 +521,127 @@ namespace
         return stream.str();
     }
 
+    bool UpdateBodyZThicknessAttribute(
+        NXOpen::Features::SheetMetal::SheetmetalManager* manager,
+        NXOpen::Body* body,
+        std::string* thicknessText)
+    {
+        if (manager == NULL || body == NULL)
+        {
+            return false;
+        }
+
+        double thickness = 0.0;
+        try
+        {
+            thickness = manager->GetBodyThickness(body);
+        }
+        catch (...)
+        {
+            return false;
+        }
+
+        if (thickness <= 0.0)
+        {
+            return false;
+        }
+
+        std::string text = FormatDouble(thickness, 1);
+        body->SetUserAttribute("Z", -1, text.c_str(), Update::OptionNow);
+        if (thicknessText != NULL)
+        {
+            *thicknessText = text;
+        }
+        return true;
+    }
+
+    std::string TrimRuleText(const std::string& value)
+    {
+        return zhihui_bend_rules_ini::Trim(value);
+    }
+
+    std::string ReadStringUserAttribute(NXOpen::NXObject* object, const char* title)
+    {
+        if (object == NULL || title == NULL || title[0] == '\0')
+        {
+            return std::string();
+        }
+
+        try
+        {
+            if (!object->HasUserAttribute(title, NXOpen::NXObject::AttributeType::AttributeTypeString, -1))
+            {
+                return std::string();
+            }
+
+            NXString value = object->GetStringAttribute(title);
+            const char* text = value.GetUTF8Text();
+            if (text != NULL && text[0] != '\0')
+            {
+                return TrimRuleText(text);
+            }
+
+            text = value.GetLocaleText();
+            if (text != NULL && text[0] != '\0')
+            {
+                return TrimRuleText(text);
+            }
+
+            text = value.GetText();
+            return text == NULL ? std::string() : TrimRuleText(text);
+        }
+        catch (...)
+        {
+            return std::string();
+        }
+    }
+
+    std::string ReadBodyMaterialText(NXOpen::Part* part, NXOpen::Body* body)
+    {
+        std::string material = ReadStringUserAttribute(body, "cailiao");
+        if (!material.empty())
+        {
+            return material;
+        }
+
+        material = ReadStringUserAttribute(body, "\xE6\x9D\x90\xE6\x96\x99");
+        if (!material.empty())
+        {
+            return material;
+        }
+
+        material = ReadStringUserAttribute(body, "\xE6\x9D\x90\xE8\xB4\xA8");
+        if (!material.empty())
+        {
+            return material;
+        }
+
+        material = ReadStringUserAttribute(part, "cailiao");
+        if (!material.empty())
+        {
+            return material;
+        }
+
+        material = ReadStringUserAttribute(part, "\xE6\x9D\x90\xE6\x96\x99");
+        if (!material.empty())
+        {
+            return material;
+        }
+
+        return ReadStringUserAttribute(part, "\xE6\x9D\x90\xE8\xB4\xA8");
+    }
+
     RuleConfig LoadRuleConfig()
     {
         RuleConfig config;
-        std::string path = FindBendFactorConfigPath();
-        std::string json = path.empty() ? std::string() : ReadAllText(path);
-        if (json.empty())
+        std::wstring path = FindBendFactorConfigPathW();
+        std::string ini = path.empty() ? std::string() : ReadAllTextW(path);
+        if (ini.empty())
         {
             return config;
         }
 
-        config.useAbsoluteLargeArc = ExtractJsonBool(json, "UseAbsoluteRadiusThreshold", true);
-        config.absoluteLargeArcRadius = ExtractJsonNumber(json, "AbsoluteRadiusThreshold", 7.0);
-        config.useRatioLargeArc = ExtractJsonBool(json, "UseRadiusThicknessRatio", false);
-        config.ratioLargeArc = ExtractJsonNumber(json, "RadiusThicknessRatioThreshold", 5.0);
-
-        std::vector<std::string> ruleObjects = ExtractObjectBodies(ExtractArrayBody(json, "Rules"));
-        for (size_t i = 0; i < ruleObjects.size(); ++i)
-        {
-            BendRule rule;
-            const std::string& item = ruleObjects[i];
-            rule.enabled = ExtractJsonBool(item, "Enabled", true);
-            rule.fallback = ExtractJsonBool(item, "IsFallback", false);
-            rule.name = ExtractJsonString(item, "RuleName", std::string());
-            rule.method = ExtractJsonString(item, "Method", "KFactor");
-            rule.note = ExtractJsonString(item, "Note", std::string());
-            rule.value = ExtractJsonNumber(item, "Value", 0.5);
-            rule.hasAngleMin = TryExtractJsonNumber(item, "AngleMinDeg", &rule.angleMin);
-            rule.hasAngleMax = TryExtractJsonNumber(item, "AngleMaxDeg", &rule.angleMax);
-            rule.hasThicknessMin = TryExtractJsonNumber(item, "ThicknessMin", &rule.thicknessMin);
-            rule.hasThicknessMax = TryExtractJsonNumber(item, "ThicknessMax", &rule.thicknessMax);
-            rule.hasRadiusMin = TryExtractJsonNumber(item, "InnerRadiusMin", &rule.radiusMin);
-            rule.hasRadiusMax = TryExtractJsonNumber(item, "InnerRadiusMax", &rule.radiusMax);
-            rule.hasRadiusOverride = TryExtractJsonNumber(item, "RadiusOverride", &rule.radiusOverride);
-            if (rule.enabled)
-            {
-                config.rules.push_back(rule);
-            }
-        }
-
+        zhihui_bend_rules_ini::LoadIntoRuleConfig<RuleConfig, BendRule>(ini, &config);
         return config;
     }
 
@@ -517,6 +670,101 @@ namespace
         return byAbsolute || byRatio;
     }
 
+    std::string NormalizeMaterialKey(const std::string& material)
+    {
+        std::string value = TrimRuleText(material);
+        for (size_t i = 0; i < value.size(); ++i)
+        {
+            if (value[i] >= 'a' && value[i] <= 'z')
+            {
+                value[i] = static_cast<char>(value[i] - 'a' + 'A');
+            }
+        }
+        return value;
+    }
+
+    bool IsUnspecifiedMaterial(const std::string& material)
+    {
+        std::string value = NormalizeMaterialKey(material);
+        return value.empty() ||
+            value.find("\xE6\x9C\xAA\xE6\x8C\x87\xE5\xAE\x9A") != std::string::npos ||
+            value.find("UNSPECIFIED") != std::string::npos;
+    }
+
+    bool IsSameMaterial(const std::string& left, const std::string& right)
+    {
+        if (IsUnspecifiedMaterial(left) || IsUnspecifiedMaterial(right))
+        {
+            return false;
+        }
+        return NormalizeMaterialKey(left) == NormalizeMaterialKey(right);
+    }
+
+    bool RuleMatchesBendShape(const BendRule& rule, const BendFaceRecord& record, bool largeArc)
+    {
+        bool pressEdgeRule = ContainsTextNoCase(rule.note, "[PressEdge]");
+        bool largeArcRule = ContainsTextNoCase(rule.note, "[LargeArc]");
+        bool smallArcRule = ContainsTextNoCase(rule.note, "[SmallArc]");
+        if (pressEdgeRule)
+        {
+            return false;
+        }
+        if (largeArc && !largeArcRule)
+        {
+            return false;
+        }
+        if (!largeArc && largeArcRule)
+        {
+            return false;
+        }
+        if (smallArcRule && largeArc)
+        {
+            return false;
+        }
+        return WithinRange(record.angleDeg, rule.hasAngleMin, rule.angleMin, rule.hasAngleMax, rule.angleMax) &&
+            WithinRange(record.thickness, rule.hasThicknessMin, rule.thicknessMin, rule.hasThicknessMax, rule.thicknessMax) &&
+            WithinRange(record.innerRadius, rule.hasRadiusMin, rule.radiusMin, rule.hasRadiusMax, rule.radiusMax);
+    }
+
+    const BendRule* MatchRuleByMaterialMode(const RuleConfig& config, const BendFaceRecord& record, bool useUnspecifiedMaterial, bool largeArc)
+    {
+        for (size_t i = 0; i < config.rules.size(); ++i)
+        {
+            const BendRule& rule = config.rules[i];
+            if (!rule.enabled || rule.fallback)
+            {
+                continue;
+            }
+
+            bool materialOk = useUnspecifiedMaterial ?
+                IsUnspecifiedMaterial(rule.material) :
+                IsSameMaterial(rule.material, record.material);
+            if (!materialOk)
+            {
+                continue;
+            }
+
+            if (RuleMatchesBendShape(rule, record, largeArc))
+            {
+                return &rule;
+            }
+        }
+        return NULL;
+    }
+
+    bool HasMaterialRules(const RuleConfig& config, const BendFaceRecord& record)
+    {
+        for (size_t i = 0; i < config.rules.size(); ++i)
+        {
+            const BendRule& rule = config.rules[i];
+            if (rule.enabled && !rule.fallback && IsSameMaterial(rule.material, record.material))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     const BendRule* MatchRule(const RuleConfig& config, const BendFaceRecord& record)
     {
         const BendRule* fallback = NULL;
@@ -524,45 +772,26 @@ namespace
         for (size_t i = 0; i < config.rules.size(); ++i)
         {
             const BendRule& rule = config.rules[i];
-            if (!rule.enabled)
-            {
-                continue;
-            }
-            if (rule.fallback)
+            if (rule.enabled && rule.fallback)
             {
                 fallback = &rule;
-                continue;
             }
-
-            bool pressEdgeRule = ContainsTextNoCase(rule.note, "[PressEdge]");
-            bool largeArcRule = ContainsTextNoCase(rule.note, "[LargeArc]");
-            bool smallArcRule = ContainsTextNoCase(rule.note, "[SmallArc]");
-            if (pressEdgeRule)
-            {
-                continue;
-            }
-            if (largeArc && !largeArcRule)
-            {
-                continue;
-            }
-            if (!largeArc && largeArcRule)
-            {
-                continue;
-            }
-            if (smallArcRule && largeArc)
-            {
-                continue;
-            }
-            if (!WithinRange(record.angleDeg, rule.hasAngleMin, rule.angleMin, rule.hasAngleMax, rule.angleMax) ||
-                !WithinRange(record.thickness, rule.hasThicknessMin, rule.thicknessMin, rule.hasThicknessMax, rule.thicknessMax) ||
-                !WithinRange(record.innerRadius, rule.hasRadiusMin, rule.radiusMin, rule.hasRadiusMax, rule.radiusMax))
-            {
-                continue;
-            }
-
-            return &rule;
         }
 
+        const BendRule* materialRule = MatchRuleByMaterialMode(config, record, false, largeArc);
+        if (materialRule != NULL)
+        {
+            return materialRule;
+        }
+
+        if (!HasMaterialRules(config, record))
+        {
+            const BendRule* unspecifiedRule = MatchRuleByMaterialMode(config, record, true, largeArc);
+            if (unspecifiedRule != NULL)
+            {
+                return unspecifiedRule;
+            }
+        }
         return fallback;
     }
 
@@ -851,6 +1080,7 @@ namespace
         std::map<tag_t, NXOpen::Features::Feature*> neutralFeatureByFace = BuildNeutralFactorFeatureByFace(body);
         std::map<tag_t, NXOpen::Features::Feature*> neutralFeaturesByTag;
         std::map<std::string, std::vector<NXOpen::Face*> > facesByRule;
+        const std::string bodyMaterial = ReadBodyMaterialText(part, body);
         int prepared = 0;
         for (size_t i = 0; i < innerBendFaces.size(); ++i)
         {
@@ -868,6 +1098,7 @@ namespace
             BendFaceRecord record;
             record.face = face;
             record.thickness = thickness;
+            record.material = bodyMaterial;
             try
             {
                 NXOpen::Features::SheetMetal::SheetmetalBendParameters parameters = manager->GetBendParameters(face);
@@ -1035,6 +1266,145 @@ namespace
         return false;
     }
 
+    bool HasMarkedFaceAttribute(NXOpen::Face* face)
+    {
+        if (face == NULL)
+        {
+            return false;
+        }
+
+        logical hasAttribute = false;
+        int error = UF_ATTR_has_user_attribute_with_title_and_type(
+            face->Tag(),
+            MarkedFaceAttributeTitle,
+            UF_ATTR_any,
+            UF_ATTR_NOT_ARRAY,
+            &hasAttribute);
+        return error == 0 && hasAttribute;
+    }
+
+    bool IsPlanarFace(NXOpen::Face* face)
+    {
+        if (face == NULL)
+        {
+            return false;
+        }
+
+        int type = 0;
+        double point[3] = { 0.0, 0.0, 0.0 };
+        double dir[3] = { 0.0, 0.0, 1.0 };
+        double box[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+        double radius = 0.0;
+        double radData = 0.0;
+        int normDir = 0;
+        return UF_MODL_ask_face_data(face->Tag(), &type, point, dir, box, &radius, &radData, &normDir) == 0 &&
+            type == UF_MODL_PLANAR_FACE;
+    }
+
+    double FaceBoxAreaScore(NXOpen::Face* face)
+    {
+        if (face == NULL)
+        {
+            return -1.0;
+        }
+
+        double box[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+        if (UF_MODL_ask_bounding_box(face->Tag(), box) != 0)
+        {
+            return -1.0;
+        }
+
+        std::vector<double> dims;
+        dims.push_back(std::fabs(box[3] - box[0]));
+        dims.push_back(std::fabs(box[4] - box[1]));
+        dims.push_back(std::fabs(box[5] - box[2]));
+        std::sort(dims.begin(), dims.end(), std::greater<double>());
+        return dims[0] * dims[1];
+    }
+
+    double FaceAreaScore(NXOpen::Face* face)
+    {
+        if (face == NULL)
+        {
+            return -1.0;
+        }
+
+        try
+        {
+            std::vector<IParameterizedSurface*> objects(1);
+            objects[0] = face;
+            MeasureFaces* measure = workPart->MeasureManager()->NewFaceProperties(NULL, NULL, 0.9999, objects);
+            if (measure == NULL)
+            {
+                return FaceBoxAreaScore(face);
+            }
+
+            double area = measure->Area();
+            return area > 0.0 ? area : FaceBoxAreaScore(face);
+        }
+        catch (...)
+        {
+            return FaceBoxAreaScore(face);
+        }
+    }
+
+    NXOpen::Face* FindMarkedAdjacentLargestPlanarFace(NXOpen::Body* body)
+    {
+        if (body == NULL)
+        {
+            return NULL;
+        }
+
+        NXOpen::Face* bestFace = NULL;
+        double bestArea = -1.0;
+        std::map<tag_t, bool> checkedFaces;
+        std::vector<NXOpen::Face*> faces = body->GetFaces();
+        for (size_t i = 0; i < faces.size(); ++i)
+        {
+            NXOpen::Face* markedFace = faces[i];
+            if (!HasMarkedFaceAttribute(markedFace))
+            {
+                continue;
+            }
+
+            std::vector<NXOpen::Edge*> edges = markedFace->GetEdges();
+            for (size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex)
+            {
+                if (edges[edgeIndex] == NULL)
+                {
+                    continue;
+                }
+
+                std::vector<NXOpen::Face*> adjacentFaces = edges[edgeIndex]->GetFaces();
+                for (size_t faceIndex = 0; faceIndex < adjacentFaces.size(); ++faceIndex)
+                {
+                    NXOpen::Face* adjacentFace = adjacentFaces[faceIndex];
+                    if (adjacentFace == NULL ||
+                        adjacentFace->Tag() == markedFace->Tag() ||
+                        checkedFaces[adjacentFace->Tag()])
+                    {
+                        continue;
+                    }
+
+                    checkedFaces[adjacentFace->Tag()] = true;
+                    if (!IsPlanarFace(adjacentFace))
+                    {
+                        continue;
+                    }
+
+                    double area = FaceAreaScore(adjacentFace);
+                    if (area > bestArea)
+                    {
+                        bestFace = adjacentFace;
+                        bestArea = area;
+                    }
+                }
+            }
+        }
+
+        return bestFace;
+    }
+
     NXOpen::Features::Feature* CreateDefaultFlatPattern(NXOpen::Face* face)
     {
         if (face == NULL)
@@ -1087,8 +1457,14 @@ SouDonZuanBanJin::SouDonZuanBanJin()
         // Initialize the NX Open C++ API environment
         SouDonZuanBanJin::theSession = NXOpen::Session::GetSession();
         SouDonZuanBanJin::theUI = UI::GetUI();
-        theDlxFileName = "SouDonZuanBanJin.dlx";
-        theDialog = SouDonZuanBanJin::theUI->CreateDialog(theDlxFileName);
+        const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(
+            IDR_ZH_DLX_SOUDONZUANBANJIN_DLX,
+            L"SouDonZuanBanJin.dlx");
+        if (dlxPath.empty())
+        {
+            throw std::runtime_error("Embedded DLX resource missing: SouDonZuanBanJin.dlx");
+        }
+        theDialog = SouDonZuanBanJin::theUI->CreateDialog(dlxPath.c_str());
         // Registration of callback functions
         theDialog->AddApplyHandler(make_callback(this, &SouDonZuanBanJin::apply_cb));
         theDialog->AddOkHandler(make_callback(this, &SouDonZuanBanJin::ok_cb));
@@ -1214,10 +1590,6 @@ void ShowLicenseDeniedMessage(const wchar_t* title, const wchar_t* message)
 
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     HMODULE module = LoadProtectedLicenseGate();
     if (module == NULL)
@@ -1289,49 +1661,1202 @@ namespace
         return std::string(".");
     }
 
-    std::string FindSettingsExePath()
+    std::string LocalTrimCopy(const std::string& value)
     {
-        std::string moduleDir = ModuleDirectory();
-        std::vector<std::string> paths;
-        paths.push_back(CombinePath(moduleDir, "PiLianZuanBanJinSettingsUI.exe"));
-        paths.push_back(CombinePath(moduleDir, "..\\application\\PiLianZuanBanJinSettingsUI.exe"));
-        paths.push_back("D:\\UG智辉钣金插件\\application\\PiLianZuanBanJinSettingsUI.exe");
-        for (size_t i = 0; i < paths.size(); ++i)
+        return zhihui_bend_rules_ini::Trim(value);
+    }
+
+    std::string LocalNormalizeUtf8Message(const std::string& value)
+    {
+        return value;
+    }
+
+    NXString U8Text(const char* text)
+    {
+        return NXString(text == NULL ? "" : text, NXString::UTF8);
+    }
+
+    NXString U8Text(const std::string& text)
+    {
+        return NXString(text, NXString::UTF8);
+    }
+
+    std::string UiTextToUtf8(const NXString& value)
+    {
+        const char* text = value.GetUTF8Text();
+        if (text != NULL && text[0] != '\0')
         {
-            if (FileExists(paths[i]))
+            return LocalNormalizeUtf8Message(text);
+        }
+
+        text = value.GetLocaleText();
+        if (text != NULL && text[0] != '\0')
+        {
+            return LocalNormalizeUtf8Message(text);
+        }
+
+        text = value.GetText();
+        return text == NULL ? std::string() : LocalNormalizeUtf8Message(text);
+    }
+
+    void ShowRulesMessage(NXOpen::UI* ui, NXOpen::NXMessageBox::DialogType type, const std::string& message)
+    {
+        if (ui != NULL)
+        {
+            ui->NXMessageBox()->Show(U8Text("折弯系数表"), type, U8Text(message));
+        }
+    }
+
+    void TrySetBlockString(NXOpen::BlockStyler::UIBlock* block, const char* propertyName, const char* value)
+    {
+        if (block == NULL)
+        {
+            return;
+        }
+
+        NXOpen::BlockStyler::PropertyList* props = NULL;
+        try
+        {
+            props = block->GetProperties();
+            props->SetString(propertyName, value == NULL ? "" : value);
+        }
+        catch (...)
+        {
+        }
+        if (props != NULL)
+        {
+            delete props;
+        }
+    }
+
+    void TrySetBlockVisible(NXOpen::BlockStyler::UIBlock* block, bool visible)
+    {
+        if (block == NULL)
+        {
+            return;
+        }
+
+        const char* names[] = { "Show", "Visibility" };
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+        {
+            NXOpen::BlockStyler::PropertyList* props = NULL;
+            try
             {
-                return paths[i];
+                props = block->GetProperties();
+                props->SetLogical(names[i], visible);
+            }
+            catch (...)
+            {
+            }
+            if (props != NULL)
+            {
+                delete props;
+            }
+        }
+    }
+
+    void SetNodeColumnText(NXOpen::BlockStyler::Node* node, int columnID, const std::string& text)
+    {
+        if (node != NULL)
+        {
+            node->SetColumnDisplayText(columnID, U8Text(text.empty() ? std::string(" ") : text));
+        }
+    }
+
+    typedef zhihui_bend_rules_ini::CoefficientRow CoefficientRow;
+    typedef zhihui_bend_rules_ini::ConditionRow ConditionRuleRow;
+
+    std::vector<CoefficientRow> LoadCoefficientRowsForTable()
+    {
+        std::wstring path = FindBendFactorConfigPathW();
+        std::string ini = path.empty() ? std::string() : ReadAllTextW(path);
+        return ini.empty() ? std::vector<CoefficientRow>() : zhihui_bend_rules_ini::LoadCoefficientRowsFromText(ini);
+    }
+
+    std::vector<ConditionRuleRow> LoadConditionRowsForTable()
+    {
+        std::wstring path = FindBendFactorConfigPathW();
+        std::string ini = path.empty() ? std::string() : ReadAllTextW(path);
+        return ini.empty() ? zhihui_bend_rules_ini::DefaultConditionRows() : zhihui_bend_rules_ini::LoadConditionRowsFromText(ini);
+    }
+
+    std::string CoefficientNumberText(double value)
+    {
+        return FormatDouble(value, 2);
+    }
+
+    std::string OptionalCoefficientNumber(bool hasValue, double value)
+    {
+        return hasValue ? CoefficientNumberText(value) : std::string();
+    }
+
+    bool ParseOptionalTextNumber(const std::string& text, bool* hasValue, double* value)
+    {
+            std::string trimmed = LocalTrimCopy(text);
+        if (trimmed.empty())
+        {
+            if (hasValue != NULL) *hasValue = false;
+            if (value != NULL) *value = 0.0;
+            return true;
+        }
+
+        char* end = NULL;
+        double parsed = std::strtod(trimmed.c_str(), &end);
+        if (end == trimmed.c_str())
+        {
+            return false;
+        }
+
+        if (hasValue != NULL) *hasValue = true;
+        if (value != NULL) *value = parsed;
+        return true;
+    }
+
+    void FillDefaultCoefficientValues(CoefficientRow* row)
+    {
+        if (row == NULL)
+        {
+            return;
+        }
+        if (!row->hasQ1) { row->hasQ1 = true; row->q1 = 0.50; }
+        if (!row->hasQ2) { row->hasQ2 = true; row->q2 = 0.50; }
+        if (!row->hasK1) { row->hasK1 = true; row->k1 = 0.35; }
+        if (!row->hasK2) { row->hasK2 = true; row->k2 = 0.24; }
+        if (!row->hasK3) { row->hasK3 = true; row->k3 = 0.50; }
+        if (row->f1.empty()) row->f1 = "f1";
+        if (row->f2.empty()) row->f2 = "f1";
+    }
+
+    std::string WidePathToUtf8Local(const std::wstring& text)
+    {
+        if (text.empty())
+        {
+            return std::string();
+        }
+
+        int length = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, NULL, 0, NULL, NULL);
+        if (length <= 0)
+        {
+            return std::string();
+        }
+
+        std::string utf8(static_cast<size_t>(length), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &utf8[0], length, NULL, NULL);
+        if (!utf8.empty() && utf8[utf8.size() - 1] == '\0')
+        {
+            utf8.resize(utf8.size() - 1);
+        }
+        return utf8;
+    }
+
+    std::wstring EnsureCsvExtensionW(const std::wstring& path)
+    {
+        if (path.empty())
+        {
+            return path;
+        }
+
+        const size_t slash = path.find_last_of(L"\\/");
+        const size_t dot = path.find_last_of(L'.');
+        if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash))
+        {
+            return path;
+        }
+        return path + L".csv";
+    }
+
+    std::wstring PromptCoefficientCsvPathW(bool save)
+    {
+        wchar_t fileName[MAX_PATH] = L"PiLianZuanBanJin_bend_factor_rules.csv";
+        wchar_t initialDir[MAX_PATH] = L"D:\\UG智辉钣金插件\\config";
+        OPENFILENAMEW ofn;
+        ZeroMemory(&ofn, sizeof(ofn));
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = NULL;
+        ofn.lpstrFilter = L"CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0\0";
+        ofn.lpstrFile = fileName;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.lpstrInitialDir = initialDir;
+        ofn.lpstrDefExt = L"csv";
+        ofn.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+        ofn.lpstrTitle = save ? L"选择导出位置" : L"选择导入文件";
+
+        BOOL ok = save ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn);
+        if (!ok)
+        {
+            return std::wstring();
+        }
+
+        return save ? EnsureCsvExtensionW(fileName) : std::wstring(fileName);
+    }
+
+    std::string CsvEscapeLocal(const std::string& value)
+    {
+        const bool quote = value.find(',') != std::string::npos ||
+            value.find('"') != std::string::npos ||
+            value.find('\n') != std::string::npos ||
+            value.find('\r') != std::string::npos;
+        if (!quote)
+        {
+            return value;
+        }
+
+        std::string result = "\"";
+        for (size_t i = 0; i < value.size(); ++i)
+        {
+            result += value[i] == '"' ? std::string("\"\"") : std::string(1, value[i]);
+        }
+        result += "\"";
+        return result;
+    }
+
+    std::vector<std::string> SplitCsvLineLocal(const std::string& line)
+    {
+        std::vector<std::string> cells;
+        std::string cell;
+        bool quoted = false;
+        for (size_t i = 0; i < line.size(); ++i)
+        {
+            char c = line[i];
+            if (quoted)
+            {
+                if (c == '"' && i + 1 < line.size() && line[i + 1] == '"')
+                {
+                    cell += '"';
+                    ++i;
+                }
+                else if (c == '"')
+                {
+                    quoted = false;
+                }
+                else
+                {
+                    cell += c;
+                }
+            }
+            else if (c == '"')
+            {
+                quoted = true;
+            }
+            else if (c == ',')
+            {
+                cells.push_back(cell);
+                cell.clear();
+            }
+            else
+            {
+                cell += c;
+            }
+        }
+        cells.push_back(cell);
+        return cells;
+    }
+
+    std::string NormalizeCoefficientCsvHeaderLocal(const std::string& text)
+    {
+        std::string value = LocalTrimCopy(LocalNormalizeUtf8Message(text));
+        if (value == "材料") return "Material";
+        if (value == "厚度") return "Thickness";
+        if (value == "扣除1") return "Q1";
+        if (value == "扣除2") return "Q2";
+        if (value == "扣除3") return "Q3";
+        if (value == "K因子1") return "K1";
+        if (value == "K因子2") return "K2";
+        if (value == "K因子3") return "K3";
+        if (value == "A1" || value == "A2" || value == "A3") return value;
+        return value;
+    }
+
+    void AssignCoefficientNumberLocal(CoefficientRow* row, const std::string& key, const std::string& text)
+    {
+        if (row == NULL)
+        {
+            return;
+        }
+
+        bool has = false;
+        double value = 0.0;
+        if (!ParseOptionalTextNumber(text, &has, &value))
+        {
+            return;
+        }
+
+        if (key == "Q1") { row->hasQ1 = has; row->q1 = value; }
+        else if (key == "Q2") { row->hasQ2 = has; row->q2 = value; }
+        else if (key == "Q3") { row->hasQ3 = has; row->q3 = value; }
+        else if (key == "K1") { row->hasK1 = has; row->k1 = value; }
+        else if (key == "K2") { row->hasK2 = has; row->k2 = value; }
+        else if (key == "K3") { row->hasK3 = has; row->k3 = value; }
+        else if (key == "A1") { row->hasA1 = has; row->a1 = value; }
+        else if (key == "A2") { row->hasA2 = has; row->a2 = value; }
+        else if (key == "A3") { row->hasA3 = has; row->a3 = value; }
+    }
+
+    bool WriteAllTextW(const std::wstring& path, const std::string& text, std::string* error)
+    {
+        FILE* file = NULL;
+        if (_wfopen_s(&file, path.c_str(), L"wb") != 0 || file == NULL)
+        {
+            if (error != NULL)
+            {
+                *error = "无法写入规则表。";
+            }
+            return false;
+        }
+
+        const size_t written = fwrite(text.data(), 1, text.size(), file);
+        fclose(file);
+        if (written != text.size())
+        {
+            if (error != NULL)
+            {
+                *error = "规则表写入不完整。";
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool SaveCoefficientRowsToCsvW(const std::vector<CoefficientRow>& rows, const std::wstring& path, std::string* error)
+    {
+        std::ostringstream file;
+        file << "\xEF\xBB\xBF";
+        file << "材料,厚度,扣除1,扣除2,扣除3,K因子1,K因子2,K因子3,A1,A2,A3\n";
+        for (size_t i = 0; i < rows.size(); ++i)
+        {
+            const CoefficientRow& row = rows[i];
+            file << CsvEscapeLocal(row.material) << ",";
+            file << CoefficientNumberText(row.thickness) << ",";
+            file << OptionalCoefficientNumber(row.hasQ1, row.q1) << ",";
+            file << OptionalCoefficientNumber(row.hasQ2, row.q2) << ",";
+            file << OptionalCoefficientNumber(row.hasQ3, row.q3) << ",";
+            file << OptionalCoefficientNumber(row.hasK1, row.k1) << ",";
+            file << OptionalCoefficientNumber(row.hasK2, row.k2) << ",";
+            file << OptionalCoefficientNumber(row.hasK3, row.k3) << ",";
+            file << OptionalCoefficientNumber(row.hasA1, row.a1) << ",";
+            file << OptionalCoefficientNumber(row.hasA2, row.a2) << ",";
+            file << OptionalCoefficientNumber(row.hasA3, row.a3) << "\n";
+        }
+
+        std::string writeError;
+        if (!WriteAllTextW(path, file.str(), &writeError))
+        {
+            if (error != NULL)
+            {
+                *error = "无法导出EXCEL数据：" + WidePathToUtf8Local(path);
+                if (!writeError.empty()) *error += "\n" + writeError;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool LoadCoefficientRowsFromCsvW(const std::wstring& path, std::vector<CoefficientRow>* rows, std::string* error)
+    {
+        if (rows == NULL)
+        {
+            return false;
+        }
+
+        std::string text = ReadAllTextW(path);
+        if (text.empty())
+        {
+            if (error != NULL) *error = "无法导入EXCEL数据：" + WidePathToUtf8Local(path);
+            return false;
+        }
+
+        std::stringstream stream(zhihui_bend_rules_ini::RemoveUtf8Bom(LocalNormalizeUtf8Message(text)));
+        std::string line;
+        if (!std::getline(stream, line))
+        {
+            if (error != NULL) *error = "EXCEL数据为空：" + WidePathToUtf8Local(path);
+            return false;
+        }
+        if (!line.empty() && line[line.size() - 1] == '\r') line.erase(line.size() - 1);
+
+        std::vector<std::string> headers = SplitCsvLineLocal(line);
+        for (size_t i = 0; i < headers.size(); ++i)
+        {
+            headers[i] = NormalizeCoefficientCsvHeaderLocal(headers[i]);
+        }
+
+        std::vector<CoefficientRow> imported;
+        size_t lineNumber = 1;
+        while (std::getline(stream, line))
+        {
+            ++lineNumber;
+            if (!line.empty() && line[line.size() - 1] == '\r') line.erase(line.size() - 1);
+            if (LocalTrimCopy(line).empty())
+            {
+                continue;
+            }
+
+            std::vector<std::string> cells = SplitCsvLineLocal(line);
+            CoefficientRow row;
+            row.material = "材质 <未指定>";
+            bool hasThickness = false;
+            for (size_t i = 0; i < headers.size() && i < cells.size(); ++i)
+            {
+                std::string key = headers[i];
+                std::string value = LocalTrimCopy(LocalNormalizeUtf8Message(cells[i]));
+                if (key == "Material")
+                {
+                    row.material = value.empty() ? std::string("材质 <未指定>") : value;
+                }
+                else if (key == "Thickness")
+                {
+                    bool has = false;
+                    double thickness = 0.0;
+                    if (ParseOptionalTextNumber(value, &has, &thickness) && has && thickness > 0.0)
+                    {
+                        row.thickness = thickness;
+                        hasThickness = true;
+                    }
+                }
+                else
+                {
+                    AssignCoefficientNumberLocal(&row, key, value);
+                }
+            }
+
+            if (!hasThickness)
+            {
+                if (error != NULL) *error = "导入失败：第 " + std::to_string(lineNumber) + " 行厚度为空或无效。";
+                return false;
+            }
+            imported.push_back(row);
+        }
+
+        if (imported.empty())
+        {
+            if (error != NULL) *error = "导入失败：没有读取到有效厚度数据。";
+            return false;
+        }
+
+        *rows = imported;
+        return true;
+    }
+
+    bool SaveCoefficientRowsForTable(const RuleConfig& settings, const std::vector<CoefficientRow>& rows,
+        const std::vector<ConditionRuleRow>& conditionRows, std::string* error)
+    {
+        char tempDir[MAX_PATH] = { 0 };
+        DWORD length = GetTempPathA(MAX_PATH, tempDir);
+        std::string tempPath = length > 0 && length < MAX_PATH ?
+            CombinePath(tempDir, "zhihui_pilian_rules_table.tmp") :
+            std::string("C:\\zhihui_pilian_rules_table.tmp");
+
+        std::string tempError;
+        if (!zhihui_bend_rules_ini::SaveCoefficientRowsToIniFile<RuleConfig>(settings, rows, conditionRows, tempPath, &tempError))
+        {
+            if (error != NULL) *error = tempError;
+            return false;
+        }
+
+        std::string text = ReadAllText(tempPath);
+        DeleteFileA(tempPath.c_str());
+        if (text.empty())
+        {
+            if (error != NULL) *error = "临时规则表生成失败。";
+            return false;
+        }
+
+        std::wstring target = FindBendFactorConfigPathW();
+        if (target.empty())
+        {
+            target = L"D:\\UG智辉钣金插件\\config\\PiLianZuanBanJin_bend_factor_rules.ini";
+        }
+        return WriteAllTextW(target, text, error);
+    }
+
+    class DirectRulesTableDialog
+    {
+    public:
+        enum Columns
+        {
+            ColumnMaterial = 0,
+            ColumnThickness = 1,
+            ColumnQ1 = 2,
+            ColumnQ2 = 3,
+            ColumnQ3 = 4,
+            ColumnK1 = 5,
+            ColumnK2 = 6,
+            ColumnK3 = 7,
+            ColumnA1 = 8,
+            ColumnA2 = 9,
+            ColumnA3 = 10
+        };
+
+        explicit DirectRulesTableDialog(NXOpen::UI* ui)
+            : ui_(ui), dialog_(NULL), tree_(NULL), rulePageEnum_(NULL), largeArcEnum_(NULL),
+              smallArcEnum_(NULL), materialPageEnum_(NULL), multiBendMinRadiusDouble_(NULL),
+              addButton_(NULL), saveButton_(NULL), importExcelButton_(NULL), exportExcelButton_(NULL),
+              deleteButton_(NULL), selectedConditionIndex_(0), selectedNode_(NULL), columnsInserted_(false)
+        {
+            if (ui_ != NULL)
+            {
+                const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(
+                    IDR_ZH_DLX_PILIANZUANBANJIN_RULES_TABLE_DLX,
+                    L"PiLianZuanBanJinRulesTable.dlx");
+                if (dlxPath.empty())
+                {
+                    throw std::runtime_error("Embedded DLX resource missing: PiLianZuanBanJinRulesTable.dlx");
+                }
+                dialog_ = ui_->CreateDialog(dlxPath.c_str());
+                dialog_->AddInitializeHandler(make_callback(this, &DirectRulesTableDialog::initialize_cb));
+                dialog_->AddDialogShownHandler(make_callback(this, &DirectRulesTableDialog::dialogShown_cb));
+                dialog_->AddUpdateHandler(make_callback(this, &DirectRulesTableDialog::update_cb));
+                dialog_->AddApplyHandler(make_callback(this, &DirectRulesTableDialog::apply_cb));
+                dialog_->AddOkHandler(make_callback(this, &DirectRulesTableDialog::ok_cb));
             }
         }
 
-        return std::string();
-    }
+        ~DirectRulesTableDialog()
+        {
+            if (dialog_ != NULL)
+            {
+                delete dialog_;
+                dialog_ = NULL;
+            }
+        }
+
+        void Show()
+        {
+            if (dialog_ != NULL)
+            {
+                dialog_->Launch();
+            }
+        }
+
+        void initialize_cb()
+        {
+            tree_ = dynamic_cast<NXOpen::BlockStyler::Tree*>(dialog_->TopBlock()->FindBlock("tree_control0"));
+            rulePageEnum_ = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(dialog_->TopBlock()->FindBlock("rulePageEnum"));
+            largeArcEnum_ = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(dialog_->TopBlock()->FindBlock("largeArcEnum"));
+            smallArcEnum_ = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(dialog_->TopBlock()->FindBlock("smallArcEnum"));
+            materialPageEnum_ = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(dialog_->TopBlock()->FindBlock("materialPageEnum"));
+            multiBendMinRadiusDouble_ = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(dialog_->TopBlock()->FindBlock("multiBendMinDiameterDouble"));
+            addButton_ = dynamic_cast<NXOpen::BlockStyler::UIBlock*>(dialog_->TopBlock()->FindBlock("addCrossSelectionNodeButton"));
+            saveButton_ = dynamic_cast<NXOpen::BlockStyler::UIBlock*>(dialog_->TopBlock()->FindBlock("addNodeButton"));
+            importExcelButton_ = dynamic_cast<NXOpen::BlockStyler::UIBlock*>(dialog_->TopBlock()->FindBlock("importExcelButton"));
+            exportExcelButton_ = dynamic_cast<NXOpen::BlockStyler::UIBlock*>(dialog_->TopBlock()->FindBlock("exportExcelButton"));
+            deleteButton_ = dynamic_cast<NXOpen::BlockStyler::UIBlock*>(dialog_->TopBlock()->FindBlock("deleteNodeButton"));
+
+            settings_ = LoadRuleConfig();
+            rows_ = LoadCoefficientRowsForTable();
+            conditionRows_ = LoadConditionRowsForTable();
+            LocalizeAndHideUnusedBlocks();
+            RefreshRulePages();
+            RefreshMaterialPages();
+            SyncMultiBendRadiusControl();
+
+            if (tree_ != NULL)
+            {
+                tree_->SetOnSelectHandler(make_callback(this, &DirectRulesTableDialog::OnSelectCallback));
+                tree_->SetOnBeginLabelEditHandler(make_callback(this, &DirectRulesTableDialog::OnBeginLabelEditCallback));
+                tree_->SetOnEndLabelEditHandler(make_callback(this, &DirectRulesTableDialog::OnEndLabelEditCallback));
+            }
+        }
+
+        void dialogShown_cb()
+        {
+            if (tree_ != NULL && !columnsInserted_)
+            {
+                tree_->InsertColumn(ColumnMaterial, U8Text("材料"), 110);
+                tree_->InsertColumn(ColumnThickness, U8Text("厚度"), 70);
+                tree_->InsertColumn(ColumnQ1, U8Text("扣除1"), 70);
+                tree_->InsertColumn(ColumnQ2, U8Text("扣除2"), 70);
+                tree_->InsertColumn(ColumnQ3, U8Text("扣除3"), 70);
+                tree_->InsertColumn(ColumnK1, U8Text("K因子1"), 70);
+                tree_->InsertColumn(ColumnK2, U8Text("K因子2"), 70);
+                tree_->InsertColumn(ColumnK3, U8Text("K因子3"), 70);
+                tree_->InsertColumn(ColumnA1, U8Text("A1"), 60);
+                tree_->InsertColumn(ColumnA2, U8Text("A2"), 60);
+                tree_->InsertColumn(ColumnA3, U8Text("A3"), 60);
+                for (int i = ColumnMaterial; i <= ColumnA3; ++i)
+                {
+                    tree_->SetColumnResizePolicy(i, NXOpen::BlockStyler::Tree::ColumnResizePolicyConstantWidth);
+                }
+                columnsInserted_ = true;
+            }
+            RebuildTree();
+        }
+
+        int update_cb(NXOpen::BlockStyler::UIBlock* block)
+        {
+            if (block == addButton_)
+            {
+                AddRow();
+            }
+            else if (block == saveButton_)
+            {
+                Save();
+            }
+            else if (block == materialPageEnum_)
+            {
+                selectedMaterialPage_ = UiTextToUtf8(materialPageEnum_->ValueAsString());
+                RebuildTree();
+            }
+            else if (block == rulePageEnum_)
+            {
+                selectedRulePage_ = UiTextToUtf8(rulePageEnum_->ValueAsString());
+                SelectConditionByRulePage();
+                RefreshArcEnums();
+            }
+            else if (block == smallArcEnum_)
+            {
+                if (selectedConditionIndex_ < conditionRows_.size())
+                {
+                    conditionRows_[selectedConditionIndex_].smallArcCode = CoefficientCodeFromDisplay(UiTextToUtf8(smallArcEnum_->ValueAsString()));
+                }
+            }
+            else if (block == largeArcEnum_)
+            {
+                if (selectedConditionIndex_ < conditionRows_.size())
+                {
+                    conditionRows_[selectedConditionIndex_].largeArcCode = CoefficientCodeFromDisplay(UiTextToUtf8(largeArcEnum_->ValueAsString()));
+                }
+            }
+            else if (block == deleteButton_)
+            {
+                DeleteSelectedRow();
+            }
+            else if (block == importExcelButton_)
+            {
+                ImportExcelData();
+            }
+            else if (block == exportExcelButton_)
+            {
+                ExportExcelData();
+            }
+            return 0;
+        }
+
+        int apply_cb() { return Save() ? 0 : 1; }
+        int ok_cb() { return Save() ? 0 : 1; }
+
+        void OnSelectCallback(NXOpen::BlockStyler::Tree*, NXOpen::BlockStyler::Node* node, int, bool selected)
+        {
+            selectedNode_ = selected ? node : NULL;
+        }
+
+        NXOpen::BlockStyler::Tree::BeginLabelEditState OnBeginLabelEditCallback(
+            NXOpen::BlockStyler::Tree*, NXOpen::BlockStyler::Node* node, int columnID)
+        {
+            return rowNodeToIndex_.find(node) != rowNodeToIndex_.end() && columnID >= ColumnMaterial && columnID <= ColumnA3 ?
+                NXOpen::BlockStyler::Tree::BeginLabelEditStateAllow :
+                NXOpen::BlockStyler::Tree::BeginLabelEditStateDisallow;
+        }
+
+        NXOpen::BlockStyler::Tree::EndLabelEditState OnEndLabelEditCallback(
+            NXOpen::BlockStyler::Tree*, NXOpen::BlockStyler::Node* node, int columnID, NXString editedText)
+        {
+            size_t index = 0;
+            if (!IndexForNode(node, &index) || index >= rows_.size())
+            {
+                return NXOpen::BlockStyler::Tree::EndLabelEditStateRejectText;
+            }
+            if (!ApplyCell(rows_[index], columnID, UiTextToUtf8(editedText)))
+            {
+                return NXOpen::BlockStyler::Tree::EndLabelEditStateRejectText;
+            }
+            FillNode(node, rows_[index]);
+            RefreshMaterialPages();
+            return NXOpen::BlockStyler::Tree::EndLabelEditStateAcceptText;
+        }
+
+    private:
+        NXOpen::UI* ui_;
+        NXOpen::BlockStyler::BlockDialog* dialog_;
+        NXOpen::BlockStyler::Tree* tree_;
+        NXOpen::BlockStyler::Enumeration* rulePageEnum_;
+        NXOpen::BlockStyler::Enumeration* largeArcEnum_;
+        NXOpen::BlockStyler::Enumeration* smallArcEnum_;
+        NXOpen::BlockStyler::Enumeration* materialPageEnum_;
+        NXOpen::BlockStyler::DoubleBlock* multiBendMinRadiusDouble_;
+        NXOpen::BlockStyler::UIBlock* addButton_;
+        NXOpen::BlockStyler::UIBlock* saveButton_;
+        NXOpen::BlockStyler::UIBlock* importExcelButton_;
+        NXOpen::BlockStyler::UIBlock* exportExcelButton_;
+        NXOpen::BlockStyler::UIBlock* deleteButton_;
+        RuleConfig settings_;
+        std::vector<CoefficientRow> rows_;
+        std::vector<ConditionRuleRow> conditionRows_;
+        std::vector<std::string> rulePages_;
+        std::string selectedRulePage_;
+        size_t selectedConditionIndex_;
+        std::vector<std::string> materialPages_;
+        std::string selectedMaterialPage_;
+        std::map<NXOpen::BlockStyler::Node*, size_t> rowNodeToIndex_;
+        std::vector<NXOpen::BlockStyler::Node*> allNodes_;
+        NXOpen::BlockStyler::Node* selectedNode_;
+        bool columnsInserted_;
+
+        void LocalizeAndHideUnusedBlocks()
+        {
+            TrySetBlockString(dialog_->TopBlock(), "Label", "折弯系数表");
+            TrySetBlockString(dialog_->TopBlock(), "LabelString", "折弯系数表");
+            TrySetBlockString(dialog_->TopBlock(), "Title", "折弯系数表");
+            TrySetBlockString(dynamic_cast<NXOpen::BlockStyler::UIBlock*>(dialog_->TopBlock()->FindBlock("nodeDataGroup")), "Label", "选择规则");
+            TrySetBlockString(dynamic_cast<NXOpen::BlockStyler::UIBlock*>(dialog_->TopBlock()->FindBlock("group0")), "Label", "折弯系数表");
+            TrySetBlockString(dynamic_cast<NXOpen::BlockStyler::UIBlock*>(dialog_->TopBlock()->FindBlock("addDeleteNodeGroup")), "Label", "保存");
+            TrySetBlockString(rulePageEnum_, "Label", "选择规则");
+            TrySetBlockString(largeArcEnum_, "Label", "多刀折圆");
+            TrySetBlockString(smallArcEnum_, "Label", "普通折弯");
+            TrySetBlockString(multiBendMinRadiusDouble_, "Label", "多刀折圆最小半径");
+            TrySetBlockString(materialPageEnum_, "Label", "材料分页");
+            TrySetBlockString(addButton_, "Label", "新增厚度");
+            TrySetBlockString(saveButton_, "Label", "保存");
+            TrySetBlockString(importExcelButton_, "Label", "导入EXCEL数据");
+            TrySetBlockString(exportExcelButton_, "Label", "导出EXCEL数据");
+            TrySetBlockString(deleteButton_, "Label", "删除厚度");
+
+            const char* hideBlockIds[] = {
+                "selection0", "conditionTree", "autoTapHoleToggle", "autoPemHoleToggle", "autoCounterboreHoleToggle",
+                "autoRecognitionGroup", "stateIconGroup", "NodeEditGroup", "menuGroup", "dragDropGroup", "defaultActionGroup",
+                "redrawGroup", "listingWindowGroup", "instructions", "nodeString", "stateIconOptions",
+                "nodeToolTip", "nodeEditOptions", "showMenuToggle", "disallowDragToggle", "dropOptions",
+                "defaultActionToggle", "redrawInstruction", "redrawToggle", "listingWindowToggle"
+            };
+            for (size_t i = 0; i < sizeof(hideBlockIds) / sizeof(hideBlockIds[0]); ++i)
+            {
+                TrySetBlockVisible(dynamic_cast<NXOpen::BlockStyler::UIBlock*>(dialog_->TopBlock()->FindBlock(hideBlockIds[i])), false);
+            }
+            TrySetBlockVisible(rulePageEnum_, true);
+            TrySetBlockVisible(largeArcEnum_, true);
+            TrySetBlockVisible(smallArcEnum_, true);
+            TrySetBlockVisible(multiBendMinRadiusDouble_, true);
+            TrySetBlockVisible(materialPageEnum_, true);
+            TrySetBlockVisible(deleteButton_, false);
+        }
+
+        void SyncMultiBendRadiusControl()
+        {
+            if (multiBendMinRadiusDouble_ != NULL)
+            {
+                multiBendMinRadiusDouble_->SetValue(std::max(0.0, settings_.absoluteLargeArcRadius));
+            }
+        }
+
+        void ReadMultiBendRadiusControl()
+        {
+            if (multiBendMinRadiusDouble_ == NULL)
+            {
+                return;
+            }
+            NXOpen::BlockStyler::PropertyList* props = NULL;
+            try
+            {
+                props = multiBendMinRadiusDouble_->GetProperties();
+                double radius = props->GetDouble("Value");
+                settings_.absoluteLargeArcRadius = std::max(0.0, radius);
+                settings_.useAbsoluteLargeArc = settings_.absoluteLargeArcRadius > 0.0;
+            }
+            catch (...)
+            {
+            }
+            if (props != NULL)
+            {
+                delete props;
+            }
+        }
+
+        std::string RulePageText(const ConditionRuleRow& row) const
+        {
+            std::string label = LocalTrimCopy(row.angleLabel);
+            if (label == "90") return "90度角折弯";
+            if (label == "(0,90)") return "小于90度折弯";
+            if (label == "(90,180)") return "大于90度折弯";
+            if (label == "(180,360)") return "压死边";
+            return label.empty() ? std::string("未命名规则") : label;
+        }
+
+        void SelectConditionByRulePage()
+        {
+            for (size_t i = 0; i < conditionRows_.size(); ++i)
+            {
+                if (RulePageText(conditionRows_[i]) == selectedRulePage_)
+                {
+                    selectedConditionIndex_ = i;
+                    return;
+                }
+            }
+            selectedConditionIndex_ = 0;
+            if (!conditionRows_.empty())
+            {
+                selectedRulePage_ = RulePageText(conditionRows_[0]);
+            }
+        }
+
+        void RefreshRulePages()
+        {
+            rulePages_.clear();
+            for (size_t i = 0; i < conditionRows_.size(); ++i)
+            {
+                rulePages_.push_back(RulePageText(conditionRows_[i]));
+            }
+            if (selectedRulePage_.empty())
+            {
+                selectedRulePage_ = rulePages_.empty() ? std::string() : rulePages_[0];
+            }
+            SelectConditionByRulePage();
+            if (rulePageEnum_ != NULL)
+            {
+                std::vector<NXString> members;
+                for (size_t i = 0; i < rulePages_.size(); ++i)
+                {
+                    members.push_back(U8Text(rulePages_[i]));
+                }
+                rulePageEnum_->SetEnumMembers(members);
+                if (!selectedRulePage_.empty())
+                {
+                    rulePageEnum_->SetValueAsString(U8Text(selectedRulePage_));
+                }
+            }
+            RefreshArcEnums();
+        }
+
+        std::string CoefficientDisplayName(const std::string& code) const
+        {
+            if (code == "Q1") return "扣除1";
+            if (code == "Q2") return "扣除2";
+            if (code == "Q3") return "扣除3";
+            if (code == "K1") return "K因子1";
+            if (code == "K2") return "K因子2";
+            if (code == "K3") return "K因子3";
+            if (code == "A1") return "A1";
+            if (code == "A2") return "A2";
+            if (code == "A3") return "A3";
+            return code;
+        }
+
+        std::string CoefficientCodeFromDisplay(const std::string& display) const
+        {
+            if (display == "扣除1") return "Q1";
+            if (display == "扣除2") return "Q2";
+            if (display == "扣除3") return "Q3";
+            if (display == "K因子1") return "K1";
+            if (display == "K因子2") return "K2";
+            if (display == "K因子3") return "K3";
+            return display;
+        }
+
+        bool SupportedCode(const std::string& code) const
+        {
+            std::string key = LocalTrimCopy(code);
+            return key == "Q1" || key == "Q2" || key == "Q3" ||
+                key == "K1" || key == "K2" || key == "K3" ||
+                key == "A1" || key == "A2" || key == "A3";
+        }
+
+        void RefreshArcEnums()
+        {
+            const char* codes[] = { "Q1", "Q2", "Q3", "K1", "K2", "K3", "A1", "A2", "A3" };
+            std::vector<NXString> members;
+            for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i)
+            {
+                members.push_back(U8Text(CoefficientDisplayName(codes[i])));
+            }
+            std::string small = "Q1";
+            std::string large = "K3";
+            if (selectedConditionIndex_ < conditionRows_.size())
+            {
+                if (SupportedCode(conditionRows_[selectedConditionIndex_].smallArcCode)) small = conditionRows_[selectedConditionIndex_].smallArcCode;
+                if (SupportedCode(conditionRows_[selectedConditionIndex_].largeArcCode)) large = conditionRows_[selectedConditionIndex_].largeArcCode;
+            }
+            if (smallArcEnum_ != NULL)
+            {
+                smallArcEnum_->SetEnumMembers(members);
+                smallArcEnum_->SetValueAsString(U8Text(CoefficientDisplayName(small)));
+            }
+            if (largeArcEnum_ != NULL)
+            {
+                largeArcEnum_->SetEnumMembers(members);
+                largeArcEnum_->SetValueAsString(U8Text(CoefficientDisplayName(large)));
+            }
+        }
+
+        std::string NormalizeMaterialPage(const std::string& material) const
+        {
+            return LocalTrimCopy(material).empty() ? std::string("材质 <未指定>") : LocalTrimCopy(material);
+        }
+
+        void SortRows()
+        {
+            std::stable_sort(rows_.begin(), rows_.end(),
+                [this](const CoefficientRow& left, const CoefficientRow& right)
+            {
+                if (std::fabs(left.thickness - right.thickness) > 1.0e-9)
+                {
+                    return left.thickness < right.thickness;
+                }
+                return NormalizeMaterialPage(left.material) < NormalizeMaterialPage(right.material);
+            });
+        }
+
+        void RefreshMaterialPages()
+        {
+            materialPages_.clear();
+            materialPages_.push_back("全部");
+            for (size_t i = 0; i < rows_.size(); ++i)
+            {
+                std::string material = NormalizeMaterialPage(rows_[i].material);
+                if (std::find(materialPages_.begin(), materialPages_.end(), material) == materialPages_.end())
+                {
+                    materialPages_.push_back(material);
+                }
+            }
+            if (selectedMaterialPage_.empty() ||
+                std::find(materialPages_.begin(), materialPages_.end(), selectedMaterialPage_) == materialPages_.end())
+            {
+                selectedMaterialPage_ = "全部";
+            }
+            if (materialPageEnum_ != NULL)
+            {
+                std::vector<NXString> members;
+                for (size_t i = 0; i < materialPages_.size(); ++i)
+                {
+                    members.push_back(U8Text(materialPages_[i]));
+                }
+                materialPageEnum_->SetEnumMembers(members);
+                materialPageEnum_->SetValueAsString(U8Text(selectedMaterialPage_));
+            }
+        }
+
+        bool RowVisible(const CoefficientRow& row) const
+        {
+            return selectedMaterialPage_.empty() || selectedMaterialPage_ == "全部" ||
+                NormalizeMaterialPage(row.material) == selectedMaterialPage_;
+        }
+
+        void RebuildTree()
+        {
+            if (tree_ == NULL)
+            {
+                return;
+            }
+            SortRows();
+            RefreshRulePages();
+            RefreshMaterialPages();
+            for (size_t i = allNodes_.size(); i > 0; --i)
+            {
+                try { tree_->DeleteNode(allNodes_[i - 1]); } catch (...) {}
+            }
+            rowNodeToIndex_.clear();
+            allNodes_.clear();
+            selectedNode_ = NULL;
+            for (size_t i = 0; i < rows_.size(); ++i)
+            {
+                if (!RowVisible(rows_[i]))
+                {
+                    continue;
+                }
+                NXOpen::BlockStyler::Node* node = tree_->CreateNode(U8Text(NormalizeMaterialPage(rows_[i].material)));
+                tree_->InsertNode(node, NULL, NULL, NXOpen::BlockStyler::Tree::NodeInsertOptionAlwaysLast);
+                FillNode(node, rows_[i]);
+                rowNodeToIndex_[node] = i;
+                allNodes_.push_back(node);
+            }
+        }
+
+        void FillNode(NXOpen::BlockStyler::Node* node, const CoefficientRow& row)
+        {
+            SetNodeColumnText(node, ColumnMaterial, NormalizeMaterialPage(row.material));
+            SetNodeColumnText(node, ColumnThickness, CoefficientNumberText(row.thickness));
+            SetNodeColumnText(node, ColumnQ1, OptionalCoefficientNumber(row.hasQ1, row.q1));
+            SetNodeColumnText(node, ColumnQ2, OptionalCoefficientNumber(row.hasQ2, row.q2));
+            SetNodeColumnText(node, ColumnQ3, OptionalCoefficientNumber(row.hasQ3, row.q3));
+            SetNodeColumnText(node, ColumnK1, OptionalCoefficientNumber(row.hasK1, row.k1));
+            SetNodeColumnText(node, ColumnK2, OptionalCoefficientNumber(row.hasK2, row.k2));
+            SetNodeColumnText(node, ColumnK3, OptionalCoefficientNumber(row.hasK3, row.k3));
+            SetNodeColumnText(node, ColumnA1, OptionalCoefficientNumber(row.hasA1, row.a1));
+            SetNodeColumnText(node, ColumnA2, OptionalCoefficientNumber(row.hasA2, row.a2));
+            SetNodeColumnText(node, ColumnA3, OptionalCoefficientNumber(row.hasA3, row.a3));
+        }
+
+        bool IndexForNode(NXOpen::BlockStyler::Node* node, size_t* index) const
+        {
+            std::map<NXOpen::BlockStyler::Node*, size_t>::const_iterator it = rowNodeToIndex_.find(node);
+            if (it == rowNodeToIndex_.end())
+            {
+                return false;
+            }
+            if (index != NULL)
+            {
+                *index = it->second;
+            }
+            return true;
+        }
+
+        bool ApplyCell(CoefficientRow& row, int columnID, const std::string& text)
+        {
+            std::string value = LocalTrimCopy(text);
+            if (columnID == ColumnMaterial)
+            {
+                row.material = value.empty() ? std::string("材质 <未指定>") : value;
+                selectedMaterialPage_ = NormalizeMaterialPage(row.material);
+                return true;
+            }
+            if (columnID == ColumnThickness)
+            {
+                bool has = false;
+                double parsed = 0.0;
+                if (!ParseOptionalTextNumber(value, &has, &parsed) || !has || parsed <= 0.0)
+                {
+                    return false;
+                }
+                row.thickness = parsed;
+                return true;
+            }
+            bool* has = NULL;
+            double* target = NULL;
+            switch (columnID)
+            {
+            case ColumnQ1: has = &row.hasQ1; target = &row.q1; break;
+            case ColumnQ2: has = &row.hasQ2; target = &row.q2; break;
+            case ColumnQ3: has = &row.hasQ3; target = &row.q3; break;
+            case ColumnK1: has = &row.hasK1; target = &row.k1; break;
+            case ColumnK2: has = &row.hasK2; target = &row.k2; break;
+            case ColumnK3: has = &row.hasK3; target = &row.k3; break;
+            case ColumnA1: has = &row.hasA1; target = &row.a1; break;
+            case ColumnA2: has = &row.hasA2; target = &row.a2; break;
+            case ColumnA3: has = &row.hasA3; target = &row.a3; break;
+            default: return false;
+            }
+            return ParseOptionalTextNumber(value, has, target);
+        }
+
+        bool HasMaterialThickness(const std::string& material, double thickness) const
+        {
+            std::string normalized = NormalizeMaterialPage(material);
+            for (size_t i = 0; i < rows_.size(); ++i)
+            {
+                if (NormalizeMaterialPage(rows_[i].material) == normalized &&
+                    std::fabs(rows_[i].thickness - thickness) < 1.0e-6)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        double NextAvailableThickness(const std::string& material, double startThickness) const
+        {
+            double thickness = startThickness > 0.0 ? startThickness : 1.0;
+            int guard = 0;
+            while (HasMaterialThickness(material, thickness) && guard < 200)
+            {
+                thickness += 0.5;
+                ++guard;
+            }
+            return thickness;
+        }
+
+        void AddRow()
+        {
+            CoefficientRow row;
+            size_t index = 0;
+            if (IndexForNode(selectedNode_, &index) && index < rows_.size())
+            {
+                row = rows_[index];
+                row.thickness += 0.5;
+            }
+            else
+            {
+                row.material = (!selectedMaterialPage_.empty() && selectedMaterialPage_ != "全部") ?
+                    selectedMaterialPage_ : std::string("材质 <未指定>");
+                row.thickness = 1.0;
+            }
+            row.thickness = NextAvailableThickness(row.material, row.thickness);
+            FillDefaultCoefficientValues(&row);
+            rows_.push_back(row);
+            selectedMaterialPage_ = NormalizeMaterialPage(row.material);
+            RebuildTree();
+        }
+
+        void DeleteSelectedRow()
+        {
+            size_t index = 0;
+            if (IndexForNode(selectedNode_, &index) && index < rows_.size())
+            {
+                rows_.erase(rows_.begin() + static_cast<std::vector<CoefficientRow>::difference_type>(index));
+                RebuildTree();
+            }
+        }
+
+        bool Save()
+        {
+            ReadMultiBendRadiusControl();
+            std::string error;
+            if (!SaveCoefficientRowsForTable(settings_, rows_, conditionRows_, &error))
+            {
+                ShowRulesMessage(ui_, NXOpen::NXMessageBox::DialogTypeError, error);
+                return false;
+            }
+            ShowRulesMessage(ui_, NXOpen::NXMessageBox::DialogTypeInformation, "系数表已保存。");
+            return true;
+        }
+
+        void ImportExcelData()
+        {
+            const std::wstring path = PromptCoefficientCsvPathW(false);
+            if (path.empty())
+            {
+                return;
+            }
+
+            std::vector<CoefficientRow> imported;
+            std::string error;
+            if (!LoadCoefficientRowsFromCsvW(path, &imported, &error))
+            {
+                ShowRulesMessage(ui_, NXOpen::NXMessageBox::DialogTypeError, error);
+                return;
+            }
+
+            rows_ = imported;
+            RefreshMaterialPages();
+            RebuildTree();
+            ShowRulesMessage(ui_, NXOpen::NXMessageBox::DialogTypeInformation,
+                "已导入EXCEL数据：\n" + WidePathToUtf8Local(path) + "\n请点击保存写入规则配置。");
+        }
+
+        void ExportExcelData()
+        {
+            const std::wstring path = PromptCoefficientCsvPathW(true);
+            if (path.empty())
+            {
+                return;
+            }
+
+            std::string error;
+            if (!SaveCoefficientRowsToCsvW(rows_, path, &error))
+            {
+                ShowRulesMessage(ui_, NXOpen::NXMessageBox::DialogTypeError, error);
+                return;
+            }
+
+            ShowRulesMessage(ui_, NXOpen::NXMessageBox::DialogTypeInformation,
+                "已导出EXCEL数据：\n" + WidePathToUtf8Local(path));
+        }
+    };
 
     void LaunchBendFactorSettings()
     {
-        std::string exePath = FindSettingsExePath();
-        if (exePath.empty())
+        try
         {
-            SouDonZuanBanJin::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeInformation, "未找到规则设置程序。");
-            return;
+            DirectRulesTableDialog dialog(SouDonZuanBanJin::theUI);
+            dialog.Show();
         }
-
-        STARTUPINFOA startupInfo;
-        PROCESS_INFORMATION processInfo;
-        ZeroMemory(&startupInfo, sizeof(startupInfo));
-        ZeroMemory(&processInfo, sizeof(processInfo));
-        startupInfo.cb = sizeof(startupInfo);
-
-        std::string commandLine = "\"" + exePath + "\" " + BendFactorSettingsArgument;
-        if (CreateProcessA(NULL, &commandLine[0], NULL, NULL, FALSE, 0, NULL, NULL, &startupInfo, &processInfo))
+        catch (const std::exception& ex)
         {
-            CloseHandle(processInfo.hProcess);
-            CloseHandle(processInfo.hThread);
-            return;
+            ShowRulesMessage(SouDonZuanBanJin::theUI, NXOpen::NXMessageBox::DialogTypeError, LocalNormalizeUtf8Message(ex.what()));
         }
-
-        SouDonZuanBanJin::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeInformation, "规则设置程序启动失败。");
+        catch (...)
+        {
+            ShowRulesMessage(SouDonZuanBanJin::theUI, NXOpen::NXMessageBox::DialogTypeError, "规则表打开失败。");
+        }
     }
+
 }
 extern "C" DllExport void  ufusr(char *param, int *retcod, int param_len)
 {
@@ -1409,14 +2934,6 @@ int SouDonZuanBanJin::Show()
         UfSessionGuard ufSession;
         logical is_exp_in_part;
         UF_MODL_is_exp_in_part(workPart->Tag(), "数量", &is_exp_in_part);
-        if (is_exp_in_part == false)
-        {
-            /*加载dll和卸载dll*/
-            char library_name[] = "D:\\UG智辉钣金插件\\application\\Write_Prat_Attr.dll";
-            RunCustomLibrary(library_name);
-            char library_name1[] = "D:\\UG智辉钣金插件\\application\\ZiDonFenCen.dll";
-            RunCustomLibrary(library_name1);
-        }
 
         theDialog->Show();
     }
@@ -1529,7 +3046,11 @@ int SouDonZuanBanJin::apply_cb()
         bool TheZeWan = GetToggleValue(ZeWan);
         bool TheHanJie = GetToggleValue(HanJie);
 
-        Body1->SetUserAttribute("Z", -1, unfoldThickness.c_str(), Update::OptionNow);
+        if (!UpdateBodyZThicknessAttribute(workPart->Features()->SheetmetalManager(), Body1, &unfoldThickness) &&
+            !unfoldThickness.empty())
+        {
+            Body1->SetUserAttribute("Z", -1, unfoldThickness.c_str(), Update::OptionNow);
+        }
 
         if (TheConCuan == true)
         {
@@ -1716,6 +3237,13 @@ int SouDonZuanBanJin::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 throw std::runtime_error("请选择有效的实体面。");
             }
 
+            NXOpen::Face* markedBaseFace = FindMarkedAdjacentLargestPlanarFace(Body1);
+            if (markedBaseFace != NULL)
+            {
+                face2 = markedBaseFace;
+                facetag = face2->Tag();
+            }
+
             if (Body1->HasUserAttribute("数量",NXObject::AttributeType::AttributeTypeInteger,-1)==false)
             {
                 Body1->SetUserAttribute("数量", -1, intVal[2], Update::OptionNow);
@@ -1760,10 +3288,7 @@ int SouDonZuanBanJin::update_cb(NXOpen::BlockStyler::UIBlock* block)
             RuleConfig ruleConfig = LoadRuleConfig();
             ApplyNeutralFactorByRules(workPart, workPart->Features()->SheetmetalManager(), Body1, ruleConfig);
             
-            double z = workPart->Features()->SheetmetalManager()->GetBodyThickness(face2->GetBody());//获得钣金厚度
-            char charZ[256];
-            sprintf(charZ, "%.1f", z);
-            unfoldThickness = charZ;
+            UpdateBodyZThicknessAttribute(workPart->Features()->SheetmetalManager(), Body1, &unfoldThickness);
 
              if (GetToggleValue(togglebaobian))
              {
@@ -2038,3 +3563,4 @@ void SouDonZuanBanJin::ask_expression(const char* expName)
         throw;
     }
 }
+

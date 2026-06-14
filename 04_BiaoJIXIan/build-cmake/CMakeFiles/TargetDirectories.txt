@@ -1,3 +1,0 @@
-D:/UGPluginRepo_clean_20260506-235206/BiaoJiXian/build-cmake/CMakeFiles/BiaoJIXIan.dir
-D:/UGPluginRepo_clean_20260506-235206/BiaoJiXian/build-cmake/CMakeFiles/ALL_BUILD.dir
-D:/UGPluginRepo_clean_20260506-235206/BiaoJiXian/build-cmake/CMakeFiles/ZERO_CHECK.dir

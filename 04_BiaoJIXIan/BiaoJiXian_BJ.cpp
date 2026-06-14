@@ -1,10 +1,14 @@
-﻿//==============================================================================
+//==============================================================================
 // Basic framework for BiaoJiXian dialog
 //==============================================================================
 
 #include "BiaoJiXian_BJ.hpp"
+#include "../../common/ZhihuiEmbeddedDialog.hpp"
+#include "embedded_dialog_resources.h"
 
 #include <Windows.h>
+#include <stdexcept>
+#include <string>
 #ifdef CreateDialog
 #undef CreateDialog
 #endif
@@ -14,8 +18,11 @@
 #include <cfloat>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -52,6 +59,7 @@
 #include <NXOpen/Features_FeatureCollection.hxx>
 #include <NXOpen/Features_ShadowCurve.hxx>
 #include <NXOpen/Features_ShadowCurveBuilder.hxx>
+#include <NXOpen/Features_TubeBuilder.hxx>
 #include <NXOpen/GeometricUtilities_BooleanOperation.hxx>
 #include <NXOpen/GeometricUtilities_Extend.hxx>
 #include <NXOpen/GeometricUtilities_FeatureOffset.hxx>
@@ -97,6 +105,7 @@
 #include <uf_modl_utilities.h>
 #include <uf_obj.h>
 #include <uf_smd.h>
+#include <uf_trns.h>
 #include <uf_ui.h>
 
 using namespace NXOpen;
@@ -189,6 +198,12 @@ std::vector<tag_t> AskPlanarFaces(tag_t bodyTag);
 double DistanceSquared(const double lhs[3], const double rhs[3]);
 std::vector<tag_t> AskPeripheralLoopEdges(tag_t faceTag);
 std::vector<tag_t> CreateCurvesFromEdges(const std::vector<tag_t>& edgeTags);
+bool AskPlanarFaceMidpoint(tag_t faceTag, double midpoint[3]);
+void DebugLog(const std::string& message);
+std::string DebugTag(tag_t tag);
+std::string DebugPoint(const double point[3]);
+bool IsAutoTestBottomRequested(const char* param, int paramLen);
+int RunBottomShallowGrooveAutoTest();
 PreparedCurveSet ApplyPreSegmentRules(Part* workPart, const std::vector<tag_t>& curveTags, const ContactMatch& match);
 PreparedCurveGroupSet ApplyPreSegmentRulesToGroups(Part* workPart, const std::vector<tag_t>& curveTags, const ContactMatch& match);
 PreparedCurveGroupSet ApplyPreSegmentRulesToGroups(
@@ -2956,27 +2971,98 @@ std::vector<tag_t> AskPeripheralLoopEdges(tag_t faceTag)
 
 bool AskFaceNormal(tag_t faceTag, double normal[3])
 {
+    if (faceTag == NULL_TAG)
+    {
+        return false;
+    }
+
     int faceType = 0;
-    double point[3] = {0.0};
-    double direction[3] = {0.0};
+    double planePoint[3] = {0.0};
+    double ufDirection[3] = {0.0};
     double box[6] = {0.0};
     double radius = 0.0;
     double radData = 0.0;
     int normalDir = 0;
 
-    if (UF_MODL_ask_face_data(faceTag, &faceType, point, direction, box, &radius, &radData, &normalDir) != 0)
+    if (UF_MODL_ask_face_data(faceTag, &faceType, planePoint, ufDirection, box, &radius, &radData, &normalDir) != 0)
     {
         return false;
     }
-
     if (faceType != UF_MODL_PLANAR_FACE)
     {
         return false;
     }
 
-    normal[0] = direction[0];
-    normal[1] = direction[1];
-    normal[2] = direction[2];
+    Part* workPart = Session::GetSession() != NULL && Session::GetSession()->Parts() != NULL
+        ? Session::GetSession()->Parts()->Work()
+        : NULL;
+    if (workPart == NULL || workPart->Points() == NULL || workPart->Directions() == NULL)
+    {
+        return false;
+    }
+
+    Face* face = dynamic_cast<Face*>(NXObjectManager::Get(faceTag));
+    if (face == NULL)
+    {
+        return false;
+    }
+
+    double origin[3] = {0.0, 0.0, 0.0};
+    if (!AskPlanarFaceMidpoint(faceTag, origin))
+    {
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            origin[axis] = planePoint[axis];
+        }
+    }
+
+    Point* point = NULL;
+    Direction* direction = NULL;
+    try
+    {
+        point = workPart->Points()->CreatePoint(Point3d(origin[0], origin[1], origin[2]));
+        if (point == NULL)
+        {
+            return false;
+        }
+
+        direction = workPart->Directions()->CreateDirection(
+            face,
+            point,
+            SenseForward,
+            SmartObject::UpdateOptionWithinModeling);
+        if (direction == NULL)
+        {
+            DeleteObjects(std::vector<tag_t>{point->Tag()});
+            return false;
+        }
+
+        const Vector3d vector = direction->Vector();
+        normal[0] = vector.X;
+        normal[1] = vector.Y;
+        normal[2] = vector.Z;
+    }
+    catch (...)
+    {
+        if (direction != NULL)
+        {
+            DeleteObjects(std::vector<tag_t>{direction->Tag()});
+        }
+        if (point != NULL)
+        {
+            DeleteObjects(std::vector<tag_t>{point->Tag()});
+        }
+        return false;
+    }
+
+    if (direction != NULL)
+    {
+        DeleteObjects(std::vector<tag_t>{direction->Tag()});
+    }
+    if (point != NULL)
+    {
+        DeleteObjects(std::vector<tag_t>{point->Tag()});
+    }
     return Normalize(normal);
 }
 
@@ -3803,6 +3889,194 @@ std::string ToFormulaString(double value)
     return stream.str();
 }
 
+std::string GetModuleDirectoryPath()
+{
+    char modulePath[MAX_PATH] = {};
+    HMODULE moduleHandle = NULL;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&GetModuleDirectoryPath),
+            &moduleHandle))
+    {
+        return ".";
+    }
+
+    const DWORD length = GetModuleFileNameA(moduleHandle, modulePath, MAX_PATH);
+    if (length == 0 || length == MAX_PATH)
+    {
+        return ".";
+    }
+
+    return std::filesystem::path(modulePath).parent_path().string();
+}
+
+std::wstring ToWideAscii(const char* text)
+{
+    std::wstring value;
+    if (text == NULL)
+    {
+        return value;
+    }
+
+    while (*text != '\0')
+    {
+        value.push_back(static_cast<wchar_t>(*text));
+        ++text;
+    }
+    return value;
+}
+
+std::wstring GetBiaoJiXianConfigPath()
+{
+    CreateDirectoryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6", NULL);
+    CreateDirectoryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\config", NULL);
+    return L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\config\\BiaoJIXIan_state.ini";
+}
+
+std::string GetBiaoJiXianDebugLogPath()
+{
+    CreateDirectoryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6", NULL);
+    CreateDirectoryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\logs", NULL);
+    return "D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\logs\\BiaoJIXIan_debug.log";
+}
+
+std::wstring GetBiaoJiXianDebugLogWidePath()
+{
+    CreateDirectoryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6", NULL);
+    CreateDirectoryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\logs", NULL);
+    return L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\logs\\BiaoJIXIan_debug.log";
+}
+
+void DebugLog(const std::string& message)
+{
+    try
+    {
+        SYSTEMTIME time;
+        GetLocalTime(&time);
+        std::ofstream log(std::filesystem::path(GetBiaoJiXianDebugLogWidePath()), std::ios::app);
+        if (!log)
+        {
+            return;
+        }
+
+        log << std::setfill('0')
+            << "[" << std::setw(4) << time.wYear
+            << "-" << std::setw(2) << time.wMonth
+            << "-" << std::setw(2) << time.wDay
+            << " " << std::setw(2) << time.wHour
+            << ":" << std::setw(2) << time.wMinute
+            << ":" << std::setw(2) << time.wSecond
+            << "." << std::setw(3) << time.wMilliseconds
+            << "] " << message << std::endl;
+    }
+    catch (...)
+    {
+    }
+}
+
+bool IsAutoTestBottomRequested(const char* param, int paramLen)
+{
+    char envValue[32] = {0};
+    if (GetEnvironmentVariableA("BIAOJIXIAN_AUTOTEST_BOTTOM", envValue, static_cast<DWORD>(sizeof(envValue))) > 0)
+    {
+        if (std::string(envValue) == "1")
+        {
+            return true;
+        }
+    }
+
+    if (param == NULL || paramLen <= 0)
+    {
+        return false;
+    }
+
+    std::string text(param, param + paramLen);
+    const std::size_t nul = text.find('\0');
+    if (nul != std::string::npos)
+    {
+        text.resize(nul);
+    }
+    std::transform(
+        text.begin(),
+        text.end(),
+        text.begin(),
+        [](unsigned char ch)
+        {
+            return static_cast<char>(std::tolower(ch));
+        });
+    return text.find("autotest_bottom") != std::string::npos;
+}
+
+std::string DebugTag(tag_t tag)
+{
+    std::ostringstream stream;
+    stream << static_cast<unsigned long long>(tag);
+    return stream.str();
+}
+
+std::string DebugPoint(const double point[3])
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(6)
+           << "(" << point[0] << "," << point[1] << "," << point[2] << ")";
+    return stream.str();
+}
+
+double ReadConfigDouble(const char* key, double fallback)
+{
+    wchar_t buffer[64] = {};
+    const std::wstring wideKey = ToWideAscii(key);
+    const std::wstring path = GetBiaoJiXianConfigPath();
+    GetPrivateProfileStringW(L"Dialog", wideKey.c_str(), L"", buffer, static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0])), path.c_str());
+    if (buffer[0] == L'\0')
+    {
+        return fallback;
+    }
+
+    wchar_t* end = NULL;
+    const double value = std::wcstod(buffer, &end);
+    return end != buffer && value > 0.0 ? value : fallback;
+}
+
+void WriteConfigDouble(const char* key, double value)
+{
+    if (value <= 0.0)
+    {
+        return;
+    }
+
+    const std::string text = ToFormulaString(value);
+    const std::wstring wideKey = ToWideAscii(key);
+    const std::wstring wideValue = ToWideAscii(text.c_str());
+    const std::wstring path = GetBiaoJiXianConfigPath();
+    WritePrivateProfileStringW(L"Dialog", wideKey.c_str(), wideValue.c_str(), path.c_str());
+}
+
+int ReadConfigInt(const char* key, int fallback)
+{
+    wchar_t buffer[64] = {};
+    const std::wstring wideKey = ToWideAscii(key);
+    const std::wstring path = GetBiaoJiXianConfigPath();
+    GetPrivateProfileStringW(L"Dialog", wideKey.c_str(), L"", buffer, static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0])), path.c_str());
+    if (buffer[0] == L'\0')
+    {
+        return fallback;
+    }
+
+    wchar_t* end = NULL;
+    const long value = std::wcstol(buffer, &end, 10);
+    return end != buffer ? static_cast<int>(value) : fallback;
+}
+
+void WriteConfigInt(const char* key, int value)
+{
+    wchar_t buffer[32] = {};
+    swprintf_s(buffer, L"%d", value);
+    const std::wstring wideKey = ToWideAscii(key);
+    const std::wstring path = GetBiaoJiXianConfigPath();
+    WritePrivateProfileStringW(L"Dialog", wideKey.c_str(), buffer, path.c_str());
+}
+
 std::vector<tag_t> CopyCurvesAsDumbGeometry(const std::vector<tag_t>& curveTags)
 {
     std::vector<tag_t> copiedCurveTags;
@@ -3828,6 +4102,176 @@ std::vector<tag_t> CopyCurvesAsDumbGeometry(const std::vector<tag_t>& curveTags)
         }
     }
     return copiedCurveTags;
+}
+
+std::vector<tag_t> TranslateCurveCopies(const std::vector<tag_t>& curveTags, const double translation[3])
+{
+    std::vector<tag_t> translatedCurves;
+    if (curveTags.empty())
+    {
+        return translatedCurves;
+    }
+
+    double matrix[12] = {0.0};
+    double mutableTranslation[3] = {translation[0], translation[1], translation[2]};
+    uf5943(mutableTranslation, matrix);
+
+    const int count = static_cast<int>(curveTags.size());
+    const int moveOrCopy = 2;
+    const int destLayer = 0;
+    const int traceCurves = 2;
+    int status = 0;
+    tag_t traceCurveGroup = NULL_TAG;
+    translatedCurves.assign(curveTags.size(), NULL_TAG);
+    uf5947(
+        matrix,
+        curveTags.data(),
+        &count,
+        &moveOrCopy,
+        &destLayer,
+        &traceCurves,
+        translatedCurves.data(),
+        &traceCurveGroup,
+        &status);
+
+    if (traceCurveGroup != NULL_TAG)
+    {
+        UF_GROUP_ungroup_top(traceCurveGroup);
+    }
+
+    if (status != 0)
+    {
+        std::ostringstream log;
+        log << "TranslateCurveCopies failed: status=" << status
+            << ", curves=" << curveTags.size()
+            << ", translation=" << DebugPoint(translation);
+        DebugLog(log.str());
+        translatedCurves.clear();
+        return translatedCurves;
+    }
+
+    translatedCurves.erase(
+        std::remove(translatedCurves.begin(), translatedCurves.end(), NULL_TAG),
+        translatedCurves.end());
+    for (std::size_t i = 0; i < translatedCurves.size(); ++i)
+    {
+        UF_OBJ_set_blank_status(translatedCurves[i], UF_OBJ_NOT_BLANKED);
+    }
+    return translatedCurves;
+}
+
+std::vector<tag_t> CreateInsetGrooveCurves(const std::vector<tag_t>& curveTags, const ContactMatch& match, double insetDistance)
+{
+    double targetMidpoint[3] = {0.0};
+    double targetNormal[3] = {0.0};
+    if (curveTags.empty() || insetDistance <= 0.0)
+    {
+        DebugLog("CreateInsetGrooveCurves skipped: empty curves or invalid inset");
+        return std::vector<tag_t>();
+    }
+    if (!AskPlanarFaceMidpoint(match.targetFace, targetMidpoint))
+    {
+        DebugLog("CreateInsetGrooveCurves skipped: AskPlanarFaceMidpoint failed, targetFace=" + DebugTag(match.targetFace));
+        return std::vector<tag_t>();
+    }
+    if (!AskFaceNormal(match.targetFace, targetNormal))
+    {
+        DebugLog("CreateInsetGrooveCurves skipped: AskFaceNormal failed, targetFace=" + DebugTag(match.targetFace));
+        return std::vector<tag_t>();
+    }
+
+    double curveCenter[3] = {0.0, 0.0, 0.0};
+    int pointCount = 0;
+    for (std::size_t i = 0; i < curveTags.size(); ++i)
+    {
+        double startPoint[3] = {0.0};
+        double endPoint[3] = {0.0};
+        if (!AskCurveEndpoints(curveTags[i], startPoint, endPoint))
+        {
+            double box[6] = {0.0};
+            if (UF_MODL_ask_bounding_box(curveTags[i], box) != 0)
+            {
+                DebugLog("CreateInsetGrooveCurves curve skipped: endpoint and bounding box failed, curve=" + DebugTag(curveTags[i]));
+                continue;
+            }
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                curveCenter[axis] += 0.5 * (box[axis] + box[axis + 3]);
+            }
+            ++pointCount;
+            continue;
+        }
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            curveCenter[axis] += startPoint[axis] + endPoint[axis];
+        }
+        pointCount += 2;
+    }
+
+    if (pointCount == 0)
+    {
+        DebugLog("CreateInsetGrooveCurves skipped: no curve center points");
+        return std::vector<tag_t>();
+    }
+
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        curveCenter[axis] /= static_cast<double>(pointCount);
+    }
+
+    double inward[3] = {
+        targetMidpoint[0] - curveCenter[0],
+        targetMidpoint[1] - curveCenter[1],
+        targetMidpoint[2] - curveCenter[2]};
+    const double normalComponent = Dot(inward, targetNormal);
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        inward[axis] -= normalComponent * targetNormal[axis];
+    }
+
+    if (!Normalize(inward))
+    {
+        DebugLog("CreateInsetGrooveCurves skipped: inward vector is zero");
+        return std::vector<tag_t>();
+    }
+
+    double translation[3] = {
+        inward[0] * insetDistance,
+        inward[1] * insetDistance,
+        inward[2] * insetDistance};
+    {
+        std::ostringstream log;
+        log << "CreateInsetGrooveCurves: inset=" << insetDistance
+            << ", curveCenter=" << DebugPoint(curveCenter)
+            << ", targetMidpoint=" << DebugPoint(targetMidpoint)
+            << ", translation=" << DebugPoint(translation);
+        DebugLog(log.str());
+    }
+
+    return TranslateCurveCopies(curveTags, translation);
+}
+
+Point3d AskCurveSectionHelpPoint(const std::vector<tag_t>& curveTags, const Point3d& fallback)
+{
+    for (std::size_t i = 0; i < curveTags.size(); ++i)
+    {
+        double startPoint[3] = {0.0};
+        double endPoint[3] = {0.0};
+        if (AskCurveEndpoints(curveTags[i], startPoint, endPoint))
+        {
+            return Point3d(startPoint[0], startPoint[1], startPoint[2]);
+        }
+
+        double box[6] = {0.0};
+        if (UF_MODL_ask_bounding_box(curveTags[i], box) == 0)
+        {
+            return Point3d(
+                0.5 * (box[0] + box[3]),
+                0.5 * (box[1] + box[4]),
+                0.5 * (box[2] + box[5]));
+        }
+    }
+    return fallback;
 }
 
 Sketch* FindSketchFromBuilderResult(NXObject* committedObject, const std::vector<NXObject*>& committedObjects, Features::Feature** sketchFeature)
@@ -3996,21 +4440,258 @@ Sketch* CreateGrooveProfileSketch(
     return sketch;
 }
 
+int CreateShallowGrooveByTube(
+    Part* workPart,
+    const std::vector<tag_t>& grooveCurves,
+    const ContactMatch& match,
+    double grooveWidth);
+
+int CreateShallowGrooveByTubeInternal(
+    Part* workPart,
+    const std::vector<tag_t>& grooveCurves,
+    const ContactMatch& match,
+    double grooveWidth,
+    bool deleteInputCurves)
+{
+    if (workPart == NULL || grooveCurves.empty() || match.targetBody == NULL_TAG)
+    {
+        return 0;
+    }
+
+    if (grooveCurves.size() > 1)
+    {
+        int successCount = 0;
+        for (std::size_t i = 0; i < grooveCurves.size(); ++i)
+        {
+            const std::vector<tag_t> singleCurve(1, grooveCurves[i]);
+            successCount += CreateShallowGrooveByTubeInternal(workPart, singleCurve, match, grooveWidth, deleteInputCurves) != 0 ? 1 : 0;
+        }
+        {
+            std::ostringstream log;
+            log << "CreateShallowGrooveByTube multi result: curves=" << grooveCurves.size()
+                << ", successCount=" << successCount;
+            DebugLog(log.str());
+        }
+        return successCount > 0 ? 1 : 0;
+    }
+
+    Body* targetBody = dynamic_cast<Body*>(NXObjectManager::Get(match.targetBody));
+    if (targetBody == NULL)
+    {
+        DebugLog("CreateShallowGrooveByTube failed: targetBody NX object is not Body, targetBody=" + DebugTag(match.targetBody));
+        return 0;
+    }
+
+    std::vector<IBaseCurve*> baseCurves;
+    baseCurves.reserve(grooveCurves.size());
+    for (std::size_t i = 0; i < grooveCurves.size(); ++i)
+    {
+        IBaseCurve* baseCurve = dynamic_cast<IBaseCurve*>(NXObjectManager::Get(grooveCurves[i]));
+        if (baseCurve != NULL)
+        {
+            baseCurves.push_back(baseCurve);
+        }
+    }
+    if (baseCurves.empty())
+    {
+        DebugLog("CreateShallowGrooveByTube failed: no IBaseCurve path curves");
+        return 0;
+    }
+
+    Features::TubeBuilder* tubeBuilder = NULL;
+    Section* section = NULL;
+    Features::Feature* tubeFeature = NULL;
+    try
+    {
+        tubeBuilder = workPart->Features()->CreateTubeBuilder(NULL);
+        section = tubeBuilder->PathSection();
+        section->SetDistanceTolerance(1.0e-5);
+        section->SetChainingTolerance(1.0e-5);
+        section->SetAllowedEntityTypes(Section::AllowTypesOnlyCurves);
+        section->AllowSelfIntersection(true);
+        section->AllowDegenerateCurves(false);
+
+        SelectionIntentRuleOptions* ruleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+        ruleOptions->SetSelectedFromInactive(false);
+        CurveDumbRule* curveRule = workPart->ScRuleFactory()->CreateRuleBaseCurveDumb(baseCurves, ruleOptions);
+        delete ruleOptions;
+        if (curveRule == NULL)
+        {
+            throw std::runtime_error("CreateRuleBaseCurveDumb returned NULL");
+        }
+
+        std::vector<SelectionIntentRule*> rules(1, static_cast<SelectionIntentRule*>(curveRule));
+        const Point3d helpPoint = AskCurveSectionHelpPoint(grooveCurves, Point3d(match.targetPoint[0], match.targetPoint[1], match.targetPoint[2]));
+        section->AddToSection(
+            rules,
+            NULL,
+            NULL,
+            NULL,
+            helpPoint,
+            Section::ModeCreate,
+            false);
+
+        tubeBuilder->OuterDiameter()->SetFormula(ToFormulaString(grooveWidth).c_str());
+        tubeBuilder->InnerDiameter()->SetFormula("0");
+        tubeBuilder->SetOutputOption(Features::TubeBuilder::OutputSingleSegment);
+        tubeBuilder->SetTolerance(1.0e-5);
+        tubeBuilder->BooleanOption()->SetType(GeometricUtilities::BooleanOperation::BooleanTypeSubtract);
+        tubeBuilder->BooleanOption()->SetTargetBodies(std::vector<Body*>(1, targetBody));
+
+        tubeFeature = tubeBuilder->CommitFeature();
+        if (tubeFeature != NULL)
+        {
+            std::ostringstream log;
+            log << "CreateShallowGrooveByTube commit success: feature=" << DebugTag(tubeFeature->Tag())
+                << ", grooveCurves=" << grooveCurves.size()
+                << ", width=" << grooveWidth;
+            DebugLog(log.str());
+        }
+    }
+    catch (const NXException& ex)
+    {
+        std::ostringstream log;
+        log << "CreateShallowGrooveByTube NXException: code=" << ex.ErrorCode()
+            << ", message=" << ex.Message();
+        DebugLog(log.str());
+        tubeFeature = NULL;
+    }
+    catch (const std::exception& ex)
+    {
+        DebugLog(std::string("CreateShallowGrooveByTube std::exception: ") + ex.what());
+        tubeFeature = NULL;
+    }
+    catch (...)
+    {
+        DebugLog("CreateShallowGrooveByTube unknown exception");
+        tubeFeature = NULL;
+    }
+
+    if (tubeBuilder != NULL)
+    {
+        tubeBuilder->Destroy();
+    }
+
+    if (tubeFeature == NULL)
+    {
+        DebugLog("CreateShallowGrooveByTube failed");
+        return 0;
+    }
+
+    MarkShallowGrooveFaces(tubeFeature->Tag());
+    if (deleteInputCurves)
+    {
+        DeleteObjects(grooveCurves);
+    }
+    DebugLog("CreateShallowGrooveByTube done: groove curves deleted and shallow groove faces marked");
+    return 1;
+}
+
+int CreateShallowGrooveByTube(
+    Part* workPart,
+    const std::vector<tag_t>& grooveCurves,
+    const ContactMatch& match,
+    double grooveWidth)
+{
+    const int directResult = CreateShallowGrooveByTubeInternal(workPart, grooveCurves, match, grooveWidth, false);
+    if (directResult != 0)
+    {
+        DeleteObjects(grooveCurves);
+        return 1;
+    }
+
+    double normal[3] = {0.0};
+    if (!AskFaceNormal(match.targetFace, normal))
+    {
+        return 0;
+    }
+
+    const double shiftDistance = std::max(grooveWidth * 2.0, 0.02);
+    for (int attempt = 0; attempt < 2; ++attempt)
+    {
+        const double sign = attempt == 0 ? 1.0 : -1.0;
+        double translation[3] = {
+            normal[0] * shiftDistance * sign,
+            normal[1] * shiftDistance * sign,
+            normal[2] * shiftDistance * sign};
+        std::vector<tag_t> shiftedCurves = TranslateCurveCopies(grooveCurves, translation);
+        {
+            std::ostringstream log;
+            log << "CreateShallowGrooveByTube shifted attempt: attempt=" << attempt
+                << ", sign=" << sign
+                << ", translation=" << DebugPoint(translation)
+                << ", shiftedCurves=" << shiftedCurves.size();
+            DebugLog(log.str());
+        }
+        if (shiftedCurves.empty())
+        {
+            continue;
+        }
+
+        const int shiftedResult = CreateShallowGrooveByTubeInternal(workPart, shiftedCurves, match, grooveWidth, true);
+        if (shiftedResult != 0)
+        {
+            DeleteObjects(grooveCurves);
+            return 1;
+        }
+        DeleteObjects(shiftedCurves);
+    }
+
+    return 0;
+}
+
 int CreateShallowGrooveByExtrude(
     Part* workPart,
     const std::vector<tag_t>& grooveCurves,
     const ContactMatch& match,
     double grooveDepth,
-    double grooveOffset)
+    double grooveWidth)
 {
     if (workPart == NULL || grooveCurves.empty() || match.targetBody == NULL_TAG || match.targetFace == NULL_TAG)
     {
+        std::ostringstream log;
+        log << "CreateShallowGrooveByExtrude skipped: invalid input"
+            << ", workPart=" << (workPart != NULL)
+            << ", grooveCurves=" << grooveCurves.size()
+            << ", targetBody=" << DebugTag(match.targetBody)
+            << ", targetFace=" << DebugTag(match.targetFace)
+            << ", sourceFace=" << DebugTag(match.sourceFace);
+        DebugLog(log.str());
         return 0;
+    }
+
+    std::vector<tag_t> insetGrooveCurves;
+    const std::vector<tag_t>* activeGrooveCurves = &grooveCurves;
+    if (match.distance <= kContactTolerance)
+    {
+        insetGrooveCurves = CreateInsetGrooveCurves(grooveCurves, match, std::max(grooveWidth, 0.05));
+        if (!insetGrooveCurves.empty())
+        {
+            activeGrooveCurves = &insetGrooveCurves;
+            std::ostringstream log;
+            log << "CreateShallowGrooveByExtrude using inset curves: original=" << grooveCurves.size()
+                << ", inset=" << insetGrooveCurves.size();
+            DebugLog(log.str());
+        }
+    }
+
+    {
+        std::ostringstream log;
+        log << "CreateShallowGrooveByExtrude begin: grooveCurves=" << activeGrooveCurves->size()
+            << ", targetBody=" << DebugTag(match.targetBody)
+            << ", targetFace=" << DebugTag(match.targetFace)
+            << ", sourceFace=" << DebugTag(match.sourceFace)
+            << ", distance=" << match.distance
+            << ", depth=" << grooveDepth
+            << ", width=" << grooveWidth;
+        DebugLog(log.str());
     }
 
     double directionVector[3] = {0.0, 0.0, 0.0};
     if (!AskFaceNormal(match.targetFace, directionVector))
     {
+        DeleteObjects(insetGrooveCurves);
+        DebugLog("CreateShallowGrooveByExtrude failed: AskFaceNormal(targetFace) returned false, targetFace=" + DebugTag(match.targetFace));
         return 0;
     }
 
@@ -4024,10 +4705,19 @@ int CreateShallowGrooveByExtrude(
         directionVector[1] = -directionVector[1];
         directionVector[2] = -directionVector[2];
     }
+    {
+        std::ostringstream log;
+        log << "CreateShallowGrooveByExtrude direction: direction=" << DebugPoint(directionVector)
+            << ", sourcePoint=" << DebugPoint(match.sourcePoint)
+            << ", targetPoint=" << DebugPoint(match.targetPoint);
+        DebugLog(log.str());
+    }
 
     double originPoint[3] = {0.0, 0.0, 0.0};
     if (!AskPlanarFaceMidpoint(match.targetFace, originPoint))
     {
+        DeleteObjects(insetGrooveCurves);
+        DebugLog("CreateShallowGrooveByExtrude failed: AskPlanarFaceMidpoint(targetFace) returned false, targetFace=" + DebugTag(match.targetFace));
         return 0;
     }
 
@@ -4036,7 +4726,7 @@ int CreateShallowGrooveByExtrude(
     std::vector<tag_t> copiedCurveTags;
     Sketch* profileSketch = CreateGrooveProfileSketch(
         workPart,
-        grooveCurves,
+        *activeGrooveCurves,
         match.targetFace,
         origin,
         sketchBaseCurves,
@@ -4044,14 +4734,24 @@ int CreateShallowGrooveByExtrude(
         NULL);
     if (profileSketch == NULL || sketchBaseCurves.empty())
     {
+        std::ostringstream log;
+        log << "CreateShallowGrooveByExtrude failed: CreateGrooveProfileSketch returned empty"
+            << ", profileSketch=" << (profileSketch != NULL)
+            << ", sketchBaseCurves=" << sketchBaseCurves.size()
+            << ", copiedCurveTags=" << copiedCurveTags.size();
+        DebugLog(log.str());
+        DeleteObjects(insetGrooveCurves);
         return 0;
     }
 
-    const std::string depthFormula = ToFormulaString(grooveDepth);
-    const std::string offsetFormula = ToFormulaString(grooveOffset);
+    const std::string cutDepthFormula = ToFormulaString(std::max(grooveDepth * 20.0, grooveWidth * 4.0));
+    const std::string halfWidthFormula = ToFormulaString(grooveWidth * 0.5);
     Body* targetBody = dynamic_cast<Body*>(NXObjectManager::Get(match.targetBody));
     if (targetBody == NULL)
     {
+        DeleteObjects(copiedCurveTags);
+        DeleteObjects(insetGrooveCurves);
+        DebugLog("CreateShallowGrooveByExtrude failed: targetBody NX object is not Body, targetBody=" + DebugTag(match.targetBody));
         return 0;
     }
 
@@ -4062,14 +4762,14 @@ int CreateShallowGrooveByExtrude(
     extrudeBuilder->SetDistanceTolerance(1.0e-5);
     extrudeBuilder->BooleanOperation()->SetType(GeometricUtilities::BooleanOperation::BooleanTypeSubtract);
     extrudeBuilder->BooleanOperation()->SetTargetBodies(std::vector<Body*>(1, targetBody));
-    extrudeBuilder->Limits()->SetSymmetricOption(true);
-    extrudeBuilder->Limits()->StartExtend()->Value()->SetFormula(depthFormula.c_str());
-    extrudeBuilder->Limits()->EndExtend()->Value()->SetFormula(depthFormula.c_str());
-    extrudeBuilder->Limits()->StartExtend()->SetTrimType(GeometricUtilities::Extend::ExtendTypeSymmetric);
-    extrudeBuilder->Limits()->EndExtend()->SetTrimType(GeometricUtilities::Extend::ExtendTypeSymmetric);
+    extrudeBuilder->Limits()->SetSymmetricOption(false);
+    extrudeBuilder->Limits()->StartExtend()->Value()->SetFormula("0");
+    extrudeBuilder->Limits()->EndExtend()->Value()->SetFormula(cutDepthFormula.c_str());
+    extrudeBuilder->Limits()->StartExtend()->SetTrimType(GeometricUtilities::Extend::ExtendTypeValue);
+    extrudeBuilder->Limits()->EndExtend()->SetTrimType(GeometricUtilities::Extend::ExtendTypeValue);
     extrudeBuilder->Offset()->SetOption(GeometricUtilities::TypeSymmetricOffset);
-    extrudeBuilder->Offset()->StartOffset()->SetFormula(offsetFormula.c_str());
-    extrudeBuilder->Offset()->EndOffset()->SetFormula(offsetFormula.c_str());
+    extrudeBuilder->Offset()->StartOffset()->SetFormula(halfWidthFormula.c_str());
+    extrudeBuilder->Offset()->EndOffset()->SetFormula(halfWidthFormula.c_str());
     extrudeBuilder->Draft()->SetDraftOption(GeometricUtilities::SimpleDraft::SimpleDraftTypeNoDraft);
     extrudeBuilder->FeatureOptions()->SetBodyType(GeometricUtilities::FeatureOptions::BodyStyleSolid);
     extrudeBuilder->SmartVolumeProfile()->SetOpenProfileSmartVolumeOption(false);
@@ -4097,7 +4797,18 @@ int CreateShallowGrooveByExtrude(
     if (rules.empty())
     {
         extrudeBuilder->Destroy();
+        DeleteObjects(copiedCurveTags);
+        DeleteObjects(insetGrooveCurves);
+        DebugLog("CreateShallowGrooveByExtrude failed: CreateRuleBaseCurveDumb returned no section rules");
         return 0;
+    }
+
+    const Point3d sectionHelpPoint = AskCurveSectionHelpPoint(*activeGrooveCurves, origin);
+    {
+        std::ostringstream log;
+        double helpPoint[3] = {sectionHelpPoint.X, sectionHelpPoint.Y, sectionHelpPoint.Z};
+        log << "CreateShallowGrooveByExtrude section help point=" << DebugPoint(helpPoint);
+        DebugLog(log.str());
     }
 
     section->AddToSection(
@@ -4105,7 +4816,7 @@ int CreateShallowGrooveByExtrude(
         NULL,
         NULL,
         NULL,
-        origin,
+        sectionHelpPoint,
         Section::ModeCreate,
         false);
 
@@ -4122,9 +4833,40 @@ int CreateShallowGrooveByExtrude(
         try
         {
             extrudeFeature = extrudeBuilder->CommitFeature();
+            if (extrudeFeature != NULL)
+            {
+                std::ostringstream log;
+                log << "CreateShallowGrooveByExtrude commit success: attempt=" << attempt
+                    << ", sign=" << sign
+                    << ", feature=" << DebugTag(extrudeFeature->Tag());
+                DebugLog(log.str());
+            }
         }
-        catch (const NXException&)
+        catch (const NXException& ex)
         {
+            std::ostringstream log;
+            log << "CreateShallowGrooveByExtrude commit NXException: attempt=" << attempt
+                << ", sign=" << sign
+                << ", code=" << ex.ErrorCode()
+                << ", message=" << ex.Message();
+            DebugLog(log.str());
+            extrudeFeature = NULL;
+        }
+        catch (const std::exception& ex)
+        {
+            std::ostringstream log;
+            log << "CreateShallowGrooveByExtrude commit std::exception: attempt=" << attempt
+                << ", sign=" << sign
+                << ", message=" << ex.what();
+            DebugLog(log.str());
+            extrudeFeature = NULL;
+        }
+        catch (...)
+        {
+            std::ostringstream log;
+            log << "CreateShallowGrooveByExtrude commit unknown exception: attempt=" << attempt
+                << ", sign=" << sign;
+            DebugLog(log.str());
             extrudeFeature = NULL;
         }
     }
@@ -4132,6 +4874,18 @@ int CreateShallowGrooveByExtrude(
     extrudeBuilder->Destroy();
     if (extrudeFeature == NULL)
     {
+        DeleteObjects(copiedCurveTags);
+        if (!insetGrooveCurves.empty())
+        {
+            DeleteObjects(insetGrooveCurves);
+        }
+        DebugLog("CreateShallowGrooveByExtrude failed: CommitFeature failed in both directions, trying tube fallback");
+        const int tubeResult = CreateShallowGrooveByTube(workPart, grooveCurves, match, grooveWidth);
+        if (tubeResult != 0)
+        {
+            return 1;
+        }
+        DebugLog("CreateShallowGrooveByExtrude failed: tube fallback also failed");
         return 0;
     }
 
@@ -4145,6 +4899,8 @@ int CreateShallowGrooveByExtrude(
 
     MarkShallowGrooveFaces(extrudeFeature->Tag());
     DeleteObjects(grooveCurves);
+    DeleteObjects(insetGrooveCurves);
+    DebugLog("CreateShallowGrooveByExtrude done: groove curves deleted and shallow groove faces marked");
     return 1;
 }
 
@@ -4546,6 +5302,11 @@ std::vector<tag_t> ProjectSelectedEdgesToFace(Part* workPart, const std::vector<
 {
     if (workPart == NULL || selectedEdges.empty() || match.targetFace == NULL_TAG)
     {
+        std::ostringstream log;
+        log << "ProjectSelectedEdgesToFace skipped: workPart=" << (workPart != NULL)
+            << ", selectedEdges=" << selectedEdges.size()
+            << ", targetFace=" << DebugTag(match.targetFace);
+        DebugLog(log.str());
         return std::vector<tag_t>();
     }
 
@@ -4562,6 +5323,7 @@ std::vector<tag_t> ProjectSelectedEdgesToFace(Part* workPart, const std::vector<
 
     if (helperCurves.empty())
     {
+        DebugLog("ProjectSelectedEdgesToFace failed: helperCurves empty");
         return std::vector<tag_t>();
     }
 
@@ -4569,6 +5331,7 @@ std::vector<tag_t> ProjectSelectedEdgesToFace(Part* workPart, const std::vector<
     if (targetPlane == NULL)
     {
         DeleteObjects(helperCurves);
+        DebugLog("ProjectSelectedEdgesToFace failed: targetPlane is NULL, targetFace=" + DebugTag(match.targetFace));
         return std::vector<tag_t>();
     }
 
@@ -4609,9 +5372,20 @@ std::vector<tag_t> ProjectSelectedEdgesToFace(Part* workPart, const std::vector<
                 }
             }
         }
+        {
+            std::ostringstream log;
+            log << "ProjectSelectedEdgesToFace result: helperCurves=" << helperCurves.size()
+                << ", errorCode=" << errorCode
+                << ", projectionGroup=" << DebugTag(projectionGroup)
+                << ", groupError=" << groupError
+                << ", memberCount=" << memberCount
+                << ", projectedCurves=" << projectedCurves.size();
+            DebugLog(log.str());
+        }
     }
     catch (...)
     {
+        DebugLog("ProjectSelectedEdgesToFace failed: unknown exception");
     }
 
     if (groupMembers != NULL)
@@ -4623,10 +5397,19 @@ std::vector<tag_t> ProjectSelectedEdgesToFace(Part* workPart, const std::vector<
         UF_GROUP_ungroup_top(projectionGroup);
     }
     DeleteObjects(std::vector<tag_t>{targetPlane->Tag()});
-    DeleteObjects(helperCurves);
 
     std::sort(projectedCurves.begin(), projectedCurves.end());
     projectedCurves.erase(std::unique(projectedCurves.begin(), projectedCurves.end()), projectedCurves.end());
+    if (projectedCurves.empty() && match.distance <= kContactTolerance)
+    {
+        projectedCurves.swap(helperCurves);
+        DebugLog("ProjectSelectedEdgesToFace fallback: using helper curves because contact faces are coincident");
+    }
+    else
+    {
+        DeleteObjects(helperCurves);
+    }
+
     for (std::size_t i = 0; i < projectedCurves.size(); ++i)
     {
         UF_OBJ_set_blank_status(projectedCurves[i], UF_OBJ_NOT_BLANKED);
@@ -4704,6 +5487,122 @@ PreparedCurveGroupSet ApplyPreSegmentRulesToGroups(
     result.retiredCurves = retiredCurves;
     return result;
 }
+
+int RunBottomShallowGrooveAutoTest()
+{
+    DebugLog("AutoTest bottom begin");
+
+    Session* session = Session::GetSession();
+    Part* workPart = session != NULL && session->Parts() != NULL ? session->Parts()->Work() : NULL;
+    if (workPart == NULL)
+    {
+        DebugLog("AutoTest bottom failed: workPart is NULL");
+        return 0;
+    }
+
+    const std::vector<tag_t> bodies = AskSolidBodiesInWorkPart(workPart->Tag());
+    {
+        std::ostringstream log;
+        log << "AutoTest bottom bodies=" << bodies.size()
+            << ", part=" << DebugTag(workPart->Tag());
+        DebugLog(log.str());
+    }
+
+    SegmentParameters segmentParameters;
+    segmentParameters.segmentLength = 40.0;
+    segmentParameters.maxMarkSpacing = 500.0;
+    segmentParameters.closedCurveRule = 0;
+    const double grooveDepth = 0.002;
+    const double grooveWidth = 0.004;
+
+    int attempted = 0;
+    for (std::size_t bodyIndex = 0; bodyIndex < bodies.size(); ++bodyIndex)
+    {
+        const tag_t sourceBodyTag = bodies[bodyIndex];
+        const std::vector<ContactMatch> matches = FindAllBottomContacts(sourceBodyTag, workPart->Tag());
+        {
+            std::ostringstream log;
+            log << "AutoTest bottom sourceBody: index=" << bodyIndex
+                << ", sourceBody=" << DebugTag(sourceBodyTag)
+                << ", matches=" << matches.size();
+            DebugLog(log.str());
+        }
+
+        for (std::size_t matchIndex = 0; matchIndex < matches.size(); ++matchIndex)
+        {
+            const ContactMatch& match = matches[matchIndex];
+            const std::vector<tag_t> peripheralEdges = AskPeripheralLoopEdges(match.sourceFace);
+            std::vector<tag_t> sourceCurves = ProjectEdgeTagsToFace(peripheralEdges, match);
+            ++attempted;
+            {
+                std::ostringstream log;
+                log << "AutoTest bottom match: bodyIndex=" << bodyIndex
+                    << ", matchIndex=" << matchIndex
+                    << ", sourceFace=" << DebugTag(match.sourceFace)
+                    << ", targetFace=" << DebugTag(match.targetFace)
+                    << ", targetBody=" << DebugTag(match.targetBody)
+                    << ", distance=" << match.distance
+                    << ", sourcePoint=" << DebugPoint(match.sourcePoint)
+                    << ", targetPoint=" << DebugPoint(match.targetPoint)
+                    << ", peripheralEdges=" << peripheralEdges.size()
+                    << ", projectedCurves=" << sourceCurves.size();
+                DebugLog(log.str());
+            }
+
+            if (sourceCurves.empty())
+            {
+                continue;
+            }
+
+            std::vector<std::vector<tag_t> > projectedGroups(1, sourceCurves);
+            const PreparedCurveGroupSet preparedCurves =
+                ApplyPreSegmentRulesToGroups(workPart, projectedGroups, match);
+            {
+                std::ostringstream log;
+                log << "AutoTest bottom prepared: inputGroups=" << projectedGroups.size()
+                    << ", groups=" << preparedCurves.groups.size()
+                    << ", curves=" << preparedCurves.curves.size()
+                    << ", retired=" << preparedCurves.retiredCurves.size();
+                DebugLog(log.str());
+            }
+
+            if (preparedCurves.curves.empty())
+            {
+                continue;
+            }
+
+            const std::vector<std::vector<tag_t> > finalCurveGroups =
+                BuildSegmentedMarkCurveGroups(preparedCurves.groups, segmentParameters);
+            const std::vector<tag_t> finalCurves = FlattenCurveGroups(finalCurveGroups);
+            {
+                std::ostringstream log;
+                log << "AutoTest bottom final: groups=" << finalCurveGroups.size()
+                    << ", curves=" << finalCurves.size();
+                DebugLog(log.str());
+            }
+
+            if (finalCurves.empty())
+            {
+                continue;
+            }
+
+            const int grooveResult = CreateShallowGrooveByExtrude(workPart, finalCurves, match, grooveDepth, grooveWidth);
+            DebugLog(std::string("AutoTest bottom shallow groove result=") + (grooveResult != 0 ? "success" : "failed"));
+            if (grooveResult != 0)
+            {
+                DebugLog("AutoTest bottom success");
+                return 1;
+            }
+        }
+    }
+
+    {
+        std::ostringstream log;
+        log << "AutoTest bottom failed: no shallow groove created, attempted=" << attempted;
+        DebugLog(log.str());
+    }
+    return 0;
+}
 }
 
 Session* BiaoJiXian_BJ::theSession = NULL;
@@ -4719,7 +5618,7 @@ BiaoJiXian_BJ::BiaoJiXian_BJ()
       OutputRuleGroup(NULL),
       MarkOutputMode(NULL),
       GrooveDepth(NULL),
-      GrooveOffset(NULL),
+      GrooveWidth(NULL),
       SegmentRuleGroup(NULL),
       SegmentLength(NULL),
       MaxMarkSpacing(NULL),
@@ -4734,7 +5633,11 @@ BiaoJiXian_BJ::BiaoJiXian_BJ()
 {
     theSession = Session::GetSession();
     theUI = UI::GetUI();
-    m_dlxPath = ResolveDialogPath();
+    m_dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_BIAOJIXIAN_DLX);
+    if (m_dlxPath.empty())
+    {
+        throw std::runtime_error("BiaoJiXian dialog resource is missing.");
+    }
     theDlxFileName = m_dlxPath.c_str();
     theDialog = theUI->CreateDialog(theDlxFileName);
 
@@ -4809,7 +5712,7 @@ HMODULE LoadProtectedLicenseGate()
         }
     }
 
-    HMODULE fixedModule = LoadLibraryW(L"D:\\UG智辉钣金插件\\application\\ZhaoFuNxLicenseGate.dll");
+    HMODULE fixedModule = LoadLibraryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\application\\ZhaoFuNxLicenseGate.dll");
     if (fixedModule != NULL)
     {
         return fixedModule;
@@ -4832,10 +5735,6 @@ void ShowLicenseDeniedMessage(const wchar_t* title, const wchar_t* message)
 
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     HMODULE module = LoadProtectedLicenseGate();
     if (module == NULL)
@@ -4872,6 +5771,16 @@ extern "C" DllExport void ufusr(char* param, int* retcod, int param_len)
     static_cast<void>(param);
     static_cast<void>(retcod);
     static_cast<void>(param_len);
+
+    if (IsAutoTestBottomRequested(param, param_len))
+    {
+        const int result = RunBottomShallowGrooveAutoTest();
+        if (retcod != NULL)
+        {
+            *retcod = result != 0 ? 0 : 1;
+        }
+        return;
+    }
 
     BiaoJiXian_BJ* dialog = NULL;
     try
@@ -4913,7 +5822,7 @@ void BiaoJiXian_BJ::initialize_cb()
     OutputRuleGroup = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("OutputRuleGroup"));
     MarkOutputMode = dynamic_cast<Enumeration*>(theDialog->TopBlock()->FindBlock("MarkOutputMode"));
     GrooveDepth = dynamic_cast<DoubleBlock*>(theDialog->TopBlock()->FindBlock("GrooveDepth"));
-    GrooveOffset = dynamic_cast<DoubleBlock*>(theDialog->TopBlock()->FindBlock("GrooveOffset"));
+    GrooveWidth = dynamic_cast<DoubleBlock*>(theDialog->TopBlock()->FindBlock("GrooveWidth"));
     SegmentRuleGroup = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("SegmentRuleGroup"));
     SegmentLength = dynamic_cast<DoubleBlock*>(theDialog->TopBlock()->FindBlock("SegmentLength"));
     MaxMarkSpacing = dynamic_cast<IntegerBlock*>(theDialog->TopBlock()->FindBlock("MaxMarkSpacing"));
@@ -4925,6 +5834,7 @@ void BiaoJiXian_BJ::initialize_cb()
     CustomCurveLayer = dynamic_cast<IntegerBlock*>(theDialog->TopBlock()->FindBlock("CustomCurveLayer"));
     CurveColorPicker = dynamic_cast<ObjectColorPicker*>(theDialog->TopBlock()->FindBlock("CurveColorPicker"));
     CurveLineFont = dynamic_cast<LineFont*>(theDialog->TopBlock()->FindBlock("CurveLineFont"));
+    LoadRememberedDialogValues();
     ConfigureSelectionFilters();
     RefreshUiState();
 }
@@ -4943,6 +5853,7 @@ int BiaoJiXian_BJ::apply_cb()
     try
     {
         gFlatPatternFeatureCache.clear();
+        SaveRememberedDialogValues();
 
         const std::vector<Face*> selectedFaces = GetSelectedFaces();
         const std::vector<Edge*> selectedEdges = GetSelectedEdges();
@@ -4951,7 +5862,7 @@ int BiaoJiXian_BJ::apply_cb()
         Part* workPart = theSession != NULL && theSession->Parts() != NULL ? theSession->Parts()->Work() : NULL;
         SegmentParameters segmentParameters;
         double grooveDepth = 0.002;
-        double grooveOffset = 0.002;
+        double grooveWidth = 0.004;
         int curveColor = 36;
         MarkCurveFont curveFont = MarkCurveFont::Solid;
         if (SegmentLength != NULL)
@@ -4977,9 +5888,19 @@ int BiaoJiXian_BJ::apply_cb()
         {
             grooveDepth = GetDoubleValue(GrooveDepth);
         }
-        if (GrooveOffset != NULL)
+        if (GrooveWidth != NULL)
         {
-            grooveOffset = GetDoubleValue(GrooveOffset);
+            grooveWidth = GetDoubleValue(GrooveWidth);
+        }
+        if (outputMode == 1 && (grooveDepth <= 0.0 || grooveWidth <= 0.0))
+        {
+            ShowError(ToUtf8(L"浅槽标记的槽深和槽宽必须大于 0。"));
+            if (session != NULL)
+            {
+                session->UndoToMark(runMarkId, "BiaoJiXian Run");
+                session->DeleteUndoMark(runMarkId, "BiaoJiXian Run");
+            }
+            return 0;
         }
         if (CurveColorPicker != NULL)
         {
@@ -4990,10 +5911,24 @@ int BiaoJiXian_BJ::apply_cb()
             curveFont = ParseCurveFontValue(CurveLineFont);
         }
         ApplyUnifiedMarkLineDisplay(curveColor, curveFont);
+        {
+            std::ostringstream log;
+            log << "Apply begin: markMode=" << markMode
+                << ", outputMode=" << outputMode
+                << ", selectedFaces=" << selectedFaces.size()
+                << ", selectedEdges=" << selectedEdges.size()
+                << ", segmentLength=" << segmentParameters.segmentLength
+                << ", maxMarkSpacing=" << segmentParameters.maxMarkSpacing
+                << ", closedCurveRule=" << segmentParameters.closedCurveRule
+                << ", grooveDepth=" << grooveDepth
+                << ", grooveWidth=" << grooveWidth;
+            DebugLog(log.str());
+        }
 
         if ((markMode == 2 && selectedEdges.empty()) ||
             (markMode != 2 && selectedFaces.empty()))
         {
+            DebugLog("Apply skipped: no selected faces/edges for current mark mode");
             if (session != NULL)
             {
                 session->DeleteUndoMark(runMarkId, "BiaoJiXian Run");
@@ -5036,10 +5971,18 @@ int BiaoJiXian_BJ::apply_cb()
                 const tag_t targetBodyTag = AskFaceOwningSolidBody(targetFaceTag);
                 if (targetBodyTag == NULL_TAG)
                 {
+                    DebugLog("Contour mode skipped face: targetBody is NULL, targetFace=" + DebugTag(targetFaceTag));
                     continue;
                 }
 
                 const std::vector<ContactMatch> matches = ResolveContactsForTargetFace(targetFaceTag, workPart->Tag());
+                {
+                    std::ostringstream log;
+                    log << "Contour mode face: targetFace=" << DebugTag(targetFaceTag)
+                        << ", targetBody=" << DebugTag(targetBodyTag)
+                        << ", matches=" << matches.size();
+                    DebugLog(log.str());
+                }
                 std::vector<tag_t> flatCurvesForBody;
                 std::vector<tag_t> projectedCurvesForFace;
                 std::vector<std::vector<tag_t> > projectedCurveGroupsForFace;
@@ -5051,10 +5994,19 @@ int BiaoJiXian_BJ::apply_cb()
                     Body* sourceBody = dynamic_cast<Body*>(NXObjectManager::Get(sourceBodyTag));
                     if (sourceBody == NULL)
                     {
+                        DebugLog("Contour mode match skipped: sourceBody is NULL, sourceFace=" + DebugTag(matches[j].sourceFace));
                         continue;
                     }
 
                     const std::vector<tag_t> sourceCurves = CreateShadowCurveForContact(workPart, sourceBody, matches[j]);
+                    {
+                        std::ostringstream log;
+                        log << "Contour mode match: index=" << j
+                            << ", sourceFace=" << DebugTag(matches[j].sourceFace)
+                            << ", targetFace=" << DebugTag(matches[j].targetFace)
+                            << ", sourceCurves=" << sourceCurves.size();
+                        DebugLog(log.str());
+                    }
                     if (!sourceCurves.empty() && !hasRepresentativeMatch)
                     {
                         representativeMatch = matches[j];
@@ -5072,6 +6024,7 @@ int BiaoJiXian_BJ::apply_cb()
 
                 if (projectedCurvesForFace.empty() || !hasRepresentativeMatch)
                 {
+                    DebugLog("Contour mode skipped face: projected curves empty or no representative match");
                     continue;
                 }
 
@@ -5083,6 +6036,13 @@ int BiaoJiXian_BJ::apply_cb()
 
                 const PreparedCurveGroupSet preparedCurves =
                     ApplyPreSegmentRulesToGroups(workPart, projectedCurveGroupsForFace, representativeMatch);
+                {
+                    std::ostringstream log;
+                    log << "Contour mode prepared: groups=" << preparedCurves.groups.size()
+                        << ", curves=" << preparedCurves.curves.size()
+                        << ", retired=" << preparedCurves.retiredCurves.size();
+                    DebugLog(log.str());
+                }
                 if (kDebugStopAfterPreSegment)
                 {
                     applyCurveOutputStyle(preparedCurves.curves, targetBodyTag);
@@ -5092,6 +6052,12 @@ int BiaoJiXian_BJ::apply_cb()
                 const std::vector<std::vector<tag_t> > finalCurveGroups =
                     BuildSegmentedMarkCurveGroups(preparedCurves.groups, segmentParameters);
                 const std::vector<tag_t> finalCurves = FlattenCurveGroups(finalCurveGroups);
+                {
+                    std::ostringstream log;
+                    log << "Contour mode final: groups=" << finalCurveGroups.size()
+                        << ", curves=" << finalCurves.size();
+                    DebugLog(log.str());
+                }
                 applyCurveOutputStyle(finalCurves, targetBodyTag);
                 if (kDebugStopAfterSegmentation)
                 {
@@ -5104,7 +6070,8 @@ int BiaoJiXian_BJ::apply_cb()
                 }
                 if (outputMode == 1)
                 {
-                    CreateShallowGrooveByExtrude(workPart, finalCurves, representativeMatch, grooveDepth, grooveOffset);
+                    const int grooveResult = CreateShallowGrooveByExtrude(workPart, finalCurves, representativeMatch, grooveDepth, grooveWidth);
+                    DebugLog(std::string("Contour mode shallow groove result=") + (grooveResult != 0 ? "success" : "failed"));
                 }
                 if (outputMode == 0 && !flatCurvesForBody.empty())
                 {
@@ -5134,10 +6101,18 @@ int BiaoJiXian_BJ::apply_cb()
                 const tag_t targetBodyTag = AskFaceOwningSolidBody(targetFaceTag);
                 if (targetBodyTag == NULL_TAG)
                 {
+                    DebugLog("Bottom mode skipped face: targetBody is NULL, targetFace=" + DebugTag(targetFaceTag));
                     continue;
                 }
 
                 const std::vector<ContactMatch> matches = ResolveContactsForTargetFace(targetFaceTag, workPart->Tag());
+                {
+                    std::ostringstream log;
+                    log << "Bottom mode face: targetFace=" << DebugTag(targetFaceTag)
+                        << ", targetBody=" << DebugTag(targetBodyTag)
+                        << ", matches=" << matches.size();
+                    DebugLog(log.str());
+                }
                 std::vector<tag_t> flatCurvesForBody;
                 std::vector<tag_t> projectedCurvesForFace;
                 std::vector<std::vector<tag_t> > projectedCurveGroupsForFace;
@@ -5147,6 +6122,19 @@ int BiaoJiXian_BJ::apply_cb()
                 {
                     const std::vector<tag_t> peripheralEdges = AskPeripheralLoopEdges(matches[j].sourceFace);
                     const std::vector<tag_t> sourceCurves = ProjectEdgeTagsToFace(peripheralEdges, matches[j]);
+                    {
+                        std::ostringstream log;
+                        log << "Bottom mode match: index=" << j
+                            << ", sourceFace=" << DebugTag(matches[j].sourceFace)
+                            << ", targetFace=" << DebugTag(matches[j].targetFace)
+                            << ", targetBody=" << DebugTag(matches[j].targetBody)
+                            << ", distance=" << matches[j].distance
+                            << ", sourcePoint=" << DebugPoint(matches[j].sourcePoint)
+                            << ", targetPoint=" << DebugPoint(matches[j].targetPoint)
+                            << ", peripheralEdges=" << peripheralEdges.size()
+                            << ", projectedCurves=" << sourceCurves.size();
+                        DebugLog(log.str());
+                    }
                     if (!sourceCurves.empty() && !hasRepresentativeMatch)
                     {
                         representativeMatch = matches[j];
@@ -5164,6 +6152,7 @@ int BiaoJiXian_BJ::apply_cb()
 
                 if (projectedCurvesForFace.empty() || !hasRepresentativeMatch)
                 {
+                    DebugLog("Bottom mode skipped face: projected curves empty or no representative match");
                     continue;
                 }
 
@@ -5175,6 +6164,14 @@ int BiaoJiXian_BJ::apply_cb()
 
                 const PreparedCurveGroupSet preparedCurves =
                     ApplyPreSegmentRulesToGroups(workPart, projectedCurveGroupsForFace, representativeMatch);
+                {
+                    std::ostringstream log;
+                    log << "Bottom mode prepared: inputGroups=" << projectedCurveGroupsForFace.size()
+                        << ", groups=" << preparedCurves.groups.size()
+                        << ", curves=" << preparedCurves.curves.size()
+                        << ", retired=" << preparedCurves.retiredCurves.size();
+                    DebugLog(log.str());
+                }
                 if (kDebugStopAfterPreSegment)
                 {
                     applyCurveOutputStyle(preparedCurves.curves, targetBodyTag);
@@ -5184,6 +6181,12 @@ int BiaoJiXian_BJ::apply_cb()
                 const std::vector<std::vector<tag_t> > finalCurveGroups =
                     BuildSegmentedMarkCurveGroups(preparedCurves.groups, segmentParameters);
                 const std::vector<tag_t> finalCurves = FlattenCurveGroups(finalCurveGroups);
+                {
+                    std::ostringstream log;
+                    log << "Bottom mode final: groups=" << finalCurveGroups.size()
+                        << ", curves=" << finalCurves.size();
+                    DebugLog(log.str());
+                }
                 applyCurveOutputStyle(finalCurves, targetBodyTag);
                 if (kDebugStopAfterSegmentation)
                 {
@@ -5196,7 +6199,8 @@ int BiaoJiXian_BJ::apply_cb()
                 }
                 if (outputMode == 1)
                 {
-                    CreateShallowGrooveByExtrude(workPart, finalCurves, representativeMatch, grooveDepth, grooveOffset);
+                    const int grooveResult = CreateShallowGrooveByExtrude(workPart, finalCurves, representativeMatch, grooveDepth, grooveWidth);
+                    DebugLog(std::string("Bottom mode shallow groove result=") + (grooveResult != 0 ? "success" : "failed"));
                 }
                 if (outputMode == 0 && !flatCurvesForBody.empty())
                 {
@@ -5226,6 +6230,13 @@ int BiaoJiXian_BJ::apply_cb()
                 UF_MODL_ask_edge_body(selectedEdges[0]->Tag(), &sourceBodyTag);
                 const std::vector<ContactMatch> matches =
                     ResolveMatchesForMarking(FindAllBottomContacts(sourceBodyTag, workPart->Tag()), true);
+                {
+                    std::ostringstream log;
+                    log << "Edge mode begin: selectedEdges=" << selectedEdges.size()
+                        << ", firstEdgeSourceBody=" << DebugTag(sourceBodyTag)
+                        << ", matches=" << matches.size();
+                    DebugLog(log.str());
+                }
                 for (std::size_t i = 0; i < matches.size(); ++i)
                 {
                     std::vector<tag_t> projectedCurvesForTarget;
@@ -5234,6 +6245,15 @@ int BiaoJiXian_BJ::apply_cb()
                     {
                         std::vector<Edge*> singleEdge(1, selectedEdges[edgeIndex]);
                         const std::vector<tag_t> sourceCurves = ProjectSelectedEdgesToFace(workPart, singleEdge, matches[i]);
+                        {
+                            std::ostringstream log;
+                            log << "Edge mode match edge: matchIndex=" << i
+                                << ", edgeIndex=" << edgeIndex
+                                << ", edgeTag=" << DebugTag(selectedEdges[edgeIndex] != NULL ? selectedEdges[edgeIndex]->Tag() : NULL_TAG)
+                                << ", targetFace=" << DebugTag(matches[i].targetFace)
+                                << ", projectedCurves=" << sourceCurves.size();
+                            DebugLog(log.str());
+                        }
                         if (!sourceCurves.empty())
                         {
                             projectedCurveGroupsForTarget.push_back(sourceCurves);
@@ -5246,6 +6266,7 @@ int BiaoJiXian_BJ::apply_cb()
 
                     if (projectedCurvesForTarget.empty())
                     {
+                        DebugLog("Edge mode skipped match: projectedCurvesForTarget empty, matchIndex=" + DebugTag(static_cast<tag_t>(i)));
                         continue;
                     }
 
@@ -5257,6 +6278,15 @@ int BiaoJiXian_BJ::apply_cb()
 
                     const PreparedCurveGroupSet preparedCurves =
                         ApplyPreSegmentRulesToGroups(workPart, projectedCurveGroupsForTarget, matches[i]);
+                    {
+                        std::ostringstream log;
+                        log << "Edge mode prepared: matchIndex=" << i
+                            << ", inputGroups=" << projectedCurveGroupsForTarget.size()
+                            << ", groups=" << preparedCurves.groups.size()
+                            << ", curves=" << preparedCurves.curves.size()
+                            << ", retired=" << preparedCurves.retiredCurves.size();
+                        DebugLog(log.str());
+                    }
                     if (kDebugStopAfterPreSegment)
                     {
                         applyCurveOutputStyle(preparedCurves.curves, matches[i].targetBody);
@@ -5266,6 +6296,13 @@ int BiaoJiXian_BJ::apply_cb()
                     const std::vector<std::vector<tag_t> > finalCurveGroups =
                         BuildSegmentedMarkCurveGroups(preparedCurves.groups, segmentParameters);
                     const std::vector<tag_t> finalCurves = FlattenCurveGroups(finalCurveGroups);
+                    {
+                        std::ostringstream log;
+                        log << "Edge mode final: matchIndex=" << i
+                            << ", groups=" << finalCurveGroups.size()
+                            << ", curves=" << finalCurves.size();
+                        DebugLog(log.str());
+                    }
                     applyCurveOutputStyle(finalCurves, matches[i].targetBody);
                     if (kDebugStopAfterSegmentation)
                     {
@@ -5274,12 +6311,13 @@ int BiaoJiXian_BJ::apply_cb()
 
                     if (outputMode == 1)
                     {
-                        CreateShallowGrooveByExtrude(
+                        const int grooveResult = CreateShallowGrooveByExtrude(
                             workPart,
                             finalCurves,
                             matches[i],
                             grooveDepth,
-                            grooveOffset);
+                            grooveWidth);
+                        DebugLog(std::string("Edge mode shallow groove result=") + (grooveResult != 0 ? "success" : "failed"));
                     }
                     else
                     {
@@ -5337,6 +6375,20 @@ int BiaoJiXian_BJ::update_cb(NXOpen::BlockStyler::UIBlock* block)
     {
         RefreshUiState();
     }
+    if (block == MarkLineMode ||
+        block == MarkOutputMode ||
+        block == GrooveDepth ||
+        block == GrooveWidth ||
+        block == SegmentLength ||
+        block == MaxMarkSpacing ||
+        block == ClosedCurveRule ||
+        block == CurveLayerModeOption ||
+        block == CustomCurveLayer ||
+        block == CurveColorPicker ||
+        block == CurveLineFont)
+    {
+        SaveRememberedDialogValues();
+    }
     static_cast<void>(block);
     return 0;
 }
@@ -5380,6 +6432,16 @@ void BiaoJiXian_BJ::RefreshUiState()
         const bool showCustomLayer = isCurveOutput && CurveLayerModeOption != NULL && GetEnumerationValue(CurveLayerModeOption) == 1;
         SetShow(CustomCurveLayer, showCustomLayer);
         SetEnable(CustomCurveLayer, showCustomLayer);
+    }
+    if (GrooveDepth != NULL)
+    {
+        SetShow(GrooveDepth, true);
+        SetEnable(GrooveDepth, true);
+    }
+    if (GrooveWidth != NULL)
+    {
+        SetShow(GrooveWidth, true);
+        SetEnable(GrooveWidth, true);
     }
 }
 
@@ -5490,6 +6552,137 @@ int BiaoJiXian_BJ::GetIntegerValue(NXOpen::BlockStyler::IntegerBlock* block) con
     const int value = properties->GetInteger("Value");
     delete properties;
     return value;
+}
+
+void BiaoJiXian_BJ::SetEnumerationValue(NXOpen::BlockStyler::Enumeration* block, int value) const
+{
+    if (block == NULL)
+    {
+        return;
+    }
+
+    PropertyList* properties = block->GetProperties();
+    try
+    {
+        properties->SetEnum("Value", value);
+    }
+    catch (...)
+    {
+    }
+    delete properties;
+}
+
+void BiaoJiXian_BJ::SetDoubleValue(NXOpen::BlockStyler::DoubleBlock* block, double value) const
+{
+    if (block == NULL)
+    {
+        return;
+    }
+
+    PropertyList* properties = block->GetProperties();
+    try
+    {
+        properties->SetDouble("Value", value);
+    }
+    catch (...)
+    {
+        try
+        {
+            properties->SetString("Value", ToFormulaString(value).c_str());
+        }
+        catch (...)
+        {
+        }
+    }
+    delete properties;
+}
+
+void BiaoJiXian_BJ::SetIntegerValue(NXOpen::BlockStyler::IntegerBlock* block, int value) const
+{
+    if (block == NULL)
+    {
+        return;
+    }
+
+    PropertyList* properties = block->GetProperties();
+    try
+    {
+        properties->SetInteger("Value", value);
+    }
+    catch (...)
+    {
+    }
+    delete properties;
+}
+
+void BiaoJiXian_BJ::SetLineFontValue(NXOpen::BlockStyler::LineFont* block, int value) const
+{
+    if (block == NULL)
+    {
+        return;
+    }
+
+    PropertyList* properties = block->GetProperties();
+    try
+    {
+        properties->SetEnum("Value", value);
+    }
+    catch (...)
+    {
+    }
+    delete properties;
+}
+
+void BiaoJiXian_BJ::SetColorValue(NXOpen::BlockStyler::ObjectColorPicker* block, int value) const
+{
+    if (block == NULL)
+    {
+        return;
+    }
+
+    try
+    {
+        block->SetValue(std::vector<int>(1, value));
+    }
+    catch (...)
+    {
+    }
+}
+
+void BiaoJiXian_BJ::LoadRememberedDialogValues() const
+{
+    SetEnumerationValue(MarkLineMode, ReadConfigInt("MarkLineMode", 0));
+    SetEnumerationValue(MarkOutputMode, ReadConfigInt("MarkOutputMode", 0));
+    SetDoubleValue(GrooveDepth, ReadConfigDouble("GrooveDepth", 0.002));
+    SetDoubleValue(GrooveWidth, ReadConfigDouble("GrooveWidth", 0.004));
+    SetDoubleValue(SegmentLength, ReadConfigDouble("SegmentLength", 40.0));
+    SetIntegerValue(MaxMarkSpacing, ReadConfigInt("MaxMarkSpacing", 500));
+    SetEnumerationValue(ClosedCurveRule, ReadConfigInt("ClosedCurveRule", 0));
+    SetEnumerationValue(CurveLayerModeOption, ReadConfigInt("CurveLayerModeOption", 0));
+    SetIntegerValue(CustomCurveLayer, ReadConfigInt("CustomCurveLayer", 1));
+    SetColorValue(CurveColorPicker, ReadConfigInt("CurveColor", 36));
+    SetLineFontValue(CurveLineFont, ReadConfigInt("CurveLineFont", 3));
+}
+
+void BiaoJiXian_BJ::SaveRememberedDialogValues() const
+{
+    if (MarkLineMode != NULL) WriteConfigInt("MarkLineMode", GetEnumerationValue(MarkLineMode));
+    if (MarkOutputMode != NULL) WriteConfigInt("MarkOutputMode", GetEnumerationValue(MarkOutputMode));
+    if (GrooveDepth != NULL) WriteConfigDouble("GrooveDepth", GetDoubleValue(GrooveDepth));
+    if (GrooveWidth != NULL) WriteConfigDouble("GrooveWidth", GetDoubleValue(GrooveWidth));
+    if (SegmentLength != NULL) WriteConfigDouble("SegmentLength", GetDoubleValue(SegmentLength));
+    if (MaxMarkSpacing != NULL) WriteConfigInt("MaxMarkSpacing", GetIntegerValue(MaxMarkSpacing));
+    if (ClosedCurveRule != NULL) WriteConfigInt("ClosedCurveRule", GetEnumerationValue(ClosedCurveRule));
+    if (CurveLayerModeOption != NULL) WriteConfigInt("CurveLayerModeOption", GetEnumerationValue(CurveLayerModeOption));
+    if (CustomCurveLayer != NULL) WriteConfigInt("CustomCurveLayer", GetIntegerValue(CustomCurveLayer));
+    if (CurveColorPicker != NULL) WriteConfigInt("CurveColor", GetCurveColorValue(CurveColorPicker));
+    if (CurveLineFont != NULL)
+    {
+        PropertyList* properties = CurveLineFont->GetProperties();
+        const int value = properties->GetEnum("Value");
+        delete properties;
+        WriteConfigInt("CurveLineFont", value);
+    }
 }
 
 void BiaoJiXian_BJ::SetShow(NXOpen::BlockStyler::UIBlock* block, bool show) const

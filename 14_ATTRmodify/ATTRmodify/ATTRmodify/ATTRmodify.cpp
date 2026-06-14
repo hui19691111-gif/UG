@@ -35,6 +35,8 @@
 //These includes are needed for the following template code
 //------------------------------------------------------------------------------
 #include "ATTRmodify.hpp"
+#include "../../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../../embedded_dialog_resources.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
@@ -211,17 +213,7 @@ namespace
         return text == NULL ? std::string() : std::string(text);
     }
 
-    void SetStringBlockValue(NXOpen::BlockStyler::StringBlock* block, const NXOpen::NXString& value)
-    {
-        if (block == NULL)
-        {
-            return;
-        }
-
-        block->SetValue(value);
-    }
-
-    void ApplyMaterialItems(NXOpen::BlockStyler::StringBlock* block, const std::vector<std::string>& materials)
+    void ApplyMaterialItems(NXOpen::BlockStyler::Enumeration* block, const std::vector<std::string>& materials)
     {
         if (block == NULL)
         {
@@ -232,32 +224,68 @@ namespace
             throw std::runtime_error("材料配置不能为空。");
         }
 
-        const std::string previousValue = Utf8Text(block->Value());
+        std::string previousValue;
+        try
+        {
+            previousValue = Utf8Text(block->ValueAsString());
+        }
+        catch (...)
+        {
+            previousValue.clear();
+        }
+
         std::vector<NXOpen::NXString> items = ToNxStrings(materials);
-        block->SetListItems(items);
-        block->SetPresentationStyleAsString("Combo");
-        block->SetReadOnlyString(true);
+        block->SetEnumMembers(items);
 
         if (ContainsText(materials, previousValue))
         {
-            block->SetValue(NXOpen::NXString(previousValue, NXOpen::NXString::UTF8));
+            block->SetValueAsString(NXOpen::NXString(previousValue, NXOpen::NXString::UTF8));
         }
         else
         {
-            block->SetValue(items.front());
+            block->SetValueAsString(items.front());
         }
     }
 
-    void SetMaterialValueIfPresent(NXOpen::BlockStyler::StringBlock* block, const NXOpen::NXString& value)
+    NXOpen::NXString GetMaterialValue(NXOpen::BlockStyler::Enumeration* block)
+    {
+        if (block == NULL)
+        {
+            throw std::runtime_error("未找到材料控件。");
+        }
+
+        NXOpen::BlockStyler::PropertyList* props = block->GetProperties();
+        NXOpen::NXString value = props->GetEnumAsString("Value");
+        delete props;
+        return value;
+    }
+
+    void SetMaterialValueIfPresent(NXOpen::BlockStyler::Enumeration* block, const NXOpen::NXString& value)
     {
         const std::vector<std::string> materials = LoadMaterialConfig();
-        ApplyMaterialItems(block, materials);
-
         const std::string text = Utf8Text(value);
-        if (ContainsText(materials, text))
+        if (block != NULL && ContainsText(materials, text))
         {
-            SetStringBlockValue(block, NXOpen::NXString(text, NXOpen::NXString::UTF8));
+            block->SetValueAsString(NXOpen::NXString(text, NXOpen::NXString::UTF8));
         }
+    }
+
+    NXOpen::NXString Utf8NxString(const char* text)
+    {
+        return NXOpen::NXString(text == NULL ? "" : text, NXOpen::NXString::UTF8);
+    }
+
+    void SetStringAttributeUtf8(NXOpen::NXObject* object, const char* title, const char* value)
+    {
+        if (object == NULL)
+        {
+            return;
+        }
+        object->SetUserAttribute(
+            Utf8NxString(title),
+            -1,
+            Utf8NxString(value),
+            NXOpen::Update::OptionNow);
     }
 
     class UfSessionGuard
@@ -390,8 +418,19 @@ ATTRmodify::ATTRmodify()
         // Initialize the NX Open C++ API environment
         ATTRmodify::theSession = NXOpen::Session::GetSession();
         ATTRmodify::theUI = UI::GetUI();
-        theDlxFileName = "ATTRmodify.dlx";
-        theDialog = ATTRmodify::theUI->CreateDialog(theDlxFileName);
+        const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_ATTRMODIFY_DLX);
+
+        if (dlxPath.empty())
+
+        {
+
+            throw std::runtime_error("ATTRmodify dialog resource is missing.");
+
+        }
+
+        theDlxFileName = NULL;
+
+        theDialog = ATTRmodify::theUI->CreateDialog(dlxPath.c_str());
         // Registration of callback functions
         theDialog->AddApplyHandler(make_callback(this, &ATTRmodify::apply_cb));
         theDialog->AddOkHandler(make_callback(this, &ATTRmodify::ok_cb));
@@ -508,10 +547,6 @@ void ShowLicenseDeniedMessage(const wchar_t* title, const wchar_t* message)
 
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     HMODULE module = LoadProtectedLicenseGate();
     if (module == NULL)
@@ -637,13 +672,14 @@ void ATTRmodify::initialize_cb()
         selection0 = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("selection0"));
         group4 = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("group4"));
         string0 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string0"));
-        string04 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string04"));
+        string04 = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(theDialog->TopBlock()->FindBlock("string04"));
         string05 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string05"));
         toggle02 = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggle02"));
         group2 = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("group2"));
         string01 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string01"));
         string02 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string02"));
         string03 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string03"));
+        ApplyMaterialItems(string04, LoadMaterialConfig());
         //------------------------------------------------------------------------------
         //Registration of StringBlock specific callbacks
         //------------------------------------------------------------------------------
@@ -675,8 +711,6 @@ void ATTRmodify::dialogShown_cb()
 {
     try
     {
-
-        ApplyMaterialItems(string04, LoadMaterialConfig());
     }
     catch(exception& ex)
     {
@@ -715,10 +749,7 @@ int ATTRmodify::apply_cb()
         string0Props = NULL;
 
         //获取材料
-        PropertyList* string04Props = string04->GetProperties();
-        NXString Thestring04 = string04Props->GetString("Value");
-        delete string04Props;
-        string04Props = NULL;
+        NXString Thestring04 = GetMaterialValue(string04);
 
         //获取数量
         PropertyList* string05Props = string05->GetProperties();
@@ -760,17 +791,11 @@ int ATTRmodify::apply_cb()
 
         if (Thetoggle02)
         {
-            UF_ATTR_value_t value6;
-            value6.type = UF_ATTR_string;
-            value6.value.string = "对称折";
-            UF_ATTR_assign(selectedBody->Tag(), "MIRR", value6);
+            SetStringAttributeUtf8(selectedBody, "MIRR", "\xE5\xAF\xB9\xE7\xA7\xB0\xE6\x8A\x98");
         }
         else
         {
-            UF_ATTR_value_t value6;
-            value6.type = UF_ATTR_string;
-            value6.value.string = "";
-            UF_ATTR_assign(selectedBody->Tag(), "MIRR", value6);
+            SetStringAttributeUtf8(selectedBody, "MIRR", "");
         }
 
 
@@ -913,7 +938,7 @@ int ATTRmodify::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 if (strcmp(VAttr[i].Title.GetLocaleText(), "MIRR") == 0)
                 {
                     NXString MIRR = selectedBody->GetStringAttribute("MIRR");
-                    if (strcmp(MIRR.GetLocaleText(), "对称折") == 0)
+                    if (Utf8Text(MIRR) == "\xE5\xAF\xB9\xE7\xA7\xB0\xE6\x8A\x98")
                     {
                         toggle02->SetValue(true);
                     }

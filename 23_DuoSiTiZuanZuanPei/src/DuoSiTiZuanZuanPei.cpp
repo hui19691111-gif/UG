@@ -1,4 +1,5 @@
 #include <NXOpen/BlockStyler_BlockDialog.hxx>
+#include <stdexcept>
 #include <NXOpen/BlockStyler_Button.hxx>
 #include <NXOpen/BlockStyler_CompositeBlock.hxx>
 #include <NXOpen/BlockStyler_Node.hxx>
@@ -71,6 +72,8 @@
 #include <vector>
 
 #include "../../../protection/native/ZhihuiLicenseGuard.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 
 #ifndef DllExport
 #define DllExport __declspec(dllexport)
@@ -344,6 +347,12 @@ struct PlaneFaceFeature
 struct PlaneFaceGroup
 {
     std::vector<std::size_t> faceIndexes;
+};
+
+struct PlaneFaceCandidate
+{
+    NXOpen::Face* face;
+    double weight;
 };
 
 struct BodyFingerprint
@@ -3217,6 +3226,44 @@ std::vector<PlaneFaceGroup> BuildPlaneFaceGroups(const std::vector<PlaneFaceFeat
     return groups;
 }
 
+bool AskPlanarFaceCandidate(NXOpen::Face* face, PlaneFaceCandidate& candidate)
+{
+    int faceType = 0;
+    if (face == NULL || UF_MODL_ask_face_type(face->Tag(), &faceType) != 0 || faceType != UF_MODL_PLANAR_FACE)
+    {
+        return false;
+    }
+
+    int dataType = 0;
+    double point[3] = {};
+    double normal[3] = {};
+    double box[6] = {};
+    double radius = 0.0;
+    double radiusData = 0.0;
+    int normalDirection = 0;
+    if (UF_MODL_ask_face_data(
+            face->Tag(),
+            &dataType,
+            point,
+            normal,
+            box,
+            &radius,
+            &radiusData,
+            &normalDirection) != 0)
+    {
+        return false;
+    }
+
+    double dims[3] = {
+        std::fabs(box[3] - box[0]),
+        std::fabs(box[4] - box[1]),
+        std::fabs(box[5] - box[2])};
+    std::sort(dims, dims + 3);
+    candidate.face = face;
+    candidate.weight = dims[1] * dims[2];
+    return candidate.weight > 0.0;
+}
+
 BodyFingerprint BuildFingerprint(NXOpen::Body* body)
 {
     BodyFingerprint fingerprint = {};
@@ -3282,11 +3329,28 @@ void EnsurePlaneFaceFeatures(BodyFingerprint& fingerprint)
     fingerprint.faceCount = static_cast<int>(faces.size());
     fingerprint.planeFaces.clear();
     fingerprint.planeFaceGroups.clear();
-    fingerprint.planeFaces.reserve(faces.size());
+
+    std::vector<PlaneFaceCandidate> candidates;
+    candidates.reserve(faces.size());
     for (std::size_t index = 0; index < faces.size(); ++index)
     {
+        PlaneFaceCandidate candidate = {};
+        if (AskPlanarFaceCandidate(faces[index], candidate))
+        {
+            candidates.push_back(candidate);
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const PlaneFaceCandidate& lhs, const PlaneFaceCandidate& rhs)
+    {
+        return lhs.weight > rhs.weight;
+    });
+
+    const std::size_t maxFeatureFaces = std::min<std::size_t>(candidates.size(), 8);
+    fingerprint.planeFaces.reserve(maxFeatureFaces);
+    for (std::size_t index = 0; index < maxFeatureFaces; ++index)
+    {
         PlaneFaceFeature faceFeature = {};
-        if (BuildPlanarFaceFeature(faces[index], faceFeature))
+        if (BuildPlanarFaceFeature(candidates[index].face, faceFeature))
         {
             fingerprint.planeFaces.push_back(faceFeature);
         }
@@ -4322,7 +4386,12 @@ public:
     {
         ResetPreviewDebugLog();
         WritePreviewDebugLog("constructor begin, dialogPath=" + GetDialogFullPath());
-        dialog = ui->CreateDialog(GetDialogFullPath().c_str());
+        const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_DUOSITIZUANZUANPEI_DLX);
+        if (dlxPath.empty())
+        {
+            throw std::runtime_error("DuoSiTiZuanZuanPei dialog resource is missing.");
+        }
+        dialog = ui->CreateDialog(dlxPath.c_str());
         dialog->AddInitializeHandler(NXOpen::make_callback(this, &DuoSiTiZuanZuanPeiDialog::Initialize));
         dialog->AddDialogShownHandler(NXOpen::make_callback(this, &DuoSiTiZuanZuanPeiDialog::DialogShown));
         dialog->AddUpdateHandler(NXOpen::make_callback(this, &DuoSiTiZuanZuanPeiDialog::Update));

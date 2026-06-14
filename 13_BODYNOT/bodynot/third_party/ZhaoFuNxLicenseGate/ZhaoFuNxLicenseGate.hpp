@@ -172,11 +172,6 @@ inline bool EnsureAuthorized(
     const wchar_t* displayName,
     std::wstring* message)
 {
-    (void)featureCode;
-    (void)displayName;
-    (void)message;
-    return true;
-
     std::wstring error;
     detail::EnsureAuthorizedProc proc = detail::ResolveEnsureAuthorized(&error);
     if (proc == nullptr)
@@ -204,11 +199,6 @@ inline bool EnsureAuthorized(
     const std::wstring& displayName,
     std::wstring* message)
 {
-    (void)featureCode;
-    (void)displayName;
-    (void)message;
-    return true;
-
     return EnsureAuthorized(featureCode.c_str(), displayName.c_str(), message);
 }
 

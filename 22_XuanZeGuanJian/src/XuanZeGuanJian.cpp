@@ -12,9 +12,19 @@
 #include <NXOpen/BlockStyler_Tree.hxx>
 #include <NXOpen/BlockStyler_UIBlock.hxx>
 #include <NXOpen/Body.hxx>
+#include <NXOpen/BodyDumbRule.hxx>
 #include <NXOpen/Callback.hxx>
+#include <NXOpen/Direction.hxx>
+#include <NXOpen/DirectionCollection.hxx>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/Face.hxx>
+#include <NXOpen/Features_CurveFeatureCollection.hxx>
+#include <NXOpen/Features_Feature.hxx>
+#include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_ShadowCurve.hxx>
+#include <NXOpen/Features_ShadowCurveBuilder.hxx>
+#include <NXOpen/GeometricUtilities_CurveFitData.hxx>
+#include <NXOpen/GeometricUtilities_CurveSettings.hxx>
 #include <NXOpen/ListingWindow.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
@@ -22,8 +32,15 @@
 #include <NXOpen/NXString.hxx>
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
+#include <NXOpen/Plane.hxx>
+#include <NXOpen/PlaneCollection.hxx>
+#include <NXOpen/ScCollector.hxx>
+#include <NXOpen/ScRuleFactory.hxx>
 #include <NXOpen/Selection.hxx>
+#include <NXOpen/SelectionIntentRule.hxx>
+#include <NXOpen/SelectionIntentRuleOptions.hxx>
 #include <NXOpen/Session.hxx>
+#include <NXOpen/SmartObject.hxx>
 #include <NXOpen/TaggedObject.hxx>
 #include <NXOpen/UI.hxx>
 
@@ -33,6 +50,8 @@
 #include <uf_exit.h>
 #include <uf_ui.h>
 #include <uf_curve.h>
+#include <uf_eval.h>
+#include <uf_group.h>
 #include <uf_layer.h>
 #include <uf_modl.h>
 #include <uf_modl_utilities.h>
@@ -56,6 +75,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -388,6 +410,60 @@ std::string GetModuleDirectory()
     return slash == std::string::npos ? "" : directory.substr(0, slash);
 }
 
+std::string SelectDebugLogPath()
+{
+    const std::string moduleDirectory = GetModuleDirectory();
+    if (moduleDirectory.empty())
+    {
+        return "";
+    }
+
+    const std::string appRoot = moduleDirectory + "\\..";
+    const std::string logDirectory = appRoot + "\\logs";
+    CreateDirectoryA(logDirectory.c_str(), NULL);
+    return logDirectory + "\\XuanZeGuanJian_select_debug.log";
+}
+
+void AppendSelectDebugLog(const std::string& message)
+{
+    (void)message;
+}
+
+std::string UfTypeText(tag_t objectTag)
+{
+    int type = 0;
+    int subtype = 0;
+    if (objectTag == NULL_TAG || UF_OBJ_ask_type_and_subtype(objectTag, &type, &subtype) != 0)
+    {
+        return "UF type unavailable";
+    }
+
+    std::ostringstream stream;
+    stream << "UF type=" << type << " subtype=" << subtype;
+    return stream.str();
+}
+
+std::string TaggedObjectKindText(NXOpen::TaggedObject* object)
+{
+    if (object == NULL)
+    {
+        return "NULL";
+    }
+    if (dynamic_cast<NXOpen::Body*>(object) != NULL)
+    {
+        return "Body";
+    }
+    if (dynamic_cast<NXOpen::Face*>(object) != NULL)
+    {
+        return "Face";
+    }
+    if (dynamic_cast<NXOpen::Edge*>(object) != NULL)
+    {
+        return "Edge";
+    }
+    return "TaggedObject";
+}
+
 void LoadTubeSpecsFromFile(const std::string& path, std::set<std::pair<int, int> >& specs)
 {
     std::ifstream input(path.c_str());
@@ -430,7 +506,21 @@ std::string SharedSpecTablePath()
     {
         return "";
     }
-    return moduleDirectory + "\\config\\FangTongKaKou_specs.txt";
+
+    const std::string appRoot = moduleDirectory + "\\..";
+    const std::string rootConfigPath = appRoot + "\\config\\FangTongKaKou_specs.txt";
+    if (GetFileAttributesA(rootConfigPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        return rootConfigPath;
+    }
+
+    const std::string legacyConfigPath = moduleDirectory + "\\config\\FangTongKaKou_specs.txt";
+    if (GetFileAttributesA(legacyConfigPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        return legacyConfigPath;
+    }
+
+    return moduleDirectory + "\\FangTongKaKou_specs.txt";
 }
 
 std::string MaterialConfigPath()
@@ -501,6 +591,7 @@ const std::set<std::pair<int, int> >& GetTubeSpecs()
     const std::string moduleDirectory = GetModuleDirectory();
     if (!moduleDirectory.empty())
     {
+        LoadTubeSpecsFromFile(moduleDirectory + "\\..\\config\\FangTongKaKou_specs.txt", specs);
         LoadTubeSpecsFromFile(moduleDirectory + "\\config\\FangTongKaKou_specs.txt", specs);
         LoadTubeSpecsFromFile(moduleDirectory + "\\FangTongKaKou_specs.txt", specs);
     }
@@ -1145,6 +1236,7 @@ struct SectionLoop
     double height;
     double area;
     std::vector<double> lineAngles;
+    std::vector<std::pair<double, double> > lineRays;
 };
 
 bool PointsNearlyEqual(const double lhs[3], const double rhs[3], double tolerance)
@@ -1312,6 +1404,105 @@ bool AnglesPerpendicularFourSides(const std::vector<double>& angles)
     return std::fabs(delta - perpendicular) <= angleTolerance;
 }
 
+bool AnglesHaveTwoPerpendicularDirections(const std::vector<double>& angles)
+{
+    if (angles.size() < 4)
+    {
+        return false;
+    }
+
+    std::vector<double> normalized;
+    for (std::size_t index = 0; index < angles.size(); ++index)
+    {
+        double angle = std::fmod(angles[index], 3.14159265358979323846);
+        if (angle < 0.0)
+        {
+            angle += 3.14159265358979323846;
+        }
+        normalized.push_back(angle);
+    }
+    std::sort(normalized.begin(), normalized.end());
+
+    const double angleTolerance = 8.0 * 3.14159265358979323846 / 180.0;
+    const double perpendicular = 3.14159265358979323846 * 0.5;
+    double firstAngle = normalized[0];
+    double secondAngle = 0.0;
+    int firstDirectionCount = 0;
+    int secondDirectionCount = 0;
+    for (std::size_t index = 0; index < normalized.size(); ++index)
+    {
+        if (std::fabs(normalized[index] - firstAngle) <= angleTolerance)
+        {
+            ++firstDirectionCount;
+            continue;
+        }
+        if (secondDirectionCount == 0)
+        {
+            secondAngle = normalized[index];
+            ++secondDirectionCount;
+            continue;
+        }
+        if (std::fabs(normalized[index] - secondAngle) <= angleTolerance)
+        {
+            ++secondDirectionCount;
+            continue;
+        }
+        return false;
+    }
+
+    if (firstDirectionCount < 2 || secondDirectionCount < 2)
+    {
+        return false;
+    }
+    double delta = std::fabs(secondAngle - firstAngle);
+    while (delta > 3.14159265358979323846)
+    {
+        delta -= 3.14159265358979323846;
+    }
+    delta = std::min(delta, std::fabs(3.14159265358979323846 - delta));
+    return std::fabs(delta - perpendicular) <= angleTolerance;
+}
+
+bool SameAngleModuloPi(double lhs, double rhs, double tolerance)
+{
+    double delta = std::fabs(lhs - rhs);
+    while (delta > 3.14159265358979323846)
+    {
+        delta -= 3.14159265358979323846;
+    }
+    delta = std::min(delta, std::fabs(3.14159265358979323846 - delta));
+    return delta <= tolerance;
+}
+
+std::vector<double> MergeCollinearLineAngles(const std::vector<std::pair<double, double> >& rays)
+{
+    std::vector<double> mergedAngles;
+    std::vector<double> mergedOffsets;
+    const double angleTolerance = 8.0 * 3.14159265358979323846 / 180.0;
+    const double offsetTolerance = 0.2;
+    for (std::size_t index = 0; index < rays.size(); ++index)
+    {
+        const double angle = rays[index].first;
+        const double offset = rays[index].second;
+        bool found = false;
+        for (std::size_t existing = 0; existing < mergedAngles.size(); ++existing)
+        {
+            if (SameAngleModuloPi(angle, mergedAngles[existing], angleTolerance) &&
+                std::fabs(offset - mergedOffsets[existing]) <= offsetTolerance)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            mergedAngles.push_back(angle);
+            mergedOffsets.push_back(offset);
+        }
+    }
+    return mergedAngles;
+}
+
 bool BuildSectionLoops(
     const std::vector<SectionCurveSegment>& segments,
     const double xAxis[3],
@@ -1319,7 +1510,7 @@ bool BuildSectionLoops(
     std::vector<SectionLoop>& loops)
 {
     loops.clear();
-    if (segments.size() < 8)
+    if (segments.size() < 4)
     {
         return false;
     }
@@ -1329,7 +1520,7 @@ bool BuildSectionLoops(
     std::vector<std::pair<int, int> > segmentPointIds(
         segments.size(),
         std::make_pair(-1, -1));
-    const double pointTolerance = 0.2;
+    const double pointTolerance = 0.05;
     for (std::size_t index = 0; index < segments.size(); ++index)
     {
         const int first = FindOrAddSectionPoint(points, segments[index].first, pointTolerance);
@@ -1436,7 +1627,19 @@ bool BuildSectionLoops(
             if (segment.line)
             {
                 ++loop.lineCount;
-                loop.lineAngles.push_back(DirectionAngleInFrame(segment.direction, xAxis, yAxis));
+                double angle = DirectionAngleInFrame(segment.direction, xAxis, yAxis);
+                angle = std::fmod(angle, 3.14159265358979323846);
+                if (angle < 0.0)
+                {
+                    angle += 3.14159265358979323846;
+                }
+                loop.lineAngles.push_back(angle);
+                const double dx = std::cos(angle);
+                const double dy = std::sin(angle);
+                const double px = Dot3(segment.first, xAxis);
+                const double py = Dot3(segment.first, yAxis);
+                const double offset = -dy * px + dx * py;
+                loop.lineRays.push_back(std::make_pair(angle, offset));
             }
             else if (segment.arc)
             {
@@ -1459,15 +1662,402 @@ bool BuildSectionLoops(
     return !loops.empty();
 }
 
+bool CollectTrueSectionCurveSegmentsAt(
+    tag_t bodyTag,
+    double sectionPosition,
+    const double lengthAxis[3],
+    std::vector<SectionCurveSegment>& segments);
+
+bool AppendEvaluatedCurveSegments(
+    tag_t curveTag,
+    const double lengthAxis[3],
+    std::vector<SectionCurveSegment>& segments)
+{
+    int type = 0;
+    int subtype = 0;
+    if (UF_OBJ_ask_type_and_subtype(curveTag, &type, &subtype) != 0)
+    {
+        return false;
+    }
+
+    if (type == UF_line_type)
+    {
+        UF_CURVE_line_t lineData = {};
+        if (UF_CURVE_ask_line_data(curveTag, &lineData) != 0)
+        {
+            return false;
+        }
+
+        SectionCurveSegment segment = {};
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            segment.first[axis] = lineData.start_point[axis];
+            segment.second[axis] = lineData.end_point[axis];
+        }
+        segment.line = LineDirectionInSection(segment.first, segment.second, lengthAxis, segment.direction);
+        segment.arc = false;
+        if (segment.line)
+        {
+            segments.push_back(segment);
+            return true;
+        }
+        return false;
+    }
+
+    UF_EVAL_p_t evaluator = NULL;
+    if (UF_EVAL_initialize(curveTag, &evaluator) != 0 || evaluator == NULL)
+    {
+        return false;
+    }
+
+    bool added = false;
+    double limits[2] = {0.0, 0.0};
+    if (UF_EVAL_ask_limits(evaluator, limits) == 0 && limits[1] > limits[0])
+    {
+        if (type == UF_circle_type)
+        {
+            double first[3] = {0.0, 0.0, 0.0};
+            double second[3] = {0.0, 0.0, 0.0};
+            double derivative[3] = {0.0, 0.0, 0.0};
+            if (UF_EVAL_evaluate(evaluator, 0, limits[0], first, derivative) == 0 &&
+                UF_EVAL_evaluate(evaluator, 0, limits[1], second, derivative) == 0 &&
+                Distance3(first, second) > 0.05)
+            {
+                SectionCurveSegment segment = {};
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    segment.first[axis] = first[axis];
+                    segment.second[axis] = second[axis];
+                    segment.direction[axis] = 0.0;
+                }
+                segment.line = false;
+                segment.arc = true;
+                segments.push_back(segment);
+                UF_EVAL_free(evaluator);
+                return true;
+            }
+            UF_EVAL_free(evaluator);
+            return false;
+        }
+
+        const int sampleCount = 32;
+        double previous[3] = {0.0, 0.0, 0.0};
+        double derivative[3] = {0.0, 0.0, 0.0};
+        if (UF_EVAL_evaluate(evaluator, 0, limits[0], previous, derivative) == 0)
+        {
+            for (int sample = 1; sample <= sampleCount; ++sample)
+            {
+                const double parameter = limits[0] + (limits[1] - limits[0]) *
+                    static_cast<double>(sample) / static_cast<double>(sampleCount);
+                double current[3] = {0.0, 0.0, 0.0};
+                if (UF_EVAL_evaluate(evaluator, 0, parameter, current, derivative) != 0)
+                {
+                    continue;
+                }
+                if (Distance3(previous, current) > 0.05)
+                {
+                    SectionCurveSegment segment = {};
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        segment.first[axis] = previous[axis];
+                        segment.second[axis] = current[axis];
+                    }
+                    segment.line = LineDirectionInSection(segment.first, segment.second, lengthAxis, segment.direction);
+                    segment.arc = !segment.line;
+                    if (segment.line)
+                    {
+                        segments.push_back(segment);
+                        added = true;
+                    }
+                }
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    previous[axis] = current[axis];
+                }
+            }
+        }
+    }
+
+    UF_EVAL_free(evaluator);
+    return added;
+}
+
+bool CollectShadowCurveSegmentsAt(
+    tag_t bodyTag,
+    double sectionPosition,
+    const double lengthAxis[3],
+    std::vector<SectionCurveSegment>& segments)
+{
+    segments.clear();
+
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    NXOpen::Part* workPart = session != NULL ? session->Parts()->Work() : NULL;
+    if (workPart == NULL)
+    {
+        return false;
+    }
+
+    NXOpen::TaggedObject* taggedObject = NXOpen::NXObjectManager::Get(bodyTag);
+    NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(taggedObject);
+    if (body == NULL)
+    {
+        return false;
+    }
+
+    int oldDisplayState = UF_DISP_UNSUPPRESS_DISPLAY;
+    const bool displayStateKnown = UF_DISP_ask_display(&oldDisplayState) == 0;
+    UF_DISP_set_display(UF_DISP_SUPPRESS_DISPLAY);
+
+    NXOpen::Features::ShadowCurveBuilder* builder = NULL;
+    NXOpen::Plane* plane = NULL;
+    NXOpen::Direction* rayDirection = NULL;
+    NXOpen::Direction* upDirection = NULL;
+    NXOpen::SelectionIntentRuleOptions* ruleOptions = NULL;
+    NXOpen::NXObject* committedObject = NULL;
+    std::vector<NXOpen::NXObject*> committedObjects;
+    bool added = false;
+
+    try
+    {
+        const NXOpen::Point3d origin(
+            lengthAxis[0] * sectionPosition,
+            lengthAxis[1] * sectionPosition,
+            lengthAxis[2] * sectionPosition);
+        const NXOpen::Vector3d normal(lengthAxis[0], lengthAxis[1], lengthAxis[2]);
+
+        double upAxisRaw[3] = {0.0, 0.0, 0.0};
+        double yAxisRaw[3] = {0.0, 0.0, 0.0};
+        if (!BuildPerpendicularFrame(lengthAxis, upAxisRaw, yAxisRaw))
+        {
+            if (displayStateKnown)
+            {
+                UF_DISP_set_display(oldDisplayState);
+            }
+            return false;
+        }
+
+        plane = workPart->Planes()->CreatePlane(
+            origin,
+            normal,
+            NXOpen::SmartObject::UpdateOptionWithinModeling);
+        rayDirection = workPart->Directions()->CreateDirection(
+            origin,
+            normal,
+            NXOpen::SmartObject::UpdateOptionWithinModeling);
+        upDirection = workPart->Directions()->CreateDirection(
+            origin,
+            NXOpen::Vector3d(upAxisRaw[0], upAxisRaw[1], upAxisRaw[2]),
+            NXOpen::SmartObject::UpdateOptionWithinModeling);
+
+        builder = workPart->Features()->CurveFeatureCollection()->CreateShadowCurveBuilder(NULL);
+        builder->SetLightSourceType(NXOpen::Features::ShadowCurveBuilder::LightSourceTypesVector);
+        builder->SetMaskType(NXOpen::Features::ShadowCurveBuilder::MaskTypesBodies);
+        builder->SetAccuracyType(NXOpen::Features::ShadowCurveBuilder::AccuracyTypesStandard);
+        builder->SetMaskBodyProcessingTypes(NXOpen::Features::ShadowCurveBuilder::MaskBodyProcessingTypeMorePreciseResult);
+        builder->SetCurveLocationType(NXOpen::Features::ShadowCurveBuilder::CurveLocationTypesShadowonPlane);
+        builder->SetCurveLocationPlane(plane);
+        builder->SetRayDirection(rayDirection);
+        builder->SetUpVector(upDirection);
+        builder->SetEnableShadowRange(false);
+
+        if (builder->CurveSettings() != NULL && builder->CurveSettings()->CurveFitData() != NULL)
+        {
+            builder->CurveSettings()->CurveFitData()->SetTolerance(0.01);
+            builder->CurveSettings()->CurveFitData()->SetAngleTolerance(0.5);
+            builder->CurveSettings()->CurveFitData()->SetCurveJoinMethod(NXOpen::GeometricUtilities::CurveFitData::JoinNo);
+        }
+        if (builder->MaskingCurves() != NULL)
+        {
+            builder->MaskingCurves()->SetDistanceTolerance(0.01);
+            builder->MaskingCurves()->SetChainingTolerance(0.0095);
+            builder->MaskingCurves()->SetAngleTolerance(0.5);
+        }
+        if (builder->Angle() != NULL)
+        {
+            builder->Angle()->SetFormula("40");
+        }
+        if (builder->WidthAngle() != NULL)
+        {
+            builder->WidthAngle()->SetFormula("40");
+        }
+        if (builder->VerticalAngle() != NULL)
+        {
+            builder->VerticalAngle()->SetFormula("20");
+        }
+        if (builder->ShadowRangeOnPlane() != NULL)
+        {
+            builder->ShadowRangeOnPlane()->SetFormula("5000");
+        }
+        if (builder->SphereDiameter() != NULL)
+        {
+            builder->SphereDiameter()->SetFormula("10000");
+        }
+
+        ruleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+        ruleOptions->SetSelectedFromInactive(false);
+        std::vector<NXOpen::Body*> bodies(1);
+        bodies[0] = body;
+        NXOpen::BodyDumbRule* bodyRule = workPart->ScRuleFactory()->CreateRuleBodyDumb(bodies, true, ruleOptions);
+        std::vector<NXOpen::SelectionIntentRule*> rules(1);
+        rules[0] = bodyRule;
+        builder->MaskingBodies()->ReplaceRules(rules, false);
+
+        committedObject = builder->Commit();
+        committedObjects = builder->GetCommittedObjects();
+
+        std::vector<tag_t> curveTags;
+        for (std::size_t index = 0; index < committedObjects.size(); ++index)
+        {
+            if (committedObjects[index] == NULL)
+            {
+                continue;
+            }
+            curveTags.push_back(committedObjects[index]->Tag());
+            UF_OBJ_set_blank_status(committedObjects[index]->Tag(), UF_OBJ_BLANKED);
+        }
+
+        NXOpen::Features::Feature* feature = dynamic_cast<NXOpen::Features::Feature*>(committedObject);
+        if (feature != NULL)
+        {
+            UF_OBJ_set_blank_status(feature->Tag(), UF_OBJ_BLANKED);
+            std::vector<NXOpen::NXObject*> entities = feature->GetEntities();
+            for (std::size_t index = 0; index < entities.size(); ++index)
+            {
+                if (entities[index] != NULL)
+                {
+                    curveTags.push_back(entities[index]->Tag());
+                    UF_OBJ_set_blank_status(entities[index]->Tag(), UF_OBJ_BLANKED);
+                }
+            }
+        }
+
+        std::sort(curveTags.begin(), curveTags.end());
+        curveTags.erase(std::unique(curveTags.begin(), curveTags.end()), curveTags.end());
+        int lineCurves = 0;
+        int circleCurves = 0;
+        int splineCurves = 0;
+        int otherCurves = 0;
+        for (std::size_t index = 0; index < curveTags.size(); ++index)
+        {
+            int type = 0;
+            int subtype = 0;
+            if (UF_OBJ_ask_type_and_subtype(curveTags[index], &type, &subtype) != 0)
+            {
+                continue;
+            }
+            if (type == UF_line_type)
+            {
+                ++lineCurves;
+            }
+            else if (type == UF_circle_type)
+            {
+                ++circleCurves;
+            }
+            else if (type == UF_spline_type)
+            {
+                ++splineCurves;
+            }
+            else
+            {
+                ++otherCurves;
+            }
+            if (type == UF_line_type || type == UF_circle_type || type == UF_spline_type)
+            {
+                if (AppendEvaluatedCurveSegments(curveTags[index], lengthAxis, segments))
+                {
+                    added = true;
+                }
+            }
+        }
+        {
+            std::ostringstream stream;
+            stream << "  shadow bodyTag=" << bodyTag
+                << " committedObjects=" << committedObjects.size()
+                << " curveObjects=" << curveTags.size()
+                << " lineCurves=" << lineCurves
+                << " circleCurves=" << circleCurves
+                << " splineCurves=" << splineCurves
+                << " otherObjects=" << otherCurves
+                << " segments=" << segments.size();
+            AppendSelectDebugLog(stream.str());
+        }
+    }
+    catch (const NXOpen::NXException&)
+    {
+        added = false;
+    }
+    catch (...)
+    {
+        added = false;
+    }
+
+    if (builder != NULL)
+    {
+        try
+        {
+            builder->Destroy();
+        }
+        catch (...)
+        {
+        }
+    }
+
+    std::vector<tag_t> deleteTags;
+    for (std::size_t index = 0; index < committedObjects.size(); ++index)
+    {
+        if (committedObjects[index] != NULL)
+        {
+            deleteTags.push_back(committedObjects[index]->Tag());
+        }
+    }
+    if (committedObject != NULL)
+    {
+        deleteTags.push_back(committedObject->Tag());
+    }
+    if (plane != NULL)
+    {
+        deleteTags.push_back(plane->Tag());
+    }
+    if (rayDirection != NULL)
+    {
+        deleteTags.push_back(rayDirection->Tag());
+    }
+    if (upDirection != NULL)
+    {
+        deleteTags.push_back(upDirection->Tag());
+    }
+    std::sort(deleteTags.begin(), deleteTags.end());
+    deleteTags.erase(std::unique(deleteTags.begin(), deleteTags.end()), deleteTags.end());
+    for (std::size_t index = 0; index < deleteTags.size(); ++index)
+    {
+        if (deleteTags[index] != NULL_TAG)
+        {
+            UF_OBJ_delete_object(deleteTags[index]);
+        }
+    }
+
+    if (displayStateKnown)
+    {
+        UF_DISP_set_display(oldDisplayState);
+    }
+
+    return added && !segments.empty();
+}
+
 bool IsRectangularTubeLoop(const SectionLoop& loop)
 {
-    if (loop.lineCount == 4 && loop.arcCount == 0)
+    const std::vector<double> mergedAngles = MergeCollinearLineAngles(loop.lineRays);
+    if (mergedAngles.size() == 4 && loop.arcCount == 0)
     {
-        return AnglesPerpendicularFourSides(loop.lineAngles);
+        return AnglesPerpendicularFourSides(mergedAngles);
     }
-    if (loop.lineCount == 4 && loop.arcCount == 4)
+    if (mergedAngles.size() == 4 && loop.arcCount == 4)
     {
-        return AnglesPerpendicularFourSides(loop.lineAngles);
+        return AnglesPerpendicularFourSides(mergedAngles);
+    }
+    if (mergedAngles.size() >= 4 && (loop.arcCount == 0 || loop.arcCount == 4))
+    {
+        return AnglesHaveTwoPerpendicularDirections(mergedAngles);
     }
     return false;
 }
@@ -1526,27 +2116,19 @@ bool HasAcceptedRectangularSectionAt(
     const double yAxis[3],
     double* sectionThickness)
 {
-    uf_list_p_t edgeList = NULL;
-    if (UF_MODL_ask_body_edges(bodyTag, &edgeList) != 0 || edgeList == NULL)
+    std::vector<SectionCurveSegment> shadowSegments;
+    if (!CollectShadowCurveSegmentsAt(bodyTag, sectionPosition, lengthAxis, shadowSegments))
     {
         return false;
     }
 
-    const std::vector<tag_t> edgeTags = UfListToTags(edgeList);
-    UF_MODL_delete_list(&edgeList);
-    std::vector<SectionCurveSegment> segments;
-    for (std::size_t index = 0; index < edgeTags.size(); ++index)
-    {
-        SectionCurveSegment segment = {};
-        if (EdgeLiesOnSection(edgeTags[index], sectionPosition, lengthAxis, 1.0, segment))
-        {
-            segments.push_back(segment);
-        }
-    }
-
     std::vector<SectionLoop> loops;
-    if (!BuildSectionLoops(segments, xAxis, yAxis, loops))
+    if (!BuildSectionLoops(shadowSegments, xAxis, yAxis, loops))
     {
+        std::ostringstream stream;
+        stream << "  shadow bodyTag=" << bodyTag
+            << " loopBuild=no segments=" << shadowSegments.size();
+        AppendSelectDebugLog(stream.str());
         return false;
     }
 
@@ -1558,7 +2140,26 @@ bool HasAcceptedRectangularSectionAt(
             ++acceptedLoopCount;
         }
     }
-    if (acceptedLoopCount < 2)
+    {
+        std::ostringstream stream;
+        stream << "  shadow bodyTag=" << bodyTag
+            << " loops=" << loops.size()
+            << " rectangularLoops=" << acceptedLoopCount;
+        AppendSelectDebugLog(stream.str());
+    }
+    for (std::size_t index = 0; index < loops.size(); ++index)
+    {
+        std::ostringstream stream;
+        stream << "    loop[" << index << "]"
+            << " lines=" << loops[index].lineCount
+            << " arcs=" << loops[index].arcCount
+            << " width=" << FormatDouble(loops[index].width, 3)
+            << " height=" << FormatDouble(loops[index].height, 3)
+            << " area=" << FormatDouble(loops[index].area, 3)
+            << " rectangular=" << (IsRectangularTubeLoop(loops[index]) ? "yes" : "no");
+        AppendSelectDebugLog(stream.str());
+    }
+    if (loops.size() < 2 || acceptedLoopCount < 2)
     {
         return false;
     }
@@ -1574,7 +2175,113 @@ bool HasAcceptedRectangularSectionAt(
     return true;
 }
 
-bool HasClosedRectangularTubeSections(tag_t bodyTag, double* sectionThickness = NULL)
+bool CollectTrueSectionCurveSegmentsAt(
+    tag_t bodyTag,
+    double sectionPosition,
+    const double lengthAxis[3],
+    std::vector<SectionCurveSegment>& segments)
+{
+    segments.clear();
+    double origin[3] =
+    {
+        lengthAxis[0] * sectionPosition,
+        lengthAxis[1] * sectionPosition,
+        lengthAxis[2] * sectionPosition
+    };
+    double normal[3] = {lengthAxis[0], lengthAxis[1], lengthAxis[2]};
+
+    tag_t planeTag = NULL_TAG;
+    if (UF_MODL_create_plane(origin, normal, &planeTag) != 0 || planeTag == NULL_TAG)
+    {
+        return false;
+    }
+
+    tag_t objects[1] = {bodyTag};
+    tag_t planes[1] = {planeTag};
+    UF_CURVE_section_general_data_t generalData = {};
+    UF_CURVE_section_planes_data_t planesData = {};
+    generalData.objects = objects;
+    generalData.num_objects = 1;
+    generalData.associate = 0;
+    generalData.grouping = 0;
+    generalData.join_type = 0;
+    generalData.tolerance = 0.01;
+    planesData.planes = planes;
+    planesData.num_planes = 1;
+
+    tag_t sectionGroup = NULL_TAG;
+    const int sectionError = UF_CURVE_section_from_planes(&generalData, &planesData, &sectionGroup);
+
+    tag_t* groupMembers = NULL;
+    int memberCount = 0;
+    if (sectionError == 0 && sectionGroup != NULL_TAG)
+    {
+        UF_GROUP_ask_group_data(sectionGroup, &groupMembers, &memberCount);
+        for (int index = 0; index < memberCount; ++index)
+        {
+            tag_t curveTag = groupMembers[index];
+            if (curveTag == NULL_TAG)
+            {
+                continue;
+            }
+
+            int type = 0;
+            int subtype = 0;
+            if (UF_OBJ_ask_type_and_subtype(curveTag, &type, &subtype) != 0)
+            {
+                continue;
+            }
+
+            if (type == UF_line_type)
+            {
+                UF_CURVE_line_t lineData = {};
+                if (UF_CURVE_ask_line_data(curveTag, &lineData) != 0)
+                {
+                    continue;
+                }
+
+                SectionCurveSegment segment = {};
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    segment.first[axis] = lineData.start_point[axis];
+                    segment.second[axis] = lineData.end_point[axis];
+                }
+                segment.line = LineDirectionInSection(segment.first, segment.second, lengthAxis, segment.direction);
+                segment.arc = false;
+                if (segment.line)
+                {
+                    segments.push_back(segment);
+                }
+            }
+        }
+    }
+
+    if (groupMembers != NULL)
+    {
+        for (int index = 0; index < memberCount; ++index)
+        {
+            if (groupMembers[index] != NULL_TAG)
+            {
+                UF_OBJ_delete_object(groupMembers[index]);
+            }
+        }
+        UF_free(groupMembers);
+    }
+    if (sectionGroup != NULL_TAG)
+    {
+        UF_OBJ_delete_object(sectionGroup);
+    }
+    if (planeTag != NULL_TAG)
+    {
+        UF_OBJ_delete_object(planeTag);
+    }
+
+    return !segments.empty();
+}
+
+bool HasClosedRectangularTubeSections(
+    tag_t bodyTag,
+    double* sectionThickness = NULL)
 {
     double lengthAxis[3] = {0.0, 0.0, 0.0};
     if (!EstimateMainLengthAxisFromEdges(bodyTag, lengthAxis))
@@ -1601,19 +2308,21 @@ bool HasClosedRectangularTubeSections(tag_t bodyTag, double* sectionThickness = 
     {
         return false;
     }
-    const double fractions[] = {0.0, 1.0 / 6.0, 2.0 / 6.0, 3.0 / 6.0, 4.0 / 6.0, 5.0 / 6.0, 1.0};
-    for (int index = 0; index < static_cast<int>(sizeof(fractions) / sizeof(fractions[0])); ++index)
+    const double sectionPosition = (bodyMinProjection + bodyMaxProjection) * 0.5;
+    double thickness = 0.0;
+    if (HasAcceptedRectangularSectionAt(
+        bodyTag,
+        sectionPosition,
+        lengthAxis,
+        xAxis,
+        yAxis,
+        &thickness))
     {
-        const double sectionPosition = bodyMinProjection + span * fractions[index];
-        double thickness = 0.0;
-        if (HasAcceptedRectangularSectionAt(bodyTag, sectionPosition, lengthAxis, xAxis, yAxis, &thickness))
+        if (sectionThickness != NULL && thickness > 0.0)
         {
-            if (sectionThickness != NULL && thickness > 0.0)
-            {
-                *sectionThickness = thickness;
-            }
-            return true;
+            *sectionThickness = thickness;
         }
+        return true;
     }
     return false;
 }
@@ -2271,7 +2980,8 @@ TubeRecord ClassifyBody(NXOpen::Body* body, double minimumRoundDiameter)
     }
 
     double sectionThickness = 0.0;
-    if (ReclassifyTubeDimensionsBySpec(record.length, record.width, record.height) &&
+    const bool dimensionsMatchTubeSpec = ReclassifyTubeDimensionsBySpec(record.length, record.width, record.height);
+    if (dimensionsMatchTubeSpec &&
         HasClosedRectangularTubeSections(body->Tag(), &sectionThickness))
     {
         record.thickness = sectionThickness > 0.0
@@ -2300,6 +3010,148 @@ TubeRecord ClassifyBody(NXOpen::Body* body, double minimumRoundDiameter)
     record.kind = TubeKindUnknown;
     record.spec = BuildTubeSpec(record.width, record.height, 0.0);
     return record;
+}
+
+int CountBodyFacesForDebug(tag_t bodyTag)
+{
+    uf_list_p_t faceList = NULL;
+    if (UF_MODL_ask_body_faces(bodyTag, &faceList) != 0 || faceList == NULL)
+    {
+        return -1;
+    }
+    int count = 0;
+    UF_MODL_ask_list_count(faceList, &count);
+    UF_MODL_delete_list(&faceList);
+    return count;
+}
+
+int CountBodyEdgesForDebug(tag_t bodyTag, int* linearEdges, int* circularEdges, int* fullCircularEdges)
+{
+    if (linearEdges != NULL)
+    {
+        *linearEdges = 0;
+    }
+    if (circularEdges != NULL)
+    {
+        *circularEdges = 0;
+    }
+    if (fullCircularEdges != NULL)
+    {
+        *fullCircularEdges = 0;
+    }
+
+    uf_list_p_t edgeList = NULL;
+    if (UF_MODL_ask_body_edges(bodyTag, &edgeList) != 0 || edgeList == NULL)
+    {
+        return -1;
+    }
+
+    const std::vector<tag_t> edgeTags = UfListToTags(edgeList);
+    UF_MODL_delete_list(&edgeList);
+    for (std::size_t index = 0; index < edgeTags.size(); ++index)
+    {
+        int edgeType = 0;
+        if (UF_MODL_ask_edge_type(edgeTags[index], &edgeType) != 0)
+        {
+            continue;
+        }
+        if (edgeType == UF_MODL_LINEAR_EDGE && linearEdges != NULL)
+        {
+            ++(*linearEdges);
+        }
+        else if (edgeType == UF_MODL_CIRCULAR_EDGE)
+        {
+            if (circularEdges != NULL)
+            {
+                ++(*circularEdges);
+            }
+            if (fullCircularEdges != NULL && IsFullCircularEdge(edgeTags[index]))
+            {
+                ++(*fullCircularEdges);
+            }
+        }
+    }
+    return static_cast<int>(edgeTags.size());
+}
+
+std::string BodyRecognitionDebugText(NXOpen::Body* body, double minimumRoundDiameter, const TubeRecord& record)
+{
+    if (body == NULL)
+    {
+        return "body=NULL";
+    }
+
+    std::ostringstream stream;
+    stream << "bodyTag=" << body->Tag()
+           << " name=\"" << ObjectName(body->Tag()) << "\" "
+           << UfTypeText(body->Tag());
+
+    double dimensions[3] = {0.0, 0.0, 0.0};
+    if (AskBodyDimensions(body->Tag(), dimensions))
+    {
+        stream << " boxDims=" << FormatDouble(dimensions[0], 3)
+               << "," << FormatDouble(dimensions[1], 3)
+               << "," << FormatDouble(dimensions[2], 3);
+    }
+    else
+    {
+        stream << " boxDims=unavailable";
+    }
+
+    int linearEdges = 0;
+    int circularEdges = 0;
+    int fullCircularEdges = 0;
+    const int edgeCount = CountBodyEdgesForDebug(body->Tag(), &linearEdges, &circularEdges, &fullCircularEdges);
+    const int faceCount = CountBodyFacesForDebug(body->Tag());
+    stream << " faces=" << faceCount
+           << " edges=" << edgeCount
+           << " linearEdges=" << linearEdges
+           << " circularEdges=" << circularEdges
+           << " fullCircularEdges=" << fullCircularEdges;
+
+    const std::vector<CylindricalFaceInfo> cylinders = CollectCylindricalFaces(body->Tag());
+    int fullCylinderFaces = 0;
+    for (std::size_t index = 0; index < cylinders.size(); ++index)
+    {
+        if (cylinders[index].fullCircle)
+        {
+            ++fullCylinderFaces;
+        }
+    }
+    stream << " cylinderFaces=" << cylinders.size()
+           << " fullCylinderFaces=" << fullCylinderFaces;
+
+    double length = 0.0;
+    double roundDiameter = 0.0;
+    double roundThickness = 0.0;
+    const bool roundOk = EstimateRoundTubeDimensions(body->Tag(), length, roundDiameter, roundThickness);
+    const bool rectangularOk = record.kind == TubeKindRectangular || record.kind == TubeKindSquare;
+    const double sectionThickness = record.thickness;
+    stream << " rectangularSection=" << (rectangularOk ? "yes" : "no")
+           << " sectionThickness=" << FormatDouble(sectionThickness, 3)
+           << " roundEstimate=" << (roundOk ? "yes" : "no")
+           << " roundD=" << FormatDouble(roundDiameter, 3)
+           << " roundZ=" << FormatDouble(roundThickness, 3)
+           << " minRoundD=" << FormatDouble(minimumRoundDiameter, 3)
+           << " resultKind=" << KindName(record.kind)
+           << " resultSpec=\"" << record.spec << "\"";
+
+    if (record.kind == TubeKindUnknown)
+    {
+        if (!rectangularOk && !roundOk)
+        {
+            stream << " reject=not_rectangular_section_and_not_round_tube";
+        }
+        else if (roundOk && minimumRoundDiameter > 0.0 && roundDiameter + 0.01 < minimumRoundDiameter)
+        {
+            stream << " reject=round_diameter_below_minimum";
+        }
+        else
+        {
+            stream << " reject=unknown_after_classify";
+        }
+    }
+    return stream.str();
 }
 
 void OpenSpecTable()
@@ -2402,7 +3254,13 @@ public:
           roundStandardLengthBlock(NULL),
           roundMinimumDiameterBlock(NULL)
     {
-        dialog = ui->CreateDialog("XuanZeGuanJian.dlx");
+        const std::string dlxPath =
+            zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_XUANZEGUANJIAN_DLX);
+        if (dlxPath.empty())
+        {
+            throw std::runtime_error("XuanZeGuanJian dialog resource is missing.");
+        }
+        dialog = ui->CreateDialog(dlxPath.c_str());
         dialog->AddInitializeHandler(NXOpen::make_callback(this, &XuanZeGuanJianDialog::Initialize));
         dialog->AddDialogShownHandler(NXOpen::make_callback(this, &XuanZeGuanJianDialog::DialogShown));
         dialog->AddUpdateHandler(NXOpen::make_callback(this, &XuanZeGuanJianDialog::Update));
@@ -3430,6 +4288,7 @@ private:
         std::vector<NXOpen::Body*> bodies;
         if (bodySelection == NULL)
         {
+            AppendSelectDebugLog("GetSelectedBodies: bodySelection block is NULL");
             return bodies;
         }
 
@@ -3437,14 +4296,49 @@ private:
         std::vector<NXOpen::TaggedObject*> selectedObjects = properties->GetTaggedObjectVector("SelectedObjects");
         delete properties;
 
+        {
+            std::ostringstream stream;
+            stream << "GetSelectedBodies: selectedObjects=" << selectedObjects.size();
+            AppendSelectDebugLog(stream.str());
+        }
+
         std::set<tag_t> seen;
         for (std::size_t index = 0; index < selectedObjects.size(); ++index)
         {
+            NXOpen::TaggedObject* selected = selectedObjects[index];
+            {
+                std::ostringstream stream;
+                stream << "  selected[" << index << "] kind=" << TaggedObjectKindText(selected);
+                if (selected != NULL)
+                {
+                    stream << " tag=" << selected->Tag() << " " << UfTypeText(selected->Tag());
+                    tag_t ownerBody = NULL_TAG;
+                    if (dynamic_cast<NXOpen::Face*>(selected) != NULL &&
+                        UF_MODL_ask_face_body(selected->Tag(), &ownerBody) == 0 &&
+                        ownerBody != NULL_TAG)
+                    {
+                        stream << " faceOwnerBody=" << ownerBody;
+                    }
+                    else if (dynamic_cast<NXOpen::Edge*>(selected) != NULL &&
+                             UF_MODL_ask_edge_body(selected->Tag(), &ownerBody) == 0 &&
+                             ownerBody != NULL_TAG)
+                    {
+                        stream << " edgeOwnerBody=" << ownerBody;
+                    }
+                }
+                AppendSelectDebugLog(stream.str());
+            }
+
             NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(selectedObjects[index]);
             if (body != NULL && seen.insert(body->Tag()).second)
             {
                 bodies.push_back(body);
             }
+        }
+        {
+            std::ostringstream stream;
+            stream << "GetSelectedBodies: acceptedDirectBodies=" << bodies.size();
+            AppendSelectDebugLog(stream.str());
         }
         return bodies;
     }
@@ -3459,16 +4353,29 @@ private:
             bodies = cachedBodies;
         }
 
+        {
+            std::ostringstream stream;
+            stream << "CountSelectedBodies: bodies=" << bodies.size()
+                   << " usingCachedBodies=" << (usingCachedBodies ? "yes" : "no")
+                   << " minRoundDiameter=" << FormatDouble(MinimumRoundDiameter(), 3)
+                   << " refreshAfterCount=" << (refreshAfterCount ? "yes" : "no");
+            AppendSelectDebugLog(stream.str());
+        }
+
         std::vector<NXOpen::Body*> acceptedBodies;
         std::set<tag_t> acceptedTags;
         for (std::size_t index = 0; index < bodies.size(); ++index)
         {
             if (bodies[index] != NULL && IsTagIgnored(bodies[index]->Tag()))
             {
+                std::ostringstream stream;
+                stream << "  skip ignored bodyTag=" << bodies[index]->Tag();
+                AppendSelectDebugLog(stream.str());
                 continue;
             }
 
             TubeRecord record = ClassifyBody(bodies[index], MinimumRoundDiameter());
+            AppendSelectDebugLog(std::string("  classify ") + BodyRecognitionDebugText(bodies[index], MinimumRoundDiameter(), record));
             if (record.kind == TubeKindUnknown)
             {
                 continue;
@@ -3480,6 +4387,13 @@ private:
             }
 
             lastRecords.push_back(record);
+        }
+
+        {
+            std::ostringstream stream;
+            stream << "CountSelectedBodies: acceptedBodies=" << acceptedBodies.size()
+                   << " lastRecords=" << lastRecords.size();
+            AppendSelectDebugLog(stream.str());
         }
 
         cachedBodies = acceptedBodies;
@@ -4419,10 +5333,6 @@ bool ValidateOwnModuleChecksum()
 #endif
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     
     if (!ValidateOwnModuleChecksum())

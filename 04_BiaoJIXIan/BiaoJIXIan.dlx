@@ -331,7 +331,7 @@
                       <item Expanded="1" class="UICOMP_double" hierarchy="" icon="styler_real" id="GrooveDepth" name="GrooveDepth" notes="" presentation="Double" type="uicomp">
                         <PropertyList id="id" mode="0">
                           <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="API Name" mask="16656" name="API Name" sname="BlockID" source="3" type="string" value="GrooveDepth" />
-                          <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="False" />
+                          <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
                           <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
                           <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="槽深" />
                           <Property ClassID="UGS::UICOMP" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="ToolTip" mask="0" name="ToolTip" sname="ToolTip" source="1" type="utfstring" value="Groove depth for shallow groove marks." />
@@ -397,15 +397,15 @@
                         </PropertyList>
                       </item>
                     </Property>
-                    <Property class="UICOMP_double" hierarchy="UGS::UICOMP_group" id="GrooveOffset" mask="256" name="GrooveOffset" presentation="Double" type="uicomp">
-                      <item Expanded="1" class="UICOMP_double" hierarchy="" icon="styler_real" id="GrooveOffset" name="GrooveOffset" notes="" presentation="Double" type="uicomp">
+                    <Property class="UICOMP_double" hierarchy="UGS::UICOMP_group" id="GrooveWidth" mask="256" name="GrooveWidth" presentation="Double" type="uicomp">
+                      <item Expanded="1" class="UICOMP_double" hierarchy="" icon="styler_real" id="GrooveWidth" name="GrooveWidth" notes="" presentation="Double" type="uicomp">
                         <PropertyList id="id" mode="0">
-                          <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="API Name" mask="16656" name="API Name" sname="BlockID" source="3" type="string" value="GrooveOffset" />
-                          <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="False" />
+                          <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="API Name" mask="16656" name="API Name" sname="BlockID" source="3" type="string" value="GrooveWidth" />
+                          <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
                           <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
-                          <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="槽偏置" />
-                          <Property ClassID="UGS::UICOMP" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="ToolTip" mask="0" name="ToolTip" sname="ToolTip" source="1" type="utfstring" value="Symmetric offset for the groove about the curve." />
-                          <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="Value" mask="256" name="Value" sname="Value" source="4" type="double" value="0.002" />
+                          <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="槽宽" />
+                          <Property ClassID="UGS::UICOMP" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="ToolTip" mask="0" name="ToolTip" sname="ToolTip" source="1" type="utfstring" value="浅槽标记的实际槽宽。" />
+                          <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="Value" mask="256" name="Value" sname="Value" source="4" type="double" value="0.004" />
                           <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False" />
                           <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True" />
                           <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="HideGroup" mask="4100" name="HideGroup" sname="HideGroup" source="1" type="logical" value="False" />

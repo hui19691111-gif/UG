@@ -37,6 +37,8 @@
 #include <NXOpen/BlockStyler_StringBlock.hxx>
 #include <NXOpen/BlockStyler_SelectObject.hxx>
 #include <NXOpen/BlockStyler_Enumeration.hxx>
+#include <NXOpen/BlockStyler_Tree.hxx>
+#include <NXOpen/BlockStyler_Node.hxx>
 
 #include <UF.h>
 #include <uf_attr.h>

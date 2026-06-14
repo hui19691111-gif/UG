@@ -1,4 +1,6 @@
-﻿//==============================================================================
+#include <stdexcept>
+#include <string>
+//==============================================================================
 //  WARNING!!  This file is overwritten by the Block UI Styler while generating
 //  the automation code. Any modifications to this file will be lost after
 //  generating the code again.
@@ -35,6 +37,8 @@
 //These includes are needed for the following template code
 //------------------------------------------------------------------------------
 #include "DaoCuDWG.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
 
@@ -54,7 +58,7 @@ bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
     HMODULE module = LoadLibraryW(L"ZhaoFuNxLicenseGate.dll");
     if (!module)
     {
-        module = LoadLibraryW(L"D:\\智辉\\application\\ZhaoFuNxLicenseGate.dll");
+        module = LoadLibraryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\application\\ZhaoFuNxLicenseGate.dll");
     }
     if (!module)
     {
@@ -117,8 +121,19 @@ DaoCuDWG::DaoCuDWG()
         // Initialize the NX Open C++ API environment
         DaoCuDWG::theSession = NXOpen::Session::GetSession();
         DaoCuDWG::theUI = UI::GetUI();
-        theDlxFileName = "DaoCuDWG.dlx";
-        theDialog = DaoCuDWG::theUI->CreateDialog(theDlxFileName);
+        const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_DAOCUDWG_DLX);
+
+        if (dlxPath.empty())
+
+        {
+
+            throw std::runtime_error("DaoCuDWG dialog resource is missing.");
+
+        }
+
+        theDlxFileName = NULL;
+
+        theDialog = DaoCuDWG::theUI->CreateDialog(dlxPath.c_str());
         // Registration of callback functions
         theDialog->AddApplyHandler(make_callback(this, &DaoCuDWG::apply_cb));
         theDialog->AddOkHandler(make_callback(this, &DaoCuDWG::ok_cb));

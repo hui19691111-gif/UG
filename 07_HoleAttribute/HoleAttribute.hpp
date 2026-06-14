@@ -130,6 +130,8 @@ private:
 
     void configureSelectionBlock();
     void localizeDialogBlocks();
+    void loadDialogMemory();
+    void saveDialogMemory();
     void loadSpecRules();
     void ensureSpecRulesLoaded();
     void refreshAutoRecognitionToggles();

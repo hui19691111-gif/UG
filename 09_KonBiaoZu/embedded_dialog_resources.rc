@@ -1,3 +1,4 @@
 #include "embedded_dialog_resources.h"
 
 IDR_ZH_DLX_KONBIAOZU_DLX RCDATA "dialog/KonBiaoZu.dlx"
+IDR_ZH_DLX_KONBIAOZU_RULES_EDITOR_DLX RCDATA "dialog/KonBiaoZuRulesEditor.dlx"

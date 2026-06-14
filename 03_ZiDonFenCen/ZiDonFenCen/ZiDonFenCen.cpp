@@ -1,4 +1,4 @@
-//==============================================================================
+﻿//==============================================================================
 //  WARNING!!  This file is overwritten by the Block UI Styler while generating
 //  the automation code. Any modifications to this file will be lost after
 //  generating the code again.
@@ -35,13 +35,42 @@
 //These includes are needed for the following template code
 //------------------------------------------------------------------------------
 #include "ZiDonFenCen.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 #include <uf_part.h>
+#include <stdexcept>
+#include <string>
+#include <fstream>
+#include <sstream>
+#include <ctime>
+#include <memory>
+#include <cstdlib>
+#include <iomanip>
 #include <uf_eval.h>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/DisplayManager.hxx>
 #include <NXOpen/DisplayModification.hxx>
+#include <cmath>
+#include <limits>
+#include <set>
+#include <uf_curve.h>
+#include <uf_disp.h>
+#include <NXOpen/BodyDumbRule.hxx>
+#include <NXOpen/Direction.hxx>
+#include <NXOpen/Features_CurveFeatureCollection.hxx>
+#include <NXOpen/Features_Feature.hxx>
+#include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_ShadowCurveBuilder.hxx>
+#include <NXOpen/GeometricUtilities_CurveFitData.hxx>
+#include <NXOpen/Plane.hxx>
+#include <NXOpen/PlaneCollection.hxx>
+#include <NXOpen/ScRuleFactory.hxx>
+#include <NXOpen/SelectionIntentRule.hxx>
+#include <NXOpen/SelectionIntentRuleOptions.hxx>
+#include <NXOpen/Update.hxx>
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
+using namespace NXOpen::Assemblies;
 
 //------------------------------------------------------------------------------
 // Initialize static variables
@@ -52,14 +81,37 @@ UI *(ZiDonFenCen::theUI) = NULL;
 // Constructor for NX Styler class
 //------------------------------------------------------------------------------
 ZiDonFenCen::ZiDonFenCen()
+    : assemblySelectionActive(false)
 {
     try
     {
         // Initialize the NX Open C++ API environment
         ZiDonFenCen::theSession = NXOpen::Session::GetSession();
         ZiDonFenCen::theUI = UI::GetUI();
-        theDlxFileName = "ZiDonFenCen.dlx";
-        theDialog = ZiDonFenCen::theUI->CreateDialog(theDlxFileName);
+        std::string dlxPath = "D:\\UG";
+        dlxPath += "\xD6\xC7"; // Zhi, CP936
+        dlxPath += "\xBB\xD4"; // Hui, CP936
+        dlxPath += "\xEE\xD3"; // Ban, CP936
+        dlxPath += "\xBD\xF0"; // Jin, CP936
+        dlxPath += "\xB2\xE5"; // Cha, CP936
+        dlxPath += "\xBC\xFE"; // Jian, CP936
+        dlxPath += "\\application\\ZiDonFenCen.dlx";
+        if (GetFileAttributesA(dlxPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+        {
+            dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_ZIDONFENCEN_DLX);
+        }
+
+        if (dlxPath.empty())
+
+        {
+
+            throw std::runtime_error("ZiDonFenCen dialog resource is missing.");
+
+        }
+
+        theDlxFileName = NULL;
+
+        theDialog = ZiDonFenCen::theUI->CreateDialog(dlxPath.c_str());
         // Registration of callback functions
         theDialog->AddApplyHandler(make_callback(this, &ZiDonFenCen::apply_cb));
         theDialog->AddOkHandler(make_callback(this, &ZiDonFenCen::ok_cb));
@@ -114,6 +166,14 @@ ZiDonFenCen::~ZiDonFenCen()
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <commctrl.h>
+#pragma comment(lib, "Comctl32.lib")
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+
+namespace
+{
+bool PrepareZiDonFenCenAssemblySelection(NXOpen::Session* session, std::vector<NXOpen::Part*>& selectedParts);
+}
 
 namespace zhihui_license_guard
 {
@@ -161,7 +221,7 @@ HMODULE LoadProtectedLicenseGate()
         }
     }
 
-    HMODULE fixedModule = LoadLibraryW(L"D:\\UG�ǻ��ӽ���\\application\\ZhaoFuNxLicenseGate.dll");
+    HMODULE fixedModule = LoadLibraryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\application\\ZhaoFuNxLicenseGate.dll");
     if (fixedModule != NULL)
     {
         return fixedModule;
@@ -288,10 +348,6 @@ bool ValidateOwnModuleChecksum()
 #endif
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     
     if (!ValidateOwnModuleChecksum())
@@ -399,6 +455,18 @@ NXOpen::BlockStyler::BlockDialog::DialogResponse ZiDonFenCen::Launch()
     NXOpen::BlockStyler::BlockDialog::DialogResponse dialogResponse= NXOpen::BlockStyler::BlockDialog::DialogResponse::DialogResponseInvalid;
     try
     {
+        assemblySelectionActive = false;
+        selectedAssemblyParts.clear();
+
+        if (PrepareZiDonFenCenAssemblySelection(ZiDonFenCen::theSession, selectedAssemblyParts))
+        {
+            assemblySelectionActive = true;
+        }
+        else if (!selectedAssemblyParts.empty())
+        {
+            return dialogResponse;
+        }
+
         dialogResponse=theDialog->Launch();
     }
     catch(exception& ex)
@@ -417,6 +485,7 @@ NXOpen::Part* workPart(theSession->Parts()->Work());
 NXOpen::Part* displayPart(theSession->Parts()->Display());
 std::vector<Body*> VBody_1;
 std::vector<Body*> VBody;
+std::vector<Body*> VFollowSources;
 std::vector<NXOpen::DisplayableObject*> objectArray1;
 vector<int> color;
 vector<TaggedObject*> VObjTag;
@@ -425,6 +494,392 @@ int tucen = 10;
 
 namespace
 {
+const char* ZiDonFenCenDebugLogPath()
+{
+	return "D:\\ZiDonFenCen_perf_debug.log";
+}
+
+
+
+NXString U8(const char* text)
+{
+	return NXString(text == NULL ? "" : text, NXString::UTF8);
+}
+
+std::string ToUtf8(const NXString& value)
+{
+	const char* utf8 = value.GetUTF8Text();
+	if (utf8 != NULL && utf8[0] != '\0')
+	{
+		return std::string(utf8);
+	}
+	const char* locale = value.GetLocaleText();
+	return locale != NULL ? std::string(locale) : std::string();
+}
+
+std::string TrimCopy(const std::string& value)
+{
+	size_t begin = 0;
+	while (begin < value.size() && isspace(static_cast<unsigned char>(value[begin])))
+	{
+		++begin;
+	}
+	size_t end = value.size();
+	while (end > begin && isspace(static_cast<unsigned char>(value[end - 1])))
+	{
+		--end;
+	}
+	return value.substr(begin, end - begin);
+}
+
+std::string NormalizeUtf8Message(const std::string& value)
+{
+	return value;
+}
+
+std::wstring PathTextToWide(const std::string& text)
+{
+	if (text.empty())
+	{
+		return std::wstring();
+	}
+	int wideLength = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, NULL, 0);
+	UINT codePage = CP_UTF8;
+	if (wideLength <= 0)
+	{
+		codePage = CP_ACP;
+		wideLength = MultiByteToWideChar(codePage, 0, text.c_str(), -1, NULL, 0);
+	}
+	if (wideLength <= 0)
+	{
+		return std::wstring();
+	}
+	std::wstring wide(static_cast<size_t>(wideLength), L'\0');
+	MultiByteToWideChar(codePage, 0, text.c_str(), -1, &wide[0], wideLength);
+	if (!wide.empty() && wide.back() == L'\0')
+	{
+		wide.pop_back();
+	}
+	return wide;
+}
+
+std::string ReadAllText(const std::string& path)
+{
+	std::ifstream input(PathTextToWide(path).c_str(), std::ios::binary);
+	if (!input.is_open())
+	{
+		return std::string();
+	}
+	std::ostringstream buffer;
+	buffer << input.rdbuf();
+	return buffer.str();
+}
+
+bool WriteAllText(const std::string& path, const std::string& text)
+{
+	CreateDirectoryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\config", NULL);
+	std::ofstream output(PathTextToWide(path).c_str(), std::ios::binary | std::ios::trunc);
+	if (!output.is_open())
+	{
+		return false;
+	}
+	output << text;
+	return true;
+}
+
+std::string ReadStringUserAttribute(NXObject* object, const char* title)
+{
+	if (object == NULL || title == NULL || title[0] == '\0')
+	{
+		return std::string();
+	}
+	try
+	{
+		if (object->HasUserAttribute(title, NXObject::AttributeTypeString, -1))
+		{
+			return TrimCopy(NormalizeUtf8Message(ToUtf8(object->GetStringAttribute(title))));
+		}
+	}
+	catch (...)
+	{
+	}
+	try
+	{
+		std::vector<NXObject::AttributeInformation> attributes = object->GetUserAttributes();
+		for (size_t i = 0; i < attributes.size(); ++i)
+		{
+			std::string attrTitle = TrimCopy(NormalizeUtf8Message(ToUtf8(attributes[i].Title)));
+			if (_stricmp(attrTitle.c_str(), title) != 0 || attributes[i].Unset)
+			{
+				continue;
+			}
+			switch (attributes[i].Type)
+			{
+			case NXObject::AttributeTypeString:
+				return TrimCopy(NormalizeUtf8Message(ToUtf8(attributes[i].StringValue)));
+			case NXObject::AttributeTypeInteger:
+				return std::to_string(attributes[i].IntegerValue);
+			case NXObject::AttributeTypeReal:
+			{
+				std::ostringstream stream;
+				stream << std::setprecision(12) << attributes[i].RealValue;
+				return stream.str();
+			}
+			case NXObject::AttributeTypeBoolean:
+				return attributes[i].BooleanValue ? "True" : "False";
+			default:
+				break;
+			}
+		}
+	}
+	catch (...)
+	{
+	}
+	return std::string();
+}
+
+void ResetZiDonFenCenDebugLog()
+{
+	std::ofstream log(ZiDonFenCenDebugLogPath(), std::ios::out | std::ios::trunc);
+	if (log.is_open())
+	{
+		log << "ZiDonFenCen performance log" << std::endl;
+	}
+}
+
+void ZiDonFenCenDebugLog(const std::string& message)
+{
+	std::ofstream log(ZiDonFenCenDebugLogPath(), std::ios::out | std::ios::app);
+	if (log.is_open())
+	{
+		log << GetTickCount64() << " " << message << std::endl;
+	}
+}
+
+unsigned long long ZiDonFenCenNowMs()
+{
+	return static_cast<unsigned long long>(GetTickCount64());
+}
+
+unsigned long long ZiDonFenCenElapsedMs(unsigned long long startMs)
+{
+	const unsigned long long nowMs = ZiDonFenCenNowMs();
+	return nowMs >= startMs ? nowMs - startMs : 0;
+}
+
+void ZiDonFenCenLogElapsed(const char* label, unsigned long long startMs)
+{
+	std::ostringstream oss;
+	oss << label << " elapsedMs=" << ZiDonFenCenElapsedMs(startMs);
+	ZiDonFenCenDebugLog(oss.str());
+}
+
+std::string NxStringForLog(const NXString& value)
+{
+	const char* text = value.GetLocaleText();
+	return text != NULL ? std::string(text) : std::string();
+}
+
+NXString MaterialPartAttributeTitle()
+{
+	static const char kMaterialUtf8[] = "\xE6\x9D\x90\xE6\x96\x99";
+	return NXString(kMaterialUtf8, NXString::UTF8);
+}
+
+const char* ZiDonFenCenStatePath()
+{
+ CreateDirectoryA("D:\\UG智辉钣金插件\\config", NULL);
+ return "D:\\UG智辉钣金插件\\config\\ZiDonFenCen_state.ini";
+}
+
+std::string ReadDialogStateString(const char* key, const char* fallbackValue)
+{
+	char value[512] = { 0 };
+	GetPrivateProfileStringA("Dialog", key, fallbackValue != NULL ? fallbackValue : "", value, static_cast<DWORD>(sizeof(value)), ZiDonFenCenStatePath());
+	return std::string(value);
+}
+
+int ReadDialogStateInt(const char* key, int fallbackValue)
+{
+	return GetPrivateProfileIntA("Dialog", key, fallbackValue, ZiDonFenCenStatePath());
+}
+
+void WriteDialogStateString(const char* key, const std::string& value)
+{
+	WritePrivateProfileStringA("Dialog", key, value.c_str(), ZiDonFenCenStatePath());
+}
+
+void WriteDialogStateInt(const char* key, int value)
+{
+	char text[64] = { 0 };
+	sprintf(text, "%d", value);
+	WriteDialogStateString(key, text);
+}
+
+void WriteDialogStateDouble(const char* key, double value)
+{
+	char text[64] = { 0 };
+	sprintf(text, "%.12g", value);
+	WriteDialogStateString(key, text);
+}
+
+void LoadZiDonFenCenDialogState(
+	Toggle* toggleBatchBodyQuantity,
+	Toggle* toggleBatchLayerFilter,
+	IntegerBlock* integerBatchLayerStart,
+	IntegerBlock* integerBatchLayerEnd,
+	Toggle* toggleBatchSizeFilter,
+	Toggle* toggleBatchFastenerFilter,
+	DoubleBlock* doubleBatchMinWidth,
+	DoubleBlock* doubleBatchMinLength,
+	Toggle* toggle0,
+	StringBlock* string0,
+	Toggle* toggle02,
+	Toggle* toggle01,
+	Toggle* toggleDuiCen,
+	Toggle* toggle03)
+{
+	if (toggleBatchBodyQuantity != NULL)
+	{
+		toggleBatchBodyQuantity->SetValue(ReadDialogStateInt("batchMode", toggleBatchBodyQuantity->Value() ? 1 : 0) != 0);
+	}
+	if (toggleBatchLayerFilter != NULL)
+	{
+		toggleBatchLayerFilter->SetValue(ReadDialogStateInt("batchLayerFilter", toggleBatchLayerFilter->Value() ? 1 : 0) != 0);
+	}
+	if (integerBatchLayerStart != NULL)
+	{
+		integerBatchLayerStart->SetValue(ReadDialogStateInt("layerStart", integerBatchLayerStart->Value()));
+	}
+	if (integerBatchLayerEnd != NULL)
+	{
+		integerBatchLayerEnd->SetValue(ReadDialogStateInt("layerEnd", integerBatchLayerEnd->Value()));
+	}
+	if (toggleBatchSizeFilter != NULL)
+	{
+		toggleBatchSizeFilter->SetValue(ReadDialogStateInt("batchSizeFilter", toggleBatchSizeFilter->Value() ? 1 : 0) != 0);
+	}
+	if (toggleBatchFastenerFilter != NULL)
+	{
+		toggleBatchFastenerFilter->SetValue(ReadDialogStateInt("batchFastenerFilter", toggleBatchFastenerFilter->Value() ? 1 : 0) != 0);
+	}
+	if (doubleBatchMinWidth != NULL)
+	{
+		doubleBatchMinWidth->SetValue(atof(ReadDialogStateString("minWidth", "7").c_str()));
+	}
+	if (doubleBatchMinLength != NULL)
+	{
+		doubleBatchMinLength->SetValue(atof(ReadDialogStateString("minLength", "40").c_str()));
+	}
+	if (toggle0 != NULL)
+	{
+		toggle0->SetValue(ReadDialogStateInt("setNumber", toggle0->GetProperties()->GetLogical("Value") ? 1 : 0) != 0);
+	}
+	if (string0 != NULL)
+	{
+		std::unique_ptr<PropertyList> string0Props(string0->GetProperties());
+		const std::string fallbackNumber = NxStringForLog(string0->Value());
+		const std::string savedNumber = ReadDialogStateString("number", fallbackNumber.c_str());
+		string0Props->SetString("Value", savedNumber.c_str());
+	}
+	if (toggle02 != NULL)
+	{
+		toggle02->SetValue(ReadDialogStateInt("followAux", toggle02->Value() ? 1 : 0) != 0);
+	}
+	if (toggle01 != NULL)
+	{
+		toggle01->SetValue(ReadDialogStateInt("randomColor", toggle01->Value() ? 1 : 0) != 0);
+	}
+	if (toggleDuiCen != NULL)
+	{
+		toggleDuiCen->SetValue(ReadDialogStateInt("mirror", toggleDuiCen->Value() ? 1 : 0) != 0);
+	}
+	if (toggle03 != NULL)
+	{
+		toggle03->SetValue(ReadDialogStateInt("keepLayerVisible", toggle03->Value() ? 1 : 0) != 0);
+	}
+	ZiDonFenCenDebugLog("dialogState loaded");
+}
+
+void SaveZiDonFenCenDialogState(
+	Toggle* toggleBatchBodyQuantity,
+	Toggle* toggleBatchLayerFilter,
+	IntegerBlock* integerBatchLayerStart,
+	IntegerBlock* integerBatchLayerEnd,
+	Toggle* toggleBatchSizeFilter,
+	Toggle* toggleBatchFastenerFilter,
+	DoubleBlock* doubleBatchMinWidth,
+	DoubleBlock* doubleBatchMinLength,
+	Toggle* toggle0,
+	StringBlock* string0,
+	Toggle* toggle02,
+	Toggle* toggle01,
+	Toggle* toggleDuiCen,
+	Toggle* toggle03)
+{
+	WriteDialogStateInt("batchMode", toggleBatchBodyQuantity != NULL && toggleBatchBodyQuantity->Value() ? 1 : 0);
+	WriteDialogStateInt("batchLayerFilter", toggleBatchLayerFilter != NULL && toggleBatchLayerFilter->Value() ? 1 : 0);
+	WriteDialogStateInt("layerStart", integerBatchLayerStart != NULL ? integerBatchLayerStart->Value() : 1);
+	WriteDialogStateInt("layerEnd", integerBatchLayerEnd != NULL ? integerBatchLayerEnd->Value() : 99);
+	WriteDialogStateInt("batchSizeFilter", toggleBatchSizeFilter != NULL && toggleBatchSizeFilter->Value() ? 1 : 0);
+	WriteDialogStateInt("batchFastenerFilter", toggleBatchFastenerFilter != NULL && toggleBatchFastenerFilter->Value() ? 1 : 0);
+	WriteDialogStateDouble("minWidth", doubleBatchMinWidth != NULL ? doubleBatchMinWidth->Value() : 7.0);
+	WriteDialogStateDouble("minLength", doubleBatchMinLength != NULL ? doubleBatchMinLength->Value() : 40.0);
+	WriteDialogStateInt("setNumber", toggle0 != NULL && toggle0->GetProperties()->GetLogical("Value") ? 1 : 0);
+	WriteDialogStateString("number", string0 != NULL ? NxStringForLog(string0->Value()) : "01-01");
+	WriteDialogStateInt("followAux", toggle02 != NULL && toggle02->Value() ? 1 : 0);
+	WriteDialogStateInt("randomColor", toggle01 != NULL && toggle01->Value() ? 1 : 0);
+	WriteDialogStateInt("mirror", toggleDuiCen != NULL && toggleDuiCen->Value() ? 1 : 0);
+	WriteDialogStateInt("keepLayerVisible", toggle03 != NULL && toggle03->Value() ? 1 : 0);
+	ZiDonFenCenDebugLog("dialogState saved");
+}
+
+std::string BodyStringAttributeForLog(NXOpen::Body* body, const char* title)
+{
+	if (body == NULL || title == NULL || title[0] == '\0')
+	{
+		return "<null>";
+	}
+	try
+	{
+		if (body->HasUserAttribute(title, NXOpen::NXObject::AttributeTypeString, -1))
+		{
+			return NxStringForLog(body->GetStringAttribute(title));
+		}
+		return "<missing>";
+	}
+	catch (NXOpen::NXException& ex)
+	{
+		std::ostringstream oss;
+		oss << "<error:" << ex.ErrorCode() << ">";
+		return oss.str();
+	}
+}
+
+std::string BodyIntegerAttributeForLog(NXOpen::Body* body, const char* title)
+{
+	if (body == NULL || title == NULL || title[0] == '\0')
+	{
+		return "<null>";
+	}
+	try
+	{
+		if (body->HasUserAttribute(title, NXOpen::NXObject::AttributeTypeInteger, -1))
+		{
+			std::ostringstream oss;
+			oss << body->GetIntegerAttribute(title);
+			return oss.str();
+		}
+		return "<missing>";
+	}
+	catch (NXOpen::NXException& ex)
+	{
+		std::ostringstream oss;
+		oss << "<error:" << ex.ErrorCode() << ">";
+		return oss.str();
+	}
+}
+
 NXOpen::Expression* FindExpressionIfExists(NXOpen::Part* part, const char* expressionName)
 {
 	if (part == NULL || expressionName == NULL || expressionName[0] == '\0')
@@ -460,6 +915,109 @@ void SetOrCreateIntegerExpression(NXOpen::Part* part, const char* expressionName
 	sprintf(expressionFormula, "%s=%s", expressionName, rightHandSide);
 	NXOpen::Unit* nullNXOpen_Unit(NULL);
 	part->Expressions()->CreateExpressionWithUnit("Integer", expressionFormula, nullNXOpen_Unit);
+}
+
+void CopyStringAttributeIfPresent(NXOpen::Body* sourceBody, NXOpen::Body* targetBody, const char* title)
+{
+	if (sourceBody == NULL || targetBody == NULL || title == NULL || title[0] == '\0')
+	{
+		return;
+	}
+	try
+	{
+		if (sourceBody->HasUserAttribute(title, NXOpen::NXObject::AttributeTypeString, -1))
+		{
+			targetBody->SetUserAttribute(title, -1, sourceBody->GetStringAttribute(title), Update::Option::OptionNow);
+		}
+	}
+	catch (NXOpen::NXException&)
+	{
+	}
+}
+
+void CopyIntegerAttributeIfPresent(NXOpen::Body* sourceBody, NXOpen::Body* targetBody, const char* title)
+{
+	if (sourceBody == NULL || targetBody == NULL || title == NULL || title[0] == '\0')
+	{
+		return;
+	}
+	try
+	{
+		if (sourceBody->HasUserAttribute(title, NXOpen::NXObject::AttributeTypeInteger, -1))
+		{
+			targetBody->SetUserAttribute(title, -1, sourceBody->GetIntegerAttribute(title), Update::Option::OptionNow);
+		}
+	}
+	catch (NXOpen::NXException&)
+	{
+	}
+}
+
+bool ContainsBodyPointer(const std::vector<Body*>& bodies, Body* body)
+{
+	return body != NULL && std::find(bodies.begin(), bodies.end(), body) != bodies.end();
+}
+
+bool FollowAuxiliaryBodiesForGroup(NXOpen::Part* part, const std::vector<Body*>& sourceBodies, std::vector<Body*>& candidateBodies, const char* logPrefix)
+{
+	if (part == NULL || logPrefix == NULL)
+	{
+		return false;
+	}
+
+	bool changed = false;
+	for (size_t i = 0; i < sourceBodies.size(); ++i)
+	{
+		Body* sourceBody = sourceBodies[i];
+		if (sourceBody == NULL)
+		{
+			continue;
+		}
+
+		for (size_t ia = 0; ia < candidateBodies.size(); )
+		{
+			Body* candidateBody = candidateBodies[ia];
+			if (candidateBody == NULL || ContainsBodyPointer(sourceBodies, candidateBody))
+			{
+				candidateBodies.erase(candidateBodies.begin() + ia);
+				continue;
+			}
+
+			MeasureDistance* measureDistance1 = part->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, sourceBody, candidateBody);
+			double distance1 = measureDistance1->Value();
+			part->MeasureManager()->ClearPartTransientModification();
+
+			if (distance1 < 0.01)
+			{
+				candidateBody->SetLayer(sourceBody->Layer());
+				CopyStringAttributeIfPresent(sourceBody, candidateBody, "bianhao");
+				CopyStringAttributeIfPresent(sourceBody, candidateBody, "cailiao");
+				CopyStringAttributeIfPresent(sourceBody, candidateBody, "MIRR");
+				CopyIntegerAttributeIfPresent(sourceBody, candidateBody, "sulian");
+				{
+					std::ostringstream oss;
+					oss << logPrefix
+						<< " sourceTag=" << sourceBody->Tag()
+						<< " sourceLayer=" << sourceBody->Layer()
+						<< " auxTag=" << candidateBody->Tag()
+						<< " auxLayer=" << candidateBody->Layer()
+						<< " distance=" << distance1
+						<< " cailiao=" << BodyStringAttributeForLog(candidateBody, "cailiao")
+						<< " sulian=" << BodyIntegerAttributeForLog(candidateBody, "sulian")
+						<< " bianhao=" << BodyStringAttributeForLog(candidateBody, "bianhao");
+					ZiDonFenCenDebugLog(oss.str());
+				}
+				changed = true;
+				candidateBodies.erase(candidateBodies.begin() + ia);
+			}
+			else
+			{
+				++ia;
+			}
+		}
+	}
+
+	return changed;
 }
 
 void AddBodyIfMissing(std::vector<Body*>& bodies, Body* body1)
@@ -663,7 +1221,6 @@ void CreateSulianExpressions(NXOpen::Part* part, NXOpen::Body* body1, int bodyId
 namespace
 {
 const double kSameBodyLengthTolerance = 0.05;
-const double kSameBodyMassTolerance = 0.05;
 const double kSameBodyDistanceTolerance = 0.05;
 const double kSameBodyFaceAreaAbsoluteTolerance = 0.05;
 const double kSameBodyFaceAreaRelativeTolerance = 0.0001;
@@ -704,37 +1261,36 @@ struct SameBodyPlaneFaceGroup
 	std::vector<size_t> faceIndexes;
 };
 
+struct SameBodyPlaneFaceCandidate
+{
+	NXOpen::Face* face;
+	double weight;
+};
+
 struct SameBodyFingerprint
 {
 	NXOpen::Body* body;
 	tag_t tag;
-	double mass;
-	double centroid[3];
 	int edgeCount;
 	int faceCount;
 	std::vector<SameBodyLengthBucket> lengthBuckets;
 	std::vector<SameBodyPoint3> vertexPoints;
 	std::vector<SameBodyPoint3> circleCenterPoints;
-	std::vector<double> circleCenterDistances;
 	std::vector<SameBodyPoint3> lineEdgePoints;
 	std::vector<SameBodyPoint3> curveEdgePoints;
 	std::vector<SameBodyPoint3> arcEdgePoints;
 	std::vector<SameBodyPoint3> fullCircleEdgePoints;
+    std::vector<double> lineEdgeLengths;
+    std::vector<double> curveEdgeLengths;
+    std::vector<double> arcEdgeLengths;
+    std::vector<double> fullCircleEdgeLengths;
 	std::vector<SameBodyPlaneFaceFeature> planeFaces;
 	std::vector<SameBodyPlaneFaceGroup> planeFaceGroups;
-};
-
-struct SameBodyCoarseSignature
-{
-	double mass;
-	double principalMoments[3];
-	int edgeCount;
-	int faceCount;
+	bool planeFeaturesBuilt;
 };
 
 struct SameBodyLocalCoordinateSignature
 {
-	SameBodyPoint3 centroid;
 	std::vector<SameBodyPoint3> vertexLocalPoints;
 	std::vector<SameBodyPoint3> lineEdgeLocalPoints;
 	std::vector<SameBodyPoint3> curveEdgeLocalPoints;
@@ -869,102 +1425,29 @@ bool AddUniqueSameBodyPoint(std::vector<SameBodyPoint3>& points, const SameBodyP
 	return true;
 }
 
-int AskSameBodyPartUnits(tag_t partTag)
+std::string IncrementTrailingNumberText(const std::string& text)
 {
-	int units = UF_PART_METRIC;
-	if (UF_PART_ask_units(partTag, &units) != 0)
+	if (text.empty())
 	{
-		return UF_PART_METRIC;
+		return text;
 	}
-	return units;
-}
 
-int AskSameBodyOwningPartUnits(tag_t objectTag)
-{
-	tag_t owningPartTag = NULL_TAG;
-	if (UF_OBJ_ask_owning_part(objectTag, &owningPartTag) != 0 || owningPartTag == NULL_TAG)
+	size_t firstDigit = text.size();
+	while (firstDigit > 0 && text[firstDigit - 1] >= '0' && text[firstDigit - 1] <= '9')
 	{
-		return UF_PART_METRIC;
+		--firstDigit;
 	}
-	return AskSameBodyPartUnits(owningPartTag);
-}
+	if (firstDigit == text.size())
+	{
+		return text;
+	}
 
-int GetSameBodyMassPropsUnitsCode(int partUnits)
-{
-	return partUnits == UF_PART_ENGLISH ? 1 : 3;
-}
-
-double ConvertSameBodyMassPropsLengthToPartUnits(double value, int partUnits, int massPropsUnitsCode)
-{
-	if (partUnits == UF_PART_ENGLISH)
-	{
-		return value;
-	}
-	if (massPropsUnitsCode == 3)
-	{
-		return value * 10.0;
-	}
-	if (massPropsUnitsCode == 4)
-	{
-		return value * 1000.0;
-	}
-	return value;
-}
-
-void AskSameBodyMassProperties(tag_t bodyTag, double* mass, double centroid[3], double principalMoments[3])
-{
-	double accuracyValues[11] = { 0.99,0,0,0,0,0,0,0,0,0,0 };
-	double massProps[47] = {};
-	double statistics[13] = {};
-	tag_t objects[1] = { bodyTag };
-	const int partUnits = AskSameBodyOwningPartUnits(bodyTag);
-	const int massPropsUnitsCode = GetSameBodyMassPropsUnitsCode(partUnits);
-
-	ThrowSameBodyUfError(UF_MODL_ask_mass_props_3d(objects, 1, 1, massPropsUnitsCode, 0.0, 1, accuracyValues, massProps, statistics));
-	if (mass != NULL)
-	{
-		*mass = massProps[2];
-	}
-	if (centroid != NULL)
-	{
-		centroid[0] = ConvertSameBodyMassPropsLengthToPartUnits(massProps[3], partUnits, massPropsUnitsCode);
-		centroid[1] = ConvertSameBodyMassPropsLengthToPartUnits(massProps[4], partUnits, massPropsUnitsCode);
-		centroid[2] = ConvertSameBodyMassPropsLengthToPartUnits(massProps[5], partUnits, massPropsUnitsCode);
-	}
-	if (principalMoments != NULL)
-	{
-		principalMoments[0] = massProps[22];
-		principalMoments[1] = massProps[23];
-		principalMoments[2] = massProps[24];
-		std::sort(principalMoments, principalMoments + 3);
-	}
-}
-
-SameBodyCoarseSignature BuildSameBodyCoarseSignature(NXOpen::Body* body)
-{
-	SameBodyCoarseSignature signature = {};
-	AskSameBodyMassProperties(body->Tag(), &signature.mass, NULL, signature.principalMoments);
-	signature.edgeCount = static_cast<int>(body->GetEdges().size());
-	signature.faceCount = static_cast<int>(body->GetFaces().size());
-	return signature;
-}
-
-bool SameBodyCoarseSignaturesMatch(const SameBodyCoarseSignature& reference, const SameBodyCoarseSignature& candidate)
-{
-	if (!SameBodyNearlyEqual(reference.mass, candidate.mass, kSameBodyMassTolerance) ||
-		reference.edgeCount != candidate.edgeCount ||
-		reference.faceCount != candidate.faceCount)
-	{
-		return false;
-	}
-	for (int index = 0; index < 3; ++index)
-	{
-		if (!SameBodyNearlyEqual(reference.principalMoments[index], candidate.principalMoments[index], kSameBodyMassTolerance))
-		{
-			return false;
-		}
-	}
-	return true;
+	const std::string prefix = text.substr(0, firstDigit);
+	const std::string digits = text.substr(firstDigit);
+	int value = atoi(digits.c_str()) + 1;
+	std::ostringstream stream;
+	stream << prefix << std::setw(static_cast<int>(digits.size())) << std::setfill('0') << value;
+	return stream.str();
 }
 
 double AskSameBodyEdgeLength(tag_t edgeTag)
@@ -1066,14 +1549,17 @@ void AppendUniqueSameBodyEdgeVertices(int vertexCount, const double firstVertex[
 
 void AppendSameBodyEdgeGeometryPoints(
 	NXOpen::Edge* edge,
-	const double centroid[3],
-	std::vector<double>& circleCenterDistances,
+	double edgeLength,
 	std::vector<SameBodyPoint3>& vertexPoints,
 	std::vector<SameBodyPoint3>& circleCenterPoints,
 	std::vector<SameBodyPoint3>& lineEdgePoints,
 	std::vector<SameBodyPoint3>& curveEdgePoints,
 	std::vector<SameBodyPoint3>& arcEdgePoints,
-	std::vector<SameBodyPoint3>& fullCircleEdgePoints)
+	std::vector<SameBodyPoint3>& fullCircleEdgePoints,
+	std::vector<double>& lineEdgeLengths,
+	std::vector<double>& curveEdgeLengths,
+	std::vector<double>& arcEdgeLengths,
+	std::vector<double>& fullCircleEdgeLengths)
 {
 	double firstVertex[3] = {};
 	double secondVertex[3] = {};
@@ -1095,22 +1581,25 @@ void AppendSameBodyEdgeGeometryPoints(
 			const SameBodyPoint3 centerPoint = SameBodyPointFromArray(center);
 			circleCenterPoints.push_back(centerPoint);
 			fullCircleEdgePoints.push_back(centerPoint);
-			circleCenterDistances.push_back(SameBodyDistanceBetweenPoints(centroid, center));
+            fullCircleEdgeLengths.push_back(edgeLength);
 		}
 		return;
 	}
 	if (isCircularEdge)
 	{
 		AppendSameBodyEdgeVerticesToGroup(vertexCount, firstVertex, secondVertex, arcEdgePoints);
+        arcEdgeLengths.push_back(edgeLength);
 		return;
 	}
 	if (edgeType == NXOpen::Edge::EdgeTypeLinear)
 	{
 		AppendSameBodyEdgeVerticesToGroup(vertexCount, firstVertex, secondVertex, lineEdgePoints);
+        lineEdgeLengths.push_back(edgeLength);
 	}
 	else
 	{
 		AppendSameBodyEdgeVerticesToGroup(vertexCount, firstVertex, secondVertex, curveEdgePoints);
+        curveEdgeLengths.push_back(edgeLength);
 	}
 }
 
@@ -1278,20 +1767,48 @@ std::vector<SameBodyPlaneFaceGroup> BuildSameBodyPlaneFaceGroups(const std::vect
 	return groups;
 }
 
+bool AskSameBodyPlanarFaceCandidate(NXOpen::Face* face, SameBodyPlaneFaceCandidate& candidate)
+{
+	int faceType = 0;
+	if (face == NULL || UF_MODL_ask_face_type(face->Tag(), &faceType) != 0 || faceType != UF_MODL_PLANAR_FACE)
+	{
+		return false;
+	}
+
+	int dataType = 0;
+	double point[3] = {};
+	double normal[3] = {};
+	double box[6] = {};
+	double radius = 0.0;
+	double radiusData = 0.0;
+	int normalDirection = 0;
+	if (UF_MODL_ask_face_data(face->Tag(), &dataType, point, normal, box, &radius, &radiusData, &normalDirection) != 0)
+	{
+		return false;
+	}
+
+	double dims[3] = { fabs(box[3] - box[0]), fabs(box[4] - box[1]), fabs(box[5] - box[2]) };
+	std::sort(dims, dims + 3);
+	candidate.face = face;
+	candidate.weight = dims[1] * dims[2];
+	return candidate.weight > 0.0;
+}
+
 SameBodyFingerprint BuildSameBodyFingerprint(NXOpen::Body* body)
 {
+	const unsigned long long totalStartMs = ZiDonFenCenNowMs();
 	SameBodyFingerprint fingerprint = {};
 	fingerprint.body = body;
 	fingerprint.tag = body->Tag();
-	AskSameBodyMassProperties(fingerprint.tag, &fingerprint.mass, fingerprint.centroid, NULL);
+	fingerprint.planeFeaturesBuilt = false;
 
+	const unsigned long long edgeStartMs = ZiDonFenCenNowMs();
 	std::vector<NXOpen::Edge*> edges = body->GetEdges();
 	fingerprint.edgeCount = static_cast<int>(edges.size());
 	std::vector<double> edgeLengths;
 	edgeLengths.reserve(edges.size());
 	fingerprint.vertexPoints.reserve(edges.size() * 2);
 	fingerprint.circleCenterPoints.reserve(edges.size());
-	fingerprint.circleCenterDistances.reserve(edges.size());
 	fingerprint.lineEdgePoints.reserve(edges.size() * 2);
 	fingerprint.curveEdgePoints.reserve(edges.size() * 2);
 	fingerprint.arcEdgePoints.reserve(edges.size() * 2);
@@ -1299,25 +1816,89 @@ SameBodyFingerprint BuildSameBodyFingerprint(NXOpen::Body* body)
 	for (size_t index = 0; index < edges.size(); ++index)
 	{
 		NXOpen::Edge* edge = edges[index];
-		edgeLengths.push_back(AskSameBodyEdgeLength(edge->Tag()));
-		AppendSameBodyEdgeGeometryPoints(edge, fingerprint.centroid, fingerprint.circleCenterDistances, fingerprint.vertexPoints, fingerprint.circleCenterPoints, fingerprint.lineEdgePoints, fingerprint.curveEdgePoints, fingerprint.arcEdgePoints, fingerprint.fullCircleEdgePoints);
+		const double edgeLength = AskSameBodyEdgeLength(edge->Tag());
+        edgeLengths.push_back(edgeLength);
+        AppendSameBodyEdgeGeometryPoints(edge, edgeLength, fingerprint.vertexPoints, fingerprint.circleCenterPoints, fingerprint.lineEdgePoints, fingerprint.curveEdgePoints, fingerprint.arcEdgePoints, fingerprint.fullCircleEdgePoints, fingerprint.lineEdgeLengths, fingerprint.curveEdgeLengths, fingerprint.arcEdgeLengths, fingerprint.fullCircleEdgeLengths);
 	}
 	fingerprint.lengthBuckets = BuildSameBodyLengthBuckets(edgeLengths);
-	std::sort(fingerprint.circleCenterDistances.begin(), fingerprint.circleCenterDistances.end());
+    std::sort(fingerprint.fullCircleEdgeLengths.begin(), fingerprint.fullCircleEdgeLengths.end(), std::greater<double>());
+    std::sort(fingerprint.arcEdgeLengths.begin(), fingerprint.arcEdgeLengths.end(), std::greater<double>());
+    std::sort(fingerprint.curveEdgeLengths.begin(), fingerprint.curveEdgeLengths.end(), std::greater<double>());
+    std::sort(fingerprint.lineEdgeLengths.begin(), fingerprint.lineEdgeLengths.end(), std::greater<double>());
+	const unsigned long long edgeElapsedMs = ZiDonFenCenElapsedMs(edgeStartMs);
 
+	const unsigned long long faceStartMs = ZiDonFenCenNowMs();
 	std::vector<NXOpen::Face*> faces = body->GetFaces();
 	fingerprint.faceCount = static_cast<int>(faces.size());
-	fingerprint.planeFaces.reserve(faces.size());
+	const unsigned long long faceElapsedMs = ZiDonFenCenElapsedMs(faceStartMs);
+	const unsigned long long totalElapsedMs = ZiDonFenCenElapsedMs(totalStartMs);
+	if (totalElapsedMs >= 100)
+	{
+		std::ostringstream oss;
+		oss << "fingerprint detail"
+			<< " bodyTag=" << fingerprint.tag
+			<< " edges=" << fingerprint.edgeCount
+			<< " faces=" << fingerprint.faceCount
+			<< " edgeMs=" << edgeElapsedMs
+			<< " faceMs=" << faceElapsedMs
+			<< " totalMs=" << totalElapsedMs;
+		ZiDonFenCenDebugLog(oss.str());
+	}
+	return fingerprint;
+}
+
+void EnsureSameBodyPlaneFaceFeatures(SameBodyFingerprint& fingerprint)
+{
+	if (fingerprint.planeFeaturesBuilt || fingerprint.body == NULL)
+	{
+		return;
+	}
+
+	const unsigned long long startMs = ZiDonFenCenNowMs();
+	std::vector<NXOpen::Face*> faces = fingerprint.body->GetFaces();
+	fingerprint.faceCount = static_cast<int>(faces.size());
+	fingerprint.planeFaces.clear();
+	fingerprint.planeFaceGroups.clear();
+	std::vector<SameBodyPlaneFaceCandidate> candidates;
+	candidates.reserve(faces.size());
 	for (size_t index = 0; index < faces.size(); ++index)
 	{
+		SameBodyPlaneFaceCandidate candidate = {};
+		if (AskSameBodyPlanarFaceCandidate(faces[index], candidate))
+		{
+			candidates.push_back(candidate);
+		}
+	}
+	std::sort(candidates.begin(), candidates.end(), [](const SameBodyPlaneFaceCandidate& lhs, const SameBodyPlaneFaceCandidate& rhs)
+	{
+		return lhs.weight > rhs.weight;
+	});
+
+	const size_t maxFeatureFaces = std::min<size_t>(candidates.size(), 8);
+	fingerprint.planeFaces.reserve(maxFeatureFaces);
+	for (size_t index = 0; index < maxFeatureFaces; ++index)
+	{
 		SameBodyPlaneFaceFeature faceFeature = {};
-		if (BuildSameBodyPlanarFaceFeature(faces[index], faceFeature))
+		if (BuildSameBodyPlanarFaceFeature(candidates[index].face, faceFeature))
 		{
 			fingerprint.planeFaces.push_back(faceFeature);
 		}
 	}
 	fingerprint.planeFaceGroups = BuildSameBodyPlaneFaceGroups(fingerprint.planeFaces);
-	return fingerprint;
+	fingerprint.planeFeaturesBuilt = true;
+	const unsigned long long elapsedMs = ZiDonFenCenElapsedMs(startMs);
+	if (elapsedMs >= 100)
+	{
+		std::ostringstream oss;
+		oss << "planeFeatures detail"
+			<< " bodyTag=" << fingerprint.tag
+			<< " faces=" << fingerprint.faceCount
+			<< " candidatePlaneFaces=" << candidates.size()
+			<< " planeFaces=" << fingerprint.planeFaces.size()
+			<< " groups=" << fingerprint.planeFaceGroups.size()
+			<< " elapsedMs=" << elapsedMs;
+		ZiDonFenCenDebugLog(oss.str());
+	}
 }
 
 SameBodyPoint3 TransformSameBodyWorldPointToLocal(const SameBodyFrame3& frame, const SameBodyPoint3& worldPoint)
@@ -1338,7 +1919,6 @@ void AppendSameBodyTransformedPoints(const SameBodyFrame3& frame, const std::vec
 SameBodyLocalCoordinateSignature BuildSameBodyLocalCoordinateSignature(const SameBodyFingerprint& fingerprint, const SameBodyFrame3& frame)
 {
 	SameBodyLocalCoordinateSignature signature = {};
-	signature.centroid = TransformSameBodyWorldPointToLocal(frame, SameBodyPointFromArray(fingerprint.centroid));
 	AppendSameBodyTransformedPoints(frame, fingerprint.vertexPoints, signature.vertexLocalPoints);
 	AppendSameBodyTransformedPoints(frame, fingerprint.lineEdgePoints, signature.lineEdgeLocalPoints);
 	AppendSameBodyTransformedPoints(frame, fingerprint.curveEdgePoints, signature.curveEdgeLocalPoints);
@@ -1369,7 +1949,6 @@ void ApplySameBodyPointVariant(const std::vector<SameBodyPoint3>& source, int va
 SameBodyLocalCoordinateSignature ApplySameBodyCoordinateVariant(const SameBodyLocalCoordinateSignature& signature, int variantIndex)
 {
 	SameBodyLocalCoordinateSignature result = {};
-	result.centroid = ApplySameBodyCoordinateVariant(signature.centroid, variantIndex);
 	ApplySameBodyPointVariant(signature.vertexLocalPoints, variantIndex, result.vertexLocalPoints);
 	ApplySameBodyPointVariant(signature.lineEdgeLocalPoints, variantIndex, result.lineEdgeLocalPoints);
 	ApplySameBodyPointVariant(signature.curveEdgeLocalPoints, variantIndex, result.curveEdgeLocalPoints);
@@ -1501,8 +2080,10 @@ bool TrySameBodyAnchorPlaneGroupMatch(const SameBodyFingerprint& reference, cons
 	return false;
 }
 
-bool SameBodyAnchorsMatch(const SameBodyFingerprint& reference, const SameBodyFingerprint& candidate)
+bool SameBodyAnchorsMatch(SameBodyFingerprint& reference, SameBodyFingerprint& candidate)
 {
+	EnsureSameBodyPlaneFaceFeatures(reference);
+	EnsureSameBodyPlaneFaceFeatures(candidate);
 	for (size_t expectedCount = 1; expectedCount <= 2; ++expectedCount)
 	{
 		const int referenceGroupIndex = FindSameBodyLargestPlaneFaceGroup(reference, expectedCount);
@@ -1565,13 +2146,35 @@ bool SameBodyDistanceVectorsMatch(const std::vector<double>& referenceDistances,
 	return true;
 }
 
-bool SameBodyFingerprintsMatch(const SameBodyFingerprint& reference, const SameBodyFingerprint& candidate)
+bool SameBodyLengthSequenceMatch(const std::vector<double>& referenceLengths, const std::vector<double>& candidateLengths)
 {
-	return SameBodyNearlyEqual(reference.mass, candidate.mass, kSameBodyMassTolerance) &&
-		reference.edgeCount == candidate.edgeCount &&
+	if (referenceLengths.size() != candidateLengths.size())
+	{
+		return false;
+	}
+	for (size_t index = 0; index < referenceLengths.size(); ++index)
+	{
+		if (!SameBodyNearlyEqual(referenceLengths[index], candidateLengths[index], kSameBodyLengthTolerance))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+bool SameBodyTypedEdgeLengthsMatch(const SameBodyFingerprint& reference, const SameBodyFingerprint& candidate)
+{
+	return SameBodyLengthSequenceMatch(reference.fullCircleEdgeLengths, candidate.fullCircleEdgeLengths) &&
+		SameBodyLengthSequenceMatch(reference.arcEdgeLengths, candidate.arcEdgeLengths) &&
+		SameBodyLengthSequenceMatch(reference.curveEdgeLengths, candidate.curveEdgeLengths) &&
+		SameBodyLengthSequenceMatch(reference.lineEdgeLengths, candidate.lineEdgeLengths);
+}
+
+bool SameBodyFingerprintsMatch(SameBodyFingerprint& reference, SameBodyFingerprint& candidate)
+{
+	return reference.edgeCount == candidate.edgeCount &&
 		reference.faceCount == candidate.faceCount &&
-		SameBodyLengthBucketsMatch(reference.lengthBuckets, candidate.lengthBuckets) &&
-		SameBodyDistanceVectorsMatch(reference.circleCenterDistances, candidate.circleCenterDistances) &&
+		SameBodyTypedEdgeLengthsMatch(reference, candidate) &&
 		SameBodyAnchorsMatch(reference, candidate);
 }
 
@@ -1614,6 +2217,2660 @@ int PickSameBodyColor(std::vector<int>& usedColors)
 	usedColors.push_back(colorId);
 	return colorId;
 }
+
+void AddPartIfMissing(std::vector<NXOpen::Part*>& parts, NXOpen::Part* part)
+{
+	if (part == NULL)
+	{
+		return;
+	}
+	if (std::find(parts.begin(), parts.end(), part) == parts.end())
+	{
+		parts.push_back(part);
+	}
+}
+
+double SameBodyLayerSortWeight(NXOpen::Body* body)
+{
+	if (body == NULL)
+	{
+		return 0.0;
+	}
+	double box[6] = { 0.0 };
+	if (UF_MODL_ask_bounding_box(body->Tag(), box) != 0)
+	{
+		return 0.0;
+	}
+	const double dx = fabs(box[3] - box[0]);
+	const double dy = fabs(box[4] - box[1]);
+	const double dz = fabs(box[5] - box[2]);
+	return dx * dy * dz;
+}
+
+void SortBodiesLargestFirstForLayering(std::vector<Body*>& bodies)
+{
+	std::stable_sort(bodies.begin(), bodies.end(), [](Body* lhs, Body* rhs)
+	{
+		return SameBodyLayerSortWeight(lhs) > SameBodyLayerSortWeight(rhs);
+	});
+}
+
+void CollectPrototypePartsFromComponent(NXOpen::Assemblies::Component* component, std::vector<NXOpen::Part*>& parts)
+{
+	if (component == NULL)
+	{
+		return;
+	}
+
+	NXOpen::Part* prototypePart = dynamic_cast<NXOpen::Part*>(component->Prototype());
+	if (prototypePart != NULL)
+	{
+		AddPartIfMissing(parts, prototypePart);
+	}
+
+	std::vector<NXOpen::Assemblies::Component*> children = component->GetChildren();
+	for (size_t i = 0; i < children.size(); ++i)
+	{
+		CollectPrototypePartsFromComponent(children[i], parts);
+	}
+}
+
+void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::Part*>& parts)
+{
+	if (assemblyPart == NULL || assemblyPart->ComponentAssembly() == NULL)
+	{
+		return;
+	}
+	NXOpen::Assemblies::Component* rootComponent = assemblyPart->ComponentAssembly()->RootComponent();
+	if (rootComponent == NULL)
+	{
+		return;
+	}
+	std::vector<NXOpen::Assemblies::Component*> children = rootComponent->GetChildren();
+	for (size_t i = 0; i < children.size(); ++i)
+	{
+		CollectPrototypePartsFromComponent(children[i], parts);
+	}
+}
+
+    std::string PartName(Part* part)
+    {
+        if (part == NULL)
+        {
+            return std::string();
+        }
+
+        try
+        {
+            return ToUtf8(part->Leaf());
+        }
+        catch (...)
+        {
+            return std::string();
+        }
+    }
+
+    struct BatchPartCandidate
+    {
+        Part* part;
+        std::string partName;
+        std::string material;
+        std::string quantity;
+    };
+
+    void CollectChildPrototypeParts(Component* component, std::vector<Part*>& parts, std::set<tag_t>& seenParts)
+    {
+        if (component == NULL)
+        {
+            return;
+        }
+
+        std::vector<Component*> children = component->GetChildren();
+        for (size_t i = 0; i < children.size(); ++i)
+        {
+            Component* child = children[i];
+            if (child == NULL)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (child->IsComponentOrAncestorSuppressed())
+                {
+                    continue;
+                }
+            }
+            catch (...)
+            {
+            }
+
+            try
+            {
+                Part* prototypePart = dynamic_cast<Part*>(child->Prototype());
+                if (prototypePart != NULL && seenParts.insert(prototypePart->Tag()).second)
+                {
+                    parts.push_back(prototypePart);
+                }
+            }
+            catch (...)
+            {
+            }
+
+            CollectChildPrototypeParts(child, parts, seenParts);
+        }
+    }
+
+    void EnsurePartFullyLoadedForBatchList(Part* part)
+    {
+        if (part == NULL)
+        {
+            return;
+        }
+
+        try
+        {
+            if (part->IsFullyLoaded())
+            {
+                return;
+            }
+
+            PartLoadStatus* loadStatus = part->LoadThisPartFully();
+            if (loadStatus != NULL)
+            {
+                delete loadStatus;
+                loadStatus = NULL;
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    std::string ReadPartMaterialText(Part* part)
+    {
+        std::string value = ReadStringUserAttribute(part, "\xE6\x9D\x90\xE6\x96\x99");
+        if (!value.empty())
+        {
+            return value;
+        }
+
+        value = ReadStringUserAttribute(part, "\xE6\x9D\x90\xE8\xB4\xA8");
+        if (!value.empty())
+        {
+            return value;
+        }
+
+        return ReadStringUserAttribute(part, "cailiao");
+    }
+
+    std::string ReadPartQuantityText(Part* part)
+    {
+        std::string value = ReadStringUserAttribute(part, "\xE6\x95\xB0\xE9\x87\x8F");
+        if (!value.empty())
+        {
+            return value;
+        }
+
+        value = ReadStringUserAttribute(part, "sulian");
+        if (!value.empty())
+        {
+            return value;
+        }
+
+        return value;
+    }
+
+    void CollectBatchPartCandidates(Component* component, std::vector<BatchPartCandidate>& candidates, std::set<tag_t>& seenParts)
+    {
+        if (component == NULL)
+        {
+            return;
+        }
+
+        std::vector<Component*> children;
+        try
+        {
+            children = component->GetChildren();
+        }
+        catch (...)
+        {
+            return;
+        }
+
+        for (size_t i = 0; i < children.size(); ++i)
+        {
+            Component* child = children[i];
+            if (child == NULL)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (child->IsComponentOrAncestorSuppressed())
+                {
+                    continue;
+                }
+            }
+            catch (...)
+            {
+            }
+
+            try
+            {
+                Part* prototypePart = dynamic_cast<Part*>(child->Prototype());
+                if (prototypePart != NULL && seenParts.insert(prototypePart->Tag()).second)
+                {
+                    EnsurePartFullyLoadedForBatchList(prototypePart);
+
+                    BatchPartCandidate candidate;
+                    candidate.part = prototypePart;
+                    candidate.partName = ToUtf8(child->DisplayName());
+                    if (candidate.partName.empty())
+                    {
+                        candidate.partName = PartName(prototypePart);
+                    }
+                    candidate.material = ReadPartMaterialText(prototypePart);
+                    candidate.quantity = ReadPartQuantityText(prototypePart);
+                    candidates.push_back(candidate);
+                }
+            }
+            catch (...)
+            {
+            }
+
+            CollectBatchPartCandidates(child, candidates, seenParts);
+        }
+    }
+
+    std::vector<BatchPartCandidate> CollectBatchPartCandidates(Part* assemblyPart)
+    {
+        std::vector<BatchPartCandidate> candidates;
+        if (assemblyPart == NULL || assemblyPart->ComponentAssembly() == NULL)
+        {
+            return candidates;
+        }
+
+        Component* root = assemblyPart->ComponentAssembly()->RootComponent();
+        if (root == NULL || root->GetChildren().empty())
+        {
+            return candidates;
+        }
+
+        try
+        {
+            std::vector<Component*> topChildren = root->GetChildren();
+            if (!topChildren.empty())
+            {
+                std::vector<ComponentAssembly::OpenComponentStatus> openStatus;
+                PartLoadStatus* loadStatus = assemblyPart->ComponentAssembly()->OpenComponents(
+                    ComponentAssembly::OpenOptionWholeAssembly,
+                    topChildren,
+                    openStatus);
+                if (loadStatus != NULL)
+                {
+                    delete loadStatus;
+                    loadStatus = NULL;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        std::set<tag_t> seenParts;
+        CollectBatchPartCandidates(root, candidates, seenParts);
+        return candidates;
+    }
+
+    bool IsAssemblyPart(Part* part)
+    {
+        if (part == NULL || part->ComponentAssembly() == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            Component* root = part->ComponentAssembly()->RootComponent();
+            return root != NULL && !root->GetChildren().empty();
+        }
+        catch (...)
+        {
+        }
+        return false;
+    }
+
+    Part* ResolveCurrentAssemblyPart(Session* session)
+    {
+        if (session == NULL || session->Parts() == NULL)
+        {
+            return NULL;
+        }
+
+        Part* displayPart = NULL;
+        Part* workPart = NULL;
+        try
+        {
+            displayPart = session->Parts()->Display();
+        }
+        catch (...)
+        {
+        }
+        try
+        {
+            workPart = session->Parts()->Work();
+        }
+        catch (...)
+        {
+        }
+
+        if (IsAssemblyPart(displayPart))
+        {
+            return displayPart;
+        }
+        if (IsAssemblyPart(workPart))
+        {
+            return workPart;
+        }
+        return NULL;
+    }
+
+    std::vector<std::string> BuildBatchPartAttributeNames(const std::vector<BatchPartCandidate>& candidates)
+    {
+        std::vector<std::string> names;
+        names.push_back(std::string());
+
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            Part* part = candidates[i].part;
+            if (part == NULL)
+            {
+                continue;
+            }
+
+            try
+            {
+                std::vector<NXObject::AttributeInformation> attributes = part->GetUserAttributes();
+                for (size_t j = 0; j < attributes.size(); ++j)
+                {
+                    std::string title = TrimCopy(NormalizeUtf8Message(ToUtf8(attributes[j].Title)));
+                    if (title.empty())
+                    {
+                        continue;
+                    }
+
+                    bool exists = false;
+                    for (size_t k = 0; k < names.size(); ++k)
+                    {
+                        if (_stricmp(names[k].c_str(), title.c_str()) == 0)
+                        {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (!exists)
+                    {
+                        names.push_back(title);
+                    }
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        return names;
+    }
+
+    std::string ReadPartListAttributeText(Part* part, const std::string& attributeName)
+    {
+        if (part == NULL || attributeName.empty())
+        {
+            return std::string();
+        }
+
+        if (attributeName == "\xE6\x9D\x90\xE6\x96\x99")
+        {
+            return ReadPartMaterialText(part);
+        }
+        if (attributeName == "\xE6\x95\xB0\xE9\x87\x8F")
+        {
+            return ReadPartQuantityText(part);
+        }
+
+        std::string value = ReadStringUserAttribute(part, attributeName.c_str());
+        if (!value.empty())
+        {
+            return value;
+        }
+
+        try
+        {
+            std::vector<NXObject::AttributeInformation> attributes = part->GetUserAttributes();
+            for (size_t i = 0; i < attributes.size(); ++i)
+            {
+                std::string title = TrimCopy(NormalizeUtf8Message(ToUtf8(attributes[i].Title)));
+                if (_stricmp(title.c_str(), attributeName.c_str()) != 0 || attributes[i].Unset)
+                {
+                    continue;
+                }
+
+                switch (attributes[i].Type)
+                {
+                case NXObject::AttributeType::AttributeTypeString:
+                    return TrimCopy(NormalizeUtf8Message(ToUtf8(attributes[i].StringValue)));
+                case NXObject::AttributeType::AttributeTypeInteger:
+                    return std::to_string(attributes[i].IntegerValue);
+                case NXObject::AttributeType::AttributeTypeReal:
+                {
+                    std::ostringstream stream;
+                    stream << std::setprecision(12) << attributes[i].RealValue;
+                    return stream.str();
+                }
+                case NXObject::AttributeType::AttributeTypeBoolean:
+                    return attributes[i].BooleanValue ? "True" : "False";
+                default:
+                    break;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return std::string();
+    }
+
+    const int BatchAttributeColumnCount = 4;
+    const int BatchPickerListWidth = 1008;
+    const int BatchPickerWindowWidth = 1052;
+    const int BatchAttributeComboDropHeight = 260;
+
+    struct BatchPartPickerPersistedState
+    {
+        std::vector<std::string> attributes;
+        bool hasAttributes = false;
+        std::set<std::string> checkedPartNames;
+        bool hasCheckedPartNames = false;
+    };
+
+    struct BatchPartPickerState
+    {
+        const std::vector<BatchPartCandidate>* candidates;
+        const std::vector<std::string>* attributeNames;
+        const BatchPartPickerPersistedState* persistedState;
+        std::vector<std::string> selectedAttributes;
+        std::vector<int> selectedIndices;
+        HWND listView;
+        HWND comboBoxes[BatchAttributeColumnCount];
+        int listX;
+        int listY;
+        int listWidth;
+        int listHeight;
+        std::vector<HWND> childControls;
+        HFONT dialogFont;
+        HBRUSH backgroundBrush;
+        COLORREF backgroundColor;
+        bool accepted;
+    };
+
+    HFONT CreateNxLikeDialogFont()
+    {
+        HDC screenDc = GetDC(NULL);
+        const int dpiY = screenDc != NULL ? GetDeviceCaps(screenDc, LOGPIXELSY) : 96;
+        if (screenDc != NULL)
+        {
+            ReleaseDC(NULL, screenDc);
+        }
+
+        return CreateFontW(
+            -MulDiv(9, dpiY, 72),
+            0,
+            0,
+            0,
+            FW_NORMAL,
+            FALSE,
+            FALSE,
+            FALSE,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE,
+            L"Microsoft YaHei UI");
+    }
+
+    void AddPickerControl(BatchPartPickerState* state, HWND control)
+    {
+        if (state == NULL || control == NULL)
+        {
+            return;
+        }
+
+        state->childControls.push_back(control);
+        if (state->dialogFont != NULL)
+        {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(state->dialogFont), TRUE);
+        }
+    }
+
+    void ApplyNxLikeListViewStyle(HWND listView)
+    {
+        if (listView == NULL)
+        {
+            return;
+        }
+
+        ListView_SetExtendedListViewStyle(listView, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER);
+        ListView_SetBkColor(listView, RGB(255, 255, 255));
+        ListView_SetTextBkColor(listView, RGB(255, 255, 255));
+        ListView_SetTextColor(listView, RGB(30, 30, 30));
+    }
+
+    void CenterWindowOnParent(HWND hwnd, HWND parent)
+    {
+        if (hwnd == NULL)
+        {
+            return;
+        }
+
+        RECT windowRect = {};
+        RECT parentRect = {};
+        GetWindowRect(hwnd, &windowRect);
+        if (parent != NULL && IsWindow(parent))
+        {
+            GetWindowRect(parent, &parentRect);
+        }
+        else
+        {
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &parentRect, 0);
+        }
+
+        const int windowWidth = windowRect.right - windowRect.left;
+        const int windowHeight = windowRect.bottom - windowRect.top;
+        const int parentWidth = parentRect.right - parentRect.left;
+        const int parentHeight = parentRect.bottom - parentRect.top;
+        const int x = parentRect.left + std::max(0, (parentWidth - windowWidth) / 2);
+        const int y = parentRect.top + std::max(0, (parentHeight - windowHeight) / 2);
+        SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+
+    void AddListViewColumn(HWND listView, int index, const wchar_t* title, int width)
+    {
+        LVCOLUMNW column = {};
+        column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        column.pszText = const_cast<wchar_t*>(title);
+        column.cx = width;
+        column.iSubItem = index;
+        ListView_InsertColumn(listView, index, &column);
+    }
+
+    void SetListViewText(HWND listView, int row, int column, const std::wstring& text)
+    {
+        LVITEMW item = {};
+        item.mask = LVIF_TEXT;
+        item.iItem = row;
+        item.iSubItem = column;
+        item.pszText = const_cast<wchar_t*>(text.c_str());
+        ListView_SetItem(listView, &item);
+    }
+
+    std::wstring ListAttributeTitle(const std::string& attributeName)
+    {
+        return attributeName.empty() ? L"空白" : PathTextToWide(attributeName);
+    }
+
+    void RepositionHeaderCombos(BatchPartPickerState* state)
+    {
+        if (state == NULL || state->listView == NULL)
+        {
+            return;
+        }
+
+        HWND header = ListView_GetHeader(state->listView);
+        RECT headerRect = {};
+        if (header == NULL || !GetWindowRect(header, &headerRect))
+        {
+            return;
+        }
+
+        POINT headerOrigin = { headerRect.left, headerRect.top };
+        ScreenToClient(GetParent(state->listView), &headerOrigin);
+        const int headerHeight = std::max(20L, headerRect.bottom - headerRect.top);
+
+        for (int i = 0; i < BatchAttributeColumnCount; ++i)
+        {
+            HWND combo = state->comboBoxes[i];
+            if (combo == NULL)
+            {
+                continue;
+            }
+
+            RECT itemRect = {};
+            if (Header_GetItemRect(header, 3 + i, &itemRect))
+            {
+                SetWindowPos(
+                    combo,
+                    HWND_TOP,
+                    headerOrigin.x + itemRect.left + 1,
+                    headerOrigin.y + 1,
+                    std::max(64L, itemRect.right - itemRect.left - 2),
+                    headerHeight + BatchAttributeComboDropHeight,
+                    SWP_SHOWWINDOW);
+            }
+        }
+    }
+
+    void RefreshBatchPartListAttributeColumns(BatchPartPickerState* state)
+    {
+        if (state == NULL || state->listView == NULL || state->candidates == NULL)
+        {
+            return;
+        }
+
+        for (int columnOffset = 0; columnOffset < BatchAttributeColumnCount; ++columnOffset)
+        {
+            const int columnIndex = 3 + columnOffset;
+            std::string attributeName;
+            if (columnOffset < static_cast<int>(state->selectedAttributes.size()))
+            {
+                attributeName = state->selectedAttributes[static_cast<size_t>(columnOffset)];
+            }
+
+            LVCOLUMNW column = {};
+            column.mask = LVCF_TEXT;
+            std::wstring title = ListAttributeTitle(attributeName);
+            column.pszText = const_cast<wchar_t*>(title.c_str());
+            ListView_SetColumn(state->listView, columnIndex, &column);
+
+            for (size_t row = 0; row < state->candidates->size(); ++row)
+            {
+                const BatchPartCandidate& candidate = (*state->candidates)[row];
+                SetListViewText(
+                    state->listView,
+                    static_cast<int>(row),
+                    columnIndex,
+                    PathTextToWide(ReadPartListAttributeText(candidate.part, attributeName)));
+            }
+        }
+    }
+
+    void PopulateBatchPartListView(BatchPartPickerState* state)
+    {
+        if (state == NULL || state->listView == NULL || state->candidates == NULL)
+        {
+            return;
+        }
+
+        AddListViewColumn(state->listView, 0, L"选择", 48);
+        AddListViewColumn(state->listView, 1, L"序号", 56);
+        AddListViewColumn(state->listView, 2, L"部件名", 220);
+        AddListViewColumn(state->listView, 3, L"材料", 170);
+        AddListViewColumn(state->listView, 4, L"数量", 170);
+        AddListViewColumn(state->listView, 5, L"空白", 170);
+        AddListViewColumn(state->listView, 6, L"空白", 154);
+
+        for (size_t i = 0; i < state->candidates->size(); ++i)
+        {
+            const BatchPartCandidate& candidate = (*state->candidates)[i];
+            LVITEMW item = {};
+            item.mask = LVIF_TEXT;
+            item.iItem = static_cast<int>(i);
+            item.iSubItem = 0;
+            item.pszText = const_cast<wchar_t*>(L"");
+            ListView_InsertItem(state->listView, &item);
+            bool checked = true;
+            if (state->persistedState != NULL && state->persistedState->hasCheckedPartNames)
+            {
+                checked = state->persistedState->checkedPartNames.find(candidate.partName) != state->persistedState->checkedPartNames.end();
+            }
+            ListView_SetCheckState(state->listView, static_cast<int>(i), checked ? TRUE : FALSE);
+
+            SetListViewText(state->listView, static_cast<int>(i), 1, std::to_wstring(i + 1));
+            SetListViewText(state->listView, static_cast<int>(i), 2, PathTextToWide(candidate.partName));
+        }
+
+        RefreshBatchPartListAttributeColumns(state);
+    }
+
+    void PopulateAttributeCombo(HWND comboBox, const std::vector<std::string>& attributeNames, const std::string& selectedValue)
+    {
+        if (comboBox == NULL)
+        {
+            return;
+        }
+
+        for (size_t i = 0; i < attributeNames.size(); ++i)
+        {
+            const std::wstring display = ListAttributeTitle(attributeNames[i]);
+            SendMessageW(comboBox, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(display.c_str()));
+        }
+
+        int selectedIndex = 0;
+        for (size_t i = 0; i < attributeNames.size(); ++i)
+        {
+            if (attributeNames[i] == selectedValue)
+            {
+                selectedIndex = static_cast<int>(i);
+                break;
+            }
+        }
+        SendMessageW(comboBox, CB_SETCURSEL, selectedIndex, 0);
+        SendMessageW(comboBox, CB_SETMINVISIBLE, 12, 0);
+        InvalidateRect(comboBox, NULL, TRUE);
+    }
+
+    std::string AttributeDefaultIfPresent(const std::vector<std::string>& attributeNames, const std::string& preferred)
+    {
+        for (size_t i = 0; i < attributeNames.size(); ++i)
+        {
+            if (_stricmp(attributeNames[i].c_str(), preferred.c_str()) == 0)
+            {
+                return attributeNames[i];
+            }
+        }
+        return std::string();
+    }
+
+    std::string BatchPartPickerStatePath()
+    {
+        return std::string("D:\\UG智辉钣金插件\\config\\ZiDonFenCen_part_picker_state.ini");
+    }
+
+    std::string EncodePickerStateValue(const std::string& value)
+    {
+        std::ostringstream stream;
+        for (size_t i = 0; i < value.size(); ++i)
+        {
+            const unsigned char ch = static_cast<unsigned char>(value[i]);
+            if (ch == '%' || ch == '\n' || ch == '\r' || ch == '=' || ch == '|')
+            {
+                stream << '%' << std::uppercase << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(ch)
+                       << std::nouppercase << std::dec << std::setfill(' ');
+            }
+            else
+            {
+                stream << value[i];
+            }
+        }
+        return stream.str();
+    }
+
+    int HexDigitValue(char ch)
+    {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'A' && ch <= 'F') return 10 + ch - 'A';
+        if (ch >= 'a' && ch <= 'f') return 10 + ch - 'a';
+        return -1;
+    }
+
+    std::string DecodePickerStateValue(const std::string& value)
+    {
+        std::string decoded;
+        for (size_t i = 0; i < value.size(); ++i)
+        {
+            if (value[i] == '%' && i + 2 < value.size())
+            {
+                const int hi = HexDigitValue(value[i + 1]);
+                const int lo = HexDigitValue(value[i + 2]);
+                if (hi >= 0 && lo >= 0)
+                {
+                    decoded.push_back(static_cast<char>((hi << 4) | lo));
+                    i += 2;
+                    continue;
+                }
+            }
+            decoded.push_back(value[i]);
+        }
+        return decoded;
+    }
+
+    bool AttributeNameExistsInList(const std::vector<std::string>& attributeNames, const std::string& value)
+    {
+        if (value.empty())
+        {
+            return true;
+        }
+
+        for (size_t i = 0; i < attributeNames.size(); ++i)
+        {
+            if (_stricmp(attributeNames[i].c_str(), value.c_str()) == 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    BatchPartPickerPersistedState LoadBatchPartPickerState(const std::vector<std::string>& attributeNames)
+    {
+        BatchPartPickerPersistedState state;
+        state.attributes.resize(BatchAttributeColumnCount);
+
+        std::string text = ReadAllText(BatchPartPickerStatePath());
+        std::stringstream input(text);
+        std::string line;
+        while (std::getline(input, line))
+        {
+            line = TrimCopy(line);
+            if (line.empty() || line[0] == '#')
+            {
+                continue;
+            }
+
+            size_t equal = line.find('=');
+            if (equal == std::string::npos)
+            {
+                continue;
+            }
+
+            std::string key = TrimCopy(line.substr(0, equal));
+            std::string value = DecodePickerStateValue(TrimCopy(line.substr(equal + 1)));
+            if (key.size() == 5 && key.find("attr") == 0)
+            {
+                int index = key[4] - '0';
+                if (index >= 0 && index < BatchAttributeColumnCount && AttributeNameExistsInList(attributeNames, value))
+                {
+                    state.attributes[static_cast<size_t>(index)] = value;
+                    state.hasAttributes = true;
+                }
+            }
+            else if (key.find("part") == 0)
+            {
+                state.checkedPartNames.insert(value);
+                state.hasCheckedPartNames = true;
+            }
+        }
+
+        return state;
+    }
+
+    void SaveBatchPartPickerState(const BatchPartPickerState* state)
+    {
+        if (state == NULL || state->listView == NULL || state->candidates == NULL)
+        {
+            return;
+        }
+
+        std::ostringstream output;
+        output << "# ZiDonFenCen part picker state\n";
+        for (int i = 0; i < BatchAttributeColumnCount; ++i)
+        {
+            std::string value;
+            if (i < static_cast<int>(state->selectedAttributes.size()))
+            {
+                value = state->selectedAttributes[static_cast<size_t>(i)];
+            }
+            output << "attr" << i << "=" << EncodePickerStateValue(value) << "\n";
+        }
+
+        int partIndex = 0;
+        const int count = ListView_GetItemCount(state->listView);
+        for (int i = 0; i < count && static_cast<size_t>(i) < state->candidates->size(); ++i)
+        {
+            if (ListView_GetCheckState(state->listView, i))
+            {
+                output << "part" << partIndex++ << "="
+                       << EncodePickerStateValue((*state->candidates)[static_cast<size_t>(i)].partName)
+                       << "\n";
+            }
+        }
+
+        WriteAllText(BatchPartPickerStatePath(), output.str());
+    }
+
+    LRESULT CALLBACK BatchPartPickerWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        const int kIdList = 1001;
+        const int kIdSelectAll = 1002;
+        const int kIdClearAll = 1003;
+        const int kIdFirstCombo = 1100;
+        const int kIdOk = IDOK;
+        const int kIdCancel = IDCANCEL;
+
+        BatchPartPickerState* state = reinterpret_cast<BatchPartPickerState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        switch (message)
+        {
+        case WM_CREATE:
+        {
+            CREATESTRUCTW* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            state = reinterpret_cast<BatchPartPickerState*>(createStruct->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+            if (state != NULL)
+            {
+                state->backgroundColor = RGB(236, 236, 236);
+                state->backgroundBrush = CreateSolidBrush(state->backgroundColor);
+                state->dialogFont = CreateNxLikeDialogFont();
+                if (state->dialogFont != NULL)
+                {
+                    SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(state->dialogFont), TRUE);
+                }
+            }
+
+            HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
+            AddPickerControl(state, CreateWindowW(L"STATIC", L"选择要自动转钣金的部件：", WS_CHILD | WS_VISIBLE, 14, 12, 250, 22, hwnd, NULL, instance, NULL));
+            if (state != NULL)
+            {
+                state->listX = 14;
+                state->listY = 40;
+                state->listWidth = BatchPickerListWidth;
+                state->listHeight = 326;
+            }
+            state->listView = CreateWindowExW(
+                WS_EX_CLIENTEDGE,
+                WC_LISTVIEWW,
+                L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
+                state != NULL ? state->listX : 14,
+                state != NULL ? state->listY : 40,
+                state != NULL ? state->listWidth : BatchPickerListWidth,
+                state != NULL ? state->listHeight : 326,
+                hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdList)),
+                instance,
+                NULL);
+            AddPickerControl(state, state->listView);
+            ApplyNxLikeListViewStyle(state->listView);
+            PopulateBatchPartListView(state);
+            for (int i = 0; i < BatchAttributeColumnCount; ++i)
+            {
+                state->comboBoxes[i] = CreateWindowW(
+                    WC_COMBOBOXW,
+                    L"",
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+                    0,
+                    0,
+                    80,
+                    BatchAttributeComboDropHeight,
+                    hwnd,
+                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdFirstCombo + i)),
+                    instance,
+                    NULL);
+                AddPickerControl(state, state->comboBoxes[i]);
+                if (state->attributeNames != NULL && i < static_cast<int>(state->selectedAttributes.size()))
+                {
+                    PopulateAttributeCombo(state->comboBoxes[i], *state->attributeNames, state->selectedAttributes[static_cast<size_t>(i)]);
+                }
+            }
+            RepositionHeaderCombos(state);
+            for (int i = 0; i < BatchAttributeColumnCount; ++i)
+            {
+                if (state != NULL && state->comboBoxes[i] != NULL)
+                {
+                    BringWindowToTop(state->comboBoxes[i]);
+                }
+            }
+
+            AddPickerControl(state, CreateWindowW(L"BUTTON", L"全选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 14, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSelectAll)), instance, NULL));
+            AddPickerControl(state, CreateWindowW(L"BUTTON", L"全不选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 96, 380, 84, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClearAll)), instance, NULL));
+        AddPickerControl(state, CreateWindowW(L"BUTTON", L"确定", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 860, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdOk)), instance, NULL));
+        AddPickerControl(state, CreateWindowW(L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 946, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCancel)), instance, NULL));
+            return 0;
+        }
+        case WM_NOTIFY:
+        {
+            if (state != NULL)
+            {
+                NMHDR* header = reinterpret_cast<NMHDR*>(lParam);
+                if (header != NULL && header->hwndFrom == ListView_GetHeader(state->listView))
+                {
+                    switch (header->code)
+                    {
+                    case HDN_ENDTRACKW:
+                    case HDN_ENDTRACKA:
+                    case HDN_ITEMCHANGEDW:
+                    case HDN_ITEMCHANGEDA:
+                        RepositionHeaderCombos(state);
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+        case WM_CTLCOLORSTATIC:
+        {
+            if (state != NULL && state->backgroundBrush != NULL)
+            {
+                SetBkColor(reinterpret_cast<HDC>(wParam), state->backgroundColor);
+                SetTextColor(reinterpret_cast<HDC>(wParam), RGB(30, 30, 30));
+                return reinterpret_cast<LRESULT>(state->backgroundBrush);
+            }
+            break;
+        }
+        case WM_COMMAND:
+        {
+            if (state == NULL)
+            {
+                break;
+            }
+
+            const int commandId = LOWORD(wParam);
+            const int notifyCode = HIWORD(wParam);
+            if (commandId >= kIdFirstCombo && commandId < kIdFirstCombo + BatchAttributeColumnCount && notifyCode == CBN_SELCHANGE)
+            {
+                const int comboIndex = commandId - kIdFirstCombo;
+                const int selectedIndex = static_cast<int>(SendMessageW(state->comboBoxes[comboIndex], CB_GETCURSEL, 0, 0));
+                if (state->attributeNames != NULL &&
+                    selectedIndex >= 0 &&
+                    static_cast<size_t>(selectedIndex) < state->attributeNames->size() &&
+                    comboIndex < static_cast<int>(state->selectedAttributes.size()))
+                {
+                    state->selectedAttributes[static_cast<size_t>(comboIndex)] = (*state->attributeNames)[static_cast<size_t>(selectedIndex)];
+                    RefreshBatchPartListAttributeColumns(state);
+                }
+                return 0;
+            }
+
+            if (commandId == kIdSelectAll || commandId == kIdClearAll)
+            {
+                const BOOL checked = commandId == kIdSelectAll ? TRUE : FALSE;
+                const int count = ListView_GetItemCount(state->listView);
+                for (int i = 0; i < count; ++i)
+                {
+                    ListView_SetCheckState(state->listView, i, checked);
+                }
+                return 0;
+            }
+
+            if (commandId == kIdOk)
+            {
+                state->selectedIndices.clear();
+                const int count = ListView_GetItemCount(state->listView);
+                for (int i = 0; i < count; ++i)
+                {
+                    if (ListView_GetCheckState(state->listView, i))
+                    {
+                        state->selectedIndices.push_back(i);
+                    }
+                }
+                SaveBatchPartPickerState(state);
+                state->accepted = true;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+
+            if (commandId == kIdCancel)
+            {
+                state->accepted = false;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        }
+        case WM_SHOWWINDOW:
+            if (wParam)
+            {
+                RepositionHeaderCombos(state);
+                for (int i = 0; state != NULL && i < BatchAttributeColumnCount; ++i)
+                {
+                    if (state->comboBoxes[i] != NULL)
+                    {
+                        BringWindowToTop(state->comboBoxes[i]);
+                        InvalidateRect(state->comboBoxes[i], NULL, TRUE);
+                    }
+                }
+            }
+            break;
+        case WM_HSCROLL:
+        case WM_SIZE:
+            RepositionHeaderCombos(state);
+            break;
+        case WM_CLOSE:
+            if (state != NULL)
+            {
+                state->accepted = false;
+            }
+            DestroyWindow(hwnd);
+            return 0;
+        case WM_DESTROY:
+            if (state != NULL)
+            {
+                if (state->dialogFont != NULL)
+                {
+                    DeleteObject(state->dialogFont);
+                    state->dialogFont = NULL;
+                }
+                if (state->backgroundBrush != NULL)
+                {
+                    DeleteObject(state->backgroundBrush);
+                    state->backgroundBrush = NULL;
+                }
+            }
+            return 0;
+        default:
+            break;
+        }
+
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    bool ShowBatchPartPicker(const std::vector<BatchPartCandidate>& candidates, std::vector<Part*>& selectedParts)
+    {
+        selectedParts.clear();
+        if (candidates.empty())
+        {
+            return false;
+        }
+
+        INITCOMMONCONTROLSEX controls = {};
+        controls.dwSize = sizeof(controls);
+        controls.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES;
+        InitCommonControlsEx(&controls);
+
+        const wchar_t* className = L"ZiDonFenCenBatchPartPicker";
+        HINSTANCE instance = reinterpret_cast<HINSTANCE>(&__ImageBase);
+        WNDCLASSEXW windowClass = {};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.lpfnWndProc = BatchPartPickerWndProc;
+        windowClass.hInstance = instance;
+        windowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+        windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        windowClass.lpszClassName = className;
+        RegisterClassExW(&windowClass);
+
+        std::vector<std::string> attributeNames = BuildBatchPartAttributeNames(candidates);
+        BatchPartPickerPersistedState persistedState = LoadBatchPartPickerState(attributeNames);
+
+        BatchPartPickerState state = {};
+        state.candidates = &candidates;
+        state.attributeNames = &attributeNames;
+        state.persistedState = &persistedState;
+        state.selectedAttributes.resize(BatchAttributeColumnCount);
+        state.selectedAttributes[0] = persistedState.hasAttributes ? persistedState.attributes[0] : AttributeDefaultIfPresent(attributeNames, "\xE6\x9D\x90\xE6\x96\x99");
+        state.selectedAttributes[1] = persistedState.hasAttributes ? persistedState.attributes[1] : AttributeDefaultIfPresent(attributeNames, "\xE6\x95\xB0\xE9\x87\x8F");
+        state.selectedAttributes[2] = persistedState.hasAttributes ? persistedState.attributes[2] : std::string();
+        state.selectedAttributes[3] = persistedState.hasAttributes ? persistedState.attributes[3] : std::string();
+        state.listView = NULL;
+        for (int i = 0; i < BatchAttributeColumnCount; ++i)
+        {
+            state.comboBoxes[i] = NULL;
+        }
+        state.dialogFont = NULL;
+        state.backgroundBrush = NULL;
+        state.backgroundColor = RGB(236, 236, 236);
+        state.accepted = false;
+
+        HWND parent = reinterpret_cast<HWND>(UF_UI_get_default_parent());
+        HWND hwnd = CreateWindowExW(
+            WS_EX_DLGMODALFRAME,
+            className,
+            L"批量转钣金部件列表",
+            WS_CAPTION | WS_SYSMENU | WS_BORDER,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            BatchPickerWindowWidth,
+            456,
+            parent,
+            NULL,
+            instance,
+            &state);
+        if (hwnd == NULL)
+        {
+            return false;
+        }
+
+        CenterWindowOnParent(hwnd, parent);
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+
+        MSG msg;
+        while (IsWindow(hwnd) && GetMessageW(&msg, NULL, 0, 0) > 0)
+        {
+            if (!IsDialogMessageW(hwnd, &msg))
+            {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+
+        if (!state.accepted || state.selectedIndices.empty())
+        {
+            return false;
+        }
+
+        for (size_t i = 0; i < state.selectedIndices.size(); ++i)
+        {
+            const int index = state.selectedIndices[i];
+            if (index >= 0 && static_cast<size_t>(index) < candidates.size() && candidates[static_cast<size_t>(index)].part != NULL)
+            {
+                selectedParts.push_back(candidates[static_cast<size_t>(index)].part);
+            }
+        }
+
+        return !selectedParts.empty();
+    }
+
+
+    bool PrepareZiDonFenCenAssemblySelection(NXOpen::Session* session, std::vector<NXOpen::Part*>& selectedParts)
+    {
+        selectedParts.clear();
+        NXOpen::Part* assemblyPart = ResolveCurrentAssemblyPart(session);
+        if (assemblyPart == NULL)
+        {
+            ZiDonFenCenDebugLog("part picker launch assembly=0");
+            return false;
+        }
+
+        std::vector<BatchPartCandidate> candidates = CollectBatchPartCandidates(assemblyPart);
+        {
+            std::ostringstream oss;
+            oss << "part picker launch assembly=1 candidates=" << candidates.size();
+            ZiDonFenCenDebugLog(oss.str());
+        }
+        if (candidates.empty())
+        {
+            return false;
+        }
+
+        if (!ShowBatchPartPicker(candidates, selectedParts))
+        {
+            ZiDonFenCenDebugLog("part picker cancelled or empty selection");
+            selectedParts.push_back(NULL);
+            return false;
+        }
+
+        std::ostringstream oss;
+        oss << "part picker selected count=" << selectedParts.size();
+        ZiDonFenCenDebugLog(oss.str());
+        return true;
+    }
+
+    struct Point2dLite
+    {
+        double x = 0.0;
+        double y = 0.0;
+    };
+    struct FastenerFilterInfo
+    {
+        bool matched = false;
+        std::string outlineType = "none";
+        double height = 0.0;
+        double outlineSize = 0.0;
+        double threshold = 0.0;
+        double cylinderDiameter = 0.0;
+        size_t shadowPointCount = 0;
+        size_t hullPointCount = 0;
+        int shadowCurveCount = 0;
+        int shadowLineCount = 0;
+        int shadowCircleCount = 0;
+        int shadowSplineCount = 0;
+        int shadowOtherCount = 0;
+        int cylinderFaceCount = 0;
+        int outerCylinderFaceCount = 0;
+        int fullCircleEdgeCount = 0;
+        int halfCircleEdgeCount = 0;
+        int circularEdgeCount = 0;
+        double outerMed = 0.0;
+        std::string reason;
+    };
+
+    struct CircleProfileStats
+    {
+        int circularEdgeCount = 0;
+        int fullCircleEdgeCount = 0;
+        int halfCircleEdgeCount = 0;
+        double lastRadius = 0.0;
+    };
+
+    struct ShadowOutlineInfo
+    {
+        bool matched = false;
+        std::string outlineType = "none";
+        double outlineSize = 0.0;
+        size_t hullPointCount = 0;
+        int curveCount = 0;
+        int lineCount = 0;
+        int circleCount = 0;
+        int splineCount = 0;
+        int otherCount = 0;
+        std::string reason;
+    };
+
+
+    struct CircularEdgeRecord
+    {
+        double center[3] = { 0.0, 0.0, 0.0 };
+        double radius = 0.0;
+        double arcLength = 0.0;
+        bool fullCircle = false;
+    };
+
+    std::string BodyName(Body* body)
+    {
+        if (body == NULL)
+        {
+            return std::string();
+        }
+
+        try
+        {
+            std::string name = NxStringForLog(body->Name());
+            if (!name.empty())
+            {
+                return name;
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return "Body_" + std::to_string(static_cast<int>(body->Tag()));
+    }
+
+    std::vector<Edge*> FaceEdgesByUf(Face* face)
+    {
+        std::vector<Edge*> edges;
+        if (face == NULL)
+        {
+            return edges;
+        }
+
+        uf_list_p_t edgeList = NULL;
+        if (UF_MODL_ask_face_edges(face->Tag(), &edgeList) != 0 || edgeList == NULL)
+        {
+            try
+            {
+                return face->GetEdges();
+            }
+            catch (...)
+            {
+                return edges;
+            }
+        }
+
+        int count = 0;
+        if (UF_MODL_ask_list_count(edgeList, &count) == 0)
+        {
+            for (int i = 0; i < count; ++i)
+            {
+                tag_t edgeTag = NULL_TAG;
+                if (UF_MODL_ask_list_item(edgeList, i, &edgeTag) != 0 || edgeTag == NULL_TAG)
+                {
+                    continue;
+                }
+                Edge* edge = dynamic_cast<Edge*>(NXOpen::NXObjectManager::Get(edgeTag));
+                if (edge != NULL)
+                {
+                    edges.push_back(edge);
+                }
+            }
+        }
+        UF_MODL_delete_list(&edgeList);
+
+        return edges;
+    }
+
+    double Dot3(const double a[3], const double b[3])
+    {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    }
+
+    double Distance3(const double a[3], const double b[3])
+    {
+        double dx = a[0] - b[0];
+        double dy = a[1] - b[1];
+        double dz = a[2] - b[2];
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    double Length3(const double v[3])
+    {
+        return std::sqrt(Dot3(v, v));
+    }
+
+    bool Normalize3(double v[3])
+    {
+        double length = Length3(v);
+        if (length <= 1e-12)
+        {
+            return false;
+        }
+
+        v[0] /= length;
+        v[1] /= length;
+        v[2] /= length;
+        return true;
+    }
+
+    bool AskCylinderFaceData(Face* face, double axisPoint[3], double axisDirection[3], double* radiusOut, int* normDirOut)
+    {
+        if (face == NULL || axisPoint == NULL || axisDirection == NULL || radiusOut == NULL)
+        {
+            return false;
+        }
+
+        int type = 0;
+        double box[6] = { 0, 0, 0, 0, 0, 0 };
+        double radiusData = 0.0;
+        int normDir = 0;
+        if (UF_MODL_ask_face_data(face->Tag(), &type, axisPoint, axisDirection, box, radiusOut, &radiusData, &normDir) != 0 ||
+            type != UF_MODL_CYLINDRICAL_FACE ||
+            *radiusOut <= 1e-6)
+        {
+            return false;
+        }
+
+        if (!Normalize3(axisDirection))
+        {
+            return false;
+        }
+
+        if (normDirOut != NULL)
+        {
+            *normDirOut = normDir;
+        }
+        return true;
+    }
+
+    bool AskFacePointFromEdges(Face* face, double facePoint[3])
+    {
+        if (face == NULL || facePoint == NULL)
+        {
+            return false;
+        }
+
+        const std::vector<Edge*> edges = FaceEdgesByUf(face);
+        for (size_t i = 0; i < edges.size(); ++i)
+        {
+            Edge* edge = edges[i];
+            if (edge == NULL)
+            {
+                continue;
+            }
+
+            try
+            {
+                Point3d vertex1;
+                Point3d vertex2;
+                edge->GetVertices(&vertex1, &vertex2);
+                facePoint[0] = vertex1.X;
+                facePoint[1] = vertex1.Y;
+                facePoint[2] = vertex1.Z;
+                return true;
+            }
+            catch (...)
+            {
+            }
+        }
+
+        return false;
+    }
+
+    bool AskNxOpenCreatedFaceNormal(Face* face, const double facePoint[3], double unitNormal[3])
+    {
+        if (face == NULL || facePoint == NULL || unitNormal == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            Session* session = Session::GetSession();
+            BasePart* owningPart = face->OwningPart();
+            if (session == NULL || owningPart == NULL || owningPart->Points() == NULL || owningPart->Directions() == NULL)
+            {
+                return false;
+            }
+
+            Point* point = owningPart->Points()->CreatePoint(Point3d(facePoint[0], facePoint[1], facePoint[2]));
+            Direction* direction = owningPart->Directions()->CreateDirection(
+                face,
+                point,
+                SenseForward,
+                SmartObject::UpdateOptionWithinModeling);
+            if (direction == NULL)
+            {
+                return false;
+            }
+
+            Vector3d vector = direction->Vector();
+            unitNormal[0] = vector.X;
+            unitNormal[1] = vector.Y;
+            unitNormal[2] = vector.Z;
+            if (!Normalize3(unitNormal))
+            {
+                return false;
+            }
+
+            std::vector<TaggedObject*> deleteObjects;
+            deleteObjects.push_back(direction);
+            deleteObjects.push_back(point);
+            Update* updateManager = session->UpdateManager();
+            if (updateManager != NULL)
+            {
+                updateManager->AddObjectsToDeleteList(deleteObjects);
+                Session::UndoMarkId markId = session->SetUndoMark(Session::MarkVisibilityInvisible, "Delete temporary face normal");
+                updateManager->DoUpdate(markId);
+            }
+
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool AskOuterCylinderMedLike08(Face* face, double* medOut)
+    {
+        if (face == NULL)
+        {
+            return false;
+        }
+
+        int type = 0;
+        double axisPoint[3] = { 0.0, 0.0, 0.0 };
+        double axisDirection[3] = { 0.0, 0.0, 1.0 };
+        double box[6] = { 0, 0, 0, 0, 0, 0 };
+        double radius = 0.0;
+        double radiusData = 0.0;
+        int normDir = 0;
+        if (UF_MODL_ask_face_data(face->Tag(), &type, axisPoint, axisDirection, box, &radius, &radiusData, &normDir) != 0 ||
+            type != UF_MODL_CYLINDRICAL_FACE)
+        {
+            return false;
+        }
+
+        double facePoint[3] = { 0.0, 0.0, 0.0 };
+        double unitNormal[3] = { 0.0, 0.0, 1.0 };
+        if (!AskFacePointFromEdges(face, facePoint) ||
+            !AskNxOpenCreatedFaceNormal(face, facePoint, unitNormal))
+        {
+            return false;
+        }
+
+        double vectorToAxis[3] = {
+            axisPoint[0] - facePoint[0],
+            axisPoint[1] - facePoint[1],
+            axisPoint[2] - facePoint[2]
+        };
+        const double med = Dot3(vectorToAxis, unitNormal);
+        if (medOut != NULL)
+        {
+            *medOut = med;
+        }
+        return true;
+    }
+
+    void AddUniquePoint(std::vector<Point3d>* points, const Point3d& point)
+    {
+        if (points == NULL)
+        {
+            return;
+        }
+
+        for (size_t i = 0; i < points->size(); ++i)
+        {
+            if (std::fabs((*points)[i].X - point.X) < 1e-5 &&
+                std::fabs((*points)[i].Y - point.Y) < 1e-5 &&
+                std::fabs((*points)[i].Z - point.Z) < 1e-5)
+            {
+                return;
+            }
+        }
+
+        points->push_back(point);
+    }
+
+    std::vector<Point3d> CollectBodyEdgePoints(Body* body)
+    {
+        std::vector<Point3d> points;
+        if (body == NULL)
+        {
+            return points;
+        }
+
+        std::vector<Face*> faces = body->GetFaces();
+        std::set<tag_t> seenEdges;
+        for (size_t i = 0; i < faces.size(); ++i)
+        {
+            std::vector<Edge*> edges = FaceEdgesByUf(faces[i]);
+            for (size_t j = 0; j < edges.size(); ++j)
+            {
+                Edge* edge = edges[j];
+                if (edge == NULL || !seenEdges.insert(edge->Tag()).second)
+                {
+                    continue;
+                }
+
+                Point3d p1;
+                Point3d p2;
+                try
+                {
+                    edge->GetVertices(&p1, &p2);
+                }
+                catch (...)
+                {
+                    continue;
+                }
+
+                AddUniquePoint(&points, p1);
+                AddUniquePoint(&points, p2);
+            }
+        }
+
+        return points;
+    }
+
+    double Cross2(const Point2dLite& origin, const Point2dLite& a, const Point2dLite& b)
+    {
+        return (a.x - origin.x) * (b.y - origin.y) - (a.y - origin.y) * (b.x - origin.x);
+    }
+
+    double Distance2(const Point2dLite& a, const Point2dLite& b)
+    {
+        const double dx = a.x - b.x;
+        const double dy = a.y - b.y;
+        return std::sqrt(dx * dx + dy * dy);
+    }
+
+    void AddUniquePoint2(std::vector<Point2dLite>* points, const Point2dLite& point)
+    {
+        if (points == NULL)
+        {
+            return;
+        }
+
+        for (size_t i = 0; i < points->size(); ++i)
+        {
+            if (std::fabs((*points)[i].x - point.x) < 1e-5 &&
+                std::fabs((*points)[i].y - point.y) < 1e-5)
+            {
+                return;
+            }
+        }
+
+        points->push_back(point);
+    }
+
+    std::vector<Point2dLite> ConvexHull2(std::vector<Point2dLite> points)
+    {
+        if (points.size() <= 2)
+        {
+            return points;
+        }
+
+        std::sort(points.begin(), points.end(), [](const Point2dLite& a, const Point2dLite& b) {
+            if (std::fabs(a.x - b.x) > 1e-7)
+            {
+                return a.x < b.x;
+            }
+            return a.y < b.y;
+        });
+
+        std::vector<Point2dLite> hull;
+        for (size_t i = 0; i < points.size(); ++i)
+        {
+            while (hull.size() >= 2 && Cross2(hull[hull.size() - 2], hull[hull.size() - 1], points[i]) <= 1e-7)
+            {
+                hull.pop_back();
+            }
+            hull.push_back(points[i]);
+        }
+
+        const size_t lowerSize = hull.size();
+        for (size_t i = points.size(); i-- > 0;)
+        {
+            while (hull.size() > lowerSize && Cross2(hull[hull.size() - 2], hull[hull.size() - 1], points[i]) <= 1e-7)
+            {
+                hull.pop_back();
+            }
+            hull.push_back(points[i]);
+        }
+
+        if (!hull.empty())
+        {
+            hull.pop_back();
+        }
+        return hull;
+    }
+
+    double PolygonMaxPairDistance(const std::vector<Point2dLite>& points)
+    {
+        double maxDistance = 0.0;
+        for (size_t i = 0; i < points.size(); ++i)
+        {
+            for (size_t j = i + 1; j < points.size(); ++j)
+            {
+                maxDistance = std::max(maxDistance, Distance2(points[i], points[j]));
+            }
+        }
+        return maxDistance;
+    }
+
+    bool IsHexShadow(const std::vector<Point2dLite>& hull, double* acrossFlatsOut)
+    {
+        if (hull.size() != 6)
+        {
+            return false;
+        }
+
+        double minSide = std::numeric_limits<double>::max();
+        double maxSide = 0.0;
+        for (size_t i = 0; i < hull.size(); ++i)
+        {
+            const double side = Distance2(hull[i], hull[(i + 1) % hull.size()]);
+            minSide = std::min(minSide, side);
+            maxSide = std::max(maxSide, side);
+        }
+
+        if (maxSide <= 1e-6 || minSide / maxSide < 0.90)
+        {
+            return false;
+        }
+
+        Point2dLite center;
+        for (size_t i = 0; i < hull.size(); ++i)
+        {
+            center.x += hull[i].x;
+            center.y += hull[i].y;
+        }
+        center.x /= 6.0;
+        center.y /= 6.0;
+
+        double minRadius = std::numeric_limits<double>::max();
+        double maxRadius = 0.0;
+        for (size_t i = 0; i < hull.size(); ++i)
+        {
+            const double radius = Distance2(center, hull[i]);
+            minRadius = std::min(minRadius, radius);
+            maxRadius = std::max(maxRadius, radius);
+        }
+
+        if (maxRadius <= 1e-6 || minRadius / maxRadius < 0.90)
+        {
+            return false;
+        }
+
+        if (acrossFlatsOut != NULL)
+        {
+            *acrossFlatsOut = PolygonMaxPairDistance(hull) * 0.8660254037844386;
+        }
+        return true;
+    }
+
+    bool BuildAxisBasis(const double axisDirection[3], double u[3], double v[3])
+    {
+        double seed[3] = { 1.0, 0.0, 0.0 };
+        if (std::fabs(Dot3(axisDirection, seed)) > 0.9)
+        {
+            seed[0] = 0.0;
+            seed[1] = 1.0;
+            seed[2] = 0.0;
+        }
+
+        const double projection = Dot3(seed, axisDirection);
+        u[0] = seed[0] - projection * axisDirection[0];
+        u[1] = seed[1] - projection * axisDirection[1];
+        u[2] = seed[2] - projection * axisDirection[2];
+        if (!Normalize3(u))
+        {
+            return false;
+        }
+
+        v[0] = axisDirection[1] * u[2] - axisDirection[2] * u[1];
+        v[1] = axisDirection[2] * u[0] - axisDirection[0] * u[2];
+        v[2] = axisDirection[0] * u[1] - axisDirection[1] * u[0];
+        return Normalize3(v);
+    }
+
+    bool AskCircularEdgeRecord(Edge* edge, CircularEdgeRecord* record)
+    {
+        if (edge == NULL || record == NULL)
+        {
+            return false;
+        }
+
+        UF_EVAL_p_t evaluator = NULL;
+        if (UF_EVAL_initialize(edge->Tag(), &evaluator) != 0 || evaluator == NULL)
+        {
+            return false;
+        }
+
+        logical isArc = false;
+        if (UF_EVAL_is_arc(evaluator, &isArc) != 0 || !isArc)
+        {
+            UF_EVAL_free(evaluator);
+            return false;
+        }
+
+        UF_EVAL_arc_t arc = {};
+        const int arcStatus = UF_EVAL_ask_arc(evaluator, &arc);
+        UF_EVAL_free(evaluator);
+        if (arcStatus != 0 || arc.radius <= 1e-6)
+        {
+            return false;
+        }
+
+        record->center[0] = arc.center[0];
+        record->center[1] = arc.center[1];
+        record->center[2] = arc.center[2];
+        record->radius = arc.radius;
+        record->fullCircle = arc.is_periodic != 0;
+        record->arcLength = 0.0;
+        try
+        {
+            record->arcLength = edge->GetLength();
+        }
+        catch (...)
+        {
+            UF_CURVE_ask_arc_length(edge->Tag(), 0.0, 1.0, UF_MODL_UNITS_PART, &record->arcLength);
+        }
+        return true;
+    }
+
+    bool SameCircleRecord(const CircularEdgeRecord& a, const CircularEdgeRecord& b, double radiusTolerance)
+    {
+        return std::fabs(a.radius - b.radius) <= radiusTolerance &&
+            Distance3(a.center, b.center) <= std::max(0.05, radiusTolerance * 2.0);
+    }
+
+    bool IsHalfCircleRecord(const CircularEdgeRecord& record)
+    {
+        if (record.radius <= 1e-6)
+        {
+            return false;
+        }
+
+        const double halfLength = 3.14159265358979323846 * record.radius;
+        return std::fabs(record.arcLength - halfLength) <= std::max(0.05, halfLength * 0.08);
+    }
+
+    bool CylinderFaceHasFullCircleProfile(Face* face, double cylinderRadius, CircleProfileStats* stats)
+    {
+        if (stats != NULL)
+        {
+            *stats = CircleProfileStats();
+        }
+        if (face == NULL || cylinderRadius <= 1e-6)
+        {
+            return false;
+        }
+
+        const double radiusTolerance = std::max(0.05, cylinderRadius * 0.03);
+        std::vector<CircularEdgeRecord> halfCircles;
+        std::vector<Edge*> edges = FaceEdgesByUf(face);
+        for (size_t i = 0; i < edges.size(); ++i)
+        {
+            CircularEdgeRecord record;
+            if (!AskCircularEdgeRecord(edges[i], &record))
+            {
+                continue;
+            }
+            if (stats != NULL)
+            {
+                ++stats->circularEdgeCount;
+                stats->lastRadius = record.radius;
+            }
+            if (std::fabs(record.radius - cylinderRadius) > radiusTolerance)
+            {
+                continue;
+            }
+            if (record.fullCircle)
+            {
+                if (stats != NULL)
+                {
+                    ++stats->fullCircleEdgeCount;
+                }
+                return true;
+            }
+            if (IsHalfCircleRecord(record))
+            {
+                if (stats != NULL)
+                {
+                    ++stats->halfCircleEdgeCount;
+                }
+                halfCircles.push_back(record);
+            }
+        }
+
+        for (size_t i = 0; i < halfCircles.size(); ++i)
+        {
+            for (size_t j = i + 1; j < halfCircles.size(); ++j)
+            {
+                if (SameCircleRecord(halfCircles[i], halfCircles[j], radiusTolerance))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    bool CollectBodyShadowOutlineByNx(Body* body, const double axisPoint[3], const double axisDirection[3], ShadowOutlineInfo* info)
+    {
+        if (info != NULL)
+        {
+            *info = ShadowOutlineInfo();
+        }
+        if (body == NULL || axisPoint == NULL || axisDirection == NULL)
+        {
+            if (info != NULL) info->reason = "阴影输入为空";
+            return false;
+        }
+
+        double u[3] = { 1.0, 0.0, 0.0 };
+        double v[3] = { 0.0, 1.0, 0.0 };
+        if (!BuildAxisBasis(axisDirection, u, v))
+        {
+            if (info != NULL) info->reason = "圆柱轴向无法创建投影基准";
+            return false;
+        }
+
+        Session* session = Session::GetSession();
+        Part* workPart = session != NULL ? session->Parts()->Work() : NULL;
+        if (workPart == NULL)
+        {
+            if (info != NULL) info->reason = "没有工作部件，无法创建阴影曲线";
+            return false;
+        }
+
+        int oldDisplayState = UF_DISP_UNSUPPRESS_DISPLAY;
+        const bool displayStateKnown = UF_DISP_ask_display(&oldDisplayState) == 0;
+        UF_DISP_set_display(UF_DISP_SUPPRESS_DISPLAY);
+
+        NXOpen::Features::ShadowCurveBuilder* builder = NULL;
+        Plane* plane = NULL;
+        Direction* rayDirection = NULL;
+        Direction* upDirection = NULL;
+        SelectionIntentRuleOptions* ruleOptions = NULL;
+        NXObject* committedObject = NULL;
+        std::vector<NXObject*> committedObjects;
+        std::vector<tag_t> deleteTags;
+        bool ok = false;
+
+        try
+        {
+            const Point3d origin(axisPoint[0], axisPoint[1], axisPoint[2]);
+            const Vector3d normal(axisDirection[0], axisDirection[1], axisDirection[2]);
+            plane = workPart->Planes()->CreatePlane(origin, normal, SmartObject::UpdateOptionWithinModeling);
+            rayDirection = workPart->Directions()->CreateDirection(origin, normal, SmartObject::UpdateOptionWithinModeling);
+            upDirection = workPart->Directions()->CreateDirection(origin, Vector3d(u[0], u[1], u[2]), SmartObject::UpdateOptionWithinModeling);
+
+            builder = workPart->Features()->CurveFeatureCollection()->CreateShadowCurveBuilder(NULL);
+            builder->SetLightSourceType(NXOpen::Features::ShadowCurveBuilder::LightSourceTypesVector);
+            builder->SetMaskType(NXOpen::Features::ShadowCurveBuilder::MaskTypesBodies);
+            builder->SetAccuracyType(NXOpen::Features::ShadowCurveBuilder::AccuracyTypesStandard);
+            builder->SetMaskBodyProcessingTypes(NXOpen::Features::ShadowCurveBuilder::MaskBodyProcessingTypeMorePreciseResult);
+            builder->SetCurveLocationType(NXOpen::Features::ShadowCurveBuilder::CurveLocationTypesShadowonPlane);
+            builder->SetCurveLocationPlane(plane);
+            builder->SetRayDirection(rayDirection);
+            builder->SetUpVector(upDirection);
+            builder->SetEnableShadowRange(false);
+
+            if (builder->CurveSettings() != NULL && builder->CurveSettings()->CurveFitData() != NULL)
+            {
+                builder->CurveSettings()->CurveFitData()->SetTolerance(0.01);
+                builder->CurveSettings()->CurveFitData()->SetAngleTolerance(0.5);
+                builder->CurveSettings()->CurveFitData()->SetCurveJoinMethod(NXOpen::GeometricUtilities::CurveFitData::JoinNo);
+            }
+
+            if (builder->Angle() != NULL)
+            {
+                builder->Angle()->SetFormula("40");
+            }
+            if (builder->WidthAngle() != NULL)
+            {
+                builder->WidthAngle()->SetFormula("40");
+            }
+            if (builder->VerticalAngle() != NULL)
+            {
+                builder->VerticalAngle()->SetFormula("20");
+            }
+            if (builder->ShadowRangeOnPlane() != NULL)
+            {
+                builder->ShadowRangeOnPlane()->SetFormula("5000");
+            }
+            if (builder->SphereDiameter() != NULL)
+            {
+                builder->SphereDiameter()->SetFormula("10000");
+            }
+            if (builder->MaskingCurves() != NULL)
+            {
+                builder->MaskingCurves()->SetDistanceTolerance(0.01);
+                builder->MaskingCurves()->SetChainingTolerance(0.0095);
+                builder->MaskingCurves()->SetAngleTolerance(0.5);
+            }
+
+            ruleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+            ruleOptions->SetSelectedFromInactive(false);
+            std::vector<Body*> bodies(1);
+            bodies[0] = body;
+            BodyDumbRule* bodyRule = workPart->ScRuleFactory()->CreateRuleBodyDumb(bodies, true, ruleOptions);
+            std::vector<SelectionIntentRule*> rules(1);
+            rules[0] = bodyRule;
+            builder->MaskingBodies()->ReplaceRules(rules, false);
+
+            committedObject = builder->Commit();
+            committedObjects = builder->GetCommittedObjects();
+
+            std::vector<tag_t> curveTags;
+            for (size_t i = 0; i < committedObjects.size(); ++i)
+            {
+                if (committedObjects[i] != NULL)
+                {
+                    curveTags.push_back(committedObjects[i]->Tag());
+                }
+            }
+
+            NXOpen::Features::Feature* feature = dynamic_cast<NXOpen::Features::Feature*>(committedObject);
+            if (feature != NULL)
+            {
+                std::vector<NXObject*> entities = feature->GetEntities();
+                for (size_t i = 0; i < entities.size(); ++i)
+                {
+                    if (entities[i] != NULL)
+                    {
+                        curveTags.push_back(entities[i]->Tag());
+                    }
+                }
+            }
+
+            std::sort(curveTags.begin(), curveTags.end());
+            curveTags.erase(std::unique(curveTags.begin(), curveTags.end()), curveTags.end());
+
+            std::vector<Point2dLite> lineEndpoints;
+            double maxCircleDiameter = 0.0;
+            int lineCount = 0;
+            int circleCount = 0;
+            int splineCount = 0;
+            int otherCount = 0;
+            for (size_t i = 0; i < curveTags.size(); ++i)
+            {
+                int type = 0;
+                int subtype = 0;
+                if (UF_OBJ_ask_type_and_subtype(curveTags[i], &type, &subtype) != 0)
+                {
+                    continue;
+                }
+                if (type == UF_line_type)
+                {
+                    ++lineCount;
+                    UF_CURVE_line_t lineData = {};
+                    if (UF_CURVE_ask_line_data(curveTags[i], &lineData) == 0)
+                    {
+                        double p1[3] = { lineData.start_point[0] - axisPoint[0], lineData.start_point[1] - axisPoint[1], lineData.start_point[2] - axisPoint[2] };
+                        double p2[3] = { lineData.end_point[0] - axisPoint[0], lineData.end_point[1] - axisPoint[1], lineData.end_point[2] - axisPoint[2] };
+                        Point2dLite a;
+                        a.x = Dot3(p1, u);
+                        a.y = Dot3(p1, v);
+                        Point2dLite b;
+                        b.x = Dot3(p2, u);
+                        b.y = Dot3(p2, v);
+                        AddUniquePoint2(&lineEndpoints, a);
+                        AddUniquePoint2(&lineEndpoints, b);
+                    }
+                }
+                else if (type == UF_circle_type)
+                {
+                    ++circleCount;
+                    UF_CURVE_arc_t arcData = {};
+                    if (UF_CURVE_ask_arc_data(curveTags[i], &arcData) == 0)
+                    {
+                        const double sweep = std::fabs(arcData.end_angle - arcData.start_angle);
+                        if (sweep >= 6.20 && arcData.radius > 1e-6)
+                        {
+                            maxCircleDiameter = std::max(maxCircleDiameter, arcData.radius * 2.0);
+                        }
+                    }
+                }
+                else if (type == UF_spline_type)
+                {
+                    ++splineCount;
+                }
+                else
+                {
+                    ++otherCount;
+                }
+            }
+
+            if (info != NULL)
+            {
+                info->curveCount = static_cast<int>(curveTags.size());
+                info->lineCount = lineCount;
+                info->circleCount = circleCount;
+                info->splineCount = splineCount;
+                info->otherCount = otherCount;
+            }
+
+            if (maxCircleDiameter > 1e-6)
+            {
+                if (info != NULL)
+                {
+                    info->matched = true;
+                    info->outlineType = "circle";
+                    info->outlineSize = maxCircleDiameter;
+                    info->reason = "阴影曲线最大外形为圆";
+                }
+                ok = true;
+            }
+            else
+            {
+                std::vector<Point2dLite> hull = ConvexHull2(lineEndpoints);
+                double acrossFlats = 0.0;
+                if (info != NULL)
+                {
+                    info->hullPointCount = hull.size();
+                }
+                if (IsHexShadow(hull, &acrossFlats) && acrossFlats > 1e-6)
+                {
+                    if (info != NULL)
+                    {
+                        info->matched = true;
+                        info->outlineType = "hex";
+                        info->outlineSize = acrossFlats;
+                        info->reason = "阴影曲线最大外形为等六边形";
+                    }
+                    ok = true;
+                }
+                else if (info != NULL)
+                {
+                    info->outlineType = "other";
+                    info->reason = curveTags.empty() ? "阴影曲线没有输出曲线" : "阴影曲线最大外形不是圆或等六边形";
+                }
+            }
+        }
+        catch (const NXException& ex)
+        {
+            if (info != NULL)
+            {
+                std::ostringstream stream;
+                stream << "创建阴影曲线异常 code=" << ex.ErrorCode() << " msg=" << ex.Message();
+                if (builder != NULL)
+                {
+                    stream << " distance_threshold=" << builder->DistanceThreshold();
+                    if (builder->MaskingCurves() != NULL)
+                    {
+                        stream << " distance_tol=" << builder->MaskingCurves()->DistanceTolerance()
+                               << " chaining_tol=" << builder->MaskingCurves()->ChainingTolerance();
+                    }
+                }
+                info->reason = stream.str();
+            }
+            ok = false;
+        }
+        catch (...)
+        {
+            if (info != NULL) info->reason = "创建阴影曲线异常";
+            ok = false;
+        }
+
+        if (builder != NULL)
+        {
+            try { builder->Destroy(); } catch (...) {}
+        }
+
+        for (size_t i = 0; i < committedObjects.size(); ++i)
+        {
+            if (committedObjects[i] != NULL)
+            {
+                deleteTags.push_back(committedObjects[i]->Tag());
+            }
+        }
+        if (committedObject != NULL) deleteTags.push_back(committedObject->Tag());
+        if (plane != NULL) deleteTags.push_back(plane->Tag());
+        if (rayDirection != NULL) deleteTags.push_back(rayDirection->Tag());
+        if (upDirection != NULL) deleteTags.push_back(upDirection->Tag());
+        std::sort(deleteTags.begin(), deleteTags.end());
+        deleteTags.erase(std::unique(deleteTags.begin(), deleteTags.end()), deleteTags.end());
+        for (size_t i = 0; i < deleteTags.size(); ++i)
+        {
+            if (deleteTags[i] != NULL_TAG)
+            {
+                UF_OBJ_delete_object(deleteTags[i]);
+            }
+        }
+
+        if (displayStateKnown)
+        {
+            UF_DISP_set_display(oldDisplayState);
+        }
+
+        return ok;
+    }
+
+    bool ShouldSkipFastenerBody(Body* body, FastenerFilterInfo* info)
+    {
+        if (info != NULL)
+        {
+            *info = FastenerFilterInfo();
+        }
+
+        if (body == NULL)
+        {
+            if (info != NULL) info->reason = "空实体";
+            return false;
+        }
+
+        FastenerFilterInfo bestInfo;
+        bestInfo.reason = "没有外圆柱候选";
+        double bestRatio = -1.0;
+        std::vector<Face*> faces = body->GetFaces();
+        for (size_t i = 0; i < faces.size(); ++i)
+        {
+            Face* face = faces[i];
+            double axisPoint[3] = { 0.0, 0.0, 0.0 };
+            double axisDirection[3] = { 0.0, 0.0, 1.0 };
+            double radius = 0.0;
+            int normDir = 0;
+            if (!AskCylinderFaceData(face, axisPoint, axisDirection, &radius, &normDir))
+            {
+                continue;
+            }
+            ++bestInfo.cylinderFaceCount;
+            double outerMed = 0.0;
+            const bool hasOuterMed = AskOuterCylinderMedLike08(face, &outerMed);
+            bestInfo.outerMed = outerMed;
+            if (!hasOuterMed || outerMed >= 0.0)
+            {
+                continue;
+            }
+            ++bestInfo.outerCylinderFaceCount;
+            CircleProfileStats circleStats;
+            if (!CylinderFaceHasFullCircleProfile(face, radius, &circleStats))
+            {
+                FastenerFilterInfo circleInfo;
+                circleInfo.outlineType = "none";
+                circleInfo.cylinderDiameter = radius * 2.0;
+                circleInfo.cylinderFaceCount = bestInfo.cylinderFaceCount;
+                circleInfo.outerCylinderFaceCount = bestInfo.outerCylinderFaceCount;
+                circleInfo.outerMed = outerMed;
+                circleInfo.circularEdgeCount = circleStats.circularEdgeCount;
+                circleInfo.fullCircleEdgeCount = circleStats.fullCircleEdgeCount;
+                circleInfo.halfCircleEdgeCount = circleStats.halfCircleEdgeCount;
+                circleInfo.reason = "圆柱直径不是整圆或两个半圆";
+                if (bestRatio < 0.0)
+                {
+                    bestInfo = circleInfo;
+                    bestRatio = 0.0;
+                }
+                continue;
+            }
+
+            double minProjection = std::numeric_limits<double>::max();
+            double maxProjection = -std::numeric_limits<double>::max();
+            std::vector<Point3d> heightPoints = CollectBodyEdgePoints(body);
+            for (size_t j = 0; j < heightPoints.size(); ++j)
+            {
+                double point[3] = { heightPoints[j].X, heightPoints[j].Y, heightPoints[j].Z };
+                double delta[3] = {
+                    point[0] - axisPoint[0],
+                    point[1] - axisPoint[1],
+                    point[2] - axisPoint[2]
+                };
+                const double projection = Dot3(delta, axisDirection);
+                minProjection = std::min(minProjection, projection);
+                maxProjection = std::max(maxProjection, projection);
+            }
+
+            const double diameter = radius * 2.0;
+            const double height = minProjection <= maxProjection ? maxProjection - minProjection : 0.0;
+            ShadowOutlineInfo shadowInfo;
+            if (!CollectBodyShadowOutlineByNx(body, axisPoint, axisDirection, &shadowInfo))
+            {
+                FastenerFilterInfo shadowFailInfo;
+                shadowFailInfo.outlineType = shadowInfo.outlineType;
+                shadowFailInfo.cylinderDiameter = diameter;
+                shadowFailInfo.height = height;
+                shadowFailInfo.outlineSize = shadowInfo.outlineSize;
+                shadowFailInfo.threshold = shadowInfo.outlineSize * 0.3;
+                shadowFailInfo.hullPointCount = shadowInfo.hullPointCount;
+                shadowFailInfo.shadowCurveCount = shadowInfo.curveCount;
+                shadowFailInfo.shadowLineCount = shadowInfo.lineCount;
+                shadowFailInfo.shadowCircleCount = shadowInfo.circleCount;
+                shadowFailInfo.shadowSplineCount = shadowInfo.splineCount;
+                shadowFailInfo.shadowOtherCount = shadowInfo.otherCount;
+                shadowFailInfo.cylinderFaceCount = bestInfo.cylinderFaceCount;
+                shadowFailInfo.outerCylinderFaceCount = bestInfo.outerCylinderFaceCount;
+                shadowFailInfo.outerMed = outerMed;
+                shadowFailInfo.circularEdgeCount = circleStats.circularEdgeCount;
+                shadowFailInfo.fullCircleEdgeCount = circleStats.fullCircleEdgeCount;
+                shadowFailInfo.halfCircleEdgeCount = circleStats.halfCircleEdgeCount;
+                shadowFailInfo.reason = shadowInfo.reason;
+                const double ratio = shadowFailInfo.outlineSize > 1e-6 ? height / shadowFailInfo.outlineSize : 0.0;
+                if (ratio > bestRatio)
+                {
+                    bestInfo = shadowFailInfo;
+                    bestRatio = ratio;
+                }
+                continue;
+            }
+
+            FastenerFilterInfo currentInfo;
+            currentInfo.outlineType = shadowInfo.outlineType;
+            currentInfo.height = height;
+            currentInfo.outlineSize = shadowInfo.outlineSize;
+            currentInfo.threshold = shadowInfo.outlineSize * 0.3;
+            currentInfo.cylinderDiameter = diameter;
+            currentInfo.hullPointCount = shadowInfo.hullPointCount;
+            currentInfo.shadowCurveCount = shadowInfo.curveCount;
+            currentInfo.shadowLineCount = shadowInfo.lineCount;
+            currentInfo.shadowCircleCount = shadowInfo.circleCount;
+            currentInfo.shadowSplineCount = shadowInfo.splineCount;
+            currentInfo.shadowOtherCount = shadowInfo.otherCount;
+            currentInfo.cylinderFaceCount = bestInfo.cylinderFaceCount;
+            currentInfo.outerCylinderFaceCount = bestInfo.outerCylinderFaceCount;
+            currentInfo.outerMed = outerMed;
+            currentInfo.circularEdgeCount = circleStats.circularEdgeCount;
+            currentInfo.fullCircleEdgeCount = circleStats.fullCircleEdgeCount;
+            currentInfo.halfCircleEdgeCount = circleStats.halfCircleEdgeCount;
+            currentInfo.reason = "阴影曲线轮廓匹配，高度不足";
+            const double ratio = shadowInfo.outlineSize > 1e-6 ? height / shadowInfo.outlineSize : 0.0;
+            if (ratio > bestRatio)
+            {
+                bestRatio = ratio;
+                bestInfo = currentInfo;
+            }
+
+            if (height > currentInfo.threshold + 1e-4)
+            {
+                currentInfo.matched = true;
+                currentInfo.reason = "阴影曲线轮廓命中跳过";
+                if (info != NULL)
+                {
+                    *info = currentInfo;
+                }
+                return true;
+            }
+        }
+
+        if (info != NULL)
+        {
+            *info = bestInfo;
+        }
+        return false;
+    }
+
+    std::string FormatNumber(double value)
+    {
+        std::ostringstream stream;
+        stream << std::fixed << std::setprecision(3) << value;
+        return stream.str();
+    }
+
+    std::string FormatFastenerFilterLogLine(
+        const std::string& partName,
+        Body* body,
+        bool skipped,
+        const FastenerFilterInfo& info)
+    {
+        std::ostringstream line;
+        line << (skipped ? "[SKIP]" : "[KEEP]")
+             << " part=\"" << partName << "\""
+             << " body=\"" << BodyName(body) << "\""
+             << " layer=" << (body == NULL ? 0 : body->Layer())
+             << " outline=" << info.outlineType
+             << " hull=" << info.hullPointCount
+             << " height=" << FormatNumber(info.height)
+             << " size=" << FormatNumber(info.outlineSize)
+             << " threshold=" << FormatNumber(info.threshold)
+             << " cylinder_diameter=" << FormatNumber(info.cylinderDiameter)
+             << " shadow_points=" << info.shadowPointCount
+             << " shadow_curves=" << info.shadowCurveCount
+             << " shadow_lines=" << info.shadowLineCount
+             << " shadow_circles=" << info.shadowCircleCount
+             << " shadow_splines=" << info.shadowSplineCount
+             << " shadow_others=" << info.shadowOtherCount
+             << " cyl_faces=" << info.cylinderFaceCount
+             << " outer_faces=" << info.outerCylinderFaceCount
+             << " outer_med=" << FormatNumber(info.outerMed)
+             << " circular_edges=" << info.circularEdgeCount
+             << " full_circle_edges=" << info.fullCircleEdgeCount
+             << " half_circle_edges=" << info.halfCircleEdgeCount
+             << " reason=\"" << info.reason << "\"";
+        return line.str();
+    }
+
+void AddSelectedComponentPrototypeParts(NXOpen::Assemblies::Component* component, std::vector<NXOpen::Part*>& parts)
+{
+	CollectPrototypePartsFromComponent(component, parts);
+}
+
+int ProcessBatchBodyQuantityInPart(
+	NXOpen::Part* processPart,
+	bool useLayerFilter,
+	int layerStart,
+	int layerEnd,
+	bool useSizeFilter,
+	bool useFastenerFilter,
+	double minWidth,
+	double minLength,
+	bool keepLayerVisible,
+	bool followAuxiliaryBodies,
+	bool colorMatchedBodies,
+	bool mirrorBodies,
+	const NXString& materialValue,
+	bool batchSetNumber,
+	std::string& batchNextNumber,
+	NXOpen::BlockStyler::StringBlock* numberBlock,
+	const char* quantityExpressionName,
+	bool& needsRegenerate)
+{
+	if (processPart == NULL)
+	{
+		return 0;
+	}
+
+	if (FindExpressionIfExists(processPart, quantityExpressionName) == NULL)
+	{
+		SetOrCreateIntegerExpression(processPart, quantityExpressionName, "1");
+	}
+
+	std::vector<Body*> batchBodies;
+	CollectBodiesFromPart(processPart, batchBodies);
+	size_t filteredOutCount = 0;
+	size_t fastenerFilteredCount = 0;
+	for (size_t i = 0; i < batchBodies.size(); )
+	{
+		Body* body = batchBodies[i];
+		int bodyType = 0;
+		bool keepBody = body != NULL && UF_MODL_ask_body_type(body->Tag(), &bodyType) == 0 && bodyType == UF_MODL_SOLID_BODY;
+		if (keepBody && useLayerFilter)
+		{
+			const int bodyLayer = body->Layer();
+			keepBody = bodyLayer >= layerStart && bodyLayer <= layerEnd;
+		}
+		if (keepBody && useSizeFilter)
+		{
+			double box[6] = { 0.0 };
+			if (UF_MODL_ask_bounding_box(body->Tag(), box) == 0)
+			{
+				double dims[3] = { fabs(box[3] - box[0]), fabs(box[4] - box[1]), fabs(box[5] - box[2]) };
+				std::sort(dims, dims + 3);
+				keepBody = dims[1] >= minWidth && dims[2] >= minLength;
+			}
+			else
+			{
+				keepBody = false;
+			}
+		}
+		if (keepBody && useFastenerFilter)
+		{
+			FastenerFilterInfo fastenerInfo;
+			const bool skipFastener = ShouldSkipFastenerBody(body, &fastenerInfo);
+			ZiDonFenCenDebugLog(std::string("assembly part fastener filter ") +
+				FormatFastenerFilterLogLine(NxStringForLog(processPart->Name()), body, skipFastener, fastenerInfo));
+			if (skipFastener)
+			{
+				keepBody = false;
+				++fastenerFilteredCount;
+			}
+		}
+		if (!keepBody)
+		{
+			batchBodies.erase(batchBodies.begin() + i);
+			++filteredOutCount;
+			continue;
+		}
+		++i;
+	}
+	SortBodiesLargestFirstForLayering(batchBodies);
+	{
+		std::ostringstream oss;
+		oss << "assembly part batch filter"
+			<< " part=" << NxStringForLog(processPart->Name())
+			<< " keptBodies=" << batchBodies.size()
+			<< " filteredOut=" << filteredOutCount
+			<< " fastenerFiltered=" << fastenerFilteredCount
+			<< " useFastenerFilter=" << (useFastenerFilter ? 1 : 0);
+		if (!batchBodies.empty())
+		{
+			oss << " firstTag=" << batchBodies[0]->Tag()
+				<< " firstWeight=" << SameBodyLayerSortWeight(batchBodies[0]);
+		}
+		ZiDonFenCenDebugLog(oss.str());
+	}
+
+	std::vector<SameBodyFingerprint> batchFingerprints;
+	batchFingerprints.reserve(batchBodies.size());
+	for (size_t bodyIndex = 0; bodyIndex < batchBodies.size(); ++bodyIndex)
+	{
+		Body* body = batchBodies[bodyIndex];
+		if (body == NULL)
+		{
+			continue;
+		}
+		try
+		{
+			batchFingerprints.push_back(BuildSameBodyFingerprint(body));
+		}
+		catch (exception& ex)
+		{
+			std::ostringstream oss;
+			oss << "assembly part fingerprint failed"
+				<< " part=" << NxStringForLog(processPart->Name())
+				<< " bodyTag=" << body->Tag()
+				<< " error=" << ex.what();
+			ZiDonFenCenDebugLog(oss.str());
+		}
+	}
+
+	std::vector<Body*> followSources;
+	std::vector<bool> batchGrouped(batchFingerprints.size(), false);
+	int processedCount = 0;
+	size_t groupCount = 0;
+	for (size_t referenceIndex = 0; referenceIndex < batchFingerprints.size(); ++referenceIndex)
+	{
+		if (batchGrouped[referenceIndex])
+		{
+			continue;
+		}
+		batchGrouped[referenceIndex] = true;
+		Body* body1 = batchFingerprints[referenceIndex].body;
+		if (body1 == NULL)
+		{
+			continue;
+		}
+
+		std::vector<Body*> groupBodies;
+		groupBodies.push_back(body1);
+		for (size_t candidateIndex = referenceIndex + 1; candidateIndex < batchFingerprints.size(); ++candidateIndex)
+		{
+			if (batchGrouped[candidateIndex])
+			{
+				continue;
+			}
+			if (!SameBodyFingerprintsMatch(batchFingerprints[referenceIndex], batchFingerprints[candidateIndex]))
+			{
+				continue;
+			}
+			batchGrouped[candidateIndex] = true;
+			if (batchFingerprints[candidateIndex].body != NULL)
+			{
+				groupBodies.push_back(batchFingerprints[candidateIndex].body);
+			}
+		}
+		++groupCount;
+
+		std::string bianhaoValue;
+		if (batchSetNumber && !batchNextNumber.empty())
+		{
+			bianhaoValue = batchNextNumber;
+		}
+
+		if (!keepLayerVisible)
+		{
+			body1->SetLayer(tucen);
+			std::vector<NXOpen::Layer::StateInfo> stateArray1(1);
+			stateArray1[0] = NXOpen::Layer::StateInfo(tucen, NXOpen::Layer::StateHidden);
+			processPart->Layers()->ChangeStates(stateArray1, false);
+			needsRegenerate = true;
+			tucen = tucen + 1;
+		}
+
+		const int matchedBodyLayer = tucen + 99;
+		const int sulian = static_cast<int>(groupBodies.size());
+		const int colorID = colorMatchedBodies ? PickSameBodyColor(color) : 0;
+		for (size_t i = 0; i < groupBodies.size(); ++i)
+		{
+			Body* groupBody = groupBodies[i];
+			if (groupBody == NULL)
+			{
+				continue;
+			}
+			if (i > 0)
+			{
+				groupBody->SetLayer(matchedBodyLayer);
+			}
+			if (colorMatchedBodies)
+			{
+				ApplySameBodyColor(groupBody, colorID);
+			}
+			if (!bianhaoValue.empty())
+			{
+				UF_OBJ_set_name(groupBody->Tag(), bianhaoValue.c_str());
+				groupBody->SetUserAttribute("bianhao", -1, bianhaoValue.c_str(), Update::Option::OptionNow);
+			}
+			groupBody->SetUserAttribute("sulian", -1, sulian, Update::Option::OptionNow);
+			groupBody->SetUserAttribute("cailiao", -1, materialValue, Update::Option::OptionNow);
+			groupBody->SetUserAttribute("MIRR", -1, mirrorBodies ? NXString("\xE5\xAF\xB9\xE7\xA7\xB0", NXString::UTF8) : NXString(""), Update::Option::OptionNow);
+			int bodyId = GetOrCreateBodyId(processPart, groupBody);
+			CreateSulianExpressions(processPart, groupBody, bodyId, quantityExpressionName);
+			AddBodyIfMissing(followSources, groupBody);
+			++processedCount;
+		}
+
+		if (batchSetNumber && !bianhaoValue.empty())
+		{
+			batchNextNumber = IncrementTrailingNumberText(bianhaoValue);
+			if (numberBlock != NULL)
+			{
+				PropertyList* string0Props = numberBlock->GetProperties();
+				string0Props->SetString("Value", batchNextNumber.c_str());
+				delete string0Props;
+			}
+		}
+	}
+
+	if (followAuxiliaryBodies)
+	{
+		std::vector<Body*> auxiliaryCandidates = batchBodies;
+		needsRegenerate = FollowAuxiliaryBodiesForGroup(processPart, followSources, auxiliaryCandidates, "assembly part batch followAux") || needsRegenerate;
+	}
+
+	if (!keepLayerVisible)
+	{
+		std::vector<NXOpen::Layer::StateInfo> stateArray1;
+		for (size_t i = 0; i < 252; i++)
+		{
+			stateArray1.push_back(NXOpen::Layer::StateInfo(i + 2, NXOpen::Layer::StateSelectable));
+		}
+		processPart->Layers()->ChangeStates(stateArray1, false);
+	}
+
+	std::ostringstream oss;
+	oss << "assembly part batch done"
+		<< " part=" << NxStringForLog(processPart->Name())
+		<< " groups=" << groupCount
+		<< " processedBodies=" << processedCount;
+	ZiDonFenCenDebugLog(oss.str());
+	return processedCount;
+}
 }
 //------------------------------------------------------------------------------
 //Callback Name: initialize_cb
@@ -1639,19 +4896,17 @@ void ZiDonFenCen::initialize_cb()
 		integerBatchLayerStart = dynamic_cast<NXOpen::BlockStyler::IntegerBlock*>(theDialog->TopBlock()->FindBlock("integerBatchLayerStart"));
 		integerBatchLayerEnd = dynamic_cast<NXOpen::BlockStyler::IntegerBlock*>(theDialog->TopBlock()->FindBlock("integerBatchLayerEnd"));
 		toggleBatchSizeFilter = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBatchSizeFilter"));
+		toggleBatchFastenerFilter = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBatchFastenerFilter"));
 		doubleBatchMinWidth = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBatchMinWidth"));
 		doubleBatchMinLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBatchMinLength"));
 		selectionBatchComponents = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("selectionBatchComponents"));
 
-		//���ù�����Ϊ ʵ��
+		//锟斤拷锟矫癸拷锟斤拷锟斤拷为 实锟斤拷
 		if (selection0 != NULL)
 		{
 			selection0->AddFilter(BlockStyler::SelectObject::FilterTypeSolidBodies);
 		}
-		if (selectionBatchComponents != NULL)
-		{
-			selectionBatchComponents->AddFilter(BlockStyler::SelectObject::FilterTypeSolidBodies);
-		}
+		// ??????????????????????????
 
 
 
@@ -1680,13 +4935,34 @@ void ZiDonFenCen::dialogShown_cb()
 		displayPart = ::theSession->Parts()->Display();
 		VBody_1.clear();
 		VBody.clear();
+		VFollowSources.clear();
 		objectArray1.clear();
 		color.clear();
 		VObjTag.clear();
 		tucen = 10;
 
 		cartesianCoordinateSystemWORK=workPart->WCS()->CoordinateSystem();
+		LoadZiDonFenCenDialogState(
+			toggleBatchBodyQuantity,
+			toggleBatchLayerFilter,
+			integerBatchLayerStart,
+			integerBatchLayerEnd,
+			toggleBatchSizeFilter,
+			toggleBatchFastenerFilter,
+			doubleBatchMinWidth,
+			doubleBatchMinLength,
+			toggle0,
+			string0,
+			toggle02,
+			toggle01,
+			toggleDuiCen,
+			toggle03);
 
+		const bool assemblyMode = workPart != NULL && workPart->ComponentAssembly() != NULL && workPart->ComponentAssembly()->RootComponent() != NULL && !workPart->ComponentAssembly()->RootComponent()->GetChildren().empty();
+		if (assemblyMode && toggleBatchBodyQuantity != NULL)
+		{
+			toggleBatchBodyQuantity->SetValue(true);
+		}
 		const bool batchMode = toggleBatchBodyQuantity != NULL && toggleBatchBodyQuantity->Value();
 		if (selection0 != NULL)
 		{
@@ -1695,8 +4971,65 @@ void ZiDonFenCen::dialogShown_cb()
 		}
 		if (selectionBatchComponents != NULL)
 		{
-			selectionBatchComponents->SetShow(false);
-			selectionBatchComponents->SetEnable(false);
+			selectionBatchComponents->SetShow(batchMode && assemblyMode);
+			selectionBatchComponents->SetEnable(batchMode && assemblyMode);
+		}
+		if (toggleBatchLayerFilter != NULL)
+		{
+			toggleBatchLayerFilter->SetShow(batchMode);
+			toggleBatchLayerFilter->SetEnable(batchMode);
+		}
+		if (integerBatchLayerStart != NULL)
+		{
+			integerBatchLayerStart->SetShow(batchMode);
+			integerBatchLayerStart->SetEnable(batchMode);
+		}
+		if (integerBatchLayerEnd != NULL)
+		{
+			integerBatchLayerEnd->SetShow(batchMode);
+			integerBatchLayerEnd->SetEnable(batchMode);
+		}
+		if (toggleBatchSizeFilter != NULL)
+		{
+			toggleBatchSizeFilter->SetShow(batchMode);
+			toggleBatchSizeFilter->SetEnable(batchMode);
+		}
+		if (doubleBatchMinWidth != NULL)
+		{
+			doubleBatchMinWidth->SetShow(batchMode);
+			doubleBatchMinWidth->SetEnable(batchMode);
+		}
+		if (doubleBatchMinLength != NULL)
+		{
+			doubleBatchMinLength->SetShow(batchMode);
+			doubleBatchMinLength->SetEnable(batchMode);
+		}
+		if (toggleBatchFastenerFilter != NULL)
+		{
+			toggleBatchFastenerFilter->SetShow(batchMode);
+			toggleBatchFastenerFilter->SetEnable(batchMode);
+		}
+		{
+			std::ostringstream oss;
+			oss << "dialogShown"
+				<< " batchMode=" << (batchMode ? 1 : 0)
+				<< " batchLayerFilter=" << (toggleBatchLayerFilter != NULL && toggleBatchLayerFilter->Value() ? 1 : 0)
+				<< " layerStart=" << (integerBatchLayerStart != NULL ? integerBatchLayerStart->Value() : -1)
+				<< " layerEnd=" << (integerBatchLayerEnd != NULL ? integerBatchLayerEnd->Value() : -1)
+				<< " batchSizeFilter=" << (toggleBatchSizeFilter != NULL && toggleBatchSizeFilter->Value() ? 1 : 0)
+				<< " batchFastenerFilter=" << (toggleBatchFastenerFilter != NULL && toggleBatchFastenerFilter->Value() ? 1 : 0)
+				<< " assemblyMode=" << (assemblyMode ? 1 : 0)
+				<< " minWidth=" << (doubleBatchMinWidth != NULL ? doubleBatchMinWidth->Value() : -1.0)
+				<< " minLength=" << (doubleBatchMinLength != NULL ? doubleBatchMinLength->Value() : -1.0)
+				<< " material=" << (stringCaiZi != NULL ? NxStringForLog(stringCaiZi->Value()) : "<null>")
+				<< " quantity=" << (integerSuLian != NULL ? integerSuLian->Value() : -1)
+				<< " setNumber=" << (toggle0 != NULL && toggle0->GetProperties()->GetLogical("Value") ? 1 : 0)
+				<< " number=" << (string0 != NULL ? NxStringForLog(string0->Value()) : "<null>")
+				<< " followAux=" << (toggle02 != NULL && toggle02->Value() ? 1 : 0)
+				<< " randomColor=" << (toggle01 != NULL && toggle01->Value() ? 1 : 0)
+				<< " mirror=" << (toggleDuiCen != NULL && toggleDuiCen->Value() ? 1 : 0)
+				<< " toggle03=" << (toggle03 != NULL && toggle03->Value() ? 1 : 0);
+			ZiDonFenCenDebugLog(oss.str());
 		}
 
 		if (toggle0->GetProperties()->GetLogical("Value") == true)
@@ -1715,11 +5048,10 @@ void ZiDonFenCen::dialogShown_cb()
 		}
 		else
 		{
-			toggle02->SetValue(true);
 			toggle02->SetShow(true);
 		}
-		toggleDuiCen->SetValue(false);
-		//��ù�������������ʵ��
+		// Dialog state is restored from ZiDonFenCen_state.ini.
+		//锟斤拷霉锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟绞碉拷锟?
 		NXOpen::BodyCollection* Cbody = workPart->Bodies();
 		Body* body1;
 		NXOpen::BodyCollection::iterator Ite1 = Cbody->begin();
@@ -1741,10 +5073,29 @@ void ZiDonFenCen::dialogShown_cb()
 
 		std::vector<NXObject::AttributeInformation>VAttr;
 		VAttr = workPart->GetAttributeTitlesByType(NXObject::AttributeType::AttributeTypeString);
-
-			if (workPart->HasUserAttribute("����", NXObject::AttributeType::AttributeTypeString, -1))
+		{
+			std::ostringstream oss;
+			oss << "dialogShown partStringAttrs count=" << VAttr.size();
+			for (size_t attrIndex = 0; attrIndex < VAttr.size() && attrIndex < 20; ++attrIndex)
 			{
-				stringCaiZi->GetProperties()->SetString("Value", workPart->GetStringAttribute("����"));
+				oss << " [" << attrIndex << "]=" << NxStringForLog(VAttr[attrIndex].Title);
+			}
+			ZiDonFenCenDebugLog(oss.str());
+		}
+		NXString materialTitle = MaterialPartAttributeTitle();
+		if (workPart->HasUserAttribute(materialTitle, NXObject::AttributeType::AttributeTypeString, -1))
+		{
+			stringCaiZi->GetProperties()->SetString("Value", workPart->GetStringAttribute(materialTitle));
+			ZiDonFenCenDebugLog("dialogShown material loaded from part attribute");
+		}
+		else
+		{
+			ZiDonFenCenDebugLog("dialogShown material part attribute missing");
+		}
+
+			if (workPart->HasUserAttribute("锟斤拷锟斤拷", NXObject::AttributeType::AttributeTypeString, -1))
+			{
+				stringCaiZi->GetProperties()->SetString("Value", workPart->GetStringAttribute("锟斤拷锟斤拷"));
 			}
 
 
@@ -1768,10 +5119,15 @@ int ZiDonFenCen::apply_cb()
     {
 		UF_initialize();
 		ufInitialized = true;
+		workPart = ::theSession->Parts()->Work();
+		displayPart = ::theSession->Parts()->Display();
 
 		if (toggleBatchBodyQuantity != NULL && toggleBatchBodyQuantity->Value())
 		{
-			const char* quantityExpressionName = "����";
+			ResetZiDonFenCenDebugLog();
+			const unsigned long long batchTotalStartMs = ZiDonFenCenNowMs();
+			ZiDonFenCenDebugLog("batch begin");
+			const char* quantityExpressionName = "锟斤拷锟斤拷";
 			if (FindExpressionIfExists(workPart, quantityExpressionName) == NULL)
 			{
 				SetOrCreateIntegerExpression(workPart, quantityExpressionName, "1");
@@ -1788,31 +5144,201 @@ int ZiDonFenCen::apply_cb()
 			}
 
 			bool useSizeFilter = toggleBatchSizeFilter != NULL && toggleBatchSizeFilter->Value();
+			bool useFastenerFilter = toggleBatchFastenerFilter != NULL && toggleBatchFastenerFilter->Value();
 			double minWidth = doubleBatchMinWidth != NULL ? doubleBatchMinWidth->Value() : 0.0;
 			double minLength = doubleBatchMinLength != NULL ? doubleBatchMinLength->Value() : 0.0;
 			std::vector<Body*> batchBodies;
 			std::vector<TaggedObject*> selectedObjects;
+			const unsigned long long collectStartMs = ZiDonFenCenNowMs();
 			if (selectionBatchComponents != NULL)
 			{
-				selectedObjects = selectionBatchComponents->GetProperties()->GetTaggedObjectVector("SelectedObjects");
+				std::unique_ptr<PropertyList> batchSelectionProps(selectionBatchComponents->GetProperties());
+				selectedObjects = batchSelectionProps->GetTaggedObjectVector("SelectedObjects");
 			}
 
-			if (!selectedObjects.empty())
+			std::vector<NXOpen::Part*> assemblyProcessParts;
+			if (assemblySelectionActive && !selectedAssemblyParts.empty())
 			{
-				for (size_t i = 0; i < selectedObjects.size(); ++i)
+				assemblyProcessParts = selectedAssemblyParts;
+			}
+			std::vector<Body*> selectedBatchBodies;
+			for (size_t selectedIndex = 0; selectedIndex < selectedObjects.size(); ++selectedIndex)
+			{
+				TaggedObject* selected = selectedObjects[selectedIndex];
+				NXOpen::Assemblies::Component* component = dynamic_cast<NXOpen::Assemblies::Component*>(selected);
+				if (component != NULL)
 				{
-					Body* selectedBody = dynamic_cast<Body*>(selectedObjects[i]);
-					if (selectedBody != NULL)
-					{
-						batchBodies.push_back(selectedBody);
-					}
+					AddSelectedComponentPrototypeParts(component, assemblyProcessParts);
+					continue;
 				}
+				Body* selectedBody = dynamic_cast<Body*>(selected);
+				if (selectedBody != NULL)
+				{
+					selectedBatchBodies.push_back(selectedBody);
+				}
+			}
+			NXOpen::Part* assemblyContextPart = dynamic_cast<NXOpen::Part*>(theSession->Parts()->BaseDisplay());
+			if (assemblyContextPart == NULL)
+			{
+				assemblyContextPart = displayPart != NULL ? displayPart : workPart;
+			}
+			if (selectedObjects.empty() && assemblyProcessParts.empty())
+			{
+				CollectBatchPrototypeParts(assemblyContextPart, assemblyProcessParts);
+			}
+			if (!assemblyProcessParts.empty())
+			{
+				{
+					NXOpen::BasePart* originalDisplayPart = theSession->Parts()->BaseDisplay();
+					NXOpen::Part* originalWorkPart = theSession->Parts()->Work();
+					int processedCount = 0;
+					const bool batchSetNumber = toggle0 != NULL && toggle0->GetProperties()->GetLogical("Value") == true;
+					std::string batchNextNumber;
+					if (batchSetNumber && string0 != NULL)
+					{
+						batchNextNumber = string0->GetProperties()->GetString("Value").GetLocaleText();
+					}
+					const bool keepLayerVisible = toggle03 != NULL && toggle03->GetProperties()->GetLogical("Value") == true;
+					const bool followAuxiliaryBodies = toggle02 != NULL && toggle02->GetProperties()->GetLogical("Value") == true;
+					const bool colorMatchedBodies = toggle01 != NULL && toggle01->GetProperties()->GetLogical("Value") == true;
+					const bool mirrorBodies = toggleDuiCen != NULL && toggleDuiCen->GetProperties()->GetLogical("Value") == true;
+					const NXString materialValue = stringCaiZi != NULL ? stringCaiZi->Value() : NXString("");
+					{
+						std::ostringstream oss;
+						oss << "assembly batch begin"
+							<< " partCount=" << assemblyProcessParts.size()
+							<< " assemblyContext=" << (assemblyContextPart != NULL ? NxStringForLog(assemblyContextPart->Name()) : "<null>")
+							<< " originalWork=" << (originalWorkPart != NULL ? NxStringForLog(originalWorkPart->Name()) : "<null>");
+						ZiDonFenCenDebugLog(oss.str());
+					}
+
+					for (size_t partIndex = 0; partIndex < assemblyProcessParts.size(); ++partIndex)
+					{
+						NXOpen::Part* processPart = assemblyProcessParts[partIndex];
+						if (processPart == NULL)
+						{
+							continue;
+						}
+						{
+							std::ostringstream oss;
+							oss << "assembly switch begin"
+								<< " index=" << (partIndex + 1)
+								<< " target=" << NxStringForLog(processPart->Name())
+								<< " beforeDisplay=" << (theSession->Parts()->Display() != NULL ? NxStringForLog(theSession->Parts()->Display()->Name()) : "<null>")
+								<< " beforeWork=" << (theSession->Parts()->Work() != NULL ? NxStringForLog(theSession->Parts()->Work()->Name()) : "<null>");
+							ZiDonFenCenDebugLog(oss.str());
+						}
+						NXOpen::PartLoadStatus* loadStatus = NULL;
+						theSession->Parts()->SetDisplay(processPart, false, false, &loadStatus);
+						if (loadStatus != NULL)
+						{
+							delete loadStatus;
+							loadStatus = NULL;
+						}
+						theSession->Parts()->SetWork(processPart);
+						workPart = theSession->Parts()->Work();
+						displayPart = theSession->Parts()->Display();
+						try
+						{
+							theSession->DisplayManager()->MakeUpToDate();
+						}
+						catch (NXOpen::NXException&)
+						{
+						}
+						{
+							std::ostringstream oss;
+							oss << "assembly switch end"
+								<< " index=" << (partIndex + 1)
+								<< " target=" << NxStringForLog(processPart->Name())
+								<< " afterDisplay=" << (displayPart != NULL ? NxStringForLog(displayPart->Name()) : "<null>")
+								<< " afterWork=" << (workPart != NULL ? NxStringForLog(workPart->Name()) : "<null>");
+							ZiDonFenCenDebugLog(oss.str());
+						}
+						tucen = 10;
+						processedCount += ProcessBatchBodyQuantityInPart(
+							workPart,
+							useLayerFilter,
+							layerStart,
+							layerEnd,
+							useSizeFilter,
+							useFastenerFilter,
+							minWidth,
+							minLength,
+							keepLayerVisible,
+							followAuxiliaryBodies,
+							colorMatchedBodies,
+							mirrorBodies,
+							materialValue,
+							batchSetNumber,
+							batchNextNumber,
+							string0,
+							quantityExpressionName,
+							needsRegenerate);
+						if (needsRegenerate && workPart != NULL)
+						{
+							workPart->ModelingViews()->WorkView()->Regenerate();
+						}
+					}
+
+					try
+					{
+						if (originalDisplayPart != NULL)
+						{
+							NXOpen::PartLoadStatus* restoreLoadStatus = NULL;
+							theSession->Parts()->SetDisplay(originalDisplayPart, false, false, &restoreLoadStatus);
+							if (restoreLoadStatus != NULL)
+							{
+								delete restoreLoadStatus;
+								restoreLoadStatus = NULL;
+							}
+						}
+						if (originalWorkPart != NULL)
+						{
+							theSession->Parts()->SetWork(originalWorkPart);
+						}
+					}
+					catch (NXOpen::NXException&)
+					{
+					}
+					workPart = theSession->Parts()->Work();
+					displayPart = theSession->Parts()->Display();
+
+					{
+						std::ostringstream oss;
+						oss << "assembly batch end"
+							<< " processedBodies=" << processedCount
+							<< " totalElapsedMs=" << ZiDonFenCenElapsedMs(batchTotalStartMs);
+						ZiDonFenCenDebugLog(oss.str());
+					}
+					char message[256];
+					sprintf(message, "Batch body quantity finished: %d bodies", processedCount);
+					ZiDonFenCen::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeInformation, message);
+					UF_terminate();
+					ufInitialized = false;
+					return errorCode;
+				}
+			}
+
+			if (!selectedBatchBodies.empty())
+			{
+				batchBodies = selectedBatchBodies;
 			}
 			else
 			{
 				CollectBatchBodies(workPart, batchBodies);
 			}
+			{
+				std::ostringstream oss;
+				oss << "batch collect"
+					<< " selectedObjects=" << selectedObjects.size()
+					<< " collectedBodies=" << batchBodies.size()
+					<< " elapsedMs=" << ZiDonFenCenElapsedMs(collectStartMs);
+				ZiDonFenCenDebugLog(oss.str());
+			}
 
+			const unsigned long long filterStartMs = ZiDonFenCenNowMs();
+			size_t filteredOutCount = 0;
+			size_t fastenerFilteredCount = 0;
 			for (size_t i = 0; i < batchBodies.size(); )
 			{
 				Body* body = batchBodies[i];
@@ -1837,29 +5363,246 @@ int ZiDonFenCen::apply_cb()
 						keepBody = false;
 					}
 				}
+				if (keepBody && useFastenerFilter)
+				{
+					FastenerFilterInfo fastenerInfo;
+					const bool skipFastener = ShouldSkipFastenerBody(body, &fastenerInfo);
+					ZiDonFenCenDebugLog(std::string("batch fastener filter ") +
+						FormatFastenerFilterLogLine(workPart != NULL ? NxStringForLog(workPart->Name()) : std::string("<null>"), body, skipFastener, fastenerInfo));
+					if (skipFastener)
+					{
+						keepBody = false;
+						++fastenerFilteredCount;
+					}
+				}
 				if (!keepBody)
 				{
 					batchBodies.erase(batchBodies.begin() + i);
+					++filteredOutCount;
 					continue;
 				}
 				++i;
 			}
+			SortBodiesLargestFirstForLayering(batchBodies);
+			{
+				std::ostringstream oss;
+				oss << "batch filter"
+					<< " keptBodies=" << batchBodies.size()
+					<< " filteredOut=" << filteredOutCount
+					<< " useLayerFilter=" << (useLayerFilter ? 1 : 0)
+					<< " useSizeFilter=" << (useSizeFilter ? 1 : 0)
+					<< " useFastenerFilter=" << (useFastenerFilter ? 1 : 0)
+					<< " fastenerFiltered=" << fastenerFilteredCount
+					<< " elapsedMs=" << ZiDonFenCenElapsedMs(filterStartMs);
+				if (!batchBodies.empty())
+				{
+					oss << " firstTag=" << batchBodies[0]->Tag()
+						<< " firstWeight=" << SameBodyLayerSortWeight(batchBodies[0]);
+				}
+				ZiDonFenCenDebugLog(oss.str());
+			}
+
+			std::vector<SameBodyFingerprint> batchFingerprints;
+			batchFingerprints.reserve(batchBodies.size());
+			const unsigned long long fingerprintTotalStartMs = ZiDonFenCenNowMs();
+			unsigned long long fingerprintSlowestMs = 0;
+			tag_t fingerprintSlowestTag = NULL_TAG;
+			for (size_t bodyIndex = 0; bodyIndex < batchBodies.size(); ++bodyIndex)
+			{
+				Body* body = batchBodies[bodyIndex];
+				if (body == NULL)
+				{
+					continue;
+				}
+				try
+				{
+					const unsigned long long fingerprintStartMs = ZiDonFenCenNowMs();
+					batchFingerprints.push_back(BuildSameBodyFingerprint(body));
+					const unsigned long long fingerprintMs = ZiDonFenCenElapsedMs(fingerprintStartMs);
+					if (fingerprintMs > fingerprintSlowestMs)
+					{
+						fingerprintSlowestMs = fingerprintMs;
+						fingerprintSlowestTag = body->Tag();
+					}
+					if (fingerprintMs >= 100)
+					{
+						std::ostringstream oss;
+						oss << "batch fingerprint slow"
+							<< " bodyIndex=" << bodyIndex
+							<< " bodyTag=" << body->Tag()
+							<< " elapsedMs=" << fingerprintMs;
+						ZiDonFenCenDebugLog(oss.str());
+					}
+				}
+				catch (exception& ex)
+				{
+					std::ostringstream oss;
+					oss << "batch fingerprint failed"
+						<< " bodyIndex=" << bodyIndex
+						<< " bodyTag=" << body->Tag()
+						<< " error=" << ex.what();
+					ZiDonFenCenDebugLog(oss.str());
+				}
+			}
+			{
+				std::ostringstream oss;
+				oss << "batch fingerprints built"
+					<< " count=" << batchFingerprints.size()
+					<< " elapsedMs=" << ZiDonFenCenElapsedMs(fingerprintTotalStartMs)
+					<< " slowestTag=" << fingerprintSlowestTag
+					<< " slowestMs=" << fingerprintSlowestMs;
+				ZiDonFenCenDebugLog(oss.str());
+			}
 
 			int processedCount = 0;
-			while (!batchBodies.empty())
+			const bool batchSetNumber = toggle0 != NULL && toggle0->GetProperties()->GetLogical("Value") == true;
+			std::string batchNextNumber;
+			if (batchSetNumber && string0 != NULL)
 			{
-				Body* Body1 = batchBodies[0];
-				Body1->SetUserAttribute("linsi", -1, "AA", Update::Option::OptionNow);
-				VBody_1.clear();
-				int sulian = 1;
-				ask_xiantonti(Body1, batchBodies, color, sulian);
-				if (VBody_1.empty())
+				batchNextNumber = string0->GetProperties()->GetString("Value").GetLocaleText();
 				{
-					VBody_1.push_back(Body1);
+					std::ostringstream oss;
+					oss << "batch numbering start=" << batchNextNumber;
+					ZiDonFenCenDebugLog(oss.str());
+				}
+			}
+			std::vector<bool> batchGrouped(batchFingerprints.size(), false);
+			const unsigned long long groupingStartMs = ZiDonFenCenNowMs();
+			size_t compareCount = 0;
+			size_t matchedCompareCount = 0;
+			unsigned long long compareTotalMs = 0;
+			unsigned long long compareSlowestMs = 0;
+			tag_t compareSlowestReferenceTag = NULL_TAG;
+			tag_t compareSlowestCandidateTag = NULL_TAG;
+			size_t groupCount = 0;
+			for (size_t referenceIndex = 0; referenceIndex < batchFingerprints.size(); ++referenceIndex)
+			{
+				if (batchGrouped[referenceIndex])
+				{
+					continue;
+				}
+				batchGrouped[referenceIndex] = true;
+				Body* Body1 = batchFingerprints[referenceIndex].body;
+				if (Body1 == NULL)
+				{
+					continue;
+				}
+				VBody_1.clear();
+				VBody_1.push_back(Body1);
+				for (size_t candidateIndex = referenceIndex + 1; candidateIndex < batchFingerprints.size(); ++candidateIndex)
+				{
+					if (batchGrouped[candidateIndex])
+					{
+						continue;
+					}
+					const unsigned long long compareStartMs = ZiDonFenCenNowMs();
+					const bool isSameBody = SameBodyFingerprintsMatch(batchFingerprints[referenceIndex], batchFingerprints[candidateIndex]);
+					const unsigned long long compareMs = ZiDonFenCenElapsedMs(compareStartMs);
+					++compareCount;
+					compareTotalMs += compareMs;
+					if (compareMs > compareSlowestMs)
+					{
+						compareSlowestMs = compareMs;
+						compareSlowestReferenceTag = batchFingerprints[referenceIndex].tag;
+						compareSlowestCandidateTag = batchFingerprints[candidateIndex].tag;
+					}
+					if (compareMs >= 100)
+					{
+						std::ostringstream oss;
+						oss << "batch compare slow"
+							<< " refIndex=" << referenceIndex
+							<< " refTag=" << batchFingerprints[referenceIndex].tag
+							<< " candIndex=" << candidateIndex
+							<< " candTag=" << batchFingerprints[candidateIndex].tag
+							<< " matched=" << (isSameBody ? 1 : 0)
+							<< " elapsedMs=" << compareMs;
+						ZiDonFenCenDebugLog(oss.str());
+					}
+					if (!isSameBody)
+					{
+						continue;
+					}
+					++matchedCompareCount;
+					batchGrouped[candidateIndex] = true;
+					if (batchFingerprints[candidateIndex].body != NULL)
+					{
+						VBody_1.push_back(batchFingerprints[candidateIndex].body);
+					}
+				}
+				++groupCount;
+				{
+					std::ostringstream oss;
+					oss << "batch group formed"
+						<< " groupIndex=" << groupCount
+						<< " refTag=" << Body1->Tag()
+						<< " groupCount=" << VBody_1.size();
+					ZiDonFenCenDebugLog(oss.str());
 				}
 
-				const int groupLayer = tucen;
-				tucen = tucen + 1;
+				std::string bianhaoValue;
+				if (batchSetNumber && !batchNextNumber.empty())
+				{
+					bianhaoValue = batchNextNumber;
+					UF_OBJ_set_name(Body1->Tag(), bianhaoValue.c_str());
+					Body1->SetUserAttribute("bianhao", -1, bianhaoValue.c_str(), Update::Option::OptionNow);
+				}
+				if ((toggle03 == NULL || toggle03->GetProperties()->GetLogical("Value") == false))
+				{
+					Body1->SetLayer(tucen);
+					std::vector<NXOpen::Layer::StateInfo> stateArray1(1);
+					stateArray1[0] = NXOpen::Layer::StateInfo(tucen, NXOpen::Layer::StateHidden);
+					workPart->Layers()->ChangeStates(stateArray1, false);
+					needsRegenerate = true;
+					tucen = tucen + 1;
+				}
+				const int sourceLayer = Body1->Layer();
+				const int matchedBodyLayer = tucen + 99;
+				const int sulian = static_cast<int>(VBody_1.size());
+				const bool colorMatchedBodies = toggle01 != NULL && toggle01->GetProperties()->GetLogical("Value") == true;
+				const int colorID = colorMatchedBodies ? PickSameBodyColor(color) : 0;
+				for (size_t groupIndex = 0; groupIndex < VBody_1.size(); ++groupIndex)
+				{
+					Body* groupBody = VBody_1[groupIndex];
+					if (groupBody == NULL)
+					{
+						continue;
+					}
+					if (groupIndex > 0)
+					{
+						groupBody->SetLayer(matchedBodyLayer);
+					}
+					if (colorMatchedBodies)
+					{
+						ApplySameBodyColor(groupBody, colorID);
+					}
+				}
+				if (batchSetNumber && !bianhaoValue.empty())
+				{
+					for (size_t i = 0; i < VBody_1.size(); ++i)
+					{
+						if (VBody_1[i] != NULL)
+						{
+							UF_OBJ_set_name(VBody_1[i]->Tag(), bianhaoValue.c_str());
+							VBody_1[i]->SetUserAttribute("bianhao", -1, bianhaoValue.c_str(), Update::Option::OptionNow);
+						}
+					}
+					batchNextNumber = IncrementTrailingNumberText(bianhaoValue);
+					if (string0 != NULL)
+					{
+						PropertyList* string0Props = string0->GetProperties();
+						string0Props->SetString("Value", batchNextNumber.c_str());
+						delete string0Props;
+						string0Props = NULL;
+					}
+					{
+						std::ostringstream oss;
+						oss << "batch numbering group=" << bianhaoValue
+							<< " next=" << batchNextNumber
+							<< " groupCount=" << VBody_1.size();
+						ZiDonFenCenDebugLog(oss.str());
+					}
+				}
+
 				for (size_t i = 0; i < VBody_1.size(); ++i)
 				{
 					Body* groupBody = VBody_1[i];
@@ -1867,12 +5610,11 @@ int ZiDonFenCen::apply_cb()
 					{
 						continue;
 					}
-					groupBody->SetLayer(groupLayer);
 					groupBody->SetUserAttribute("sulian", -1, sulian, Update::Option::OptionNow);
 					groupBody->SetUserAttribute("cailiao", -1, stringCaiZi->Value(), Update::Option::OptionNow);
 					if (toggleDuiCen->GetProperties()->GetLogical("Value"))
 					{
-						groupBody->SetUserAttribute("MIRR", -1, "�Գ���", Update::Option::OptionNow);
+						groupBody->SetUserAttribute("MIRR", -1, NXString("\xE5\xAF\xB9\xE7\xA7\xB0", NXString::UTF8), Update::Option::OptionNow);
 					}
 					else
 					{
@@ -1880,11 +5622,63 @@ int ZiDonFenCen::apply_cb()
 					}
 					int bodyId = GetOrCreateBodyId(workPart, groupBody);
 					CreateSulianExpressions(workPart, groupBody, bodyId, quantityExpressionName);
+					AddBodyIfMissing(VFollowSources, groupBody);
+					{
+						std::ostringstream oss;
+						oss << "batch groupAttrs"
+							<< " bodyTag=" << groupBody->Tag()
+							<< " sourceLayer=" << sourceLayer
+							<< " layer=" << groupBody->Layer()
+							<< " cailiao=" << BodyStringAttributeForLog(groupBody, "cailiao")
+							<< " sulian=" << BodyIntegerAttributeForLog(groupBody, "sulian")
+							<< " bianhao=" << BodyStringAttributeForLog(groupBody, "bianhao");
+						ZiDonFenCenDebugLog(oss.str());
+					}
 					++processedCount;
 				}
 			}
 
+			if (toggle02 != NULL && toggle02->GetProperties()->GetLogical("Value") == true)
+			{
+				const unsigned long long followStartMs = ZiDonFenCenNowMs();
+				needsRegenerate = FollowAuxiliaryBodiesForGroup(workPart, VFollowSources, VBody, "batch followAux") || needsRegenerate;
+				ZiDonFenCenLogElapsed("batch followAux", followStartMs);
+			}
+			{
+				std::ostringstream oss;
+				oss << "batch grouping summary"
+					<< " groups=" << groupCount
+					<< " compares=" << compareCount
+					<< " matchedCompares=" << matchedCompareCount
+					<< " compareTotalMs=" << compareTotalMs
+					<< " compareSlowestMs=" << compareSlowestMs
+					<< " compareSlowestRefTag=" << compareSlowestReferenceTag
+					<< " compareSlowestCandTag=" << compareSlowestCandidateTag
+					<< " elapsedMs=" << ZiDonFenCenElapsedMs(groupingStartMs);
+				ZiDonFenCenDebugLog(oss.str());
+			}
+			if ((toggle03 == NULL || toggle03->GetProperties()->GetLogical("Value") == false))
+			{
+				const unsigned long long layerRestoreStartMs = ZiDonFenCenNowMs();
+				std::vector<NXOpen::Layer::StateInfo> stateArray1;
+				for (size_t i = 0; i < 252; i++)
+				{
+					stateArray1.push_back(NXOpen::Layer::StateInfo(i + 2, NXOpen::Layer::StateSelectable));
+				}
+				workPart->Layers()->ChangeStates(stateArray1, false);
+				ZiDonFenCenLogElapsed("batch restoreLayers", layerRestoreStartMs);
+			}
+
+			const unsigned long long regenerateStartMs = ZiDonFenCenNowMs();
 			workPart->ModelingViews()->WorkView()->Regenerate();
+			ZiDonFenCenLogElapsed("batch regenerate", regenerateStartMs);
+			{
+				std::ostringstream oss;
+				oss << "batch end"
+					<< " processedBodies=" << processedCount
+					<< " totalElapsedMs=" << ZiDonFenCenElapsedMs(batchTotalStartMs);
+				ZiDonFenCenDebugLog(oss.str());
+			}
 			char message[256];
 			sprintf(message, "Batch body quantity finished: %d bodies", processedCount);
 			ZiDonFenCen::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeInformation, message);
@@ -1895,18 +5689,37 @@ int ZiDonFenCen::apply_cb()
 
 		if (toggle02->GetProperties()->GetLogical("Value") == true)
 		{
+			const std::vector<Body*>& followSources = VFollowSources.empty() ? VBody_1 : VFollowSources;
+			needsRegenerate = FollowAuxiliaryBodiesForGroup(workPart, followSources, VBody, "apply followAux") || needsRegenerate;
 			for (size_t i = 0; i < VBody_1.size(); i++)
 			{
 				for (size_t ia = 0; ia < VBody.size(); )
 				{
 					MeasureDistance* measureDistance1;
 					measureDistance1 = workPart->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, VBody_1[i], VBody[ia]);
-					double distance1 = measureDistance1->Value();//��ȡ������ֵ
+					double distance1 = measureDistance1->Value();//锟斤拷取锟斤拷锟斤拷锟斤拷值
 					workPart->MeasureManager()->ClearPartTransientModification();
 
 					if (distance1 < 0.01)
 					{
 						VBody[ia]->SetLayer(VBody_1[i]->Layer());
+						CopyStringAttributeIfPresent(VBody_1[i], VBody[ia], "bianhao");
+						CopyStringAttributeIfPresent(VBody_1[i], VBody[ia], "cailiao");
+						CopyStringAttributeIfPresent(VBody_1[i], VBody[ia], "MIRR");
+						CopyIntegerAttributeIfPresent(VBody_1[i], VBody[ia], "sulian");
+						{
+							std::ostringstream oss;
+							oss << "apply followAux"
+								<< " sourceTag=" << VBody_1[i]->Tag()
+								<< " sourceLayer=" << VBody_1[i]->Layer()
+								<< " auxTag=" << VBody[ia]->Tag()
+								<< " auxLayer=" << VBody[ia]->Layer()
+								<< " distance=" << distance1
+								<< " cailiao=" << BodyStringAttributeForLog(VBody[ia], "cailiao")
+								<< " sulian=" << BodyIntegerAttributeForLog(VBody[ia], "sulian")
+								<< " bianhao=" << BodyStringAttributeForLog(VBody[ia], "bianhao");
+							ZiDonFenCenDebugLog(oss.str());
+						}
 						needsRegenerate = true;
 						VBody.erase(VBody.begin() + ia);
 					}
@@ -1960,6 +5773,7 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 		if (block == toggleBatchBodyQuantity)
 		{
 			const bool batchMode = toggleBatchBodyQuantity != NULL && toggleBatchBodyQuantity->Value();
+			const bool assemblyMode = workPart != NULL && workPart->ComponentAssembly() != NULL && workPart->ComponentAssembly()->RootComponent() != NULL && !workPart->ComponentAssembly()->RootComponent()->GetChildren().empty();
 			if (selection0 != NULL)
 			{
 				selection0->SetShow(!batchMode);
@@ -1967,8 +5781,52 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 			}
 			if (selectionBatchComponents != NULL)
 			{
-				selectionBatchComponents->SetShow(false);
-				selectionBatchComponents->SetEnable(false);
+				selectionBatchComponents->SetShow(batchMode && assemblyMode);
+				selectionBatchComponents->SetEnable(batchMode && assemblyMode);
+			}
+			if (toggleBatchLayerFilter != NULL)
+			{
+				toggleBatchLayerFilter->SetShow(batchMode);
+				toggleBatchLayerFilter->SetEnable(batchMode);
+			}
+			if (integerBatchLayerStart != NULL)
+			{
+				integerBatchLayerStart->SetShow(batchMode);
+				integerBatchLayerStart->SetEnable(batchMode);
+			}
+			if (integerBatchLayerEnd != NULL)
+			{
+				integerBatchLayerEnd->SetShow(batchMode);
+				integerBatchLayerEnd->SetEnable(batchMode);
+			}
+			if (toggleBatchSizeFilter != NULL)
+			{
+				toggleBatchSizeFilter->SetShow(batchMode);
+				toggleBatchSizeFilter->SetEnable(batchMode);
+			}
+			if (doubleBatchMinWidth != NULL)
+			{
+				doubleBatchMinWidth->SetShow(batchMode);
+				doubleBatchMinWidth->SetEnable(batchMode);
+			}
+			if (doubleBatchMinLength != NULL)
+			{
+				doubleBatchMinLength->SetShow(batchMode);
+				doubleBatchMinLength->SetEnable(batchMode);
+			}
+			if (toggleBatchFastenerFilter != NULL)
+			{
+				toggleBatchFastenerFilter->SetShow(batchMode);
+				toggleBatchFastenerFilter->SetEnable(batchMode);
+			}
+			{
+				std::ostringstream oss;
+				oss << "update.toggleBatchBodyQuantity batchMode=" << (batchMode ? 1 : 0)
+					<< " assemblyMode=" << (assemblyMode ? 1 : 0)
+					<< " fastenerFilter=" << (toggleBatchFastenerFilter != NULL && toggleBatchFastenerFilter->Value() ? 1 : 0)
+					<< " material=" << (stringCaiZi != NULL ? NxStringForLog(stringCaiZi->Value()) : "<null>")
+					<< " number=" << (string0 != NULL ? NxStringForLog(string0->Value()) : "<null>");
+				ZiDonFenCenDebugLog(oss.str());
 			}
 		}
 		else if (block == toggle03)
@@ -1980,13 +5838,12 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 			}
 			else
 			{
-				toggle02->SetValue(true);
 				toggle02->SetShow(true);
 			}
 		}
 		else if (block == selection0)     
         {
-			const char* quantityExpressionName = "����";
+			const char* quantityExpressionName = "锟斤拷锟斤拷";
 			if (FindExpressionIfExists(workPart, quantityExpressionName) == NULL)
 			{
 				SetOrCreateIntegerExpression(workPart, quantityExpressionName, "1");
@@ -2012,17 +5869,36 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 			VObjTag = selection0->GetProperties()->GetTaggedObjectVector("SelectedObjects");
 			if (VObjTag.empty())
 			{
+				ZiDonFenCenDebugLog("selection0 selectedObjects=0");
 				UF_terminate();
 				ufInitialized = false;
 				return 0;
 			}
 			
-				NXOpen::Body* Body1(dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(VObjTag[0]->Tag())));//ǿ��ת��ΪNX����
+				NXOpen::Body* Body1(dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(VObjTag[0]->Tag())));//强锟斤拷转锟斤拷为NX锟斤拷锟斤拷
 				if (Body1 == NULL)
 				{
+					ZiDonFenCenDebugLog("selection0 first selected object is not a body");
 					UF_terminate();
 					ufInitialized = false;
 					return 0;
+				}
+				{
+					std::ostringstream oss;
+					oss << "selection0 begin"
+						<< " bodyTag=" << Body1->Tag()
+						<< " bodyLayer=" << Body1->Layer()
+						<< " selectedCount=" << VObjTag.size()
+						<< " allBodiesBefore=" << VBody.size()
+						<< " materialInput=" << (stringCaiZi != NULL ? NxStringForLog(stringCaiZi->Value()) : "<null>")
+						<< " quantityInput=" << (integerSuLian != NULL ? integerSuLian->Value() : -1)
+						<< " setNumber=" << (toggle0 != NULL && toggle0->GetProperties()->GetLogical("Value") ? 1 : 0)
+						<< " numberInput=" << (string0 != NULL ? NxStringForLog(string0->Value()) : "<null>")
+						<< " followAux=" << (toggle02 != NULL && toggle02->Value() ? 1 : 0)
+						<< " randomColor=" << (toggle01 != NULL && toggle01->Value() ? 1 : 0)
+						<< " mirror=" << (toggleDuiCen != NULL && toggleDuiCen->Value() ? 1 : 0)
+						<< " keepLayerVisible=" << (toggle03 != NULL && toggle03->Value() ? 1 : 0);
+					ZiDonFenCenDebugLog(oss.str());
 				}
 				Body1->SetUserAttribute("linsi", -1, "AA", Update::Option::OptionNow);
 				string bianhaoValue;
@@ -2031,23 +5907,23 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 					bianhaoValue = string0->GetProperties()->GetString("Value").GetLocaleText();
 					UF_OBJ_set_name(Body1->Tag(), bianhaoValue.c_str());
 					Body1->SetUserAttribute("bianhao", -1, bianhaoValue.c_str(), Update::Option::OptionNow);
-					string strbianhao = bianhaoValue;//char*ת��Ϊstring
+					string strbianhao = bianhaoValue;//char*转锟斤拷为string
 					string strbianhao1 = strbianhao;
 					string strbianhaotwo, strbianhaoone;
-					strbianhaotwo = strbianhao.erase(0, strbianhao.length() - 2);//ɾ�������λ�ַ���ǰ����ַ�
-					strbianhaoone = strbianhao.erase(0, strbianhao.length() - 1);//ɾ�����1λ�ַ���ǰ����ַ�
-					int ot = stoi(strbianhaotwo, 0, 10);//stringתint
-					int ot1 = stoi(strbianhaoone, 0, 10);//stringתint	
+					strbianhaotwo = strbianhao.erase(0, strbianhao.length() - 2);//删锟斤拷锟斤拷锟斤拷锟轿伙拷址锟斤拷锟角帮拷锟斤拷锟街凤拷
+					strbianhaoone = strbianhao.erase(0, strbianhao.length() - 1);//删锟斤拷锟斤拷锟?位锟街凤拷锟斤拷前锟斤拷锟斤拷址锟?
+					int ot = stoi(strbianhaotwo, 0, 10);//string转int
+					int ot1 = stoi(strbianhaoone, 0, 10);//string转int	
 
 					if (ot > 8)
 					{
 						int ca = ot + 1;
 						char cb[25];
-						itoa(ca, cb, 10);//intתchar*
+						itoa(ca, cb, 10);//int转char*
 						string dd = cb;
 						strbianhao1.erase(strbianhao1.length() - 2, 2);
 						string newbianhao = strbianhao1 + dd;
-						//stringת��Ϊchar*
+						//string转锟斤拷为char*
 						const char* ab = newbianhao.c_str();
 
 						PropertyList* string0Props = string0->GetProperties();
@@ -2065,7 +5941,7 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 						string dd = cb;
 						strbianhao1.erase(strbianhao1.length() - 1, 1);
 						string newbianhao = strbianhao1 + dd;
-						//stringת��Ϊchar*
+						//string转锟斤拷为char*
 						const char* ab = newbianhao.c_str();
 
 						PropertyList* string0Props = string0->GetProperties();
@@ -2086,6 +5962,15 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				}
 				VBody_1.clear();
 				ask_xiantonti(Body1, VBody, color, sulian);
+				{
+					std::ostringstream oss;
+					oss << "selection0 connectedGroup"
+						<< " sourceTag=" << Body1->Tag()
+						<< " groupCount=" << VBody_1.size()
+						<< " remainingBodies=" << VBody.size()
+						<< " computedSulian=" << sulian;
+					ZiDonFenCenDebugLog(oss.str());
+				}
 				if (toggle0->GetProperties()->GetLogical("Value") == true)
 				{
 					for (size_t i = 0; i < VBody_1.size(); ++i)
@@ -2103,10 +5988,20 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
 				Body1->SetUserAttribute("sulian", -1, sulian,Update::Option::OptionNow);
 				Body1->SetUserAttribute("cailiao", -1, stringCaiZi->Value(), Update::Option::OptionNow);
+				{
+					std::ostringstream oss;
+					oss << "selection0 sourceAttrs"
+						<< " bodyTag=" << Body1->Tag()
+						<< " layer=" << Body1->Layer()
+						<< " cailiao=" << BodyStringAttributeForLog(Body1, "cailiao")
+						<< " sulian=" << BodyIntegerAttributeForLog(Body1, "sulian")
+						<< " bianhao=" << BodyStringAttributeForLog(Body1, "bianhao");
+					ZiDonFenCenDebugLog(oss.str());
+				}
 
 				if (toggleDuiCen->GetProperties()->GetLogical("Value"))
 				{
-					Body1->SetUserAttribute("MIRR", -1, "�Գ���", Update::Option::OptionNow);
+					Body1->SetUserAttribute("MIRR", -1, NXString("\xE5\xAF\xB9\xE7\xA7\xB0", NXString::UTF8), Update::Option::OptionNow);
 				}
 				else
 				{
@@ -2114,6 +6009,34 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				}
 				int Body1ID = GetOrCreateBodyId(workPart, Body1);
 				CreateSulianExpressions(workPart, Body1, Body1ID, quantityExpressionName);
+				for (size_t groupIndex = 0; groupIndex < VBody_1.size(); ++groupIndex)
+				{
+					Body* groupBody = VBody_1[groupIndex];
+					if (groupBody == NULL)
+					{
+						continue;
+					}
+					groupBody->SetUserAttribute("sulian", -1, sulian, Update::Option::OptionNow);
+					CopyStringAttributeIfPresent(Body1, groupBody, "cailiao");
+					CopyStringAttributeIfPresent(Body1, groupBody, "MIRR");
+					int groupBodyID = GetOrCreateBodyId(workPart, groupBody);
+					CreateSulianExpressions(workPart, groupBody, groupBodyID, quantityExpressionName);
+					{
+						std::ostringstream oss;
+						oss << "selection0 groupAttrs"
+							<< " index=" << groupIndex
+							<< " bodyTag=" << groupBody->Tag()
+							<< " layer=" << groupBody->Layer()
+							<< " cailiao=" << BodyStringAttributeForLog(groupBody, "cailiao")
+							<< " sulian=" << BodyIntegerAttributeForLog(groupBody, "sulian")
+							<< " bianhao=" << BodyStringAttributeForLog(groupBody, "bianhao");
+						ZiDonFenCenDebugLog(oss.str());
+					}
+				}
+				for (size_t followIndex = 0; followIndex < VBody_1.size(); ++followIndex)
+				{
+					AddBodyIfMissing(VFollowSources, VBody_1[followIndex]);
+				}
 				needsRegenerate = true;
 				if (needsRegenerate)
 				{
@@ -2124,15 +6047,24 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
         }
 		else if (block == stringCaiZi)
 		{
-			//---------Enter your code here-----------
+			std::ostringstream oss;
+			oss << "update.material"
+				<< " material=" << (stringCaiZi != NULL ? NxStringForLog(stringCaiZi->Value()) : "<null>");
+			ZiDonFenCenDebugLog(oss.str());
 		}
 		else if (block == integerSuLian)
 		{
-			//---------Enter your code here-----------
+			std::ostringstream oss;
+			oss << "update.quantity"
+				<< " quantity=" << (integerSuLian != NULL ? integerSuLian->Value() : -1);
+			ZiDonFenCenDebugLog(oss.str());
 		}
 		else if (block == toggleDuiCen)
 		{
-			//---------Enter your code here-----------
+			std::ostringstream oss;
+			oss << "update.mirror"
+				<< " mirror=" << (toggleDuiCen != NULL && toggleDuiCen->Value() ? 1 : 0);
+			ZiDonFenCenDebugLog(oss.str());
 		}
 		else if (block == toggle0)
 		{
@@ -2144,20 +6076,49 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 			{
 				string0->SetShow(false);
 			}
+			std::ostringstream oss;
+			oss << "update.setNumber"
+				<< " setNumber=" << (toggle0 != NULL && toggle0->GetProperties()->GetLogical("Value") ? 1 : 0)
+				<< " number=" << (string0 != NULL ? NxStringForLog(string0->Value()) : "<null>");
+			ZiDonFenCenDebugLog(oss.str());
 		}
 		else if (block == string0)
 		{
-			//---------Enter your code here-----------
+			std::ostringstream oss;
+			oss << "update.number"
+				<< " number=" << (string0 != NULL ? NxStringForLog(string0->Value()) : "<null>");
+			ZiDonFenCenDebugLog(oss.str());
 		}
 		else if (block == toggle02)
 		{
-			//---------Enter your code here-----------
+			std::ostringstream oss;
+			oss << "update.followAux"
+				<< " followAux=" << (toggle02 != NULL && toggle02->Value() ? 1 : 0);
+			ZiDonFenCenDebugLog(oss.str());
 		}
 		else if (block == toggle01)
 		{
-			//---------Enter your code here-----------
+			std::ostringstream oss;
+			oss << "update.randomColor"
+				<< " randomColor=" << (toggle01 != NULL && toggle01->Value() ? 1 : 0);
+			ZiDonFenCenDebugLog(oss.str());
 		}
 
+		SaveZiDonFenCenDialogState(
+			toggleBatchBodyQuantity,
+			toggleBatchLayerFilter,
+			integerBatchLayerStart,
+			integerBatchLayerEnd,
+			toggleBatchSizeFilter,
+			toggleBatchFastenerFilter,
+			doubleBatchMinWidth,
+			doubleBatchMinLength,
+			toggle0,
+			string0,
+			toggle02,
+			toggle01,
+			toggleDuiCen,
+			toggle03);
 
     }
     catch(exception& ex)
@@ -2210,7 +6171,6 @@ int ZiDonFenCen::ask_xiantonti(Body* body1,vector<Body*> &VBody, std::vector<int
 			ApplySameBodyColor(body1, colorID);
 		}
 
-		const SameBodyCoarseSignature referenceCoarseSignature = BuildSameBodyCoarseSignature(body1);
 		bool referenceFingerprintReady = false;
 		SameBodyFingerprint referenceFingerprint = {};
 		for (size_t i = 0; i < VBody.size(); )
@@ -2223,19 +6183,12 @@ int ZiDonFenCen::ask_xiantonti(Body* body1,vector<Body*> &VBody, std::vector<int
 				continue;
 			}
 
-			const SameBodyCoarseSignature candidateCoarseSignature = BuildSameBodyCoarseSignature(VBody[i]);
-			if (!SameBodyCoarseSignaturesMatch(referenceCoarseSignature, candidateCoarseSignature))
-			{
-				++i;
-				continue;
-			}
-
 			if (!referenceFingerprintReady)
 			{
 				referenceFingerprint = BuildSameBodyFingerprint(body1);
 				referenceFingerprintReady = true;
 			}
-			const SameBodyFingerprint candidateFingerprint = BuildSameBodyFingerprint(VBody[i]);
+			SameBodyFingerprint candidateFingerprint = BuildSameBodyFingerprint(VBody[i]);
 			if (!SameBodyFingerprintsMatch(referenceFingerprint, candidateFingerprint))
 			{
 				++i;
@@ -2273,3 +6226,6 @@ PropertyList* ZiDonFenCen::GetBlockProperties(const char* blockID)
 {
 	return theDialog->GetBlockProperties(blockID);
 }
+
+
+

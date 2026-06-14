@@ -11,4 +11,11 @@
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
+  <ItemGroup>
+    <None Include="FanTonGMK.dlx" />
+    <None Include="FanTon1.bmp" />
+    <None Include="FanTon2.bmp" />
+    <None Include="FanTon1Icon.bmp" />
+    <None Include="FanTon2Icon.bmp" />
+  </ItemGroup>
 </Project>

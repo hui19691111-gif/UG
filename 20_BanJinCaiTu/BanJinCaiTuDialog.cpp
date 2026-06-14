@@ -38,9 +38,12 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <stdexcept>
 #undef CreateDialog
 
 #include "BanJinCaiTuDialog.hpp"
+#include "../../common/ZhihuiEmbeddedDialog.hpp"
+#include "embedded_dialog_resources.h"
 
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/CurveDumbRule.hxx>
@@ -237,7 +240,11 @@ BanJinCaiTuDialog::BanJinCaiTuDialog()
         selectedFace = NULL;
         selectedEndFace = NULL;
         selectedBody = NULL;
-        g_dlxFileName = GetDialogFullPath();
+        g_dlxFileName = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_BANJINCAITUDIALOG_DLX);
+        if (g_dlxFileName.empty())
+        {
+            throw std::runtime_error("BanJinCaiTuDialog dialog resource is missing.");
+        }
         theDlxFileName = g_dlxFileName.c_str();
         theDialog = BanJinCaiTuDialog::theUI->CreateDialog(theDlxFileName);
         // Registration of callback functions
@@ -341,7 +348,7 @@ HMODULE LoadProtectedLicenseGate()
         }
     }
 
-    HMODULE fixedModule = LoadLibraryW(L"D:\\UGÖÇ»ÔîÓ½ð²å¼þ\\application\\ZhaoFuNxLicenseGate.dll");
+    HMODULE fixedModule = LoadLibraryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\application\\ZhaoFuNxLicenseGate.dll");
     if (fixedModule != NULL)
     {
         return fixedModule;
@@ -468,10 +475,6 @@ bool ValidateOwnModuleChecksum()
 #endif
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     
     if (!ValidateOwnModuleChecksum())
@@ -673,31 +676,31 @@ int BanJinCaiTuDialog::apply_cb()
     {
         if (selectedFace == NULL)
         {
-            throw NXException::Create(1, "ÇëÏÈÑ¡ÔñÒ»¸ö×÷ÎªÆðÊ¼ÃæµÄÆ½Ãæ¡£");
+            throw NXException::Create(1, "ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½Ê¼ï¿½ï¿½ï¿½Æ½ï¿½æ¡£");
         }
         if (selectedEndFace == NULL)
         {
-            throw NXException::Create(1, "ÇëÏÈÑ¡ÔñÒ»¸ö×÷ÎªÖÕÖ¹ÃæµÄÆ½Ãæ¡£");
+            throw NXException::Create(1, "ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½Ö¹ï¿½ï¿½ï¿½Æ½ï¿½æ¡£");
         }
         if (selectedFace->Tag() == selectedEndFace->Tag())
         {
-            throw NXException::Create(1, "ÆðÊ¼ÃæºÍÖÕÖ¹Ãæ²»ÄÜÊÇÍ¬Ò»¸öÃæ¡£");
+            throw NXException::Create(1, "ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½Ö¹ï¿½æ²»ï¿½ï¿½ï¿½ï¿½Í¬Ò»ï¿½ï¿½ï¿½æ¡£");
         }
 
         FaceInfo seedFaceInfo = QueryFaceInfo(selectedFace->Tag());
         if (!seedFaceInfo.isPlanar)
         {
-            throw NXException::Create(1, "µ±Ç°½öÖ§³ÖÑ¡ÔñÆ½ÃæÃæ×÷ÎªÆðÊ¼Ãæ¡£");
+            throw NXException::Create(1, "ï¿½ï¿½Ç°ï¿½ï¿½Ö§ï¿½ï¿½Ñ¡ï¿½ï¿½Æ½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½Ê¼ï¿½æ¡£");
         }
         FaceInfo endFaceInfo = QueryFaceInfo(selectedEndFace->Tag());
         if (!endFaceInfo.isPlanar)
         {
-            throw NXException::Create(1, "µ±Ç°½öÖ§³ÖÑ¡ÔñÆ½ÃæÃæ×÷ÎªÖÕÖ¹Ãæ¡£");
+            throw NXException::Create(1, "ï¿½ï¿½Ç°ï¿½ï¿½Ö§ï¿½ï¿½Ñ¡ï¿½ï¿½Æ½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½Ö¹ï¿½æ¡£");
         }
         Body* endBody = dynamic_cast<Body*>(selectedEndFace->GetBody());
         if (selectedBody != NULL && endBody != NULL && selectedBody->Tag() != endBody->Tag())
         {
-            throw NXException::Create(1, "ÆðÊ¼ÃæºÍÖÕÖ¹Ãæ±ØÐëÔÚÍ¬Ò»¸öÊµÌåÉÏ¡£");
+            throw NXException::Create(1, "ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬Ò»ï¿½ï¿½Êµï¿½ï¿½ï¿½Ï¡ï¿½");
         }
 
         const TraversalContext context = BuildTraversalContext(selectedFace);
@@ -724,7 +727,7 @@ int BanJinCaiTuDialog::apply_cb()
         }
         if (!reachedEndFace)
         {
-            throw NXException::Create(1, "Ã»ÓÐ´ÓÆðÊ¼ÃæÑØÁ¬ÐøÕÛÍäÃæÕÒµ½ÖÕÖ¹Ãæ£¬Çë¼ì²éÑ¡ÔñµÄÁ½¸öÃæÊÇ·ñÔÚÍ¬Ò»ÌõÁ¬ÐøÂ·¾¶ÉÏ¡£");
+            throw NXException::Create(1, "Ã»ï¿½Ð´ï¿½ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òµï¿½ï¿½ï¿½Ö¹ï¿½æ£¬ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç·ï¿½ï¿½ï¿½Í¬Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â·ï¿½ï¿½ï¿½Ï¡ï¿½");
         }
         std::vector<tag_t> extractedSourceFaceTags;
         std::vector<tag_t> extractedSheetBodies = ExtractRecognizedFaces(
@@ -958,7 +961,7 @@ BanJinCaiTuDialog::TraversalContext BanJinCaiTuDialog::BuildTraversalContext(Fac
     Body* body = dynamic_cast<Body*>(seedFace->GetBody());
     if (body == NULL)
     {
-        throw NXException::Create("ÎÞ·¨´ÓÆðÊ¼Ãæ»ñÈ¡ÊµÌå¡£");
+        throw NXException::Create("ï¿½Þ·ï¿½ï¿½ï¿½ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½È¡Êµï¿½å¡£");
     }
 
     double bodyBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
@@ -983,7 +986,7 @@ BanJinCaiTuDialog::TraversalContext BanJinCaiTuDialog::BuildTraversalContext(Fac
     if (context.referenceEdgeTag == NULL_TAG ||
         !TryGetLinearEdgeDirection(context.referenceEdgeTag, context.referenceEdgeDirection))
     {
-        throw NXException::Create("ÎÞ·¨¸ù¾Ýµã»÷Î»ÖÃÕÒµ½ÓÐÐ§µÄÕÛÍä²Î¿¼±ß£¬Çë¾¡Á¿¿¿½üÒ»ÌõÖ±±ßµã»÷¡£");
+        throw NXException::Create("ï¿½Þ·ï¿½ï¿½ï¿½ï¿½Ýµï¿½ï¿½Î»ï¿½ï¿½ï¿½Òµï¿½ï¿½ï¿½Ð§ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î¿ï¿½ï¿½ß£ï¿½ï¿½ë¾¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½Ö±ï¿½ßµï¿½ï¿½ï¿½ï¿½");
     }
 
     return context;
@@ -1236,7 +1239,7 @@ tag_t BanJinCaiTuDialog::FindNearestReferenceEdge(
             continue;
         }
 
-        // »ù×¼±ßÖ»ÔÊÐí´Óµ±Ç°ÃæÕæÕýµÄÕÛÍä±ßÀïÑ¡£¬ÆÕÍ¨ÂÖÀª±ß²»²ÎÓë×î½ü¾àÀë¾ºÕù¡£
+        // ï¿½ï¿½×¼ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½Óµï¿½Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½ï¿½ß²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ë¾ºï¿½ï¿½ï¿½ï¿½
         if (!IsBendReferenceEdge(faceTag, edgeTags[index], thickness))
         {
             continue;
@@ -2038,7 +2041,7 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
     const tag_t stopFaceTag = stopFace == NULL ? NULL_TAG : stopFace->Tag();
     visitedFaces.insert(seedFaceTag);
 
-    // ÆðÊ¼ÃæÈÔ¼ÆÈë½á¹û£¬µ«´«²¥Èë¿ÚÖ»ÔÊÐí´Óµã»÷Î»ÖÃ×î½üµÄ»ù×¼±ß¿ªÊ¼¡£
+    // ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½Ô¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½Óµï¿½ï¿½Î»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä»ï¿½×¼ï¿½ß¿ï¿½Ê¼ï¿½ï¿½
     Face* seedNxFace = dynamic_cast<Face*>(NXObjectManager::Get(seedFaceTag));
     if (seedNxFace != NULL)
     {
@@ -7124,7 +7127,7 @@ tag_t BanJinCaiTuDialog::SubtractSelectedBodyByToolBody(tag_t toolBodyTag) const
         NXOpen::Features::BooleanFeature* nullBooleanFeature = NULL;
         booleanBuilder = workPart->Features()->CreateBooleanBuilderUsingCollector(nullBooleanFeature);
 
-        // °´Â¼ÖÆ´úÂëË³ÐòÏÈ´¥·¢ÄÚ²¿ÊÕ¼¯Æ÷ÓëÇøÓòÑ¡Ôñ³õÊ¼»¯¡£
+        // ï¿½ï¿½Â¼ï¿½Æ´ï¿½ï¿½ï¿½Ë³ï¿½ï¿½ï¿½È´ï¿½ï¿½ï¿½ï¿½Ú²ï¿½ï¿½Õ¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½
         NXOpen::ScCollector* scCollector1 = booleanBuilder->ToolBodyCollector();
         NXOpen::ScCollector* scCollector2 = booleanBuilder->TargetBodyCollector();
         NXOpen::GeometricUtilities::BooleanRegionSelect* booleanRegionSelect1 =
@@ -7307,11 +7310,11 @@ std::string BanJinCaiTuDialog::BuildRegionSummary(
     }
 
     std::ostringstream stream;
-    stream << "ÆðÊ¼Æ½Ãæ Tag: " << (seedFace == NULL ? 0 : seedFace->Tag()) << "\n";
-    stream << "¹ÀËã°åºñ: " << context.thickness << "\n";
-    stream << "²Î¿¼ÕÛÍä±ß Tag: " << context.referenceEdgeTag << "\n";
-    stream << "Ê¶±ðµ½Á¬Ðø¹¤×÷ÃæÊýÁ¿: " << planarCount << "\n";
-    stream << "Ê¶±ðµ½ÕÛÍä¹ý¶ÉÃæÊýÁ¿: " << bendCount << "\n";
-    stream << "µ±Ç°¹æÔò: ÒÔµã»÷µã×î½üÖ±±ßÎªÕÛÍä²Î¿¼±ß£¬Ö»ÑØÓë¸Ã±ßÆ½ÐÐµÄÕÛÍä´øÀ©Õ¹¡£";
+    stream << "ï¿½ï¿½Ê¼Æ½ï¿½ï¿½ Tag: " << (seedFace == NULL ? 0 : seedFace->Tag()) << "\n";
+    stream << "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: " << context.thickness << "\n";
+    stream << "ï¿½Î¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Tag: " << context.referenceEdgeTag << "\n";
+    stream << "Ê¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: " << planarCount << "\n";
+    stream << "Ê¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: " << bendCount << "\n";
+    stream << "ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½: ï¿½Ôµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö±ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½Î¿ï¿½ï¿½ß£ï¿½Ö»ï¿½ï¿½ï¿½ï¿½Ã±ï¿½Æ½ï¿½Ðµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¹ï¿½ï¿½";
     return stream.str();
 }

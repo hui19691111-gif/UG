@@ -1,20 +1,27 @@
 #include "ZheWanBiRangCao.hpp"
+#include "../../common/ZhihuiEmbeddedDialog.hpp"
+#include "embedded_dialog_resources.h"
 
 #ifdef CreateDialog
 #undef CreateDialog
 #endif
 
 #include <NXOpen/BlockStyler_PropertyList.hxx>
+#include <stdexcept>
 #include <NXOpen/BasePart.hxx>
 #include <NXOpen/CurveDumbRule.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
+#include <NXOpen/BodyDumbRule.hxx>
 #include <NXOpen/Features_BooleanBuilder.hxx>
+#include <NXOpen/Features_BooleanFeature.hxx>
+#include <NXOpen/Features_ExtrudeBuilder.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
-#include <NXOpen/Features_ToolingBox.hxx>
-#include <NXOpen/Features_ToolingBoxBuilder.hxx>
-#include <NXOpen/Features_ToolingFeatureCollection.hxx>
+#include <NXOpen/GeometricUtilities_BooleanOperation.hxx>
+#include <NXOpen/GeometricUtilities_Extend.hxx>
+#include <NXOpen/GeometricUtilities_FeatureOptions.hxx>
+#include <NXOpen/GeometricUtilities_Limits.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObject.hxx>
@@ -26,20 +33,29 @@
 #include <NXOpen/MeasureFaces.hxx>
 #include <NXOpen/MeasureManager.hxx>
 #include <NXOpen/ScCollector.hxx>
+#include <NXOpen/ScCollectorCollection.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
+#include <NXOpen/Section.hxx>
+#include <NXOpen/SectionCollection.hxx>
 #include <NXOpen/SmartObject.hxx>
-#include <NXOpen/Tooling_ToolingSession.hxx>
 #include <NXOpen/UI.hxx>
 #include <NXOpen/UnitCollection.hxx>
 
 #include <uf.h>
+#include <uf_curve.h>
 #include <uf_modl.h>
+#include <uf_modl_sweep.h>
+#include <uf_obj.h>
 #include <uf_ui_types.h>
+
+#include <windows.h>
 
 #include <cmath>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <string>
@@ -48,6 +64,35 @@
 namespace
 {
 constexpr double kVectorTolerance = 1.0e-6;
+const char* kDialogStatePath = "D:\\UG智辉钣金插件\\config\\ZheWanBiRangCao_state.ini";
+
+double ReadStateDouble(const char* key, const double fallbackValue)
+{
+    char buffer[128] = {};
+    GetPrivateProfileStringA("Dialog", key, "", buffer, static_cast<DWORD>(sizeof(buffer)), kDialogStatePath);
+    if (buffer[0] == '\0')
+    {
+        return fallbackValue;
+    }
+
+    char* end = nullptr;
+    const double value = std::strtod(buffer, &end);
+    return end != buffer ? value : fallbackValue;
+}
+
+void WriteStateDouble(const char* key, const double value)
+{
+    char buffer[64] = {};
+    std::snprintf(buffer, sizeof(buffer), "%.15g", value);
+    WritePrivateProfileStringA("Dialog", key, buffer, kDialogStatePath);
+}
+
+std::string FormatDouble(const double value)
+{
+    char buffer[64] = {};
+    std::snprintf(buffer, sizeof(buffer), "%.15g", value);
+    return std::string(buffer);
+}
 
 double Dot(const NXOpen::Vector3d& a, const NXOpen::Vector3d& b)
 {
@@ -121,6 +166,133 @@ NXOpen::Point3d MidPoint(const NXOpen::Point3d& a, const NXOpen::Point3d& b)
         0.5 * (a.X + b.X),
         0.5 * (a.Y + b.Y),
         0.5 * (a.Z + b.Z));
+}
+
+NXOpen::Point3d ProjectPointToPlane(const NXOpen::Point3d& point,
+                                    const NXOpen::Point3d& planePoint,
+                                    const NXOpen::Vector3d& planeNormal)
+{
+    const double normalLength = Magnitude(planeNormal);
+    if (normalLength < kVectorTolerance)
+    {
+        throw NXOpen::NXException::Create(1, "Zero-length vector.");
+    }
+    const NXOpen::Vector3d normal = Scale(planeNormal, 1.0 / normalLength);
+    const double signedDistance = Dot(Subtract(point, planePoint), normal);
+    return Add(point, Scale(normal, -signedDistance));
+}
+
+NXOpen::Point3d ClosestPointOnLine(const NXOpen::Point3d& point,
+                                   const NXOpen::Point3d& linePoint,
+                                   const NXOpen::Vector3d& lineDirection)
+{
+    const double directionLength = Magnitude(lineDirection);
+    if (directionLength < kVectorTolerance)
+    {
+        throw NXOpen::NXException::Create(1, "Zero-length vector.");
+    }
+    const NXOpen::Vector3d direction = Scale(lineDirection, 1.0 / directionLength);
+    return Add(linePoint, Scale(direction, Dot(Subtract(point, linePoint), direction)));
+}
+
+double DistancePointToLine(const NXOpen::Point3d& point,
+                           const NXOpen::Point3d& linePoint,
+                           const NXOpen::Vector3d& lineDirection)
+{
+    return Distance(point, ClosestPointOnLine(point, linePoint, lineDirection));
+}
+
+tag_t CreateLineBetweenPoints(const NXOpen::Point3d& startPoint, const NXOpen::Point3d& endPoint)
+{
+    if (Distance(startPoint, endPoint) < kVectorTolerance)
+    {
+        return NULL_TAG;
+    }
+
+    UF_CURVE_line_t lineData;
+    lineData.start_point[0] = startPoint.X;
+    lineData.start_point[1] = startPoint.Y;
+    lineData.start_point[2] = startPoint.Z;
+    lineData.end_point[0] = endPoint.X;
+    lineData.end_point[1] = endPoint.Y;
+    lineData.end_point[2] = endPoint.Z;
+
+    tag_t lineTag = NULL_TAG;
+    if (UF_CURVE_create_line(&lineData, &lineTag) != 0)
+    {
+        return NULL_TAG;
+    }
+
+    return lineTag;
+}
+
+bool EditLineBetweenPoints(tag_t lineTag, const NXOpen::Point3d& startPoint, const NXOpen::Point3d& endPoint)
+{
+    if (lineTag == NULL_TAG || Distance(startPoint, endPoint) < kVectorTolerance)
+    {
+        return false;
+    }
+
+    UF_CURVE_line_t lineData;
+    lineData.start_point[0] = startPoint.X;
+    lineData.start_point[1] = startPoint.Y;
+    lineData.start_point[2] = startPoint.Z;
+    lineData.end_point[0] = endPoint.X;
+    lineData.end_point[1] = endPoint.Y;
+    lineData.end_point[2] = endPoint.Z;
+    return UF_CURVE_edit_line_data(lineTag, &lineData) == 0;
+}
+
+void DeleteObjectIfAlive(tag_t objectTag)
+{
+    if (objectTag != NULL_TAG)
+    {
+        static_cast<void>(UF_OBJ_delete_object(objectTag));
+    }
+}
+
+void DeleteObjects(const std::vector<tag_t>& objectTags)
+{
+    for (tag_t objectTag : objectTags)
+    {
+        DeleteObjectIfAlive(objectTag);
+    }
+}
+
+std::vector<tag_t> AskBodyFeatureTags(tag_t bodyTag)
+{
+    std::vector<tag_t> featureTags;
+    if (bodyTag == NULL_TAG)
+    {
+        return featureTags;
+    }
+
+    uf_list_p_t featureList = NULL;
+    if (UF_MODL_ask_body_feats(bodyTag, &featureList) != 0 || featureList == NULL)
+    {
+        return featureTags;
+    }
+
+    int featureCount = 0;
+    if (UF_MODL_ask_list_count(featureList, &featureCount) == 0)
+    {
+        for (int index = 0; index < featureCount; ++index)
+        {
+            tag_t featureTag = NULL_TAG;
+            if (UF_MODL_ask_list_item(featureList, index, &featureTag) == 0 &&
+                featureTag != NULL_TAG)
+            {
+                featureTags.push_back(featureTag);
+            }
+        }
+    }
+    UF_MODL_delete_list(&featureList);
+    return featureTags;
+}
+
+bool ContainsTag(const std::vector<tag_t>& tags, tag_t tag)
+{
+    return std::find(tags.begin(), tags.end(), tag) != tags.end();
 }
 
 NXOpen::Vector3d Normalize(const NXOpen::Vector3d& vector)
@@ -266,13 +438,24 @@ ZheWanBiRangCaoDialog::ZheWanBiRangCaoDialog()
       session_(NXOpen::Session::GetSession()),
       dialog_(nullptr),
       mainGroup_(nullptr),
-      slotModeBlock_(nullptr),
       edgeSelectBlock_(nullptr),
       slotWidthBlock_(nullptr),
       slotDepthBlock_(nullptr),
-      slotRecords_()
+      slotRecords_(),
+      hiddenTemporaryTags_(),
+      previewFeatureTags_()
 {
-    dialog_ = ui_->CreateDialog(GetDialogFilePath().c_str());
+    const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_ZHEWANBIRANGCAO_DLX);
+
+    if (dlxPath.empty())
+
+    {
+
+        throw std::runtime_error("ZheWanBiRangCao dialog resource is missing.");
+
+    }
+
+    dialog_ = ui_->CreateDialog(dlxPath.c_str());
     dialog_->AddInitializeHandler(NXOpen::make_callback(this, &ZheWanBiRangCaoDialog::initialize_cb));
     dialog_->AddEnableOKButtonHandler(NXOpen::make_callback(this, &ZheWanBiRangCaoDialog::enable_ok_cb));
     dialog_->AddUpdateHandler(NXOpen::make_callback(this, &ZheWanBiRangCaoDialog::update_cb));
@@ -283,6 +466,8 @@ ZheWanBiRangCaoDialog::ZheWanBiRangCaoDialog()
 
 ZheWanBiRangCaoDialog::~ZheWanBiRangCaoDialog()
 {
+    CleanupHiddenTemporaryObjects();
+
     if (dialog_ != nullptr)
     {
         delete dialog_;
@@ -304,7 +489,6 @@ std::string ZheWanBiRangCaoDialog::GetDialogFilePath() const
 void ZheWanBiRangCaoDialog::initialize_cb()
 {
     mainGroup_ = dialog_->TopBlock()->FindBlock("main_group");
-    slotModeBlock_ = dialog_->TopBlock()->FindBlock("slot_mode");
     edgeSelectBlock_ = dialog_->TopBlock()->FindBlock("edge_select");
     slotWidthBlock_ = dialog_->TopBlock()->FindBlock("slot_width_y");
     slotDepthBlock_ = dialog_->TopBlock()->FindBlock("slot_depth_z");
@@ -317,6 +501,8 @@ void ZheWanBiRangCaoDialog::initialize_cb()
         NXOpen::Selection::SelectionActionClearAndEnableSpecific,
         selectionMaskArray);
     delete properties;
+
+    LoadDialogState();
 }
 
 bool ZheWanBiRangCaoDialog::enable_ok_cb()
@@ -328,14 +514,19 @@ int ZheWanBiRangCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
     if (block == edgeSelectBlock_)
     {
+        CleanupPreviewObjects();
+        CleanupHiddenTemporaryObjects();
         return Execute();
     }
 
     if (block == slotWidthBlock_ || block == slotDepthBlock_)
     {
-        if (!slotRecords_.empty())
+        SaveDialogState();
+        if (GetSelectedFace() != nullptr)
         {
-            return UpdateAllSlots() ? 0 : 1;
+            CleanupPreviewObjects();
+            CleanupHiddenTemporaryObjects();
+            return Execute();
         }
     }
 
@@ -344,16 +535,18 @@ int ZheWanBiRangCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
 int ZheWanBiRangCaoDialog::apply_cb()
 {
+    SaveDialogState();
+
     if (GetSelectedFace() != nullptr)
     {
-        return Execute();
+        previewFeatureTags_.clear();
+        CleanupHiddenTemporaryObjects();
+        ClearSelectedEdge();
+        return 0;
     }
 
-    if (!slotRecords_.empty())
-    {
-        return UpdateAllSlots() ? 0 : 1;
-    }
-
+    previewFeatureTags_.clear();
+    CleanupHiddenTemporaryObjects();
     return 0;
 }
 
@@ -364,6 +557,8 @@ int ZheWanBiRangCaoDialog::ok_cb()
 
 int ZheWanBiRangCaoDialog::cancel_cb()
 {
+    CleanupPreviewObjects();
+    CleanupHiddenTemporaryObjects();
     return 0;
 }
 
@@ -405,14 +600,6 @@ void ZheWanBiRangCaoDialog::ClearSelectedEdge() const
     delete properties;
 }
 
-int ZheWanBiRangCaoDialog::GetSlotMode() const
-{
-    NXOpen::BlockStyler::PropertyList* properties = slotModeBlock_->GetProperties();
-    const int value = properties->GetEnum("Value");
-    delete properties;
-    return value;
-}
-
 double ZheWanBiRangCaoDialog::GetSlotWidthY() const
 {
     NXOpen::BlockStyler::PropertyList* properties = slotWidthBlock_->GetProperties();
@@ -427,6 +614,30 @@ double ZheWanBiRangCaoDialog::GetSlotDepthZ() const
     const double value = properties->GetDouble("Value");
     delete properties;
     return value;
+}
+
+void ZheWanBiRangCaoDialog::SetDoubleValue(NXOpen::BlockStyler::UIBlock* block, double value) const
+{
+    if (block == nullptr)
+    {
+        return;
+    }
+
+    NXOpen::BlockStyler::PropertyList* properties = block->GetProperties();
+    properties->SetDouble("Value", value);
+    delete properties;
+}
+
+void ZheWanBiRangCaoDialog::LoadDialogState() const
+{
+    SetDoubleValue(slotWidthBlock_, ReadStateDouble("slotWidthY", GetSlotWidthY()));
+    SetDoubleValue(slotDepthBlock_, ReadStateDouble("slotDepthZ", GetSlotDepthZ()));
+}
+
+void ZheWanBiRangCaoDialog::SaveDialogState() const
+{
+    WriteStateDouble("slotWidthY", GetSlotWidthY());
+    WriteStateDouble("slotDepthZ", GetSlotDepthZ());
 }
 
 void ZheWanBiRangCaoDialog::ShowError(const std::string& message) const
@@ -566,7 +777,11 @@ double ZheWanBiRangCaoDialog::ComputeInnerEdgeDistance(NXOpen::Edge* selectedEdg
     return thickness / std::sin(0.5 * angle);
 }
 
-std::vector<ZheWanBiRangCaoDialog::SlotReferenceEdge> ZheWanBiRangCaoDialog::FindInnerReferenceEdges(NXOpen::Edge* selectedEdge, NXOpen::Face* face) const
+std::vector<ZheWanBiRangCaoDialog::SlotReferenceEdge> ZheWanBiRangCaoDialog::FindInnerReferenceEdges(
+    NXOpen::Edge* selectedEdge,
+    NXOpen::Face* face,
+    const NXOpen::Point3d& selectedPlanePoint,
+    const NXOpen::Vector3d& selectedPlaneNormal) const
 {
     NXOpen::Body* body = selectedEdge->GetBody();
     NXOpen::Point3d selectedStart;
@@ -579,6 +794,7 @@ std::vector<ZheWanBiRangCaoDialog::SlotReferenceEdge> ZheWanBiRangCaoDialog::Fin
     const double thickness = EstimateThickness(body, face);
     const double targetDistance = ComputeInnerEdgeDistance(selectedEdge);
     const double distanceTolerance = std::max(0.5, thickness * 0.35);
+    const double projectedThicknessTolerance = std::max(0.2, thickness * 0.2);
     const double axialOffsetTolerance = std::max(thickness * 2.0, selectedLength * 0.6);
 
     struct CandidateEdge
@@ -640,10 +856,21 @@ std::vector<ZheWanBiRangCaoDialog::SlotReferenceEdge> ZheWanBiRangCaoDialog::Fin
             continue;
         }
 
+        const NXOpen::Point3d projectedStart = ProjectPointToPlane(alignedStart, selectedPlanePoint, selectedPlaneNormal);
+        const NXOpen::Point3d projectedEnd = ProjectPointToPlane(alignedEnd, selectedPlanePoint, selectedPlaneNormal);
+        const double projectedStartDistance = DistancePointToLine(projectedStart, selectedStart, selectedDirection);
+        const double projectedEndDistance = DistancePointToLine(projectedEnd, selectedStart, selectedDirection);
+        const double projectedDistance = 0.5 * (projectedStartDistance + projectedEndDistance);
+        const double projectedDistanceError = std::fabs(projectedDistance - thickness);
+        if (projectedDistanceError > projectedThicknessTolerance)
+        {
+            continue;
+        }
+
         const double endpointError =
             std::min(Distance(alignedStart, selectedStart), Distance(alignedStart, selectedEnd)) +
             std::min(Distance(alignedEnd, selectedStart), Distance(alignedEnd, selectedEnd));
-        const double score = spacingError * 100.0 + axialOffset * 10.0 + endpointError;
+        const double score = spacingError * 100.0 + projectedDistanceError * 100.0 + axialOffset * 10.0 + endpointError;
         candidates.push_back(CandidateEdge{score, SlotReferenceEdge{candidate, alignedStart, alignedEnd}});
     }
 
@@ -851,226 +1078,286 @@ bool ZheWanBiRangCaoDialog::ShouldCreateSlotAtEnd(const NXOpen::Point3d& innerPo
     return endExtension > extensionTolerance;
 }
 
-bool ZheWanBiRangCaoDialog::CreateBoundedSlot(NXOpen::Edge* edge,
-                                              const NXOpen::Point3d& boundedPointPosition,
-                                              const NXOpen::Vector3d& xDirection,
-                                              const NXOpen::Vector3d& yDirection,
-                                              const NXOpen::Vector3d& zDirection,
-                                              double offsetPositiveX,
-                                              double offsetNegativeX,
-                                              double offsetPositiveY,
-                                              double offsetNegativeY,
-                                              double offsetPositiveZ,
-                                              double offsetNegativeZ,
-                                              NXOpen::Features::ToolingBox** createdToolingBox,
-                                              bool useDefaultMatrix) const
+bool ZheWanBiRangCaoDialog::CreateSlotOutlineOnSelectedFace(NXOpen::Edge* selectedEdge,
+                                                            NXOpen::Face* selectedFace,
+                                                            const NXOpen::Point3d& innerPoint,
+                                                            const NXOpen::Point3d& selectedPlanePoint,
+                                                            const NXOpen::Vector3d& selectedPlaneNormal,
+                                                            double slotWidth,
+                                                            double slotDepth)
 {
-    NXOpen::Part* workPart = session_->Parts()->Work();
-    NXOpen::Body* targetBody = edge->GetBody();
-    if (workPart == nullptr || targetBody == nullptr)
+    if (selectedEdge == nullptr || selectedFace == nullptr || slotWidth <= 0.0 || slotDepth <= 0.0)
     {
         return false;
     }
 
-    const NXOpen::Point3d boxOrigin = Add(
-        boundedPointPosition,
-        Add(
-            Scale(xDirection, -offsetNegativeX),
-            Scale(zDirection, -offsetNegativeZ)));
+    NXOpen::Point3d edgeStart;
+    NXOpen::Point3d edgeEnd;
+    selectedEdge->GetVertices(&edgeStart, &edgeEnd);
+    const NXOpen::Vector3d edgeDirection = Normalize(Subtract(edgeEnd, edgeStart));
 
-    session_->ToolingSession()->SetWizardType(1);
-
-    NXOpen::Point* boundedPoint = nullptr;
-    NXOpen::SelectionIntentRuleOptions* ruleOptions = nullptr;
-    NXOpen::CurveDumbRule* pointRule = nullptr;
-    NXOpen::Features::ToolingBoxBuilder* toolingBoxBuilder = nullptr;
-    NXOpen::Features::BooleanBuilder* booleanBuilder = nullptr;
-
-    try
+    const NXOpen::Point3d pointB = ProjectPointToPlane(innerPoint, selectedPlanePoint, selectedPlaneNormal);
+    const NXOpen::Point3d pointA = ClosestPointOnLine(pointB, edgeStart, edgeDirection);
+    NXOpen::Vector3d depthDirection = Subtract(pointB, pointA);
+    if (Magnitude(depthDirection) < kVectorTolerance)
     {
-        boundedPoint = workPart->Points()->CreatePoint(boundedPointPosition);
-        ruleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
-        ruleOptions->SetSelectedFromInactive(false);
+        return false;
+    }
+    depthDirection = Normalize(depthDirection);
 
-        std::vector<NXOpen::Point*> points(1, boundedPoint);
-        pointRule = workPart->ScRuleFactory()->CreateRuleCurveDumbFromPoints(points, ruleOptions);
+    NXOpen::Point3d nearEdgeEnd = edgeStart;
+    NXOpen::Point3d farEdgeEnd = edgeEnd;
+    if (Distance(pointA, edgeEnd) < Distance(pointA, edgeStart))
+    {
+        nearEdgeEnd = edgeEnd;
+        farEdgeEnd = edgeStart;
+    }
 
-        toolingBoxBuilder = workPart->Features()->ToolingFeatureCollection()->CreateToolingBoxBuilder(nullptr);
-        toolingBoxBuilder->SetType(NXOpen::Features::ToolingBoxBuilder::TypesBoundedBlock);
-        toolingBoxBuilder->SetSingleOffset(false);
-        toolingBoxBuilder->Clearance()->SetFormula("0");
-        toolingBoxBuilder->RadialOffset()->SetFormula("0");
+    NXOpen::Vector3d widthDirection = Subtract(nearEdgeEnd, farEdgeEnd);
+    if (Magnitude(widthDirection) < kVectorTolerance)
+    {
+        widthDirection = edgeDirection;
+    }
+    widthDirection = Normalize(widthDirection);
 
-        NXOpen::Matrix3x3 matrix;
-        if (useDefaultMatrix)
+    const NXOpen::Point3d pointC = Add(pointB, Scale(depthDirection, slotDepth));
+    const NXOpen::Point3d pointD = Add(pointC, Scale(widthDirection, slotWidth));
+    const NXOpen::Point3d pointE = Add(pointA, Scale(widthDirection, slotWidth));
+
+    std::vector<tag_t> curveTags;
+    curveTags.reserve(5);
+    curveTags.push_back(CreateLineBetweenPoints(pointA, pointB));
+    curveTags.push_back(CreateLineBetweenPoints(pointB, pointC));
+    curveTags.push_back(CreateLineBetweenPoints(pointC, pointD));
+    curveTags.push_back(CreateLineBetweenPoints(pointD, pointE));
+    curveTags.push_back(CreateLineBetweenPoints(pointE, pointA));
+
+    for (tag_t line : curveTags)
+    {
+        if (line == NULL_TAG)
         {
-            NXOpen::Vector3d normalizedY = Normalize(yDirection);
-            NXOpen::Vector3d normalizedZ = Normalize(zDirection);
-            if (std::fabs(Dot(normalizedY, normalizedZ)) > 0.98)
-            {
-                normalizedZ = NXOpen::Vector3d(0.0, 0.0, 1.0);
-                if (std::fabs(Dot(normalizedY, normalizedZ)) > 0.98)
-                {
-                    normalizedZ = NXOpen::Vector3d(1.0, 0.0, 0.0);
-                }
-            }
-
-            NXOpen::Vector3d adjustedX = Cross(normalizedY, normalizedZ);
-            if (Magnitude(adjustedX) < kVectorTolerance)
-            {
-                normalizedZ = NXOpen::Vector3d(0.0, 1.0, 0.0);
-                adjustedX = Cross(normalizedY, normalizedZ);
-            }
-            adjustedX = Normalize(adjustedX);
-            NXOpen::Vector3d adjustedZ = Normalize(Cross(adjustedX, normalizedY));
-
-            matrix.Xx = adjustedX.X;
-            matrix.Xy = adjustedX.Y;
-            matrix.Xz = adjustedX.Z;
-            matrix.Yx = normalizedY.X;
-            matrix.Yy = normalizedY.Y;
-            matrix.Yz = normalizedY.Z;
-            matrix.Zx = adjustedZ.X;
-            matrix.Zy = adjustedZ.Y;
-            matrix.Zz = adjustedZ.Z;
-        }
-        else
-        {
-            matrix.Xx = xDirection.X;
-            matrix.Xy = xDirection.Y;
-            matrix.Xz = xDirection.Z;
-            matrix.Yx = yDirection.X;
-            matrix.Yy = yDirection.Y;
-            matrix.Yz = yDirection.Z;
-            matrix.Zx = zDirection.X;
-            matrix.Zy = zDirection.Y;
-            matrix.Zz = zDirection.Z;
-        }
-        toolingBoxBuilder->SetBoxMatrixAndPosition(matrix, boxOrigin);
-
-        NXOpen::ScCollector* boundedCollector = toolingBoxBuilder->BoundedObject();
-        std::vector<NXOpen::SelectionIntentRule*> rules(1, pointRule);
-        boundedCollector->ReplaceRules(rules, false);
-        toolingBoxBuilder->CalculateBoxSize();
-        toolingBoxBuilder->SetBoxPosition(boxOrigin);
-
-        toolingBoxBuilder->OffsetPositiveX()->SetFormula(std::to_string(offsetPositiveX).c_str());
-        toolingBoxBuilder->OffsetNegativeX()->SetFormula(std::to_string(offsetNegativeX).c_str());
-        toolingBoxBuilder->OffsetPositiveY()->SetFormula(std::to_string(offsetPositiveY).c_str());
-        toolingBoxBuilder->OffsetNegativeY()->SetFormula(std::to_string(offsetNegativeY).c_str());
-        toolingBoxBuilder->OffsetPositiveZ()->SetFormula(std::to_string(offsetPositiveZ).c_str());
-        toolingBoxBuilder->OffsetNegativeZ()->SetFormula(std::to_string(offsetNegativeZ).c_str());
-
-        NXOpen::NXObject* committedObject = toolingBoxBuilder->Commit();
-        toolingBoxBuilder->Destroy();
-        toolingBoxBuilder = nullptr;
-        delete ruleOptions;
-        ruleOptions = nullptr;
-
-        NXOpen::Features::Feature* toolingFeature = dynamic_cast<NXOpen::Features::Feature*>(committedObject);
-        if (toolingFeature == nullptr)
-        {
+            DeleteObjects(curveTags);
             return false;
         }
+    }
+    HideObjects(curveTags);
+    hiddenTemporaryTags_.insert(hiddenTemporaryTags_.end(), curveTags.begin(), curveTags.end());
 
-        if (createdToolingBox != nullptr)
-        {
-            *createdToolingBox = dynamic_cast<NXOpen::Features::ToolingBox*>(committedObject);
-        }
+    const double thickness = EstimateThickness(selectedEdge->GetBody(), selectedFace);
+    const bool subtracted =
+        ExtrudeSubtractAndDeleteCurves(selectedEdge->GetBody(), selectedFace, pointA, curveTags, thickness);
+    return subtracted;
+}
 
-        tag_t toolingBodyTag = NULL_TAG;
-        if (UF_MODL_ask_feat_body(toolingFeature->Tag(), &toolingBodyTag) != 0 || toolingBodyTag == NULL_TAG)
-        {
-            return false;
-        }
+bool ZheWanBiRangCaoDialog::EditSlotOutline(SlotFeatureRecord& record, double slotWidth, double slotDepth) const
+{
+    const NXOpen::Point3d pointC = Add(record.pointB, Scale(record.depthDirection, slotDepth));
+    const NXOpen::Point3d pointD = Add(pointC, Scale(record.widthDirection, slotWidth));
+    const NXOpen::Point3d pointE = Add(record.pointA, Scale(record.widthDirection, slotWidth));
 
-        NXOpen::Body* toolBody = dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(toolingBodyTag));
-        if (toolBody == nullptr)
-        {
-            return false;
-        }
-
-        booleanBuilder = workPart->Features()->CreateBooleanBuilderUsingCollector(nullptr);
-        booleanBuilder->SetOperation(NXOpen::Features::Feature::BooleanTypeSubtract);
-        booleanBuilder->SetTarget(targetBody);
-        booleanBuilder->SetTool(toolBody);
-        booleanBuilder->Commit();
-        booleanBuilder->Destroy();
+    bool updated = true;
+    updated = EditLineBetweenPoints(record.lines[0], record.pointA, record.pointB) && updated;
+    updated = EditLineBetweenPoints(record.lines[1], record.pointB, pointC) && updated;
+    updated = EditLineBetweenPoints(record.lines[2], pointC, pointD) && updated;
+    updated = EditLineBetweenPoints(record.lines[3], pointD, pointE) && updated;
+    updated = EditLineBetweenPoints(record.lines[4], pointE, record.pointA) && updated;
+    if (updated)
+    {
         ForceModelUpdate();
-        return true;
     }
-    catch (...)
+    return updated;
+}
+
+void ZheWanBiRangCaoDialog::HideObject(tag_t objectTag) const
+{
+    if (objectTag != NULL_TAG)
     {
-        if (booleanBuilder != nullptr)
-        {
-            booleanBuilder->Destroy();
-        }
-        if (toolingBoxBuilder != nullptr)
-        {
-            toolingBoxBuilder->Destroy();
-        }
-        if (ruleOptions != nullptr)
-        {
-            delete ruleOptions;
-        }
-        return false;
+        static_cast<void>(UF_OBJ_set_blank_status(objectTag, UF_OBJ_BLANKED));
     }
 }
 
-bool ZheWanBiRangCaoDialog::EditSlotFeature(SlotFeatureRecord& record)
+void ZheWanBiRangCaoDialog::HideObjects(const std::vector<tag_t>& objectTags) const
 {
-    if (record.toolingBox == nullptr)
+    for (tag_t objectTag : objectTags)
     {
-        return false;
+        HideObject(objectTag);
+    }
+}
+
+void ZheWanBiRangCaoDialog::CleanupHiddenTemporaryObjects()
+{
+    DeleteObjects(hiddenTemporaryTags_);
+    hiddenTemporaryTags_.clear();
+}
+
+void ZheWanBiRangCaoDialog::CleanupPreviewObjects()
+{
+    DeleteObjects(previewFeatureTags_);
+    previewFeatureTags_.clear();
+}
+
+NXOpen::Vector3d ZheWanBiRangCaoDialog::AskSelectedFaceInnerNormal(NXOpen::Face* face,
+                                                                   NXOpen::Body* body,
+                                                                   const NXOpen::Point3d& referencePoint,
+                                                                   double thickness) const
+{
+    if (face == nullptr)
+    {
+        throw NXOpen::NXException::Create(1, "Planar face is required.");
     }
 
     NXOpen::Part* workPart = session_->Parts()->Work();
     if (workPart == nullptr)
     {
+        throw NXOpen::NXException::Create(1, "Failed to get work part.");
+    }
+
+    NXOpen::Point* normalPoint = workPart->Points()->CreatePoint(referencePoint);
+    normalPoint->Blank();
+    NXOpen::Direction* normalDirection =
+        workPart->Directions()->CreateDirection(
+            face,
+            normalPoint,
+            NXOpen::SenseForward,
+            NXOpen::SmartObject::UpdateOptionWithinModeling);
+    NXOpen::Vector3d normal = Normalize(normalDirection->Vector());
+
+    const double probeDistance = std::max(thickness * 0.5, 0.5);
+    const int positiveStatus = AskPointContainmentStatus(body, Add(referencePoint, Scale(normal, probeDistance)));
+    if (positiveStatus == 1 || positiveStatus == 3)
+    {
+        return normal;
+    }
+
+    const int negativeStatus = AskPointContainmentStatus(body, Add(referencePoint, Scale(normal, -probeDistance)));
+    if (negativeStatus == 1 || negativeStatus == 3)
+    {
+        return Scale(normal, -1.0);
+    }
+
+    return Scale(normal, -1.0);
+}
+
+bool ZheWanBiRangCaoDialog::ExtrudeSubtractAndDeleteCurves(NXOpen::Body* targetBody,
+                                                           NXOpen::Face* selectedFace,
+                                                           const NXOpen::Point3d& referencePoint,
+                                                           const std::vector<tag_t>& curveTags,
+                                                           double thickness)
+{
+    if (targetBody == nullptr || selectedFace == nullptr || curveTags.empty() || thickness <= 0.0)
+    {
         return false;
     }
 
-    NXOpen::Features::ToolingBoxBuilder* toolingBoxBuilder = nullptr;
+    tag_t toolFeatureTag = NULL_TAG;
+    tag_t toolBodyTag = NULL_TAG;
+    uf_list_p_t curveList = NULL;
+    uf_list_p_t featureList = NULL;
+
     try
     {
-        toolingBoxBuilder =
-            workPart->Features()->ToolingFeatureCollection()->CreateToolingBoxBuilder(record.toolingBox);
+        if (UF_MODL_create_list(&curveList) != 0 || curveList == NULL)
+        {
+            return false;
+        }
+        for (tag_t curveTag : curveTags)
+        {
+            if (curveTag != NULL_TAG && UF_MODL_put_list_item(curveList, curveTag) != 0)
+            {
+                UF_MODL_delete_list(&curveList);
+                return false;
+            }
+        }
 
-        NXOpen::Matrix3x3 matrix;
-        matrix.Xx = record.xDirection.X;
-        matrix.Xy = record.xDirection.Y;
-        matrix.Xz = record.xDirection.Z;
-        matrix.Yx = record.yDirection.X;
-        matrix.Yy = record.yDirection.Y;
-        matrix.Yz = record.yDirection.Z;
-        matrix.Zx = record.zDirection.X;
-        matrix.Zy = record.zDirection.Y;
-        matrix.Zz = record.zDirection.Z;
+        const NXOpen::Vector3d innerNormal = AskSelectedFaceInnerNormal(selectedFace, targetBody, referencePoint, thickness);
+        std::string startLimit = "0";
+        std::string endLimit = FormatDouble(thickness);
+        char taperAngle[] = "0";
+        char* limits[2] = {const_cast<char*>(startLimit.c_str()), const_cast<char*>(endLimit.c_str())};
+        double origin[3] = {referencePoint.X, referencePoint.Y, referencePoint.Z};
+        double direction[3] = {innerNormal.X, innerNormal.Y, innerNormal.Z};
 
-        const NXOpen::Point3d boxOrigin = Add(
-            record.boundedPoint,
-            Add(
-                Scale(record.xDirection, -record.offsetNegativeX),
-                Scale(record.zDirection, -record.offsetNegativeZ)));
+        const int extrudeResult = UF_MODL_create_extruded(
+            curveList,
+            taperAngle,
+            limits,
+            origin,
+            direction,
+            UF_NULLSIGN,
+            &featureList);
+        UF_MODL_delete_list(&curveList);
+        curveList = NULL;
+        if (extrudeResult != 0 || featureList == NULL)
+        {
+            return false;
+        }
 
-        toolingBoxBuilder->SetBoxMatrixAndPosition(matrix, boxOrigin);
-        toolingBoxBuilder->SetBoxPosition(boxOrigin);
-        toolingBoxBuilder->OffsetPositiveX()->SetFormula(std::to_string(record.offsetPositiveX).c_str());
-        toolingBoxBuilder->OffsetNegativeX()->SetFormula(std::to_string(record.offsetNegativeX).c_str());
-        toolingBoxBuilder->OffsetPositiveY()->SetFormula(std::to_string(record.offsetPositiveY).c_str());
-        toolingBoxBuilder->OffsetNegativeY()->SetFormula(std::to_string(record.offsetNegativeY).c_str());
-        toolingBoxBuilder->OffsetPositiveZ()->SetFormula(std::to_string(record.offsetPositiveZ).c_str());
-        toolingBoxBuilder->OffsetNegativeZ()->SetFormula(std::to_string(record.offsetNegativeZ).c_str());
-        toolingBoxBuilder->Commit();
-        toolingBoxBuilder->Destroy();
+        int featureCount = 0;
+        if (UF_MODL_ask_list_count(featureList, &featureCount) == 0 && featureCount > 0)
+        {
+            static_cast<void>(UF_MODL_ask_list_item(featureList, 0, &toolFeatureTag));
+        }
+        UF_MODL_delete_list(&featureList);
+        featureList = NULL;
+
+        if (toolFeatureTag == NULL_TAG || UF_MODL_ask_feat_body(toolFeatureTag, &toolBodyTag) != 0 || toolBodyTag == NULL_TAG)
+        {
+            DeleteObjectIfAlive(toolFeatureTag);
+            return false;
+        }
+
+        uf_list_p_t bodyList = NULL;
+        if (UF_MODL_create_list(&bodyList) == 0 && bodyList != NULL)
+        {
+            if (UF_MODL_put_list_item(bodyList, toolBodyTag) == 0)
+            {
+                static_cast<void>(UF_MODL_delete_body_parms(bodyList));
+            }
+            UF_MODL_delete_list(&bodyList);
+        }
+
+        const std::vector<tag_t> featuresBefore = AskBodyFeatureTags(targetBody->Tag());
+        int resultCount = 0;
+        tag_t* resultingBodies = NULL;
+        const int subtractResult =
+            UF_MODL_subtract_bodies(targetBody->Tag(), toolBodyTag, &resultCount, &resultingBodies);
+        if (resultingBodies != NULL)
+        {
+            UF_free(resultingBodies);
+        }
+        if (subtractResult != 0)
+        {
+            HideObject(toolBodyTag);
+            hiddenTemporaryTags_.push_back(toolBodyTag);
+            return false;
+        }
+
+        const std::vector<tag_t> featuresAfter = AskBodyFeatureTags(targetBody->Tag());
+        for (tag_t featureTag : featuresAfter)
+        {
+            if (featureTag != NULL_TAG && !ContainsTag(featuresBefore, featureTag) && featureTag != toolFeatureTag)
+            {
+                previewFeatureTags_.push_back(featureTag);
+            }
+        }
+        DeleteObjectIfAlive(toolBodyTag);
         ForceModelUpdate();
         return true;
     }
     catch (...)
     {
-        if (toolingBoxBuilder != nullptr)
+        if (curveList != NULL)
         {
-            toolingBoxBuilder->Destroy();
+            UF_MODL_delete_list(&curveList);
+        }
+        if (featureList != NULL)
+        {
+            UF_MODL_delete_list(&featureList);
+        }
+        HideObject(toolBodyTag);
+        if (toolBodyTag != NULL_TAG)
+        {
+            hiddenTemporaryTags_.push_back(toolBodyTag);
         }
         return false;
     }
@@ -1078,166 +1365,13 @@ bool ZheWanBiRangCaoDialog::EditSlotFeature(SlotFeatureRecord& record)
 
 bool ZheWanBiRangCaoDialog::UpdateAllSlots()
 {
-    bool updatedAny = false;
-    for (SlotFeatureRecord& record : slotRecords_)
-    {
-        if (record.edge == nullptr)
-        {
-            continue;
-        }
-
-        if (record.offsetPositiveY > 0.0)
-        {
-            record.offsetPositiveY = GetSlotWidthY();
-        }
-        record.offsetNegativeZ = record.baseNegativeZ + GetSlotDepthZ();
-
-        updatedAny = EditSlotFeature(record) || updatedAny;
-    }
-
-    return updatedAny;
-}
-
-bool ZheWanBiRangCaoDialog::CreateOrEditSlot(NXOpen::Edge* edge,
-                                             const NXOpen::Point3d& boundedPoint,
-                                             const NXOpen::Vector3d& xDirection,
-                                             const NXOpen::Vector3d& yDirection,
-                                             const NXOpen::Vector3d& zDirection,
-                                             double offsetPositiveX,
-                                             double offsetNegativeX,
-                                             double offsetPositiveY,
-                                             double offsetNegativeY,
-                                             double offsetPositiveZ,
-                                             double offsetNegativeZ,
-                                             double baseNegativeZ,
-                                             bool useDefaultMatrix)
-{
-    for (SlotFeatureRecord& record : slotRecords_)
-    {
-        if (record.edge == edge && Distance(record.boundedPoint, boundedPoint) <= 0.01)
-        {
-            record.xDirection = xDirection;
-            record.yDirection = yDirection;
-            record.zDirection = zDirection;
-            record.offsetPositiveX = offsetPositiveX;
-            record.offsetNegativeX = offsetNegativeX;
-            record.offsetPositiveY = offsetPositiveY;
-            record.offsetNegativeY = offsetNegativeY;
-            record.offsetPositiveZ = offsetPositiveZ;
-            record.offsetNegativeZ = offsetNegativeZ;
-            record.baseNegativeZ = baseNegativeZ;
-            return EditSlotFeature(record);
-        }
-    }
-
-    NXOpen::Features::ToolingBox* toolingBox = nullptr;
-    if (!CreateBoundedSlot(edge,
-                           boundedPoint,
-                           xDirection,
-                           yDirection,
-                           zDirection,
-                           offsetPositiveX,
-                           offsetNegativeX,
-                           offsetPositiveY,
-                           offsetNegativeY,
-                           offsetPositiveZ,
-                           offsetNegativeZ,
-                           &toolingBox,
-                           useDefaultMatrix))
-    {
-        return false;
-    }
-
-    if (toolingBox == nullptr)
-    {
-        return false;
-    }
-
-    slotRecords_.push_back(
-        SlotFeatureRecord{
-            toolingBox,
-            edge,
-            boundedPoint,
-            xDirection,
-            yDirection,
-            zDirection,
-            offsetPositiveX,
-            offsetNegativeX,
-            offsetPositiveY,
-            offsetNegativeY,
-            offsetPositiveZ,
-            offsetNegativeZ,
-            baseNegativeZ});
-    return true;
-}
-
-bool ZheWanBiRangCaoDialog::CreateSlotAtEnd(NXOpen::Edge* edge,
-                                            NXOpen::Face* largerFace,
-                                            const NXOpen::Point3d& innerPoint,
-                                            const NXOpen::Point3d& outerPoint,
-                                            const NXOpen::Vector3d& yDirection,
-                                            const SlotParameters& parameters)
-{
-    NXOpen::Part* workPart = session_->Parts()->Work();
-    NXOpen::Body* targetBody = edge->GetBody();
-    if (workPart == nullptr || targetBody == nullptr || largerFace == nullptr)
-    {
-        return false;
-    }
-
-    double faceBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-    NXOpen::Vector3d xDirection = AskPlanarFaceNormal(largerFace, faceBox);
-    NXOpen::Vector3d normalizedY = Normalize(yDirection);
-    xDirection = Subtract(xDirection, Scale(normalizedY, Dot(xDirection, normalizedY)));
-    if (Magnitude(xDirection) < kVectorTolerance)
-    {
-        return false;
-    }
-    xDirection = Normalize(xDirection);
-
-    const double thickness = EstimateThickness(targetBody, largerFace);
-    NXOpen::Vector3d zDirection = Cross(xDirection, normalizedY);
-    if (Magnitude(zDirection) < kVectorTolerance)
-    {
-        return false;
-    }
-    zDirection = Normalize(zDirection);
-
-    const double probeZDistance = std::max(thickness * 2.0, 0.5);
-    int positiveStatus = AskPointContainmentStatus(targetBody, Add(innerPoint, Scale(zDirection, probeZDistance)));
-
-    if (positiveStatus == 1 || positiveStatus == 3)
-    {
-        xDirection = Scale(xDirection, -1.0);
-        zDirection = Cross(xDirection, normalizedY);
-        if (Magnitude(zDirection) < kVectorTolerance)
-        {
-            return false;
-        }
-        zDirection = Normalize(zDirection);
-        positiveStatus = AskPointContainmentStatus(targetBody, Add(innerPoint, Scale(zDirection, probeZDistance)));
-        if (positiveStatus == 1 || positiveStatus == 3)
-        {
-            return false;
-        }
-    }
-
-    return CreateOrEditSlot(edge,
-                            innerPoint,
-                            xDirection,
-                            normalizedY,
-                            zDirection,
-                            thickness + parameters.xPositiveExtra,
-                            thickness + parameters.xNegativeExtra,
-                            parameters.slotWidth,
-                            0.0,
-                            parameters.zPositiveExtra,
-                            parameters.slotDepth,
-                            0.0);
+    return false;
 }
 
 int ZheWanBiRangCaoDialog::Execute()
 {
+    SaveDialogState();
+
     NXOpen::Face* selectedFace = GetSelectedFace();
     if (selectedFace == nullptr)
     {
@@ -1268,94 +1402,34 @@ int ZheWanBiRangCaoDialog::Execute()
         }
 
         const SlotParameters parameters{GetSlotWidthY(), GetSlotDepthZ(), 0.5, 0.5, 6.0};
-        NXOpen::Point3d outerStart;
-        NXOpen::Point3d outerEnd;
-        edge->GetVertices(&outerStart, &outerEnd);
-        const NXOpen::Vector3d outerEdgeDirection = Normalize(Subtract(outerEnd, outerStart));
-        const double thickness = EstimateThickness(edge->GetBody(), largerFace);
-        const int slotMode = GetSlotMode();
+        double selectedFaceBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        const NXOpen::Vector3d selectedFaceNormal = AskPlanarFaceNormal(largerFace, selectedFaceBox);
+        const NXOpen::Point3d selectedPlanePoint = FaceBoxCenter(selectedFaceBox);
 
-        if (slotMode == 1)
-        {
-            NXOpen::Point3d pointA;
-            NXOpen::Point3d pointB;
-            GetPickedEndPoints(edge, pickPoint, pointA, pointB);
-
-            // Step 1: selected endpoint A is the bounded-block reference point.
-            const NXOpen::Vector3d yDirection = Normalize(Subtract(pointB, pointA));
-            NXOpen::Face* carrierFace = FindInnerSlotCarrierFace(edge, yDirection, thickness);
-            if (carrierFace == nullptr)
-            {
-                ShowError("No inner slot carrier face was found from the selected edge.");
-                return 1;
-            }
-
-            NXOpen::Vector3d faceNormal = AskPlanarFaceOuterNormal(carrierFace, pointA);
-            NXOpen::Vector3d zDirection = Normalize(faceNormal);
-            NXOpen::Vector3d xDirection = Cross(yDirection, zDirection);
-            if (Magnitude(xDirection) < kVectorTolerance)
-            {
-                ShowError("Failed to determine the inner slot X direction.");
-                return 1;
-            }
-            xDirection = Normalize(xDirection);
-
-            // Step 2: feed the fixed offsets first, consistent with the manual bounded-block workflow.
-            const double xPositive = thickness + 0.5;
-            const double xNegative = thickness + 0.5;
-            const double yPositive = GetSlotWidthY();
-            const double yNegative = 0.0;
-            const double zPositive = thickness + 0.5;
-
-            // Step 3: the negative-Z offset must follow the edge chain along the specified -Z direction.
-            const double baseDepth =
-                ComputeDepthChainLengthFromPoint(edge->GetBody(), edge, pointA, Scale(zDirection, -1.0), thickness);
-            if (baseDepth < kVectorTolerance)
-            {
-                ShowError("No valid inner slot depth chain was found.");
-                return 1;
-            }
-
-            const double zNegative = baseDepth + GetSlotDepthZ();
-            if (!CreateOrEditSlot(edge,
-                                  pointA,
-                                  xDirection,
-                                  yDirection,
-                                  zDirection,
-                                  xPositive,
-                                  xNegative,
-                                  yPositive,
-                                  yNegative,
-                                  zPositive,
-                                  zNegative,
-                                  baseDepth,
-                                  true))
-            {
-                ShowError("No relief slot was created.");
-                return 1;
-            }
-            ClearSelectedEdge();
-            return 0;
-        }
-
-        const std::vector<SlotReferenceEdge> referenceEdges = FindInnerReferenceEdges(edge, largerFace);
+        const std::vector<SlotReferenceEdge> referenceEdges =
+            FindInnerReferenceEdges(edge, largerFace, selectedPlanePoint, selectedFaceNormal);
 
         int createdCount = 0;
         for (const SlotReferenceEdge& referenceEdge : referenceEdges)
         {
-            const NXOpen::Vector3d yDirection = Scale(
-                Normalize(Subtract(referenceEdge.endPoint, referenceEdge.startPoint)),
-                -1.0);
-            const NXOpen::Point3d matchedOuterStart = FindNearestOuterPoint(referenceEdge.startPoint, outerStart, outerEnd);
-            const NXOpen::Point3d matchedOuterEnd = FindNearestOuterPoint(referenceEdge.endPoint, outerStart, outerEnd);
-
-            if (ShouldCreateSlotAtEnd(referenceEdge.startPoint, matchedOuterStart, outerEdgeDirection, edge->GetBody(), thickness) &&
-                CreateSlotAtEnd(edge, largerFace, referenceEdge.startPoint, matchedOuterStart, yDirection, parameters))
+            if (CreateSlotOutlineOnSelectedFace(edge,
+                                                largerFace,
+                                                referenceEdge.startPoint,
+                                                selectedPlanePoint,
+                                                selectedFaceNormal,
+                                                parameters.slotWidth,
+                                                parameters.slotDepth))
             {
                 ++createdCount;
             }
-            if (ShouldCreateSlotAtEnd(referenceEdge.endPoint, matchedOuterEnd, outerEdgeDirection, edge->GetBody(), thickness) &&
-                CreateSlotAtEnd(edge, largerFace, referenceEdge.endPoint, matchedOuterEnd, Scale(yDirection, -1.0), parameters))
+
+            if (CreateSlotOutlineOnSelectedFace(edge,
+                                                largerFace,
+                                                referenceEdge.endPoint,
+                                                selectedPlanePoint,
+                                                selectedFaceNormal,
+                                                parameters.slotWidth,
+                                                parameters.slotDepth))
             {
                 ++createdCount;
             }
@@ -1367,7 +1441,6 @@ int ZheWanBiRangCaoDialog::Execute()
             return 1;
         }
 
-        ClearSelectedEdge();
         return 0;
     }
     catch (const NXOpen::NXException& ex)

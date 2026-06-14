@@ -15,6 +15,7 @@ set(NX_OPEN_INCLUDE_DIR "${NX_ROOT}/UGOPEN")
 set(NX_OPEN_LIBRARY_DIR "${NX_ROOT}/UGOPEN")
 
 add_library(TwoPointBiLanCao SHARED
+    embedded_dialog_resources.rc
     TwoPointBiLanCao.cpp
     TwoPointBiLanCaoMain.cpp
 )

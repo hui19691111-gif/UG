@@ -1,0 +1,2 @@
+#include "embedded_dialog_resources.h"
+IDR_ZH_DLX_ATTRMODIFY_DLX RCDATA "ATTRmodify.dlx"

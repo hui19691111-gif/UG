@@ -96,7 +96,8 @@
         </Style>
     </Window.Resources>
 
-    <DockPanel Margin="10">
+    <Grid Margin="10">
+    <DockPanel>
         <TabControl x:Name="MainTabControl"
                     DockPanel.Dock="Top"
                     Height="Auto"
@@ -110,16 +111,16 @@
         </TabControl>
 
         <Grid DockPanel.Dock="Bottom" Height="56" Margin="0,10,0,0">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="140"/>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="170"/>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="130"/>
-            </Grid.ColumnDefinitions>
-            <Button Grid.Column="0" Content="应用" Width="125" HorizontalAlignment="Left" Click="ApplyPartSettingsButton_Click"/>
-            <Button Grid.Column="2" Content="生成图纸" Width="150" Style="{StaticResource PrimaryButton}" Click="GenerateButton_Click"/>
-            <Button Grid.Column="4" Content="关闭" Width="125" HorizontalAlignment="Right" Click="CloseButton_Click"/>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="140"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="170"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="130"/>
+                </Grid.ColumnDefinitions>
+                <Button Grid.Column="0" Content="应用" Width="125" HorizontalAlignment="Left" Click="ApplyPartSettingsButton_Click"/>
+                <Button x:Name="GenerateButton" Grid.Column="2" Content="生成图纸" Width="150" Style="{StaticResource PrimaryButton}" Click="GenerateButton_Click"/>
+                <Button Grid.Column="4" Content="关闭" Width="125" HorizontalAlignment="Right" Click="CloseButton_Click"/>
         </Grid>
 
         <Grid>
@@ -240,25 +241,25 @@
                         <Border BorderBrush="#D8DEE5" BorderThickness="1" Background="#FBFCFD" Padding="8" Margin="0,0,0,8">
                         <Canvas Width="330" Height="300" HorizontalAlignment="Center">
                             <ToggleButton x:Name="TopViewButton" Canvas.Left="96" Canvas.Top="8" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
-                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/top.png"/>
+                                <Image x:Name="TopViewButtonImage" Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/top.png"/>
                             </ToggleButton>
                             <ToggleButton x:Name="LeftPositionViewButton" Canvas.Left="18" Canvas.Top="82" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
-                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/left.png"/>
+                                <Image x:Name="LeftPositionViewButtonImage" Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/left.png"/>
                             </ToggleButton>
                             <ToggleButton x:Name="FrontViewButton" Canvas.Left="96" Canvas.Top="82" IsChecked="True" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
-                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/front.png"/>
+                                <Image x:Name="FrontViewButtonImage" Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/front.png"/>
                             </ToggleButton>
                             <ToggleButton x:Name="RightPositionViewButton" Canvas.Left="174" Canvas.Top="82" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
-                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/right.png"/>
+                                <Image x:Name="RightPositionViewButtonImage" Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/right.png"/>
                             </ToggleButton>
                             <ToggleButton x:Name="BackViewButton" Canvas.Left="252" Canvas.Top="82" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
-                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/back.png"/>
+                                <Image x:Name="BackViewButtonImage" Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/back.png"/>
                             </ToggleButton>
                             <ToggleButton x:Name="BottomViewButton" Canvas.Left="96" Canvas.Top="158" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
-                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/bottom.png"/>
+                                <Image x:Name="BottomViewButtonImage" Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/bottom.png"/>
                             </ToggleButton>
                             <ToggleButton x:Name="BackBottomViewButton" Canvas.Left="96" Canvas.Top="236" Style="{StaticResource ViewTileButton}" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed">
-                                <Image Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/backbottom.png"/>
+                                <Image x:Name="BackBottomViewButtonImage" Style="{StaticResource ViewButtonImage}" Source="Assets/ViewButtons/backbottom.png"/>
                             </ToggleButton>
                         </Canvas>
                         </Border>
@@ -275,7 +276,7 @@
                             </Grid.ColumnDefinitions>
 
                             <TextBlock Grid.Row="0" Grid.Column="0" Text="轴测图" VerticalAlignment="Center" Margin="0,0,6,8"/>
-                            <Image Grid.Row="0" Grid.Column="1" Style="{StaticResource AuxViewImage}" Source="Assets/ViewButtons/iso.png" Margin="0,0,6,8"/>
+                            <Image x:Name="IsoAuxViewImage" Grid.Row="0" Grid.Column="1" Style="{StaticResource AuxViewImage}" Source="Assets/ViewButtons/iso.png" Margin="0,0,6,8"/>
                             <UniformGrid Grid.Row="0" Grid.Column="2" Columns="4" Margin="0,0,0,8">
                                 <ToggleButton x:Name="IsoTopLeftButton" Content="左上" Height="28" Margin="2" Padding="0" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed"/>
                                 <ToggleButton x:Name="IsoTopRightButton" Content="右上" Height="28" Margin="2" Padding="0" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed"/>
@@ -284,7 +285,7 @@
                             </UniformGrid>
 
                             <TextBlock Grid.Row="1" Grid.Column="0" Text="展开图" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                            <Image Grid.Row="1" Grid.Column="1" Style="{StaticResource AuxViewImage}" Source="Assets/ViewButtons/flat.png" Margin="0,0,6,0"/>
+                            <Image x:Name="FlatAuxViewImage" Grid.Row="1" Grid.Column="1" Style="{StaticResource AuxViewImage}" Source="Assets/ViewButtons/flat.png" Margin="0,0,6,0"/>
                             <UniformGrid Grid.Row="1" Grid.Column="2" Columns="4">
                                 <ToggleButton x:Name="FlatTopLeftButton" Content="左上" Height="28" Margin="2" Padding="0" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed"/>
                                 <ToggleButton x:Name="FlatTopRightButton" Content="右上" Height="28" Margin="2" Padding="0" Checked="PreviewOption_Changed" Unchecked="PreviewOption_Changed"/>
@@ -312,7 +313,6 @@
                                 <CheckBox x:Name="DimensionLinearCheckBox"
                                           Content="水平垂直标注"
                                           IsChecked="False"
-                                          IsEnabled="False"
                                           Visibility="Collapsed"/>
                                 <CheckBox x:Name="DimensionAngleCheckBox"
                                           Content="角度标注"
@@ -425,39 +425,39 @@
                             <Line X1="577" Y1="53" X2="590" Y2="53" Stroke="#4F5B66"/>
 
                             <Canvas x:Name="PreviewTopView" Canvas.Left="242" Canvas.Top="70" Width="120" Height="62">
-                                <Image Width="120" Height="62" Source="Assets/ViewButtons/top.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                                <Image x:Name="PreviewTopViewImage" Width="120" Height="62" Source="Assets/ViewButtons/top.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
                             </Canvas>
 
                             <Canvas x:Name="PreviewLeftPositionView" Canvas.Left="64" Canvas.Top="210" Width="86" Height="72">
-                                <Image Width="86" Height="72" Source="Assets/ViewButtons/left.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                                <Image x:Name="PreviewLeftPositionViewImage" Width="86" Height="72" Source="Assets/ViewButtons/left.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
                             </Canvas>
 
                             <Canvas x:Name="PreviewFrontView" Canvas.Left="225" Canvas.Top="210" Width="150" Height="72">
-                                <Image Width="150" Height="72" Source="Assets/ViewButtons/front.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                                <Image x:Name="PreviewFrontViewImage" Width="150" Height="72" Source="Assets/ViewButtons/front.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
                             </Canvas>
 
                             <Canvas x:Name="PreviewRightPositionView" Canvas.Left="415" Canvas.Top="210" Width="88" Height="72">
-                                <Image Width="88" Height="72" Source="Assets/ViewButtons/right.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                                <Image x:Name="PreviewRightPositionViewImage" Width="88" Height="72" Source="Assets/ViewButtons/right.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
                             </Canvas>
 
                             <Canvas x:Name="PreviewBackView" Canvas.Left="495" Canvas.Top="210" Width="120" Height="72">
-                                <Image Width="120" Height="72" Source="Assets/ViewButtons/back.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                                <Image x:Name="PreviewBackViewImage" Width="120" Height="72" Source="Assets/ViewButtons/back.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
                             </Canvas>
 
                             <Canvas x:Name="PreviewBackBottomView" Canvas.Left="242" Canvas.Top="420" Width="120" Height="72">
-                                <Image Width="120" Height="72" Source="Assets/ViewButtons/backbottom.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                                <Image x:Name="PreviewBackBottomViewImage" Width="120" Height="72" Source="Assets/ViewButtons/backbottom.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
                             </Canvas>
 
                             <Canvas x:Name="PreviewBottomView" Canvas.Left="242" Canvas.Top="335" Width="120" Height="70">
-                                <Image Width="120" Height="70" Source="Assets/ViewButtons/bottom.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                                <Image x:Name="PreviewBottomViewImage" Width="120" Height="70" Source="Assets/ViewButtons/bottom.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
                             </Canvas>
 
                             <Canvas x:Name="PreviewIsoView" Canvas.Left="65" Canvas.Top="75" Width="94" Height="66">
-                                <Image Width="94" Height="66" Source="Assets/ViewButtons/iso.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                                <Image x:Name="PreviewIsoViewImage" Width="94" Height="66" Source="Assets/ViewButtons/iso.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
                             </Canvas>
 
                             <Canvas x:Name="PreviewFlatView" Canvas.Left="420" Canvas.Top="335" Width="140" Height="70">
-                                <Image Width="140" Height="70" Source="Assets/ViewButtons/flat.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                                <Image x:Name="PreviewFlatViewImage" Width="140" Height="70" Source="Assets/ViewButtons/flat.png" Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
                             </Canvas>
 
                             <Border x:Name="PreviewTechnicalRequirement"
@@ -485,4 +485,37 @@
             </Border>
         </Grid>
     </DockPanel>
+
+    <Border x:Name="ProgressPanel"
+            Visibility="Collapsed"
+            Background="#66000000"
+            HorizontalAlignment="Stretch"
+            VerticalAlignment="Stretch">
+        <Border Width="420"
+                Padding="22"
+                Background="White"
+                BorderBrush="#AEB9C4"
+                BorderThickness="1"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center">
+            <StackPanel>
+                <TextBlock Text="生成图纸"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           Foreground="#1D2D3A"
+                           Margin="0,0,0,12"/>
+                <TextBlock x:Name="ProgressTextBlock"
+                           Text="Preparing..."
+                           Foreground="#405060"
+                           TextTrimming="CharacterEllipsis"
+                           Margin="0,0,0,12"/>
+                <ProgressBar x:Name="DrawingProgressBar"
+                             Height="18"
+                             Minimum="0"
+                             Maximum="100"
+                             Value="0"/>
+            </StackPanel>
+        </Border>
+    </Border>
+    </Grid>
 </Window>

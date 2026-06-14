@@ -35,5 +35,10 @@
       <Filter>Resource Files</Filter>
     </None>
   </ItemGroup>
+
+  <ItemGroup>
+    <ResourceCompile Include="..\..\embedded_dialog_resources.rc" />
+    <ClInclude Include="..\..\embedded_dialog_resources.h" />
+  </ItemGroup>
 </Project>
 

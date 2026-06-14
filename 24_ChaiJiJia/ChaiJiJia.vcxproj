@@ -61,5 +61,8 @@
   <ItemGroup>
     <None Include="ChaiJiJia.dlx" />
   </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="embedded_dialog_resources.rc" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

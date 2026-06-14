@@ -76,6 +76,7 @@
 #include <algorithm>
 #include <NXOpen/Point.hxx>
 #include <NXOpen/PointCollection.hxx>
+#include <vector>
 //------------------------------------------------------------------------------
 //Bit Option for Property: SnapPointTypesEnabled
 //------------------------------------------------------------------------------
@@ -163,8 +164,11 @@ private:
     NXOpen::BlockStyler::IntegerBlock* integerBatchLayerStart;
     NXOpen::BlockStyler::IntegerBlock* integerBatchLayerEnd;
     NXOpen::BlockStyler::Toggle* toggleBatchSizeFilter;
+    NXOpen::BlockStyler::Toggle* toggleBatchFastenerFilter;
     NXOpen::BlockStyler::DoubleBlock* doubleBatchMinWidth;
     NXOpen::BlockStyler::DoubleBlock* doubleBatchMinLength;
     NXOpen::BlockStyler::SelectObject* selectionBatchComponents;
+    bool assemblySelectionActive;
+    std::vector<NXOpen::Part*> selectedAssemblyParts;
 };
 #endif //ZIDONFENCEN_H_INCLUDED

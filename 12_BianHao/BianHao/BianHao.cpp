@@ -35,6 +35,8 @@
 //These includes are needed for the following template code
 //------------------------------------------------------------------------------
 #include "BianHao.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
 
@@ -113,8 +115,19 @@ BianHao::BianHao() :
         // Initialize the NX Open C++ API environment
         BianHao::theSession = NXOpen::Session::GetSession();
         BianHao::theUI = UI::GetUI();
-        theDlxFileName = "BianHao.dlx";
-        theDialog = BianHao::theUI->CreateDialog(theDlxFileName);
+        const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_BIANHAO_DLX);
+
+        if (dlxPath.empty())
+
+        {
+
+            throw std::runtime_error("BianHao dialog resource is missing.");
+
+        }
+
+        theDlxFileName = NULL;
+
+        theDialog = BianHao::theUI->CreateDialog(dlxPath.c_str());
         // Registration of callback functions
         theDialog->AddApplyHandler(make_callback(this, &BianHao::apply_cb));
         theDialog->AddOkHandler(make_callback(this, &BianHao::ok_cb));
@@ -178,6 +191,8 @@ BianHao::~BianHao()
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <stdexcept>
+#include <string>
 
 namespace zhihui_license_guard
 {
@@ -248,10 +263,6 @@ void ShowLicenseDeniedMessage(const wchar_t* title, const wchar_t* message)
 
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     HMODULE module = LoadProtectedLicenseGate();
     if (module == NULL)

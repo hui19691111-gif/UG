@@ -8,7 +8,7 @@
 - `AutoCreateThreeViewsDialog` 对话框包装类。
 - `AutoCreateThreeViews.dlx` 对话框草稿，包含基本、视图、标注、输出、规则库五类参数。
 - `AutoCreateThreeViews.bmp` 插件工具栏图标，打包时随 application 文件一起发布。
-- `AutoCreateThreeViews.rules.json` 默认规则库配置。
+- 共用 `config/KonBiaoZuRules.ini` 作为孔标注规则表。
 - Release x64 Visual Studio 工程。
 
 ## 后续接入点

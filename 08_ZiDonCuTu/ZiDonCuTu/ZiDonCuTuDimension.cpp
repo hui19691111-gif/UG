@@ -1,4 +1,4 @@
-#include "ZiDonCuTuDimension.hpp"
+﻿#include "ZiDonCuTuDimension.hpp"
 #include "ZiDonCuTuSupport.hpp"
 #include <NXOpen/Annotations_OrdinateDimension.hxx>
 #include <NXOpen/Annotations_OrdinateDimensionBuilder.hxx>
@@ -28,8 +28,10 @@
 #include <NXOpen/SketchIncludeGeometryBuilder.hxx>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -42,6 +44,8 @@ std::unordered_map<std::string, int> g_dimensionLayoutLayers;
 
 void DimensionDebugLog(const std::string& message)
 {
+	(void)message;
+	return;
 	try
 	{
 		std::ofstream out("D:\\ZiDonCuTu_side_dim_debug.log", std::ios::out | std::ios::app);
@@ -70,6 +74,18 @@ bool TryGetGuideFaceNormalDrawingDirection(
 	NXOpen::Face* guideFace,
 	double direction2d[2],
 	double drawingStart[2]);
+double ComputeDrawingCurveProjectedLength(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingCurve* draftingCurve);
+bool IsLineDraftingCurve(NXOpen::Drawings::DraftingCurve* draftingCurve);
+void HoleNoteDebugLog(const std::string& message);
+bool TryGetLineCurveData(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingCurve* draftingCurve,
+	UF_CURVE_line_t& lineData,
+	double startDrawingPoint[2],
+	double endDrawingPoint[2]);
+void Normalize2d(double& x, double& y);
 
 struct AngularPlacementSlot
 {
@@ -263,6 +279,192 @@ bool CurveReferencesFaceOrEdge(
 		}
 	}
 	return false;
+}
+
+std::unordered_set<tag_t> CollectFaceEdgeTags(NXOpen::Face* face)
+{
+	std::unordered_set<tag_t> edgeTags;
+	if (face == NULL)
+	{
+		return edgeTags;
+	}
+
+	const std::vector<NXOpen::Edge*> edges = face->GetEdges();
+	for (size_t i = 0; i < edges.size(); ++i)
+	{
+		if (edges[i] != NULL)
+		{
+			edgeTags.insert(edges[i]->Tag());
+		}
+	}
+	return edgeTags;
+}
+
+NXOpen::Drawings::DraftingCurve* FindRepresentativeCurveForFace(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Face* face,
+	bool preferArc,
+	bool useFaceDirection = false,
+	bool reverseFaceDirection = false,
+	NXOpen::Point3d* selectedPoint = NULL,
+	const NXOpen::Point3d* preferredDrawingPoint = NULL)
+{
+	if (selectedPoint != NULL)
+	{
+		*selectedPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
+	}
+	if (baseView == NULL || face == NULL)
+	{
+		return NULL;
+	}
+
+	const std::unordered_set<tag_t> edgeTags = CollectFaceEdgeTags(face);
+	NXOpen::Drawings::DraftingCurve* bestCurve = NULL;
+	NXOpen::Point3d bestPoint(0.0, 0.0, 0.0);
+	double bestScore = -1.0e100;
+	double faceDirection[2] = { 0.0, 0.0 };
+	double faceDrawingStart[2] = { 0.0, 0.0 };
+	const bool hasFaceDirection =
+		useFaceDirection &&
+		TryGetGuideFaceNormalDrawingDirection(baseView, face, faceDirection, faceDrawingStart);
+	if (hasFaceDirection)
+	{
+		Normalize2d(faceDirection[0], faceDirection[1]);
+		if (reverseFaceDirection)
+		{
+			faceDirection[0] = -faceDirection[0];
+			faceDirection[1] = -faceDirection[1];
+		}
+	}
+
+	const std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(baseView);
+	for (size_t i = 0; i < curves.size(); ++i)
+	{
+		NXOpen::Drawings::DraftingCurve* candidate = curves[i];
+		if (!CurveReferencesFaceOrEdge(candidate, face->Tag(), edgeTags))
+		{
+			continue;
+		}
+
+		NXOpen::Point3d candidatePoint(0.0, 0.0, 0.0);
+		bool hasCandidatePoint = false;
+		if (IsLineDraftingCurve(candidate))
+		{
+			UF_CURVE_line_t lineData;
+			double startPoint[2] = { 0.0, 0.0 };
+			double endPoint[2] = { 0.0, 0.0 };
+			if (TryGetLineCurveData(baseView, candidate, lineData, startPoint, endPoint))
+			{
+				candidatePoint = NXOpen::Point3d(
+					(startPoint[0] + endPoint[0]) * 0.5,
+					(startPoint[1] + endPoint[1]) * 0.5,
+					0.0);
+				hasCandidatePoint = true;
+			}
+		}
+		else if (IsArcDraftingCurve(candidate))
+		{
+			UF_EVAL_p_t evaluator = NULL;
+			if (UF_EVAL_initialize(candidate->Tag(), &evaluator) == 0)
+			{
+				UF_EVAL_arc_t arcData;
+				if (UF_EVAL_ask_arc(evaluator, &arcData) == 0)
+				{
+					double center[2] = { 0.0, 0.0 };
+					if (UF_VIEW_map_model_to_drawing(baseView->Tag(), arcData.center, center) == 0)
+					{
+						candidatePoint = NXOpen::Point3d(center[0], center[1], 0.0);
+						hasCandidatePoint = true;
+					}
+				}
+				UF_EVAL_free(evaluator);
+			}
+		}
+
+		if (!hasCandidatePoint)
+		{
+			continue;
+		}
+
+		const bool candidateIsArc = IsArcDraftingCurve(candidate);
+		const bool candidateIsLine = IsLineDraftingCurve(candidate);
+		double score = 0.0;
+		if (preferArc && candidateIsArc)
+		{
+			score += 1000000.0;
+		}
+		else if (!preferArc && candidateIsLine)
+		{
+			score += 1000000.0;
+		}
+
+		if (hasFaceDirection)
+		{
+			const double directionalScore =
+				(candidatePoint.X - faceDrawingStart[0]) * faceDirection[0] +
+				(candidatePoint.Y - faceDrawingStart[1]) * faceDirection[1];
+			score += directionalScore * 1000.0;
+		}
+		if (preferredDrawingPoint != NULL)
+		{
+			const double dx = candidatePoint.X - preferredDrawingPoint->X;
+			const double dy = candidatePoint.Y - preferredDrawingPoint->Y;
+			score -= (dx * dx + dy * dy) * 10000.0;
+		}
+		score += ComputeDrawingCurveProjectedLength(baseView, candidate);
+
+		if (score > bestScore)
+		{
+			bestScore = score;
+			bestCurve = candidate;
+			bestPoint = candidatePoint;
+		}
+	}
+	if (selectedPoint != NULL)
+	{
+		*selectedPoint = bestPoint;
+	}
+	return bestCurve;
+}
+
+NXOpen::Drawings::DraftingCurve* FindRepresentativeCurveForObject(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::DisplayableObject* object)
+{
+	if (baseView == NULL || object == NULL)
+	{
+		return NULL;
+	}
+
+	NXOpen::Drawings::DraftingCurve* draftingCurve = dynamic_cast<NXOpen::Drawings::DraftingCurve*>(object);
+	if (draftingCurve != NULL)
+	{
+		return draftingCurve;
+	}
+
+	NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(object);
+	if (face != NULL)
+	{
+		return FindRepresentativeCurveForFace(baseView, face, false);
+	}
+
+	NXOpen::Edge* edge = dynamic_cast<NXOpen::Edge*>(object);
+	if (edge == NULL)
+	{
+		return NULL;
+	}
+
+	std::unordered_set<tag_t> edgeTags;
+	edgeTags.insert(edge->Tag());
+	const std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(baseView);
+	for (size_t i = 0; i < curves.size(); ++i)
+	{
+		if (CurveReferencesFaceOrEdge(curves[i], NULL_TAG, edgeTags))
+		{
+			return curves[i];
+		}
+	}
+	return NULL;
 }
 
 bool IsLineDraftingCurve(NXOpen::Drawings::DraftingCurve* draftingCurve)
@@ -1068,6 +1270,24 @@ NXOpen::Point3d BuildOffsetOriginFromModelPoint(
 	return BuildOffsetOrigin(baseView, drawingPoint, centerX, centerY, offset, layerGap);
 }
 
+NXOpen::Point3d BuildAssociativityPointFromModelPoint(
+	NXOpen::Drawings::BaseView* baseView,
+	const double* modelPoint)
+{
+	if (baseView == NULL || modelPoint == NULL)
+	{
+		return NXOpen::Point3d(0.0, 0.0, 0.0);
+	}
+
+	double mutableModelPoint[3] = { modelPoint[0], modelPoint[1], modelPoint[2] };
+	double drawingPoint[2] = { 0.0, 0.0 };
+	if (UF_VIEW_map_model_to_drawing(baseView->Tag(), mutableModelPoint, drawingPoint) != 0)
+	{
+		return NXOpen::Point3d(0.0, 0.0, 0.0);
+	}
+	return NXOpen::Point3d(drawingPoint[0], drawingPoint[1], 0.0);
+}
+
 bool TryGetGuideFaceNormalDrawingDirection(
 	NXOpen::Drawings::BaseView* baseView,
 	NXOpen::Face* guideFace,
@@ -1625,6 +1845,10 @@ bool CreateCurveEndToFaceTangentDimensionFromModelPoint(
 		ApplyDefaultRapidDimensionStyle(builder);
 		builder->FirstAssociativity()->SetValue(
 			NXOpen::InferSnapType::SnapTypeEnd, curve, baseView, point, NULL, nullView, point);
+		const NXOpen::Point3d modelAssociativityPoint =
+			BuildAssociativityPointFromModelPoint(baseView, modelPoint);
+		const NXOpen::Point3d originPoint =
+			BuildOffsetOriginFromModelPointAndGuideFace(baseView, modelPoint, guideFace != NULL ? guideFace : face, centerX, centerY, 5.0, reverseGuideDirection);
 
 		NXOpen::Drawings::DraftingCurve* tangentCurve = NULL;
 		NXOpen::Point3d tangentPoint(0.0, 0.0, 0.0);
@@ -1635,12 +1859,21 @@ bool CreateCurveEndToFaceTangentDimensionFromModelPoint(
 		}
 		else
 		{
-			builder->SecondAssociativity()->SetValue(face, baseView, point);
+			NXOpen::Point3d faceAssociativityPoint(0.0, 0.0, 0.0);
+			NXOpen::Drawings::DraftingCurve* faceCurve =
+				FindRepresentativeCurveForFace(baseView, face, false, true, reverseGuideDirection, &faceAssociativityPoint, &originPoint);
+			if (faceCurve == NULL)
+			{
+				builder->Destroy();
+				return false;
+			}
+			builder->SecondAssociativity()->SetValue(
+				NXOpen::InferSnapType::SnapTypeExist, faceCurve, baseView, faceAssociativityPoint, NULL, nullView, point);
 		}
 		builder->Origin()->Origin()->SetValue(
 			NULL,
 			nullView,
-			BuildOffsetOriginFromModelPointAndGuideFace(baseView, modelPoint, guideFace != NULL ? guideFace : face, centerX, centerY, 5.0, reverseGuideDirection));
+			originPoint);
 		return CommitAndDestroyRapidDimension(builder) != NULL;
 	}
 	catch (NXOpen::NXException& ex)
@@ -1723,6 +1956,10 @@ bool CreateFaceToSymbolDimensionFromModelPoint(
 		NXOpen::Point3d point(0.0, 0.0, 0.0);
 		NXOpen::View* nullView(NULL);
 		ApplyDefaultRapidDimensionStyle(builder);
+		const NXOpen::Point3d modelAssociativityPoint =
+			BuildAssociativityPointFromModelPoint(baseView, modelPoint);
+		const NXOpen::Point3d originPoint =
+			BuildOffsetOriginFromModelPointAndGuideFace(baseView, modelPoint, guideFace != NULL ? guideFace : face, centerX, centerY, 5.0, reverseGuideDirection);
 		NXOpen::Drawings::DraftingCurve* tangentCurve = NULL;
 		NXOpen::Point3d tangentPoint(0.0, 0.0, 0.0);
 		if (TryGetOuterTangentAssociativityForFace(baseView, face, centerX, centerY, tangentCurve, tangentPoint))
@@ -1732,14 +1969,23 @@ bool CreateFaceToSymbolDimensionFromModelPoint(
 		}
 		else
 		{
-			builder->FirstAssociativity()->SetValue(face, baseView, point);
+			NXOpen::Point3d faceAssociativityPoint(0.0, 0.0, 0.0);
+			NXOpen::Drawings::DraftingCurve* faceCurve =
+				FindRepresentativeCurveForFace(baseView, face, false, true, reverseGuideDirection, &faceAssociativityPoint, &originPoint);
+			if (faceCurve == NULL)
+			{
+				builder->Destroy();
+				return false;
+			}
+			builder->FirstAssociativity()->SetValue(
+				NXOpen::InferSnapType::SnapTypeExist, faceCurve, baseView, faceAssociativityPoint, NULL, nullView, point);
 		}
 		builder->SecondAssociativity()->SetValue(
 			NXOpen::InferSnapType::SnapTypeExist, symbol, baseView, point, NULL, nullView, point);
 		builder->Origin()->Origin()->SetValue(
 			NULL,
 			nullView,
-			BuildOffsetOriginFromModelPointAndGuideFace(baseView, modelPoint, guideFace != NULL ? guideFace : face, centerX, centerY, 5.0, reverseGuideDirection));
+			originPoint);
 		return CommitAndDestroyRapidDimension(builder) != NULL;
 	}
 	catch (NXOpen::NXException& ex)
@@ -1785,6 +2031,10 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 		NXOpen::Point3d point(0.0, 0.0, 0.0);
 		NXOpen::View* nullView(NULL);
 		ApplyDefaultRapidDimensionStyle(builder);
+		const NXOpen::Point3d modelAssociativityPoint =
+			BuildAssociativityPointFromModelPoint(baseView, modelPoint);
+		const NXOpen::Point3d originPoint =
+			BuildOffsetOriginFromModelPointAndGuideFace(baseView, modelPoint, guideFace != NULL ? guideFace : firstFace, centerX, centerY, 5.0, reverseGuideDirection);
 		NXOpen::Drawings::DraftingCurve* tangentCurve = NULL;
 		NXOpen::Point3d tangentPoint(0.0, 0.0, 0.0);
 		if (TryGetOuterTangentAssociativityForFace(baseView, firstFace, centerX, centerY, tangentCurve, tangentPoint))
@@ -1794,7 +2044,16 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 		}
 		else
 		{
-			builder->FirstAssociativity()->SetValue(firstFace, baseView, point);
+			NXOpen::Point3d firstAssociativityPoint(0.0, 0.0, 0.0);
+			NXOpen::Drawings::DraftingCurve* firstCurve =
+				FindRepresentativeCurveForFace(baseView, firstFace, false, true, reverseGuideDirection, &firstAssociativityPoint, &originPoint);
+			if (firstCurve == NULL)
+			{
+				builder->Destroy();
+				return false;
+			}
+			builder->FirstAssociativity()->SetValue(
+				NXOpen::InferSnapType::SnapTypeExist, firstCurve, baseView, firstAssociativityPoint, NULL, nullView, point);
 		}
 
 		NXOpen::Face* secondFace = dynamic_cast<NXOpen::Face*>(secondObject);
@@ -1806,13 +2065,23 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 		}
 		else
 		{
+			NXOpen::Point3d secondAssociativityPoint = modelAssociativityPoint;
+			NXOpen::Face* fallbackSecondFace = dynamic_cast<NXOpen::Face*>(secondObject);
+			NXOpen::Drawings::DraftingCurve* secondCurve = fallbackSecondFace != NULL
+				? FindRepresentativeCurveForFace(baseView, fallbackSecondFace, false, true, reverseGuideDirection, &secondAssociativityPoint, &originPoint)
+				: FindRepresentativeCurveForObject(baseView, secondObject);
+			if (secondCurve == NULL)
+			{
+				builder->Destroy();
+				return false;
+			}
 			builder->SecondAssociativity()->SetValue(
-				NXOpen::InferSnapType::SnapTypeExist, secondObject, baseView, point, NULL, nullView, point);
+				NXOpen::InferSnapType::SnapTypeExist, secondCurve, baseView, secondAssociativityPoint, NULL, nullView, point);
 		}
 		builder->Origin()->Origin()->SetValue(
 			NULL,
 			nullView,
-			BuildOffsetOriginFromModelPointAndGuideFace(baseView, modelPoint, guideFace != NULL ? guideFace : firstFace, centerX, centerY, 5.0, reverseGuideDirection));
+			originPoint);
 		return CommitAndDestroyRapidDimension(builder) != NULL;
 	}
 	catch (NXOpen::NXException& ex)
@@ -1875,6 +2144,12 @@ bool CreateRadialDimensionAtDrawingPoint(
 		return false;
 	}
 
+	NXOpen::Drawings::DraftingCurve* faceCurve = FindRepresentativeCurveForFace(baseView, face, true);
+	if (faceCurve == NULL)
+	{
+		return false;
+	}
+
 	NXOpen::Annotations::Dimension* nullDimension(NULL);
 	NXOpen::Annotations::RadialDimensionBuilder* builder =
 		workPart->Dimensions()->CreateRadialDimensionBuilder(nullDimension);
@@ -1884,7 +2159,7 @@ bool CreateRadialDimensionAtDrawingPoint(
 	}
 
 	NXOpen::Point3d point(drawingPoint[0], drawingPoint[1], 0.0);
-	builder->FirstAssociativity()->SetValue(face, baseView, point);
+	builder->FirstAssociativity()->SetValue(faceCurve, baseView, point);
 	NXOpen::Point3d originPoint;
 	if (TryBuildRadialDimensionOrigin(baseView, face, drawingPoint, originPoint))
 	{
@@ -1924,6 +2199,23 @@ struct FlatPatternHoleNoteGroup
 	std::string specText;
 	int count;
 	std::vector<NXOpen::Point3d> markerCenters;
+};
+
+struct HoleNoteRuleRecord
+{
+	std::string annotationType;
+	std::string series;
+	std::string size;
+	std::string threadSpec;
+	std::string lengthText;
+	double bottomHole;
+	std::string displayText;
+	std::string standardComment;
+	std::string note;
+
+	HoleNoteRuleRecord() : bottomHole(0.0)
+	{
+	}
 };
 
 struct HoleOrdinatePlacementState
@@ -2383,6 +2675,300 @@ bool HoleNoteTextIsPlainHole(const std::string& value)
 	return upperValue == "HOLE" || upperValue == "PLAIN HOLE" || upperValue == "NORMAL HOLE";
 }
 
+void ReplaceAllHoleNoteText(std::string& text, const std::string& from, const std::string& to)
+{
+	if (from.empty())
+	{
+		return;
+	}
+
+	size_t position = 0;
+	while ((position = text.find(from, position)) != std::string::npos)
+	{
+		text.replace(position, from.size(), to);
+		position += to.size();
+	}
+}
+
+std::string UnescapeHoleNoteIniValue(const std::string& value)
+{
+	std::string text;
+	for (size_t index = 0; index < value.size(); ++index)
+	{
+		const char ch = value[index];
+		if (ch != '\\' || index + 1 >= value.size())
+		{
+			text.push_back(ch);
+			continue;
+		}
+
+		const char escaped = value[++index];
+		switch (escaped)
+		{
+		case 'n':
+			text.push_back('\n');
+			break;
+		case 'r':
+			text.push_back('\r');
+			break;
+		case '\\':
+			text.push_back('\\');
+			break;
+		default:
+			text.push_back(escaped);
+			break;
+		}
+	}
+	return text;
+}
+
+bool SetHoleNoteRuleField(HoleNoteRuleRecord& record, const std::string& key, const std::string& value)
+{
+	if (key == "annotationType")
+	{
+		record.annotationType = value;
+	}
+	else if (key == "series")
+	{
+		record.series = value;
+	}
+	else if (key == "size")
+	{
+		record.size = value;
+	}
+	else if (key == "threadSpec")
+	{
+		record.threadSpec = value;
+	}
+	else if (key == "lengthText")
+	{
+		record.lengthText = value;
+	}
+	else if (key == "displayText")
+	{
+		record.displayText = value;
+	}
+	else if (key == "standardComment")
+	{
+		record.standardComment = value;
+	}
+	else if (key == "note")
+	{
+		record.note = value;
+	}
+	else if (key == "bottomHole")
+	{
+		const std::string trimmed = TrimHoleNoteText(value);
+		if (trimmed.empty())
+		{
+			record.bottomHole = 0.0;
+			return true;
+		}
+
+		char* end = NULL;
+		const double parsed = std::strtod(trimmed.c_str(), &end);
+		if (end == trimmed.c_str())
+		{
+			return false;
+		}
+		record.bottomHole = parsed;
+	}
+	return true;
+}
+
+bool HoleNoteRuleHasContent(const HoleNoteRuleRecord& record)
+{
+	return !record.annotationType.empty() ||
+		!record.series.empty() ||
+		!record.size.empty() ||
+		!record.threadSpec.empty() ||
+		!record.displayText.empty() ||
+		record.bottomHole > 1.0e-6;
+}
+
+std::vector<HoleNoteRuleRecord> LoadHoleNoteRulesFromIni(const std::string& path)
+{
+	std::vector<HoleNoteRuleRecord> rules;
+	std::ifstream input(path.c_str(), std::ios::in | std::ios::binary);
+	if (!input.is_open())
+	{
+		return rules;
+	}
+
+	HoleNoteRuleRecord current;
+	bool inRule = false;
+	std::string line;
+	while (std::getline(input, line))
+	{
+		if (!line.empty() && line[line.size() - 1] == '\r')
+		{
+			line.erase(line.size() - 1);
+		}
+		if (line.size() >= 3 &&
+			static_cast<unsigned char>(line[0]) == 0xEF &&
+			static_cast<unsigned char>(line[1]) == 0xBB &&
+			static_cast<unsigned char>(line[2]) == 0xBF)
+		{
+			line.erase(0, 3);
+		}
+
+		const std::string trimmed = TrimHoleNoteText(line);
+		if (trimmed.empty() || trimmed[0] == ';' || trimmed[0] == '#')
+		{
+			continue;
+		}
+
+		if (trimmed[0] == '[' && trimmed[trimmed.size() - 1] == ']')
+		{
+			if (inRule && HoleNoteRuleHasContent(current))
+			{
+				rules.push_back(current);
+			}
+			current = HoleNoteRuleRecord();
+			inRule = true;
+			continue;
+		}
+
+		const size_t equals = trimmed.find('=');
+		if (equals == std::string::npos)
+		{
+			continue;
+		}
+		const std::string key = TrimHoleNoteText(trimmed.substr(0, equals));
+		const std::string value = UnescapeHoleNoteIniValue(TrimHoleNoteText(trimmed.substr(equals + 1)));
+		SetHoleNoteRuleField(current, key, value);
+	}
+
+	if (inRule && HoleNoteRuleHasContent(current))
+	{
+		rules.push_back(current);
+	}
+	return rules;
+}
+
+std::vector<HoleNoteRuleRecord> GetHoleNoteRules()
+{
+	const std::vector<std::string> paths = {
+		PluginPath("config", "KonBiaoZuRules.ini")
+	};
+	for (size_t i = 0; i < paths.size(); ++i)
+	{
+		std::vector<HoleNoteRuleRecord> rules = LoadHoleNoteRulesFromIni(paths[i]);
+		if (!rules.empty())
+		{
+			std::ostringstream log;
+			log << "[HoleNote] loaded rules=" << rules.size() << " path=" << paths[i];
+			HoleNoteDebugLog(log.str());
+			return rules;
+		}
+	}
+	return std::vector<HoleNoteRuleRecord>();
+}
+
+bool HoleNoteRuleIsCounterboreRule(const HoleNoteRuleRecord& rule)
+{
+	const std::string combined = rule.annotationType + "|" + rule.series + "|" + rule.note + "|" + rule.displayText;
+	return combined.find("\xE6\xB2\x89\xE5\xAD\x94") != std::string::npos ||
+		HoleNoteTextContainsCounterbore(combined);
+}
+
+std::string FormatHoleRuleNumber(double value)
+{
+	std::ostringstream out;
+	out << std::fixed << std::setprecision(2) << value;
+	return out.str();
+}
+
+std::string ApplyHoleNoteRuleTemplate(const std::string& templateText, const HoleNoteRuleRecord& rule)
+{
+	std::string result = templateText;
+	ReplaceAllHoleNoteText(result, "\x7B\xE5\xAD\x90\xE7\xB1\xBB\xE5\x9E\x8B\x7D", rule.series);
+	ReplaceAllHoleNoteText(result, "\x7B\xE8\xA7\x84\xE6\xA0\xBC\x7D", rule.size);
+	ReplaceAllHoleNoteText(result, "\x7B\xE8\x9E\xBA\xE7\xBA\xB9\x7D", rule.threadSpec);
+	ReplaceAllHoleNoteText(result, "\x7B\xE5\xBA\x95\xE5\xAD\x94\x7D", FormatHoleRuleNumber(rule.bottomHole));
+	ReplaceAllHoleNoteText(result, "\x7B\xE9\x95\xBF\xE5\xBA\xA6\x7D", rule.lengthText);
+	return TrimHoleNoteText(result);
+}
+
+std::string BuildMatchedRuleHoleNoteText(const HoleNoteRuleRecord& rule)
+{
+	if (!rule.displayText.empty())
+	{
+		const std::string text = ApplyHoleNoteRuleTemplate(rule.displayText, rule);
+		if (!text.empty())
+		{
+			return text;
+		}
+	}
+	if (!rule.threadSpec.empty())
+	{
+		return rule.threadSpec;
+	}
+	return rule.size;
+}
+
+bool HoleNoteRuleIsPemRule(const HoleNoteRuleRecord& rule)
+{
+	return rule.annotationType == "\xE5\x8E\x8B\xE9\x93\x86\xE8\x9E\xBA\xE6\xAF\x8D\xE6\xA0\x87\xE6\xB3\xA8" ||
+		rule.annotationType == "\xE5\x8E\x8B\xE9\x93\x86\xE8\x9E\xBA\xE9\x92\x89\xE6\xA0\x87\xE6\xB3\xA8" ||
+		rule.annotationType == "\xE5\x8E\x8B\xE9\x93\x86\xE8\x9E\xBA\xE6\xAF\x8D\xE6\x9F\xB1\xE6\xA0\x87\xE6\xB3\xA8";
+}
+
+std::string HoleNoteRuleTypeForRecord(const HoleNoteRuleRecord& rule)
+{
+	if (rule.annotationType == "\xE5\xAD\x94\xE6\xA0\x87\xE6\xB3\xA8")
+	{
+		return "\xE5\xAD\x94";
+	}
+	if (rule.annotationType == "\xE8\x9E\xBA\xE7\x89\x99\xE6\xA0\x87\xE6\xB3\xA8")
+	{
+		return "\xE6\x94\xBB\xE7\x89\x99";
+	}
+	if (rule.annotationType == "\xE7\x84\x8A\xE6\x8E\xA5\xE8\x9E\xBA\xE6\xAF\x8D\xE6\xA0\x87\xE6\xB3\xA8")
+	{
+		return "\xE7\x84\x8A\xE6\x8E\xA5\xE8\x9E\xBA\xE6\xAF\x8D";
+	}
+	if (HoleNoteRuleIsPemRule(rule))
+	{
+		return rule.series.empty() ? rule.annotationType : rule.series;
+	}
+
+	const std::string suffix = "\xE6\xA0\x87\xE6\xB3\xA8";
+	if (rule.annotationType.size() > suffix.size() &&
+		rule.annotationType.substr(rule.annotationType.size() - suffix.size()) == suffix)
+	{
+		return rule.annotationType.substr(0, rule.annotationType.size() - suffix.size());
+	}
+	return rule.annotationType.empty() ? "\xE5\xAD\x94" : rule.annotationType;
+}
+
+bool TryBuildMatchedRuleHoleNoteText(double diameter, std::string& typeText, std::string& noteText)
+{
+	const std::vector<HoleNoteRuleRecord> rules = GetHoleNoteRules();
+	const double tolerance = 0.005;
+	for (size_t i = 0; i < rules.size(); ++i)
+	{
+		const HoleNoteRuleRecord& rule = rules[i];
+		if (rule.bottomHole <= 1.0e-6 || std::fabs(rule.bottomHole - diameter) >= tolerance)
+		{
+			continue;
+		}
+		if (HoleNoteRuleIsCounterboreRule(rule))
+		{
+			continue;
+		}
+
+		typeText = HoleNoteRuleTypeForRecord(rule);
+		if (typeText.empty())
+		{
+			typeText = "\xE5\xAD\x94";
+		}
+		noteText = BuildMatchedRuleHoleNoteText(rule);
+		return !noteText.empty();
+	}
+	return false;
+}
+
 int BuildCounterboreScrewSize(double diameter)
 {
 	if (diameter <= 1.0)
@@ -2631,13 +3217,13 @@ bool TryAskArcDataByTag(tag_t objectTag, double& diameter, double center[3])
 
 void ResetHoleNoteDebugLog()
 {
-	std::ofstream stream("D:\\UGPluginRepo\\ZiDonCuTu\\outputs\\hole_note_debug.log", std::ios::out | std::ios::trunc);
+	std::ofstream stream("D:\\UG智辉钣金插件\\logs\\hole_note_debug.log", std::ios::out | std::ios::trunc);
 	stream << "[HoleNote] reset\n";
 }
 
 void HoleNoteDebugLog(const std::string& message)
 {
-	std::ofstream stream("D:\\UGPluginRepo\\ZiDonCuTu\\outputs\\hole_note_debug.log", std::ios::out | std::ios::app);
+	std::ofstream stream("D:\\UG智辉钣金插件\\logs\\hole_note_debug.log", std::ios::out | std::ios::app);
 	stream << message << "\n";
 }
 
@@ -3362,6 +3948,8 @@ bool CreateFlatPatternHoleAttributeDimension(
 	builder->Style()->LetteringStyle()->SetGeneralTextSize(3.0);
 	builder->Style()->DimensionStyle()->SetDimensionReferenceIncludeType(
 		NXOpen::Annotations::ReferenceIncludeTypeOnlyValue);
+	builder->Style()->DimensionStyle()->SetDimensionValuePrecision(2);
+	builder->Style()->UnitsStyle()->SetDisplayTrailingZeros(true);
 
 	std::vector<NXOpen::NXString> emptyLines(0);
 	if (!text.empty())
@@ -4425,12 +5013,14 @@ bool CreateFlatPatternHoleAttributeNotes(
 			NXOpen::NXString("SPEC"),
 			NXOpen::NXString("\xE5\x9E\x8B\xE5\x8F\xB7", NXOpen::NXString::UTF8)
 		};
-		TryGetStringUserAttribute(cylinderFace, typeTitles, typeText);
-		const bool isCounterbore = HoleNoteTextContainsCounterbore(typeText);
+		const bool hasTypeAttribute = TryGetStringUserAttribute(cylinderFace, typeTitles, typeText);
+		bool isCounterbore = HoleNoteTextContainsCounterbore(typeText);
+		bool hasSpecAttribute = false;
 		if (!isCounterbore)
 		{
-			TryGetStringUserAttribute(cylinderFace, specTitles, specText);
+			hasSpecAttribute = TryGetStringUserAttribute(cylinderFace, specTitles, specText);
 		}
+		const bool hasHoleAttributes = hasTypeAttribute || hasSpecAttribute;
 		NXOpen::Drawings::DraftingCurve* effectiveCurve = curves[i];
 		double effectiveCenter[2] = { center[0], center[1] };
 		double effectiveRadius = radius;
@@ -4481,6 +5071,73 @@ bool CreateFlatPatternHoleAttributeNotes(
 				groupDiameter = static_cast<double>(screwSize);
 			}
 		}
+		else if (!hasHoleAttributes)
+		{
+			NXOpen::Drawings::DraftingCurve* outerCurve = NULL;
+			double outerCenter[2] = { center[0], center[1] };
+			double outerRadius = radius;
+			const bool hasOuterConcentricCircle =
+				TryFindOuterConcentricHoleNoteCircle(baseView, curves, center, radius, outerCurve, outerCenter, outerRadius) &&
+				outerCurve != NULL &&
+				outerRadius > radius + 0.02;
+			if (hasOuterConcentricCircle)
+			{
+				effectiveCurve = outerCurve;
+				effectiveCenter[0] = outerCenter[0];
+				effectiveCenter[1] = outerCenter[1];
+				effectiveRadius = outerRadius;
+				NXOpen::Face* outerCylinderFace = NULL;
+				double outerCylinderDiameter = 0.0;
+				if (TryResolveHoleCylinderFace(effectiveCurve, effectiveRadius * 2.0, outerCylinderFace, outerCylinderDiameter) &&
+					outerCylinderFace != NULL && outerCylinderDiameter > 1.0e-6)
+				{
+					cylinderDiameter = outerCylinderDiameter;
+					cylinderFace = outerCylinderFace;
+				}
+
+				std::ostringstream counterboreKey;
+				counterboreKey << static_cast<long long>(std::llround(effectiveCenter[0] * 1000.0))
+					<< ":" << static_cast<long long>(std::llround(effectiveCenter[1] * 1000.0))
+					<< ":" << static_cast<long long>(std::llround(effectiveRadius * 2000.0));
+				if (!visitedCounterbores.insert(counterboreKey.str()).second)
+				{
+					HoleNoteDebugLog("[HoleNote]   skip: duplicate auto counterbore candidate");
+					continue;
+				}
+
+				std::string sideText = ResolveCounterboreSideTextFromFlatPattern(effectiveCurve);
+				if (sideText.empty())
+				{
+					sideText = ResolveCounterboreSideText(cylinderFace);
+				}
+				typeText = "\xE6\xB2\x89\xE5\xAD\x94";
+				specText = BuildCounterboreSpecText(cylinderDiameter, sideText);
+				const int screwSize = BuildCounterboreScrewSize(cylinderDiameter);
+				if (screwSize > 0)
+				{
+					groupDiameter = static_cast<double>(screwSize);
+				}
+				isCounterbore = true;
+				HoleNoteDebugLog("[HoleNote]   fallback: concentric circles -> counterbore");
+			}
+			else
+			{
+				std::string ruleNoteText;
+				std::string ruleTypeText;
+				if (TryBuildMatchedRuleHoleNoteText(cylinderDiameter, ruleTypeText, ruleNoteText))
+				{
+					typeText = ruleTypeText;
+					specText = ruleNoteText;
+					HoleNoteDebugLog("[HoleNote]   fallback: bottom hole rule -> matched note");
+				}
+				else
+				{
+					typeText = "\xE5\xAD\x94";
+					specText.clear();
+					HoleNoteDebugLog("[HoleNote]   fallback: plain diameter note");
+				}
+			}
+		}
 		{
 			std::ostringstream log;
 			log << "[HoleNote]   attrs type='" << typeText << "' spec='" << specText << "'";
@@ -4488,7 +5145,7 @@ bool CreateFlatPatternHoleAttributeNotes(
 		}
 		if (typeText.empty() && specText.empty())
 		{
-			HoleNoteDebugLog("[HoleNote]   skip: no type/spec attribute");
+			HoleNoteDebugLog("[HoleNote]   skip: no type/spec/fallback note");
 			continue;
 		}
 

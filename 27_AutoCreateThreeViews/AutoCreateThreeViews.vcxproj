@@ -50,12 +50,12 @@
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>
-      <SetChecksum>false</SetChecksum>
+      <SetChecksum>true</SetChecksum>
       <AdditionalLibraryDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libugopenint.lib;libufun.lib;libnxopencpp.lib;libnxopencpp_gateway.lib;libnxopencpp_annotations.lib;libnxopencpp_drawings.lib;libnxopencpp_features.lib;libnxopencpp_sheetmetal.lib;libnxopenuicpp.lib;user32.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libugopenint.lib;libufun.lib;libnxopencpp.lib;libnxopencpp_gateway.lib;libnxopencpp_annotations.lib;libnxopencpp_drawings.lib;libnxopencpp_features.lib;libnxopencpp_sheetmetal.lib;libnxopenuicpp.lib;user32.lib;shell32.lib;Crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)AutoCreateThreeViews.dlx" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)AutoCreateThreeViews.rules.json" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)AutoCreateThreeViews.bmp" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)AutoCreateThreeViews.hole_rules.ini" "$(OutDir)"</Command>
+      <Command>copy /Y "$(ProjectDir)AutoCreateThreeViews.dlx" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)AutoCreateThreeViews.bmp" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)AutoCreateThreeViews.hole_rules.ini" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -69,8 +69,11 @@
     <None Include="AutoCreateThreeViews.dlx" />
     <None Include="AutoCreateThreeViews.bmp" />
     <None Include="AutoCreateThreeViews.hole_rules.ini" />
-    <None Include="AutoCreateThreeViews.rules.json" />
     <None Include="README.md" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ItemGroup>
+    <ResourceCompile Include="embedded_dialog_resources.rc" />
+    <ClInclude Include="embedded_dialog_resources.h" />
+  </ItemGroup>
 </Project>

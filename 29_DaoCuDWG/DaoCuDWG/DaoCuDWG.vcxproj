@@ -93,7 +93,7 @@
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>
-      <SetChecksum>false</SetChecksum>
+      <SetChecksum>true</SetChecksum>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "$(ProjectDir)..\DaoCuDWG.dlx" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)..\DaoCuDWG.bmp" "$(OutDir)"</Command>
@@ -111,4 +111,8 @@
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
+  <ItemGroup>
+    <ResourceCompile Include="../embedded_dialog_resources.rc" />
+    <ClInclude Include="../embedded_dialog_resources.h" />
+  </ItemGroup>
 </Project>

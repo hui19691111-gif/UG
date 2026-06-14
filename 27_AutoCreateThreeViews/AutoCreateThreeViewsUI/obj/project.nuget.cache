@@ -1,9 +1,10 @@
 {
   "version": 2,
-  "dgSpecHash": "VDIUV/Q9b5g=",
+  "dgSpecHash": "RXMSjRUr71E=",
   "success": true,
-  "projectFilePath": "G:\\UG智辉钣金插件_源码精简_20260602\\features\\27_AutoCreateThreeViews\\AutoCreateThreeViewsUI\\AutoCreateThreeViewsUI.csproj",
+  "projectFilePath": "G:\\UG智辉钣金插件_源码精简_20260605_最终精简\\features\\27_AutoCreateThreeViews\\AutoCreateThreeViewsUI\\AutoCreateThreeViewsUI.csproj",
   "expectedPackageFiles": [
+    "C:\\Users\\Administrator\\.nuget\\packages\\microsoft.net.illink.tasks\\8.0.26\\microsoft.net.illink.tasks.8.0.26.nupkg.sha512",
     "C:\\Users\\Administrator\\.nuget\\packages\\system.text.encoding.codepages\\8.0.0\\system.text.encoding.codepages.8.0.0.nupkg.sha512",
     "C:\\Users\\Administrator\\.nuget\\packages\\microsoft.netcore.app.runtime.win-x64\\8.0.26\\microsoft.netcore.app.runtime.win-x64.8.0.26.nupkg.sha512",
     "C:\\Users\\Administrator\\.nuget\\packages\\microsoft.windowsdesktop.app.runtime.win-x64\\8.0.26\\microsoft.windowsdesktop.app.runtime.win-x64.8.0.26.nupkg.sha512",

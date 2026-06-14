@@ -160,6 +160,18 @@ namespace
         return std::filesystem::current_path() / "DATA";
     }
 
+    std::filesystem::path GetUnifiedRulesConfigPath()
+    {
+        std::string pluginRoot = "D:\\UG";
+        pluginRoot += "\xD6\xC7"; // Zhi, CP936
+        pluginRoot += "\xBB\xD4"; // Hui, CP936
+        pluginRoot += "\xEE\xD3"; // Ban, CP936
+        pluginRoot += "\xBD\xF0"; // Jin, CP936
+        pluginRoot += "\xB2\xE5"; // Cha, CP936
+        pluginRoot += "\xBC\xFE"; // Jian, CP936
+        return std::filesystem::path(pluginRoot) / "config" / "KonBiaoZuRules.ini";
+    }
+
     std::string Utf8ToSystem(const std::string& utf8)
     {
         if (utf8.empty())
@@ -239,16 +251,7 @@ namespace
     {
         std::ostringstream out;
         out << std::fixed << std::setprecision(2) << value;
-        std::string text = out.str();
-        while (!text.empty() && text.back() == '0')
-        {
-            text.pop_back();
-        }
-        if (!text.empty() && text.back() == '.')
-        {
-            text.pop_back();
-        }
-        return text;
+        return out.str();
     }
 
     std::string FormatHole(double value)
@@ -769,7 +772,7 @@ namespace
                 const size_t separator = trimmedLine.find('=');
                 if (separator == std::string::npos)
                 {
-                    errorMessage = Utf8ToSystem("瑙勫垯閰嶇疆鏂囦欢 INI 鏍煎紡閿欒: " + configPath);
+                    errorMessage = Utf8ToSystem("规则配置文件 INI 格式错误: " + configPath);
                     return false;
                 }
 
@@ -777,7 +780,7 @@ namespace
                 const std::string value = UnescapeIni(Trim(trimmedLine.substr(separator + 1)));
                 if (!SetIniRuleField(record, key, value))
                 {
-                    errorMessage = Utf8ToSystem("瑙勫垯閰嶇疆鏂囦欢 INI 瀛楁閿欒: " + configPath);
+                    errorMessage = Utf8ToSystem("规则配置文件 INI 字段错误: " + configPath);
                     return false;
                 }
             }
@@ -799,7 +802,7 @@ namespace
         size_t position = rulesKey == std::string::npos ? std::string::npos : json.find('[', rulesKey);
         if (position == std::string::npos)
         {
-            errorMessage = Utf8ToSystem("瑙勫垯閰嶇疆鏂囦欢缂哄皯 rules 鏁扮粍: " + configPath);
+            errorMessage = Utf8ToSystem("规则配置文件缺少 rules 数组: " + configPath);
             return false;
         }
         ++position;
@@ -815,7 +818,7 @@ namespace
             KonBiaoZu::RuleRecord record;
             if (!ParseRuleObject(json, position, record))
             {
-                errorMessage = Utf8ToSystem("瑙勫垯閰嶇疆鏂囦欢鏍煎紡閿欒: " + configPath);
+                errorMessage = Utf8ToSystem("规则配置文件格式错误: " + configPath);
                 return false;
             }
             if (HasRuleContent(record))
@@ -1957,8 +1960,8 @@ namespace KonBiaoZu
 
     ExcelRuleManager::ExcelRuleManager(const std::string& configFileName)
     {
-        const std::filesystem::path dataDirectory = GetDataDirectory();
-        configPath_ = (dataDirectory / configFileName).string();
+        (void)configFileName;
+        configPath_ = GetUnifiedRulesConfigPath().string();
     }
 
     ExcelRuleManager::~ExcelRuleManager()

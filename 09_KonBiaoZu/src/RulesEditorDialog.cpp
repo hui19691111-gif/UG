@@ -1,4 +1,6 @@
-#include "RulesEditorDialog.hpp"
+﻿#include "RulesEditorDialog.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 
 #include <NXOpen/BlockStyler_BlockDialog.hxx>
 #include <NXOpen/BlockStyler_Enumeration.hxx>
@@ -428,16 +430,7 @@ namespace
     {
         std::ostringstream out;
         out << std::fixed << std::setprecision(2) << value;
-        std::string text = out.str();
-        while (!text.empty() && text.back() == '0')
-        {
-            text.pop_back();
-        }
-        if (!text.empty() && text.back() == '.')
-        {
-            text.pop_back();
-        }
-        return text;
+        return out.str();
     }
 
     bool HasRuleContent(const KonBiaoZu::RuleRecord& rule)
@@ -687,6 +680,15 @@ namespace
 
     std::string FindRulesEditorDlxPath()
     {
+        const std::string embeddedDlxPath =
+            zhihui_embedded_dialog::ExtractDlxToRandomPath(
+                IDR_ZH_DLX_KONBIAOZU_RULES_EDITOR_DLX,
+                L"KonBiaoZuRulesEditor.dlx");
+        if (!embeddedDlxPath.empty())
+        {
+            return embeddedDlxPath;
+        }
+
         const std::vector<std::filesystem::path> candidates = {
             "KonBiaoZuRulesEditor.dlx",
             "application/KonBiaoZuRulesEditor.dlx",
@@ -1067,7 +1069,7 @@ namespace
             const std::string dlxPath = FindRulesEditorDlxPath();
             if (dlxPath.empty())
             {
-                errorMessage = Utf8ToSystem("找不到规则表编辑器界面文件 KonBiaoZuRulesEditor.dlx");
+                errorMessage = "找不到规则表编辑器界面文件 KonBiaoZuRulesEditor.dlx";
                 return false;
             }
 
@@ -2134,7 +2136,7 @@ namespace
                 std::filesystem::create_directories(parentPath, createError);
                 if (createError)
                 {
-                    errorMessage = Utf8ToSystem("无法创建规则表目录: " + parentPath.string());
+                    errorMessage = "无法创建规则表目录: " + parentPath.string();
                     return false;
                 }
             }
@@ -2142,7 +2144,7 @@ namespace
             std::ofstream output(configPath_, std::ios::binary | std::ios::trunc);
             if (!output.is_open())
             {
-                errorMessage = Utf8ToSystem("无法写入规则表: " + configPath_);
+                errorMessage = "无法写入规则表: " + configPath_;
                 return false;
             }
 
@@ -2163,7 +2165,7 @@ namespace
 
             if (!output.good())
             {
-                errorMessage = Utf8ToSystem("规则表保存失败: " + configPath_);
+                errorMessage = "规则表保存失败: " + configPath_;
                 return false;
             }
 
@@ -2256,12 +2258,12 @@ namespace
 
         void ShowError(const std::string& text)
         {
-            ui_->NXMessageBox()->Show(Utf8ToSystem("规则表").c_str(), NXOpen::NXMessageBox::DialogTypeError, Utf8ToSystem(text));
+            ui_->NXMessageBox()->Show(Utf8NxString("规则表"), NXOpen::NXMessageBox::DialogTypeError, Utf8NxString(text));
         }
 
         void ShowInfo(const std::string& text)
         {
-            ui_->NXMessageBox()->Show(Utf8ToSystem("规则表").c_str(), NXOpen::NXMessageBox::DialogTypeInformation, Utf8ToSystem(text));
+            ui_->NXMessageBox()->Show(Utf8NxString("规则表"), NXOpen::NXMessageBox::DialogTypeInformation, Utf8NxString(text));
         }
 
         NXOpen::UI* ui_;
@@ -2308,13 +2310,14 @@ namespace KonBiaoZu
         }
         catch (const std::exception& ex)
         {
-            errorMessage = Utf8ToSystem(ex.what());
+            errorMessage = ex.what();
             return false;
         }
         catch (...)
         {
-            errorMessage = Utf8ToSystem("规则表编辑器启动失败");
+            errorMessage = "规则表编辑器启动失败";
             return false;
         }
     }
 }
+

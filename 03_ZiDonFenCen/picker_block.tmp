@@ -1,0 +1,1151 @@
+    std::string PartName(Part* part)
+    {
+        if (part == NULL)
+        {
+            return std::string();
+        }
+
+        try
+        {
+            return ToUtf8(part->Leaf());
+        }
+        catch (...)
+        {
+            return std::string();
+        }
+    }
+
+    struct BatchPartCandidate
+    {
+        Part* part;
+        std::string partName;
+        std::string material;
+        std::string quantity;
+    };
+
+    void CollectChildPrototypeParts(Component* component, std::vector<Part*>& parts, std::set<tag_t>& seenParts)
+    {
+        if (component == NULL)
+        {
+            return;
+        }
+
+        std::vector<Component*> children = component->GetChildren();
+        for (size_t i = 0; i < children.size(); ++i)
+        {
+            Component* child = children[i];
+            if (child == NULL)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (child->IsComponentOrAncestorSuppressed())
+                {
+                    continue;
+                }
+            }
+            catch (...)
+            {
+            }
+
+            try
+            {
+                Part* prototypePart = dynamic_cast<Part*>(child->Prototype());
+                if (prototypePart != NULL && seenParts.insert(prototypePart->Tag()).second)
+                {
+                    parts.push_back(prototypePart);
+                }
+            }
+            catch (...)
+            {
+            }
+
+            CollectChildPrototypeParts(child, parts, seenParts);
+        }
+    }
+
+    void EnsurePartFullyLoadedForBatchList(Part* part)
+    {
+        if (part == NULL)
+        {
+            return;
+        }
+
+        try
+        {
+            if (part->IsFullyLoaded())
+            {
+                return;
+            }
+
+            PartLoadStatus* loadStatus = part->LoadThisPartFully();
+            if (loadStatus != NULL)
+            {
+                delete loadStatus;
+                loadStatus = NULL;
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    std::string ReadPartMaterialText(Part* part)
+    {
+        std::string value = ReadStringUserAttribute(part, u8"材料");
+        if (!value.empty())
+        {
+            return value;
+        }
+
+        value = ReadStringUserAttribute(part, u8"材质");
+        if (!value.empty())
+        {
+            return value;
+        }
+
+        return ReadStringUserAttribute(part, "cailiao");
+    }
+
+    std::string ReadPartQuantityText(Part* part)
+    {
+        std::string value = ReadStringUserAttribute(part, u8"数量");
+        if (!value.empty())
+        {
+            return value;
+        }
+
+        value = ReadStringUserAttribute(part, "sulian");
+        if (!value.empty())
+        {
+            return value;
+        }
+
+        return value;
+    }
+
+    void CollectBatchPartCandidates(Component* component, std::vector<BatchPartCandidate>& candidates, std::set<tag_t>& seenParts)
+    {
+        if (component == NULL)
+        {
+            return;
+        }
+
+        std::vector<Component*> children;
+        try
+        {
+            children = component->GetChildren();
+        }
+        catch (...)
+        {
+            return;
+        }
+
+        for (size_t i = 0; i < children.size(); ++i)
+        {
+            Component* child = children[i];
+            if (child == NULL)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (child->IsComponentOrAncestorSuppressed())
+                {
+                    continue;
+                }
+            }
+            catch (...)
+            {
+            }
+
+            try
+            {
+                Part* prototypePart = dynamic_cast<Part*>(child->Prototype());
+                if (prototypePart != NULL && seenParts.insert(prototypePart->Tag()).second)
+                {
+                    EnsurePartFullyLoadedForBatchList(prototypePart);
+
+                    BatchPartCandidate candidate;
+                    candidate.part = prototypePart;
+                    candidate.partName = ToUtf8(child->DisplayName());
+                    if (candidate.partName.empty())
+                    {
+                        candidate.partName = PartName(prototypePart);
+                    }
+                    candidate.material = ReadPartMaterialText(prototypePart);
+                    candidate.quantity = ReadPartQuantityText(prototypePart);
+                    candidates.push_back(candidate);
+                }
+            }
+            catch (...)
+            {
+            }
+
+            CollectBatchPartCandidates(child, candidates, seenParts);
+        }
+    }
+
+    std::vector<BatchPartCandidate> CollectBatchPartCandidates(Part* assemblyPart)
+    {
+        std::vector<BatchPartCandidate> candidates;
+        if (assemblyPart == NULL || assemblyPart->ComponentAssembly() == NULL)
+        {
+            return candidates;
+        }
+
+        Component* root = assemblyPart->ComponentAssembly()->RootComponent();
+        if (root == NULL || root->GetChildren().empty())
+        {
+            return candidates;
+        }
+
+        try
+        {
+            std::vector<Component*> topChildren = root->GetChildren();
+            if (!topChildren.empty())
+            {
+                std::vector<ComponentAssembly::OpenComponentStatus> openStatus;
+                PartLoadStatus* loadStatus = assemblyPart->ComponentAssembly()->OpenComponents(
+                    ComponentAssembly::OpenOptionWholeAssembly,
+                    topChildren,
+                    openStatus);
+                if (loadStatus != NULL)
+                {
+                    delete loadStatus;
+                    loadStatus = NULL;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        std::set<tag_t> seenParts;
+        CollectBatchPartCandidates(root, candidates, seenParts);
+        return candidates;
+    }
+
+    bool IsAssemblyPart(Part* part)
+    {
+        if (part == NULL || part->ComponentAssembly() == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            Component* root = part->ComponentAssembly()->RootComponent();
+            return root != NULL && !root->GetChildren().empty();
+        }
+        catch (...)
+        {
+        }
+        return false;
+    }
+
+    Part* ResolveCurrentAssemblyPart(Session* session)
+    {
+        if (session == NULL || session->Parts() == NULL)
+        {
+            return NULL;
+        }
+
+        Part* displayPart = NULL;
+        Part* workPart = NULL;
+        try
+        {
+            displayPart = session->Parts()->Display();
+        }
+        catch (...)
+        {
+        }
+        try
+        {
+            workPart = session->Parts()->Work();
+        }
+        catch (...)
+        {
+        }
+
+        if (IsAssemblyPart(displayPart))
+        {
+            return displayPart;
+        }
+        if (IsAssemblyPart(workPart))
+        {
+            return workPart;
+        }
+        return NULL;
+    }
+
+    std::vector<std::string> BuildBatchPartAttributeNames(const std::vector<BatchPartCandidate>& candidates)
+    {
+        std::vector<std::string> names;
+        names.push_back(std::string());
+
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            Part* part = candidates[i].part;
+            if (part == NULL)
+            {
+                continue;
+            }
+
+            try
+            {
+                std::vector<NXObject::AttributeInformation> attributes = part->GetUserAttributes();
+                for (size_t j = 0; j < attributes.size(); ++j)
+                {
+                    std::string title = TrimCopy(NormalizeUtf8Message(ToUtf8(attributes[j].Title)));
+                    if (title.empty())
+                    {
+                        continue;
+                    }
+
+                    bool exists = false;
+                    for (size_t k = 0; k < names.size(); ++k)
+                    {
+                        if (_stricmp(names[k].c_str(), title.c_str()) == 0)
+                        {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (!exists)
+                    {
+                        names.push_back(title);
+                    }
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        return names;
+    }
+
+    std::string ReadPartListAttributeText(Part* part, const std::string& attributeName)
+    {
+        if (part == NULL || attributeName.empty())
+        {
+            return std::string();
+        }
+
+        if (attributeName == u8"材料")
+        {
+            return ReadPartMaterialText(part);
+        }
+        if (attributeName == u8"数量")
+        {
+            return ReadPartQuantityText(part);
+        }
+
+        std::string value = ReadStringUserAttribute(part, attributeName.c_str());
+        if (!value.empty())
+        {
+            return value;
+        }
+
+        try
+        {
+            std::vector<NXObject::AttributeInformation> attributes = part->GetUserAttributes();
+            for (size_t i = 0; i < attributes.size(); ++i)
+            {
+                std::string title = TrimCopy(NormalizeUtf8Message(ToUtf8(attributes[i].Title)));
+                if (_stricmp(title.c_str(), attributeName.c_str()) != 0 || attributes[i].Unset)
+                {
+                    continue;
+                }
+
+                switch (attributes[i].Type)
+                {
+                case NXObject::AttributeType::AttributeTypeString:
+                    return TrimCopy(NormalizeUtf8Message(ToUtf8(attributes[i].StringValue)));
+                case NXObject::AttributeType::AttributeTypeInteger:
+                    return std::to_string(attributes[i].IntegerValue);
+                case NXObject::AttributeType::AttributeTypeReal:
+                {
+                    std::ostringstream stream;
+                    stream << std::setprecision(12) << attributes[i].RealValue;
+                    return stream.str();
+                }
+                case NXObject::AttributeType::AttributeTypeBoolean:
+                    return attributes[i].BooleanValue ? "True" : "False";
+                default:
+                    break;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return std::string();
+    }
+
+    const int BatchAttributeColumnCount = 4;
+    const int BatchPickerListWidth = 1008;
+    const int BatchPickerWindowWidth = 1052;
+    const int BatchAttributeComboDropHeight = 260;
+
+    struct BatchPartPickerPersistedState
+    {
+        std::vector<std::string> attributes;
+        bool hasAttributes = false;
+        std::set<std::string> checkedPartNames;
+        bool hasCheckedPartNames = false;
+    };
+
+    struct BatchPartPickerState
+    {
+        const std::vector<BatchPartCandidate>* candidates;
+        const std::vector<std::string>* attributeNames;
+        const BatchPartPickerPersistedState* persistedState;
+        std::vector<std::string> selectedAttributes;
+        std::vector<int> selectedIndices;
+        HWND listView;
+        HWND comboBoxes[BatchAttributeColumnCount];
+        int listX;
+        int listY;
+        int listWidth;
+        int listHeight;
+        std::vector<HWND> childControls;
+        HFONT dialogFont;
+        HBRUSH backgroundBrush;
+        COLORREF backgroundColor;
+        bool accepted;
+    };
+
+    HFONT CreateNxLikeDialogFont()
+    {
+        HDC screenDc = GetDC(NULL);
+        const int dpiY = screenDc != NULL ? GetDeviceCaps(screenDc, LOGPIXELSY) : 96;
+        if (screenDc != NULL)
+        {
+            ReleaseDC(NULL, screenDc);
+        }
+
+        return CreateFontW(
+            -MulDiv(9, dpiY, 72),
+            0,
+            0,
+            0,
+            FW_NORMAL,
+            FALSE,
+            FALSE,
+            FALSE,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE,
+            L"Microsoft YaHei UI");
+    }
+
+    void AddPickerControl(BatchPartPickerState* state, HWND control)
+    {
+        if (state == NULL || control == NULL)
+        {
+            return;
+        }
+
+        state->childControls.push_back(control);
+        if (state->dialogFont != NULL)
+        {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(state->dialogFont), TRUE);
+        }
+    }
+
+    void ApplyNxLikeListViewStyle(HWND listView)
+    {
+        if (listView == NULL)
+        {
+            return;
+        }
+
+        ListView_SetExtendedListViewStyle(listView, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_CHECKBOXES | LVS_EX_DOUBLEBUFFER);
+        ListView_SetBkColor(listView, RGB(255, 255, 255));
+        ListView_SetTextBkColor(listView, RGB(255, 255, 255));
+        ListView_SetTextColor(listView, RGB(30, 30, 30));
+    }
+
+    void CenterWindowOnParent(HWND hwnd, HWND parent)
+    {
+        if (hwnd == NULL)
+        {
+            return;
+        }
+
+        RECT windowRect = {};
+        RECT parentRect = {};
+        GetWindowRect(hwnd, &windowRect);
+        if (parent != NULL && IsWindow(parent))
+        {
+            GetWindowRect(parent, &parentRect);
+        }
+        else
+        {
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &parentRect, 0);
+        }
+
+        const int windowWidth = windowRect.right - windowRect.left;
+        const int windowHeight = windowRect.bottom - windowRect.top;
+        const int parentWidth = parentRect.right - parentRect.left;
+        const int parentHeight = parentRect.bottom - parentRect.top;
+        const int x = parentRect.left + std::max(0, (parentWidth - windowWidth) / 2);
+        const int y = parentRect.top + std::max(0, (parentHeight - windowHeight) / 2);
+        SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+
+    void AddListViewColumn(HWND listView, int index, const wchar_t* title, int width)
+    {
+        LVCOLUMNW column = {};
+        column.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        column.pszText = const_cast<wchar_t*>(title);
+        column.cx = width;
+        column.iSubItem = index;
+        ListView_InsertColumn(listView, index, &column);
+    }
+
+    void SetListViewText(HWND listView, int row, int column, const std::wstring& text)
+    {
+        LVITEMW item = {};
+        item.mask = LVIF_TEXT;
+        item.iItem = row;
+        item.iSubItem = column;
+        item.pszText = const_cast<wchar_t*>(text.c_str());
+        ListView_SetItem(listView, &item);
+    }
+
+    std::wstring ListAttributeTitle(const std::string& attributeName)
+    {
+        return attributeName.empty() ? L"空白" : PathTextToWide(attributeName);
+    }
+
+    void RepositionHeaderCombos(BatchPartPickerState* state)
+    {
+        if (state == NULL || state->listView == NULL)
+        {
+            return;
+        }
+
+        HWND header = ListView_GetHeader(state->listView);
+        RECT headerRect = {};
+        if (header == NULL || !GetWindowRect(header, &headerRect))
+        {
+            return;
+        }
+
+        POINT headerOrigin = { headerRect.left, headerRect.top };
+        ScreenToClient(GetParent(state->listView), &headerOrigin);
+        const int headerHeight = std::max(20L, headerRect.bottom - headerRect.top);
+
+        for (int i = 0; i < BatchAttributeColumnCount; ++i)
+        {
+            HWND combo = state->comboBoxes[i];
+            if (combo == NULL)
+            {
+                continue;
+            }
+
+            RECT itemRect = {};
+            if (Header_GetItemRect(header, 3 + i, &itemRect))
+            {
+                SetWindowPos(
+                    combo,
+                    HWND_TOP,
+                    headerOrigin.x + itemRect.left + 1,
+                    headerOrigin.y + 1,
+                    std::max(64L, itemRect.right - itemRect.left - 2),
+                    headerHeight + BatchAttributeComboDropHeight,
+                    SWP_SHOWWINDOW);
+            }
+        }
+    }
+
+    void RefreshBatchPartListAttributeColumns(BatchPartPickerState* state)
+    {
+        if (state == NULL || state->listView == NULL || state->candidates == NULL)
+        {
+            return;
+        }
+
+        for (int columnOffset = 0; columnOffset < BatchAttributeColumnCount; ++columnOffset)
+        {
+            const int columnIndex = 3 + columnOffset;
+            std::string attributeName;
+            if (columnOffset < static_cast<int>(state->selectedAttributes.size()))
+            {
+                attributeName = state->selectedAttributes[static_cast<size_t>(columnOffset)];
+            }
+
+            LVCOLUMNW column = {};
+            column.mask = LVCF_TEXT;
+            std::wstring title = ListAttributeTitle(attributeName);
+            column.pszText = const_cast<wchar_t*>(title.c_str());
+            ListView_SetColumn(state->listView, columnIndex, &column);
+
+            for (size_t row = 0; row < state->candidates->size(); ++row)
+            {
+                const BatchPartCandidate& candidate = (*state->candidates)[row];
+                SetListViewText(
+                    state->listView,
+                    static_cast<int>(row),
+                    columnIndex,
+                    PathTextToWide(ReadPartListAttributeText(candidate.part, attributeName)));
+            }
+        }
+    }
+
+    void PopulateBatchPartListView(BatchPartPickerState* state)
+    {
+        if (state == NULL || state->listView == NULL || state->candidates == NULL)
+        {
+            return;
+        }
+
+        AddListViewColumn(state->listView, 0, L"选择", 48);
+        AddListViewColumn(state->listView, 1, L"序号", 56);
+        AddListViewColumn(state->listView, 2, L"部件名", 220);
+        AddListViewColumn(state->listView, 3, L"材料", 170);
+        AddListViewColumn(state->listView, 4, L"数量", 170);
+        AddListViewColumn(state->listView, 5, L"空白", 170);
+        AddListViewColumn(state->listView, 6, L"空白", 154);
+
+        for (size_t i = 0; i < state->candidates->size(); ++i)
+        {
+            const BatchPartCandidate& candidate = (*state->candidates)[i];
+            LVITEMW item = {};
+            item.mask = LVIF_TEXT;
+            item.iItem = static_cast<int>(i);
+            item.iSubItem = 0;
+            item.pszText = const_cast<wchar_t*>(L"");
+            ListView_InsertItem(state->listView, &item);
+            bool checked = true;
+            if (state->persistedState != NULL && state->persistedState->hasCheckedPartNames)
+            {
+                checked = state->persistedState->checkedPartNames.find(candidate.partName) != state->persistedState->checkedPartNames.end();
+            }
+            ListView_SetCheckState(state->listView, static_cast<int>(i), checked ? TRUE : FALSE);
+
+            SetListViewText(state->listView, static_cast<int>(i), 1, std::to_wstring(i + 1));
+            SetListViewText(state->listView, static_cast<int>(i), 2, PathTextToWide(candidate.partName));
+        }
+
+        RefreshBatchPartListAttributeColumns(state);
+    }
+
+    void PopulateAttributeCombo(HWND comboBox, const std::vector<std::string>& attributeNames, const std::string& selectedValue)
+    {
+        if (comboBox == NULL)
+        {
+            return;
+        }
+
+        for (size_t i = 0; i < attributeNames.size(); ++i)
+        {
+            const std::wstring display = ListAttributeTitle(attributeNames[i]);
+            SendMessageW(comboBox, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(display.c_str()));
+        }
+
+        int selectedIndex = 0;
+        for (size_t i = 0; i < attributeNames.size(); ++i)
+        {
+            if (attributeNames[i] == selectedValue)
+            {
+                selectedIndex = static_cast<int>(i);
+                break;
+            }
+        }
+        SendMessageW(comboBox, CB_SETCURSEL, selectedIndex, 0);
+        SendMessageW(comboBox, CB_SETMINVISIBLE, 12, 0);
+        InvalidateRect(comboBox, NULL, TRUE);
+    }
+
+    std::string AttributeDefaultIfPresent(const std::vector<std::string>& attributeNames, const std::string& preferred)
+    {
+        for (size_t i = 0; i < attributeNames.size(); ++i)
+        {
+            if (_stricmp(attributeNames[i].c_str(), preferred.c_str()) == 0)
+            {
+                return attributeNames[i];
+            }
+        }
+        return std::string();
+    }
+
+    std::string BatchPartPickerStatePath()
+    {
+        return std::string("D:\\UG智辉钣金插件\\config\\ZiDonFenCen_part_picker_state.ini");
+    }
+
+    std::string EncodePickerStateValue(const std::string& value)
+    {
+        std::ostringstream stream;
+        for (size_t i = 0; i < value.size(); ++i)
+        {
+            const unsigned char ch = static_cast<unsigned char>(value[i]);
+            if (ch == '%' || ch == '\n' || ch == '\r' || ch == '=' || ch == '|')
+            {
+                stream << '%' << std::uppercase << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(ch)
+                       << std::nouppercase << std::dec << std::setfill(' ');
+            }
+            else
+            {
+                stream << value[i];
+            }
+        }
+        return stream.str();
+    }
+
+    int HexDigitValue(char ch)
+    {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'A' && ch <= 'F') return 10 + ch - 'A';
+        if (ch >= 'a' && ch <= 'f') return 10 + ch - 'a';
+        return -1;
+    }
+
+    std::string DecodePickerStateValue(const std::string& value)
+    {
+        std::string decoded;
+        for (size_t i = 0; i < value.size(); ++i)
+        {
+            if (value[i] == '%' && i + 2 < value.size())
+            {
+                const int hi = HexDigitValue(value[i + 1]);
+                const int lo = HexDigitValue(value[i + 2]);
+                if (hi >= 0 && lo >= 0)
+                {
+                    decoded.push_back(static_cast<char>((hi << 4) | lo));
+                    i += 2;
+                    continue;
+                }
+            }
+            decoded.push_back(value[i]);
+        }
+        return decoded;
+    }
+
+    bool AttributeNameExistsInList(const std::vector<std::string>& attributeNames, const std::string& value)
+    {
+        if (value.empty())
+        {
+            return true;
+        }
+
+        for (size_t i = 0; i < attributeNames.size(); ++i)
+        {
+            if (_stricmp(attributeNames[i].c_str(), value.c_str()) == 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    BatchPartPickerPersistedState LoadBatchPartPickerState(const std::vector<std::string>& attributeNames)
+    {
+        BatchPartPickerPersistedState state;
+        state.attributes.resize(BatchAttributeColumnCount);
+
+        std::string text = ReadAllText(BatchPartPickerStatePath());
+        std::stringstream input(text);
+        std::string line;
+        while (std::getline(input, line))
+        {
+            line = TrimCopy(line);
+            if (line.empty() || line[0] == '#')
+            {
+                continue;
+            }
+
+            size_t equal = line.find('=');
+            if (equal == std::string::npos)
+            {
+                continue;
+            }
+
+            std::string key = TrimCopy(line.substr(0, equal));
+            std::string value = DecodePickerStateValue(TrimCopy(line.substr(equal + 1)));
+            if (key.size() == 5 && key.find("attr") == 0)
+            {
+                int index = key[4] - '0';
+                if (index >= 0 && index < BatchAttributeColumnCount && AttributeNameExistsInList(attributeNames, value))
+                {
+                    state.attributes[static_cast<size_t>(index)] = value;
+                    state.hasAttributes = true;
+                }
+            }
+            else if (key.find("part") == 0)
+            {
+                state.checkedPartNames.insert(value);
+                state.hasCheckedPartNames = true;
+            }
+        }
+
+        return state;
+    }
+
+    void SaveBatchPartPickerState(const BatchPartPickerState* state)
+    {
+        if (state == NULL || state->listView == NULL || state->candidates == NULL)
+        {
+            return;
+        }
+
+        std::ostringstream output;
+        output << "# ZiDonFenCen part picker state\n";
+        for (int i = 0; i < BatchAttributeColumnCount; ++i)
+        {
+            std::string value;
+            if (i < static_cast<int>(state->selectedAttributes.size()))
+            {
+                value = state->selectedAttributes[static_cast<size_t>(i)];
+            }
+            output << "attr" << i << "=" << EncodePickerStateValue(value) << "\n";
+        }
+
+        int partIndex = 0;
+        const int count = ListView_GetItemCount(state->listView);
+        for (int i = 0; i < count && static_cast<size_t>(i) < state->candidates->size(); ++i)
+        {
+            if (ListView_GetCheckState(state->listView, i))
+            {
+                output << "part" << partIndex++ << "="
+                       << EncodePickerStateValue((*state->candidates)[static_cast<size_t>(i)].partName)
+                       << "\n";
+            }
+        }
+
+        WriteAllText(BatchPartPickerStatePath(), output.str());
+    }
+
+    LRESULT CALLBACK BatchPartPickerWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        const int kIdList = 1001;
+        const int kIdSelectAll = 1002;
+        const int kIdClearAll = 1003;
+        const int kIdFirstCombo = 1100;
+        const int kIdOk = IDOK;
+        const int kIdCancel = IDCANCEL;
+
+        BatchPartPickerState* state = reinterpret_cast<BatchPartPickerState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        switch (message)
+        {
+        case WM_CREATE:
+        {
+            CREATESTRUCTW* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            state = reinterpret_cast<BatchPartPickerState*>(createStruct->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+            if (state != NULL)
+            {
+                state->backgroundColor = RGB(236, 236, 236);
+                state->backgroundBrush = CreateSolidBrush(state->backgroundColor);
+                state->dialogFont = CreateNxLikeDialogFont();
+                if (state->dialogFont != NULL)
+                {
+                    SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(state->dialogFont), TRUE);
+                }
+            }
+
+            HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
+            AddPickerControl(state, CreateWindowW(L"STATIC", L"选择要自动转钣金的部件：", WS_CHILD | WS_VISIBLE, 14, 12, 250, 22, hwnd, NULL, instance, NULL));
+            if (state != NULL)
+            {
+                state->listX = 14;
+                state->listY = 40;
+                state->listWidth = BatchPickerListWidth;
+                state->listHeight = 326;
+            }
+            state->listView = CreateWindowExW(
+                WS_EX_CLIENTEDGE,
+                WC_LISTVIEWW,
+                L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
+                state != NULL ? state->listX : 14,
+                state != NULL ? state->listY : 40,
+                state != NULL ? state->listWidth : BatchPickerListWidth,
+                state != NULL ? state->listHeight : 326,
+                hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdList)),
+                instance,
+                NULL);
+            AddPickerControl(state, state->listView);
+            ApplyNxLikeListViewStyle(state->listView);
+            PopulateBatchPartListView(state);
+            for (int i = 0; i < BatchAttributeColumnCount; ++i)
+            {
+                state->comboBoxes[i] = CreateWindowW(
+                    WC_COMBOBOXW,
+                    L"",
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+                    0,
+                    0,
+                    80,
+                    BatchAttributeComboDropHeight,
+                    hwnd,
+                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdFirstCombo + i)),
+                    instance,
+                    NULL);
+                AddPickerControl(state, state->comboBoxes[i]);
+                if (state->attributeNames != NULL && i < static_cast<int>(state->selectedAttributes.size()))
+                {
+                    PopulateAttributeCombo(state->comboBoxes[i], *state->attributeNames, state->selectedAttributes[static_cast<size_t>(i)]);
+                }
+            }
+            RepositionHeaderCombos(state);
+            for (int i = 0; i < BatchAttributeColumnCount; ++i)
+            {
+                if (state != NULL && state->comboBoxes[i] != NULL)
+                {
+                    BringWindowToTop(state->comboBoxes[i]);
+                }
+            }
+
+            AddPickerControl(state, CreateWindowW(L"BUTTON", L"全选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 14, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSelectAll)), instance, NULL));
+            AddPickerControl(state, CreateWindowW(L"BUTTON", L"全不选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 96, 380, 84, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClearAll)), instance, NULL));
+        AddPickerControl(state, CreateWindowW(L"BUTTON", L"确定", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 860, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdOk)), instance, NULL));
+        AddPickerControl(state, CreateWindowW(L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 946, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCancel)), instance, NULL));
+            return 0;
+        }
+        case WM_NOTIFY:
+        {
+            if (state != NULL)
+            {
+                NMHDR* header = reinterpret_cast<NMHDR*>(lParam);
+                if (header != NULL && header->hwndFrom == ListView_GetHeader(state->listView))
+                {
+                    switch (header->code)
+                    {
+                    case HDN_ENDTRACKW:
+                    case HDN_ENDTRACKA:
+                    case HDN_ITEMCHANGEDW:
+                    case HDN_ITEMCHANGEDA:
+                        RepositionHeaderCombos(state);
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+        case WM_CTLCOLORSTATIC:
+        {
+            if (state != NULL && state->backgroundBrush != NULL)
+            {
+                SetBkColor(reinterpret_cast<HDC>(wParam), state->backgroundColor);
+                SetTextColor(reinterpret_cast<HDC>(wParam), RGB(30, 30, 30));
+                return reinterpret_cast<LRESULT>(state->backgroundBrush);
+            }
+            break;
+        }
+        case WM_COMMAND:
+        {
+            if (state == NULL)
+            {
+                break;
+            }
+
+            const int commandId = LOWORD(wParam);
+            const int notifyCode = HIWORD(wParam);
+            if (commandId >= kIdFirstCombo && commandId < kIdFirstCombo + BatchAttributeColumnCount && notifyCode == CBN_SELCHANGE)
+            {
+                const int comboIndex = commandId - kIdFirstCombo;
+                const int selectedIndex = static_cast<int>(SendMessageW(state->comboBoxes[comboIndex], CB_GETCURSEL, 0, 0));
+                if (state->attributeNames != NULL &&
+                    selectedIndex >= 0 &&
+                    static_cast<size_t>(selectedIndex) < state->attributeNames->size() &&
+                    comboIndex < static_cast<int>(state->selectedAttributes.size()))
+                {
+                    state->selectedAttributes[static_cast<size_t>(comboIndex)] = (*state->attributeNames)[static_cast<size_t>(selectedIndex)];
+                    RefreshBatchPartListAttributeColumns(state);
+                }
+                return 0;
+            }
+
+            if (commandId == kIdSelectAll || commandId == kIdClearAll)
+            {
+                const BOOL checked = commandId == kIdSelectAll ? TRUE : FALSE;
+                const int count = ListView_GetItemCount(state->listView);
+                for (int i = 0; i < count; ++i)
+                {
+                    ListView_SetCheckState(state->listView, i, checked);
+                }
+                return 0;
+            }
+
+            if (commandId == kIdOk)
+            {
+                state->selectedIndices.clear();
+                const int count = ListView_GetItemCount(state->listView);
+                for (int i = 0; i < count; ++i)
+                {
+                    if (ListView_GetCheckState(state->listView, i))
+                    {
+                        state->selectedIndices.push_back(i);
+                    }
+                }
+                SaveBatchPartPickerState(state);
+                state->accepted = true;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+
+            if (commandId == kIdCancel)
+            {
+                state->accepted = false;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        }
+        case WM_SHOWWINDOW:
+            if (wParam)
+            {
+                RepositionHeaderCombos(state);
+                for (int i = 0; state != NULL && i < BatchAttributeColumnCount; ++i)
+                {
+                    if (state->comboBoxes[i] != NULL)
+                    {
+                        BringWindowToTop(state->comboBoxes[i]);
+                        InvalidateRect(state->comboBoxes[i], NULL, TRUE);
+                    }
+                }
+            }
+            break;
+        case WM_HSCROLL:
+        case WM_SIZE:
+            RepositionHeaderCombos(state);
+            break;
+        case WM_CLOSE:
+            if (state != NULL)
+            {
+                state->accepted = false;
+            }
+            DestroyWindow(hwnd);
+            return 0;
+        case WM_DESTROY:
+            if (state != NULL)
+            {
+                if (state->dialogFont != NULL)
+                {
+                    DeleteObject(state->dialogFont);
+                    state->dialogFont = NULL;
+                }
+                if (state->backgroundBrush != NULL)
+                {
+                    DeleteObject(state->backgroundBrush);
+                    state->backgroundBrush = NULL;
+                }
+            }
+            return 0;
+        default:
+            break;
+        }
+
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    bool ShowBatchPartPicker(const std::vector<BatchPartCandidate>& candidates, std::vector<Part*>& selectedParts)
+    {
+        selectedParts.clear();
+        if (candidates.empty())
+        {
+            return false;
+        }
+
+        INITCOMMONCONTROLSEX controls = {};
+        controls.dwSize = sizeof(controls);
+        controls.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES;
+        InitCommonControlsEx(&controls);
+
+        const wchar_t* className = L"ZiDonFenCenBatchPartPicker";
+        HINSTANCE instance = reinterpret_cast<HINSTANCE>(&__ImageBase);
+        WNDCLASSEXW windowClass = {};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.lpfnWndProc = BatchPartPickerWndProc;
+        windowClass.hInstance = instance;
+        windowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+        windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        windowClass.lpszClassName = className;
+        RegisterClassExW(&windowClass);
+
+        std::vector<std::string> attributeNames = BuildBatchPartAttributeNames(candidates);
+        BatchPartPickerPersistedState persistedState = LoadBatchPartPickerState(attributeNames);
+
+        BatchPartPickerState state = {};
+        state.candidates = &candidates;
+        state.attributeNames = &attributeNames;
+        state.persistedState = &persistedState;
+        state.selectedAttributes.resize(BatchAttributeColumnCount);
+        state.selectedAttributes[0] = persistedState.hasAttributes ? persistedState.attributes[0] : AttributeDefaultIfPresent(attributeNames, u8"材料");
+        state.selectedAttributes[1] = persistedState.hasAttributes ? persistedState.attributes[1] : AttributeDefaultIfPresent(attributeNames, u8"数量");
+        state.selectedAttributes[2] = persistedState.hasAttributes ? persistedState.attributes[2] : std::string();
+        state.selectedAttributes[3] = persistedState.hasAttributes ? persistedState.attributes[3] : std::string();
+        state.listView = NULL;
+        for (int i = 0; i < BatchAttributeColumnCount; ++i)
+        {
+            state.comboBoxes[i] = NULL;
+        }
+        state.dialogFont = NULL;
+        state.backgroundBrush = NULL;
+        state.backgroundColor = RGB(236, 236, 236);
+        state.accepted = false;
+
+        HWND parent = reinterpret_cast<HWND>(UF_UI_get_default_parent());
+        HWND hwnd = CreateWindowExW(
+            WS_EX_DLGMODALFRAME,
+            className,
+            L"批量转钣金部件列表",
+            WS_CAPTION | WS_SYSMENU | WS_BORDER,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            BatchPickerWindowWidth,
+            456,
+            parent,
+            NULL,
+            instance,
+            &state);
+        if (hwnd == NULL)
+        {
+            return false;
+        }
+
+        CenterWindowOnParent(hwnd, parent);
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+
+        MSG msg;
+        while (IsWindow(hwnd) && GetMessageW(&msg, NULL, 0, 0) > 0)
+        {
+            if (!IsDialogMessageW(hwnd, &msg))
+            {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+
+        if (!state.accepted || state.selectedIndices.empty())
+        {
+            return false;
+        }
+
+        for (size_t i = 0; i < state.selectedIndices.size(); ++i)
+        {
+            const int index = state.selectedIndices[i];
+            if (index >= 0 && static_cast<size_t>(index) < candidates.size() && candidates[static_cast<size_t>(index)].part != NULL)
+            {
+                selectedParts.push_back(candidates[static_cast<size_t>(index)].part);
+            }
+        }
+
+        return !selectedParts.empty();
+    }
+

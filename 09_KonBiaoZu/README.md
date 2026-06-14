@@ -7,14 +7,14 @@ NX2412 C++ drafting plugin scaffold for hole-style annotation workflows.
 - Target platform: Siemens NX 2412
 - Language: C++
 - Project type: NX Open DLL plugin
-- Rule data: built-in defaults plus editable JSON config
+- Rule data: built-in defaults plus editable INI config
 - Dialog: planned as Block Styler dialog
 
 ## Planned dialog controls
 
 - Enumeration: annotation type
 - Toggle: enable A/B/C edge marker
-- Button: open JSON rule config
+- Button: open INI rule config
 - Select curve block: pick one circular edge in drafting
 
 ## Annotation types
@@ -30,10 +30,10 @@ NX2412 C++ drafting plugin scaffold for hole-style annotation workflows.
 ## Current scaffold behavior
 
 - Launches inside NX with a startup summary
-- Creates `DATA/KonBiaoZuRules.json` from built-in defaults when missing
-- Loads JSON rules directly for lookup
+- Creates `config/KonBiaoZuRules.ini` from built-in defaults when missing
+- Loads INI rules directly for lookup
 - Exposes service classes for future circle grouping and annotation placement
-- Opens the JSON rule config via the default Windows application
+- Opens the INI rule config via the built-in table editor
 
 ## Files
 
@@ -46,4 +46,4 @@ NX2412 C++ drafting plugin scaffold for hole-style annotation workflows.
 2. Add drafting environment validation and circular edge selection.
 3. Group equal-diameter circles inside the active drawing view.
 4. Add A/B/C marker placement and grouped annotation text placement.
-5. Add an in-dialog table editor for `DATA/KonBiaoZuRules.json`.
+5. Keep the shared rule table in `config/KonBiaoZuRules.ini`.

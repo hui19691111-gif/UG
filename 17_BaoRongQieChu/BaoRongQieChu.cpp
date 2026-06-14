@@ -1,4 +1,7 @@
 #include "BaoRongQieChu.hpp"
+#include "../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../../common/ZhihuiDialogMemory.hpp"
+#include "embedded_dialog_resources.h"
 
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/Body.hxx>
@@ -69,6 +72,7 @@
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -103,7 +107,7 @@ std::string GetDialogFilePath()
         }
     }
 
-    return "D:\\UGPluginRepo\\BaoRongQieChu\\BaoRongQieChu.dlx";
+    return "D:\\UG智辉钣金插件\\application\\BaoRongQieChu.dlx";
 }
 
 std::string FormatDouble(double value)
@@ -1168,7 +1172,17 @@ BaoRongQieChuDialog::BaoRongQieChuDialog()
       pendingCutFeatures_(),
       isInternalUpdate_(false)
 {
-    dialog_ = ui_->CreateDialog(GetDialogFilePath().c_str());
+    const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_BAORONGQIECHU_DLX);
+
+    if (dlxPath.empty())
+
+    {
+
+        throw std::runtime_error("BaoRongQieChu dialog resource is missing.");
+
+    }
+
+    dialog_ = ui_->CreateDialog(dlxPath.c_str());
     dialog_->AddInitializeHandler(NXOpen::make_callback(this, &BaoRongQieChuDialog::initialize_cb));
     dialog_->AddDialogShownHandler(NXOpen::make_callback(this, &BaoRongQieChuDialog::dialogShown_cb));
     dialog_->AddUpdateHandler(NXOpen::make_callback(this, &BaoRongQieChuDialog::update_cb));
@@ -1211,6 +1225,7 @@ void BaoRongQieChuDialog::initialize_cb()
     properties->SetLogical("AutomaticProgression", true);
     delete properties;
 
+    LoadDialogMemory();
     SyncOptionalControls();
 }
 
@@ -1237,11 +1252,13 @@ int BaoRongQieChuDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
 int BaoRongQieChuDialog::apply_cb()
 {
+    SaveDialogMemory();
     return ExecuteFromSelection();
 }
 
 int BaoRongQieChuDialog::ok_cb()
 {
+    SaveDialogMemory();
     return ExecuteFromSelection();
 }
 
@@ -1601,6 +1618,26 @@ void BaoRongQieChuDialog::SyncOptionalControls()
         pendingCutFeatures_.clear();
         ClearPendingHoleProfiles();
     }
+}
+
+void BaoRongQieChuDialog::LoadDialogMemory()
+{
+    const wchar_t* fileName = L"BaoRongQieChu_state.ini";
+    zhihui_dialog_memory::LoadLogical(fileName, L"booleanSubtract", booleanToggleBlock_);
+    zhihui_dialog_memory::LoadLogical(fileName, L"removeBlend", removeBlendToggleBlock_);
+    zhihui_dialog_memory::LoadLogical(fileName, L"healRemovedRegion", healRemovedRegionToggleBlock_);
+    zhihui_dialog_memory::LoadDouble(fileName, L"blendRadius", blendRadiusBlock_);
+    zhihui_dialog_memory::LoadDouble(fileName, L"offset", offsetBlock_);
+}
+
+void BaoRongQieChuDialog::SaveDialogMemory()
+{
+    const wchar_t* fileName = L"BaoRongQieChu_state.ini";
+    zhihui_dialog_memory::SaveLogical(fileName, L"booleanSubtract", booleanToggleBlock_);
+    zhihui_dialog_memory::SaveLogical(fileName, L"removeBlend", removeBlendToggleBlock_);
+    zhihui_dialog_memory::SaveLogical(fileName, L"healRemovedRegion", healRemovedRegionToggleBlock_);
+    zhihui_dialog_memory::SaveDouble(fileName, L"blendRadius", blendRadiusBlock_);
+    zhihui_dialog_memory::SaveDouble(fileName, L"offset", offsetBlock_);
 }
 
 void BaoRongQieChuDialog::RememberPendingBlendBody(NXOpen::Body* body)

@@ -61,7 +61,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libufun.lib;libugopenint.lib;libnxopencpp.lib;libnxopenuicpp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libufun.lib;libugopenint.lib;libnxopencpp.lib;libnxopenuicpp.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -87,7 +87,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libufun.lib;libugopenint.lib;libnxopencpp.lib;libnxopenuicpp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libufun.lib;libugopenint.lib;libnxopencpp.lib;libnxopenuicpp.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>
@@ -99,6 +99,9 @@
     <ClCompile Include="src\TubeSameBodySearch.cpp" />
     <None Include="XuanZeGuanJian.dlx" />
     <None Include="XuanZeGuanJian.bmp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="embedded_dialog_resources.rc" />
   </ItemGroup>
   <Target Name="CopyDlxToOutput" AfterTargets="Build">
     <Copy SourceFiles="$(ProjectDir)XuanZeGuanJian.dlx;$(ProjectDir)XuanZeGuanJian.bmp" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />

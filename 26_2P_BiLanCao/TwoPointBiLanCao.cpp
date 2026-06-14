@@ -1,10 +1,15 @@
 #include "TwoPointBiLanCao.hpp"
+#include "../../common/ZhihuiDialogMemory.hpp"
+#include "../../common/ZhihuiEmbeddedDialog.hpp"
+#include "embedded_dialog_resources.h"
 
 #ifdef CreateDialog
 #undef CreateDialog
 #endif
 
 #include <NXOpen/BlockStyler_PropertyList.hxx>
+#include <stdexcept>
+#include <string>
 #include <NXOpen/BlockStyler_SelectObject.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
@@ -411,7 +416,17 @@ TwoPointBiLanCaoDialog::TwoPointBiLanCaoDialog()
       liveSlotToolBodyTag_(NULL_TAG),
       slotCreatedOnSelection_(false)
 {
-    dialog_ = ui_->CreateDialog(GetDialogFilePath().c_str());
+    const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_TWOPOINTBILANCAO_DLX);
+
+    if (dlxPath.empty())
+
+    {
+
+        throw std::runtime_error("TwoPointBiLanCao dialog resource is missing.");
+
+    }
+
+    dialog_ = ui_->CreateDialog(dlxPath.c_str());
     dialog_->AddInitializeHandler(NXOpen::make_callback(this, &TwoPointBiLanCaoDialog::initialize_cb));
     dialog_->AddDialogShownHandler(NXOpen::make_callback(this, &TwoPointBiLanCaoDialog::dialogShown_cb));
     dialog_->AddEnableOKButtonHandler(NXOpen::make_callback(this, &TwoPointBiLanCaoDialog::enable_ok_cb));
@@ -465,6 +480,7 @@ void TwoPointBiLanCaoDialog::initialize_cb()
 
     ConfigurePointSelectionsForCurrentMode();
 
+    LoadDialogMemory();
     SetDouble(slotClearanceBlock_, std::max(0.1, ReadDouble(slotClearanceBlock_, 0.5)));
     SetDouble(bendRadiusBlock_, std::max(0.0, ReadDouble(bendRadiusBlock_, 1.0)));
 }
@@ -616,11 +632,13 @@ int TwoPointBiLanCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
 int TwoPointBiLanCaoDialog::apply_cb()
 {
+    SaveDialogMemory();
     return Execute();
 }
 
 int TwoPointBiLanCaoDialog::ok_cb()
 {
+    SaveDialogMemory();
     return Execute();
 }
 
@@ -4547,6 +4565,31 @@ void TwoPointBiLanCaoDialog::CacheStartPointOwner()
     {
         cachedTargetBody_ = FindBodyBySmartPointParents(cachedStartSelectedObject_, nullptr, nullptr, nullptr);
     }
+}
+
+void TwoPointBiLanCaoDialog::LoadDialogMemory()
+{
+    const wchar_t* fileName = L"TwoPointBiLanCao_state.ini";
+    zhihui_dialog_memory::LoadDouble(fileName, L"slotClearance", slotClearanceBlock_);
+    zhihui_dialog_memory::LoadDouble(fileName, L"bendRadius", bendRadiusBlock_);
+    zhihui_dialog_memory::LoadLogical(fileName, L"chamferEdge", chamferEdgeToggleBlock_);
+    zhihui_dialog_memory::LoadLogical(fileName, L"gapOnly", gapOnlyToggleBlock_);
+    zhihui_dialog_memory::LoadEnum(fileName, L"wrapCornerMode", wrapCornerModeBlock_);
+    if (ReadLogical(gapOnlyToggleBlock_, false) && ReadLogical(chamferEdgeToggleBlock_, false))
+    {
+        SetLogical(chamferEdgeToggleBlock_, false);
+    }
+    ConfigurePointSelectionsForCurrentMode();
+}
+
+void TwoPointBiLanCaoDialog::SaveDialogMemory()
+{
+    const wchar_t* fileName = L"TwoPointBiLanCao_state.ini";
+    zhihui_dialog_memory::SaveDouble(fileName, L"slotClearance", slotClearanceBlock_);
+    zhihui_dialog_memory::SaveDouble(fileName, L"bendRadius", bendRadiusBlock_);
+    zhihui_dialog_memory::SaveLogical(fileName, L"chamferEdge", chamferEdgeToggleBlock_);
+    zhihui_dialog_memory::SaveLogical(fileName, L"gapOnly", gapOnlyToggleBlock_);
+    zhihui_dialog_memory::SaveEnum(fileName, L"wrapCornerMode", wrapCornerModeBlock_);
 }
 
 double TwoPointBiLanCaoDialog::ReadDouble(NXOpen::BlockStyler::UIBlock* block, double fallback) const

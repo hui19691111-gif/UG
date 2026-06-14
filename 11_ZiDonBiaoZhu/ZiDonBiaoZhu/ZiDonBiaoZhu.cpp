@@ -35,6 +35,8 @@
 //These includes are needed for the following template code
 //------------------------------------------------------------------------------
 #include "ZiDonBiaoZhu.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 #include "ZiDonBiaoZhuDimension.hpp"
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
@@ -392,8 +394,19 @@ ZiDonBiaoZhu::ZiDonBiaoZhu()
         // Initialize the NX Open C++ API environment
         ZiDonBiaoZhu::theSession = NXOpen::Session::GetSession();
         ZiDonBiaoZhu::theUI = UI::GetUI();
-        theDlxFileName = "ZiDonBiaoZhu.dlx";
-        theDialog = ZiDonBiaoZhu::theUI->CreateDialog(theDlxFileName);
+        const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_ZIDONBIAOZHU_DLX);
+
+        if (dlxPath.empty())
+
+        {
+
+            throw std::runtime_error("ZiDonBiaoZhu dialog resource is missing.");
+
+        }
+
+        theDlxFileName = NULL;
+
+        theDialog = ZiDonBiaoZhu::theUI->CreateDialog(dlxPath.c_str());
         // Registration of callback functions
         theDialog->AddApplyHandler(make_callback(this, &ZiDonBiaoZhu::apply_cb));
         theDialog->AddOkHandler(make_callback(this, &ZiDonBiaoZhu::ok_cb));
@@ -448,6 +461,8 @@ ZiDonBiaoZhu::~ZiDonBiaoZhu()
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <stdexcept>
+#include <string>
 
 namespace zhihui_license_guard
 {
@@ -518,10 +533,6 @@ void ShowLicenseDeniedMessage(const wchar_t* title, const wchar_t* message)
 
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     HMODULE module = LoadProtectedLicenseGate();
     if (module == NULL)

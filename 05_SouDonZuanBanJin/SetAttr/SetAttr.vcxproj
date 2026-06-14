@@ -101,7 +101,7 @@
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <AdditionalIncludeDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
-      <AdditionalOptions>/d1scalableinclude- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/d1scalableinclude- /utf-8 %(AdditionalOptions)</AdditionalOptions>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <ConformanceMode>Default</ConformanceMode>
     </ClCompile>
@@ -126,7 +126,7 @@
       <DebugInformationFormat>None</DebugInformationFormat>
       <BufferSecurityCheck>true</BufferSecurityCheck>
       <PreprocessorDefinitions>ZH_PROTECTED_BUILD=1;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>/Gw %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Gw /utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -154,7 +154,7 @@
       <DebugInformationFormat>None</DebugInformationFormat>
       <AdditionalIncludeDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
-      <AdditionalOptions>/Gw /d1scalableinclude- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Gw /d1scalableinclude- /utf-8 %(AdditionalOptions)</AdditionalOptions>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <ConformanceMode>Default</ConformanceMode>
       <BufferSecurityCheck>true</BufferSecurityCheck>
@@ -187,6 +187,13 @@
   <ItemGroup>
     <None Include="..\PiLianZuanBanJinRulesTable.dlx" />
     <None Include="..\config\PiLianZuanBanJin_bend_factor_rules.ini" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ResourceCompile Include="..\embedded_dialog_resources.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\embedded_dialog_resources.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

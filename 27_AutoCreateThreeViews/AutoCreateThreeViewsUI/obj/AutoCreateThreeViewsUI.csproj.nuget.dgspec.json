@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "G:\\UG智辉钣金插件_源码精简_20260602\\features\\27_AutoCreateThreeViews\\AutoCreateThreeViewsUI\\AutoCreateThreeViewsUI.csproj": {}
+    "G:\\UG智辉钣金插件_源码精简_20260605_最终精简\\features\\27_AutoCreateThreeViews\\AutoCreateThreeViewsUI\\AutoCreateThreeViewsUI.csproj": {}
   },
   "projects": {
-    "G:\\UG智辉钣金插件_源码精简_20260602\\features\\27_AutoCreateThreeViews\\AutoCreateThreeViewsUI\\AutoCreateThreeViewsUI.csproj": {
+    "G:\\UG智辉钣金插件_源码精简_20260605_最终精简\\features\\27_AutoCreateThreeViews\\AutoCreateThreeViewsUI\\AutoCreateThreeViewsUI.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "G:\\UG智辉钣金插件_源码精简_20260602\\features\\27_AutoCreateThreeViews\\AutoCreateThreeViewsUI\\AutoCreateThreeViewsUI.csproj",
+        "projectUniqueName": "G:\\UG智辉钣金插件_源码精简_20260605_最终精简\\features\\27_AutoCreateThreeViews\\AutoCreateThreeViewsUI\\AutoCreateThreeViewsUI.csproj",
         "projectName": "AutoCreateThreeViewsUI",
-        "projectPath": "G:\\UG智辉钣金插件_源码精简_20260602\\features\\27_AutoCreateThreeViews\\AutoCreateThreeViewsUI\\AutoCreateThreeViewsUI.csproj",
+        "projectPath": "G:\\UG智辉钣金插件_源码精简_20260605_最终精简\\features\\27_AutoCreateThreeViews\\AutoCreateThreeViewsUI\\AutoCreateThreeViewsUI.csproj",
         "packagesPath": "C:\\Users\\Administrator\\.nuget\\packages\\",
-        "outputPath": "G:\\UG智辉钣金插件_源码精简_20260602\\features\\27_AutoCreateThreeViews\\AutoCreateThreeViewsUI\\obj\\",
+        "outputPath": "G:\\UG智辉钣金插件_源码精简_20260605_最终精简\\features\\27_AutoCreateThreeViews\\AutoCreateThreeViewsUI\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\Administrator\\AppData\\Roaming\\NuGet\\NuGet.Config"
@@ -43,6 +43,12 @@
         "net8.0-windows7.0": {
           "targetAlias": "net8.0-windows",
           "dependencies": {
+            "Microsoft.NET.ILLink.Tasks": {
+              "suppressParent": "All",
+              "target": "Package",
+              "version": "[8.0.26, )",
+              "autoReferenced": true
+            },
             "System.Text.Encoding.CodePages": {
               "target": "Package",
               "version": "[8.0.0, )"

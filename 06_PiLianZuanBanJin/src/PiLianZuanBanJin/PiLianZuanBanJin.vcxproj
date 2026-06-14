@@ -74,7 +74,7 @@
       <TargetMachine>MachineX64</TargetMachine>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libnxopencpp.lib;libnxopencpp_features.lib;libnxopencpp_sheetmetal.lib;libnxopencpp_display.lib;libnxopencpp_preferences.lib;libnxopencpp_assemblies.lib;libnxopenuicpp.lib;libugopenint.lib;libufun.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libnxopencpp.lib;libnxopencpp_features.lib;libnxopencpp_sheetmetal.lib;libnxopencpp_display.lib;libnxopencpp_preferences.lib;libnxopencpp_assemblies.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_tooling.lib;libnxopenuicpp.lib;libugopenint.lib;libufun.lib;Comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -102,7 +102,7 @@
       <TargetMachine>MachineX64</TargetMachine>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libnxopencpp.lib;libnxopencpp_features.lib;libnxopencpp_sheetmetal.lib;libnxopencpp_display.lib;libnxopencpp_preferences.lib;libnxopencpp_assemblies.lib;libnxopenuicpp.lib;libugopenint.lib;libufun.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libnxopencpp.lib;libnxopencpp_features.lib;libnxopencpp_sheetmetal.lib;libnxopencpp_display.lib;libnxopencpp_preferences.lib;libnxopencpp_assemblies.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_tooling.lib;libnxopenuicpp.lib;libugopenint.lib;libufun.lib;Comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>
@@ -119,6 +119,13 @@
     <None Include="PiLianZuanBanJin.dlx" />
     <None Include="PiLianZuanBanJinRulesTable.dlx" />
     <None Include="..\..\config\PiLianZuanBanJin_bend_factor_rules.ini" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ResourceCompile Include="..\..\embedded_dialog_resources.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\embedded_dialog_resources.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

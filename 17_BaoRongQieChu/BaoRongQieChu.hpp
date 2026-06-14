@@ -50,6 +50,8 @@ private:
     void ClearSelection();
     void ShowError(const std::string& message) const;
     void SyncOptionalControls();
+    void LoadDialogMemory();
+    void SaveDialogMemory();
     void RememberPendingBlendBody(NXOpen::Body* body);
     void RememberPendingCutFeature(NXOpen::Features::BooleanFeature* feature);
     void CapturePendingHoleProfiles(const std::vector<NXOpen::TaggedObject*>& selectedObjects);

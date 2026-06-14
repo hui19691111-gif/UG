@@ -33,6 +33,7 @@
 #include <NXOpen/BlockStyler_SelectObject.hxx>
 #include <NXOpen/BlockStyler_Group.hxx>
 #include <NXOpen/BlockStyler_StringBlock.hxx>
+#include <NXOpen/BlockStyler_Enumeration.hxx>
 #include <NXOpen/BlockStyler_Toggle.hxx>
 
 #include <uf.h>
@@ -135,7 +136,7 @@ private:
     NXOpen::BlockStyler::SelectObject* selection0;// Block type: Selection
     NXOpen::BlockStyler::Group* group4;// Block type: Group
     NXOpen::BlockStyler::StringBlock* string0;// Block type: String
-    NXOpen::BlockStyler::StringBlock* string04;// Block type: String
+    NXOpen::BlockStyler::Enumeration* string04;// Block type: Enumeration
     NXOpen::BlockStyler::StringBlock* string05;// Block type: String
     NXOpen::BlockStyler::Toggle* toggle02;// Block type: Toggle
     NXOpen::BlockStyler::Group* group2;// Block type: Group

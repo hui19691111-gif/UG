@@ -35,7 +35,11 @@
 //These includes are needed for the following template code
 //------------------------------------------------------------------------------
 #include "MenBanSiBian.hpp"
+#include "../../../common/ZhihuiDialogMemory.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 #include <algorithm>
+#include <stdexcept>
 #include <cstdio>
 #include <limits>
 #include <string>
@@ -59,8 +63,19 @@ MenBanSiBian::MenBanSiBian()
         // Initialize the NX Open C++ API environment
         MenBanSiBian::theSession = NXOpen::Session::GetSession();
         MenBanSiBian::theUI = UI::GetUI();
-        theDlxFileName = "MenBanSiBian.dlx";
-        theDialog = MenBanSiBian::theUI->CreateDialog(theDlxFileName);
+        const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_MENBANSIBIAN_DLX);
+
+        if (dlxPath.empty())
+
+        {
+
+            throw std::runtime_error("MenBanSiBian dialog resource is missing.");
+
+        }
+
+        theDlxFileName = NULL;
+
+        theDialog = MenBanSiBian::theUI->CreateDialog(dlxPath.c_str());
         // Registration of callback functions
         theDialog->AddApplyHandler(make_callback(this, &MenBanSiBian::apply_cb));
         theDialog->AddOkHandler(make_callback(this, &MenBanSiBian::ok_cb));
@@ -163,7 +178,7 @@ HMODULE LoadProtectedLicenseGate()
         }
     }
 
-    HMODULE fixedModule = LoadLibraryW(L"D:\\UGÖÇ»ÔîÓ½ð²å¼þ\\application\\ZhaoFuNxLicenseGate.dll");
+    HMODULE fixedModule = LoadLibraryW(L"D:\\UG\u667A\u8F89\u94A3\u91D1\u63D2\u4EF6\\application\\ZhaoFuNxLicenseGate.dll");
     if (fixedModule != NULL)
     {
         return fixedModule;
@@ -290,10 +305,6 @@ bool ValidateOwnModuleChecksum()
 #endif
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     
     if (!ValidateOwnModuleChecksum())
@@ -427,6 +438,18 @@ static vector<tag_t> CollectCoordinateSystemTags(NXOpen::Part* part);
 static void DeleteNewCoordinateSystems(NXOpen::Part* part, const vector<tag_t>& baselineTags);
 static void RestoreWcsAndDeleteTemporary(NXOpen::Part* part, NXOpen::CartesianCoordinateSystem*& previousWcs, bool& wcsChanged, const vector<tag_t>& baselineTags);
 static double GetDoubleBlockValue(NXOpen::BlockStyler::DoubleBlock* block, double defaultValue);
+static void LoadMenBanSiBianDialogMemory(
+    NXOpen::BlockStyler::Enumeration* enumCreateMode,
+    NXOpen::BlockStyler::Enumeration* enum0,
+    NXOpen::BlockStyler::Enumeration* enum01,
+    NXOpen::BlockStyler::DoubleBlock* bendInnerR,
+    NXOpen::BlockStyler::DoubleBlock* tearGap);
+static void SaveMenBanSiBianDialogMemory(
+    NXOpen::BlockStyler::Enumeration* enumCreateMode,
+    NXOpen::BlockStyler::Enumeration* enum0,
+    NXOpen::BlockStyler::Enumeration* enum01,
+    NXOpen::BlockStyler::DoubleBlock* bendInnerR,
+    NXOpen::BlockStyler::DoubleBlock* tearGap);
 
 void MenBanSiBian::initialize_cb()
 {
@@ -480,6 +503,7 @@ void MenBanSiBian::initialize_cb()
         {
             tearGap = NULL;
         }
+        LoadMenBanSiBianDialogMemory(enumCreateMode, enum0, enum01, bendInnerR, tearGap);
         phase = "initialize.read create mode";
         const bool singleCornerMode = IsSingleCornerMode(enumCreateMode);
         phase = "initialize.set selection0 filter";
@@ -495,7 +519,7 @@ void MenBanSiBian::initialize_cb()
         ShowBlockStylerError(ex);
     }
 }
-//³õÊ¼»¯
+//ï¿½ï¿½Ê¼ï¿½ï¿½
 NXOpen::Session* theSession = NXOpen::Session::GetSession();
 NXOpen::Part* workPart(theSession->Parts()->Work());
 NXOpen::Part* displayPart(theSession->Parts()->Display());
@@ -565,6 +589,36 @@ static double GetDoubleBlockValue(NXOpen::BlockStyler::DoubleBlock* block, doubl
         }
         return defaultValue;
     }
+}
+
+static void LoadMenBanSiBianDialogMemory(
+    NXOpen::BlockStyler::Enumeration* enumCreateMode,
+    NXOpen::BlockStyler::Enumeration* enum0,
+    NXOpen::BlockStyler::Enumeration* enum01,
+    NXOpen::BlockStyler::DoubleBlock* bendInnerR,
+    NXOpen::BlockStyler::DoubleBlock* tearGap)
+{
+    const wchar_t* fileName = L"MenBanSiBian_state.ini";
+    zhihui_dialog_memory::LoadEnum(fileName, L"createMode", enumCreateMode);
+    zhihui_dialog_memory::LoadEnum(fileName, L"jointMode", enum0);
+    zhihui_dialog_memory::LoadEnum(fileName, L"cornerMode", enum01);
+    zhihui_dialog_memory::LoadDouble(fileName, L"bendInnerR", bendInnerR);
+    zhihui_dialog_memory::LoadDouble(fileName, L"tearGap", tearGap);
+}
+
+static void SaveMenBanSiBianDialogMemory(
+    NXOpen::BlockStyler::Enumeration* enumCreateMode,
+    NXOpen::BlockStyler::Enumeration* enum0,
+    NXOpen::BlockStyler::Enumeration* enum01,
+    NXOpen::BlockStyler::DoubleBlock* bendInnerR,
+    NXOpen::BlockStyler::DoubleBlock* tearGap)
+{
+    const wchar_t* fileName = L"MenBanSiBian_state.ini";
+    zhihui_dialog_memory::SaveEnum(fileName, L"createMode", enumCreateMode);
+    zhihui_dialog_memory::SaveEnum(fileName, L"jointMode", enum0);
+    zhihui_dialog_memory::SaveEnum(fileName, L"cornerMode", enum01);
+    zhihui_dialog_memory::SaveDouble(fileName, L"bendInnerR", bendInnerR);
+    zhihui_dialog_memory::SaveDouble(fileName, L"tearGap", tearGap);
 }
 
 static void ShowBlockStylerError(const exception& ex)
@@ -751,13 +805,44 @@ static bool IsSingleCornerMode(NXOpen::BlockStyler::Enumeration* createModeBlock
 
         const char* utf8Text = createModeValue.GetUTF8Text();
         const char* localeText = createModeValue.GetLocaleText();
-        return (utf8Text != NULL && strstr(utf8Text, "µ¥") != NULL) ||
-            (localeText != NULL && strstr(localeText, "µ¥") != NULL);
+        return (utf8Text != NULL && strstr(utf8Text, "ï¿½ï¿½") != NULL) ||
+            (localeText != NULL && strstr(localeText, "ï¿½ï¿½") != NULL);
     }
     catch (exception&)
     {
         return false;
     }
+}
+
+static int GetEnumerationValue(NXOpen::BlockStyler::Enumeration* enumBlock, int defaultValue)
+{
+    if (enumBlock == NULL)
+    {
+        return defaultValue;
+    }
+
+    try
+    {
+        PropertyList* props = enumBlock->GetProperties();
+        int value = props->GetEnum("Value");
+        delete props;
+        props = NULL;
+        return value;
+    }
+    catch (exception&)
+    {
+        return defaultValue;
+    }
+}
+
+static bool IsDiagonalJointMode(NXOpen::BlockStyler::Enumeration* enumBlock)
+{
+    return GetEnumerationValue(enumBlock, 0) == 0;
+}
+
+static bool IsShortWrapLongMode(NXOpen::BlockStyler::Enumeration* enumBlock)
+{
+    return GetEnumerationValue(enumBlock, 0) == 1;
 }
 
 static NXOpen::Edge* GetEdgeFromTaggedObject(NXOpen::TaggedObject* taggedObject)
@@ -2676,17 +2761,17 @@ static const char* GetCornerTypeCreateSummary(int cornerType)
     switch (cornerType)
     {
     case 1:
-        return "´´½¨½Ç±ß°üÈÝÌå + ¶¥µã/¶Ô½Ç»òÖ±½Ç²¹³ä(°´°ü±ß·½Ê½)";
+        return "ï¿½ï¿½ï¿½ï¿½ï¿½Ç±ß°ï¿½ï¿½ï¿½ï¿½ï¿½ + ï¿½ï¿½ï¿½ï¿½/ï¿½Ô½Ç»ï¿½Ö±ï¿½Ç²ï¿½ï¿½ï¿½(ï¿½ï¿½ï¿½ï¿½ï¿½ß·ï¿½Ê½)";
     case 2:
-        return "´´½¨½Ç±ß°üÈÝÌå + ¶¥µã°üÈÝÌå";
+        return "ï¿½ï¿½ï¿½ï¿½ï¿½Ç±ß°ï¿½ï¿½ï¿½ï¿½ï¿½ + ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½";
     case 3:
-        return "µ±Ç°ÔÝÍ££¬²»°´type3´´½¨";
+        return "ï¿½ï¿½Ç°ï¿½ï¿½Í£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½type3ï¿½ï¿½ï¿½ï¿½";
     case 4:
-        return "´´½¨1¸ö¹á´©½Ç±ß°üÈÝÌå + ¶¥µã°üÈÝÌå£¬²»´´½¨µ¥±ß°üÈÝÌå";
+        return "ï¿½ï¿½ï¿½ï¿½1ï¿½ï¿½ï¿½á´©ï¿½Ç±ß°ï¿½ï¿½ï¿½ï¿½ï¿½ + ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½å£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß°ï¿½ï¿½ï¿½ï¿½ï¿½";
     case 5:
-        return "°´°ü±ß·½Ê½´´½¨1¸ö¹á´©½Ç±ß°üÈÝÌå + ¶¥µã°üÈÝÌå£¬²»´´½¨µ¥±ß/¶Ô½Ç/Ö±½Ç²¹³ä";
+        return "ï¿½ï¿½ï¿½ï¿½ï¿½ß·ï¿½Ê½ï¿½ï¿½ï¿½ï¿½1ï¿½ï¿½ï¿½á´©ï¿½Ç±ß°ï¿½ï¿½ï¿½ï¿½ï¿½ + ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½å£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½Ô½ï¿½/Ö±ï¿½Ç²ï¿½ï¿½ï¿½";
     default:
-        return "²»´´½¨°üÈÝÌå";
+        return "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½";
     }
 }
 
@@ -2765,6 +2850,7 @@ int MenBanSiBian::apply_cb()
     int errorCode = 0;
     try
     {
+        SaveMenBanSiBianDialogMemory(enumCreateMode, enum0, enum01, bendInnerR, tearGap);
         AcceptTrackedObjects();
     }
     catch(exception& ex)
@@ -2866,7 +2952,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 if (!IsStraightEdge(selectedSingleCornerEdge))
                 {
                     ClearSelection(activeSelection);
-                    MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, "ÇëÑ¡ÔñÖ±Ïß±ß¡£");
+                    MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, "ï¿½ï¿½Ñ¡ï¿½ï¿½Ö±ï¿½ß±ß¡ï¿½");
                     UF_terminate();
                     ufInitialized = false;
                     return 0;
@@ -2882,7 +2968,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 if (face1 == NULL)
                 {
                     ClearSelection(activeSelection);
-                    MenBanSiBian::theUI->NXMessageBox()->Show("µ¥½ÇÇÐ½Ç", NXOpen::NXMessageBox::DialogTypeWarning, "ÒÑÕÒµ½±ßËùÔÚÊµÌå£¬µ«Ã»ÓÐÕÒµ½´¹Ö±Ñ¡±ßÇÒµ½Ñ¡±ß¾àÀëÎª0µÄ»ù×¼Æ½Ãæ¡£");
+                    MenBanSiBian::theUI->NXMessageBox()->Show("ï¿½ï¿½ï¿½ï¿½ï¿½Ð½ï¿½", NXOpen::NXMessageBox::DialogTypeWarning, "ï¿½ï¿½ï¿½Òµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½å£¬ï¿½ï¿½Ã»ï¿½ï¿½ï¿½Òµï¿½ï¿½ï¿½Ö±Ñ¡ï¿½ï¿½ï¿½Òµï¿½Ñ¡ï¿½ß¾ï¿½ï¿½ï¿½Îª0ï¿½Ä»ï¿½×¼Æ½ï¿½æ¡£");
                     UF_terminate();
                     ufInitialized = false;
                     return 0;
@@ -2929,7 +3015,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 {
                     ClearSelection(selection0);
                 }
-                MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, "ËùÑ¡Ãæ²»ÊÇÆ½Ãæ»òÎÞ·¨È¡µÃÍâÂÖÀª£¬ÇëÖØÐÂÑ¡Ôñ¡£");
+                MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, "ï¿½ï¿½Ñ¡ï¿½æ²»ï¿½ï¿½Æ½ï¿½ï¿½ï¿½ï¿½Þ·ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½");
                 UF_terminate();
                 ufInitialized = false;
                 return 0;
@@ -2946,7 +3032,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 {
                     RestoreWcsAndDeleteTemporary(workPart, previousWcs, wcsChanged, baselineCoordinateSystems);
                     ClearSelection(selectionEdge != NULL ? selectionEdge : selection0);
-                    MenBanSiBian::theUI->NXMessageBox()->Show("µ¥½ÇÇÐ½Ç", NXOpen::NXMessageBox::DialogTypeWarning, "Î´ÄÜ¸ù¾Ýµã»÷¶ËµãÕÒµ½Á½Ìõ»¥Ïà´¹Ö±µÄ»ùÃæ±ß£¬ÇëµãÑ¡¿¿½ü»ùÃæµÄ½Ç±ß¶Ëµã¡£");
+                    MenBanSiBian::theUI->NXMessageBox()->Show("ï¿½ï¿½ï¿½ï¿½ï¿½Ð½ï¿½", NXOpen::NXMessageBox::DialogTypeWarning, "Î´ï¿½Ü¸ï¿½ï¿½Ýµï¿½ï¿½ï¿½Ëµï¿½ï¿½Òµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½à´¹Ö±ï¿½Ä»ï¿½ï¿½ï¿½ß£ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä½Ç±ß¶Ëµã¡£");
                     UF_terminate();
                     ufInitialized = false;
                     return 0;
@@ -3024,7 +3110,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
             double banHouBaseArea = 0.0;
             double banHouMatchedArea = 0.0;
             int banHouQualifiedFaceCount = 0;
-            std::string banHouSource = "Æ½ÐÐÃæÕæÊµÃæ»ý/»ùÃæÕæÊµÃæ»ý>0.5ºóÈ¡×îÐ¡¾àÀë";
+            std::string banHouSource = "Æ½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½ï¿½ï¿½>0.5ï¿½ï¿½È¡ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½";
             bool usedParallelLargeFaceThickness = GetParallelLargeFaceThickness(
                 face1,
                 Vface,
@@ -3036,12 +3122,12 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
             double Mindistance1 = std::numeric_limits<double>::max();
             if (!usedParallelLargeFaceThickness)
             {
-                banHouSource = "¾É²â¾à¶µµ×(sqrt(distance^2/3))";
+                banHouSource = "ï¿½É²ï¿½à¶µï¿½ï¿½(sqrt(distance^2/3))";
                 for (size_t i = 0; i < Vface.size(); i++)
                 {
                     MeasureDistance* measureDistance1;
                     measureDistance1 = workPart->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, Vface[i], point_1);
-                    double distance1 = measureDistance1->Value();//»ñÈ¡²âÁ¿µÄÖµ
+                    double distance1 = measureDistance1->Value();//ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Öµ
                     delete measureDistance1;
                     measureDistance1 = NULL;
                     if (Mindistance1> distance1&& distance1>0.01)
@@ -3060,7 +3146,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     ufInitialized = false;
                     return 0;
                 }
-                BanHou = sqrt(pow(Mindistance1, 2)/3);//¹´¹É¶¨Àí
+                BanHou = sqrt(pow(Mindistance1, 2)/3);//ï¿½ï¿½ï¿½É¶ï¿½ï¿½ï¿½
             }
             double bendInnerRValue = GetDoubleBlockValue(bendInnerR, 0.2);
             if (bendInnerRValue < 0.0)
@@ -3134,7 +3220,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     createdFaceXform = NULL;
                     UF_terminate();
                     ufInitialized = false;
-                    MenBanSiBian::theUI->NXMessageBox()->Show("µ¥½ÇÇÐ½Ç", NXOpen::NXMessageBox::DialogTypeWarning, "ÎÞ·¨¸ù¾Ýµã»÷Î»ÖÃÈ·¶¨½Ç±ß¶Ëµã¡£");
+                    MenBanSiBian::theUI->NXMessageBox()->Show("ï¿½ï¿½ï¿½ï¿½ï¿½Ð½ï¿½", NXOpen::NXMessageBox::DialogTypeWarning, "ï¿½Þ·ï¿½ï¿½ï¿½ï¿½Ýµï¿½ï¿½Î»ï¿½ï¿½È·ï¿½ï¿½ï¿½Ç±ß¶Ëµã¡£");
                     return 0;
                 }
 
@@ -3149,7 +3235,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     createdFaceXform = NULL;
                     UF_terminate();
                     ufInitialized = false;
-                    MenBanSiBian::theUI->NXMessageBox()->Show("µ¥½ÇÇÐ½Ç", NXOpen::NXMessageBox::DialogTypeWarning, "µã»÷¶ËµãÎ´ÂäÔÚÐÂ»ùÃæ¸½½ü£¬ÇëµãÑ¡¿¿½ü»ùÃæµÄ½Ç±ß¶Ëµã¡£");
+                    MenBanSiBian::theUI->NXMessageBox()->Show("ï¿½ï¿½ï¿½ï¿½ï¿½Ð½ï¿½", NXOpen::NXMessageBox::DialogTypeWarning, "ï¿½ï¿½ï¿½ï¿½Ëµï¿½Î´ï¿½ï¿½ï¿½ï¿½ï¿½Â»ï¿½ï¿½æ¸½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä½Ç±ß¶Ëµã¡£");
                     return 0;
                 }
 
@@ -3219,17 +3305,17 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 }
 
                 double edgeLengthDiff = fabs(JiaoEdge->GetLength() - ReiJiaoEdge->GetLength());
-                std::string cornerTypeSource = "Î´ÃüÖÐÈÎºÎ´´½¨Ö§Â·";
+                std::string cornerTypeSource = "Î´ï¿½ï¿½ï¿½ï¿½ï¿½ÎºÎ´ï¿½ï¿½ï¿½Ö§Â·";
                 if (selectedFaceIsMaxBoundary && fabs(edgeLengthDiff - BanHou * 2) < 0.001)
                 {
                     cornerType = 1;
-                    cornerTypeSource = "×î´óÍâÂÖÀª ÇÒ ½Ç±ß-½ÇÄÚ±ß=2±¶°åºñ";
+                    cornerTypeSource = "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½Ç±ï¿½-ï¿½ï¿½ï¿½Ú±ï¿½=2ï¿½ï¿½ï¿½ï¿½ï¿½";
 
                 }
                 if (selectedFaceIsMaxBoundary && fabs(edgeLengthDiff - BanHou) < 0.001)
                 {
                     cornerType = 2;
-                    cornerTypeSource = "×î´óÍâÂÖÀª ÇÒ ½Ç±ß-½ÇÄÚ±ß=1±¶°åºñ";
+                    cornerTypeSource = "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½Ç±ï¿½-ï¿½ï¿½ï¿½Ú±ï¿½=1ï¿½ï¿½ï¿½ï¿½ï¿½";
 
                 }
                 int connectedThicknessDirection = 0;
@@ -3269,13 +3355,13 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     if (connectedThicknessDirection != 0)
                     {
                         cornerType = 4;
-                        cornerTypeSource = cornerHasXSkirt ? "È¹±ßÖ§Â·: ¸Ã½ÇÖ»ÓÐX²àÏàÁÚÈ¹±ß" : "È¹±ßÖ§Â·: ¸Ã½ÇÖ»ÓÐY²àÏàÁÚÈ¹±ß";
+                        cornerTypeSource = cornerHasXSkirt ? "È¹ï¿½ï¿½Ö§Â·: ï¿½Ã½ï¿½Ö»ï¿½ï¿½Xï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¹ï¿½ï¿½" : "È¹ï¿½ï¿½Ö§Â·: ï¿½Ã½ï¿½Ö»ï¿½ï¿½Yï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¹ï¿½ï¿½";
                     }
                 }
                 else if (cornerSkirtCount == 2)
                 {
                     cornerType = 5;
-                    cornerTypeSource = "È¹±ßÖ§Â·: ¸Ã½ÇX/YÁ½²à¶¼ÓÐÏàÁÚÈ¹±ß";
+                    cornerTypeSource = "È¹ï¿½ï¿½Ö§Â·: ï¿½Ã½ï¿½X/Yï¿½ï¿½ï¿½à¶¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¹ï¿½ï¿½";
                 }
                 else if (selectedFaceIsMaxBoundary && JiaoEdge->GetLength() > ReiJiaoEdge->GetLength() + 0.001)
                 {
@@ -3283,7 +3369,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     if (connectedThicknessDirection != 0 && cornerType == 0)
                     {
                         cornerType = 4;
-                        cornerTypeSource = "ÐÂÔöÖ§Â·: ½Ç±ß´óÓÚ½ÇÄÚ±ß£¬½Ç±ßÁíÒ»¶ËÁ¬½Ó°åºñ±ß";
+                        cornerTypeSource = "ï¿½ï¿½ï¿½ï¿½Ö§Â·: ï¿½Ç±ß´ï¿½ï¿½Ú½ï¿½ï¿½Ú±ß£ï¿½ï¿½Ç±ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½Ó°ï¿½ï¿½ï¿½";
                     }
                 }
                 if (cornerType!=0)
@@ -3291,14 +3377,10 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     double output_point1[3];
                     double point1[3];
 
-                    //°ü±ß·½Ê½
-                    PropertyList* enum01Props = enum01->GetProperties();
-                    NXString Theenum01 = enum01Props->GetEnumAsString("Value");
-                    delete enum01Props;
-                    enum01Props = NULL;
-                    const char* BaoBian = (char*)Theenum01.GetLocaleText();
+                    //ï¿½ï¿½ï¿½ß·ï¿½Ê½
+                    bool shortWrapLong = IsShortWrapLongMode(enum01);
                     int singleSideDirection = 0; // 1: X-thin box, 2: Y-thin box
-                    std::string singleSideDirectionSource = "Î´ÕÒµ½°åºñ±ß·½Ïò£¬ºóÐø°´°ü±ß·½Ê½¶µµ×";
+                    std::string singleSideDirectionSource = "Î´ï¿½Òµï¿½ï¿½ï¿½ï¿½ß·ï¿½ï¿½ò£¬ºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß·ï¿½Ê½ï¿½ï¿½ï¿½ï¿½";
                     if (cornerType != 2 && cornerType != 5)
                     {
                         Point3d checkJiaoPoint1;
@@ -3348,28 +3430,28 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                             if (xSingleSide)
                             {
                                 singleSideDirection = 1;
-                                singleSideDirectionSource = "×î½ü°åºñ±ßÅÐ¶¨: X·½Ïò°åºñ±ß -> X±¡/Y³¤ -> ÇÐY·½Ïò";
+                                singleSideDirectionSource = "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½: Xï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ -> Xï¿½ï¿½/Yï¿½ï¿½ -> ï¿½ï¿½Yï¿½ï¿½ï¿½ï¿½";
                             }
                             else if (ySingleSide)
                             {
                                 singleSideDirection = 2;
-                                singleSideDirectionSource = "×î½ü°åºñ±ßÅÐ¶¨: Y·½Ïò°åºñ±ß -> Y±¡/X³¤ -> ÇÐX·½Ïò";
+                                singleSideDirectionSource = "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½: Yï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ -> Yï¿½ï¿½/Xï¿½ï¿½ -> ï¿½ï¿½Xï¿½ï¿½ï¿½ï¿½";
                             }
                         }
                     }
                     else
                     {
-                        singleSideDirectionSource = "cornerTypeÎª2»ò5£¬Ìø¹ý×î½ü°åºñ±ß·½ÏòÅÐ¶Ï£¬ºóÐø°´°ü±ß·½Ê½¶µµ×";
+                        singleSideDirectionSource = "cornerTypeÎª2ï¿½ï¿½5ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß·ï¿½ï¿½ï¿½ï¿½Ð¶Ï£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß·ï¿½Ê½ï¿½ï¿½ï¿½ï¿½";
                     }
                     if (connectedThicknessDirection != 0 && IsThroughHeightCornerType(cornerType))
                     {
                         singleSideDirection = connectedThicknessDirection;
                         singleSideDirectionSource = connectedThicknessDirection == 1 ?
-                            "Ö§Â·Ç¿ÖÆ·½Ïò: X±¡/Y³¤ -> ÇÐY·½Ïò" :
-                            "Ö§Â·Ç¿ÖÆ·½Ïò: Y±¡/X³¤ -> ÇÐX·½Ïò";
+                            "Ö§Â·Ç¿ï¿½Æ·ï¿½ï¿½ï¿½: Xï¿½ï¿½/Yï¿½ï¿½ -> ï¿½ï¿½Yï¿½ï¿½ï¿½ï¿½" :
+                            "Ö§Â·Ç¿ï¿½Æ·ï¿½ï¿½ï¿½: Yï¿½ï¿½/Xï¿½ï¿½ -> ï¿½ï¿½Xï¿½ï¿½ï¿½ï¿½";
                     }
                     bool useXDirectionForJiaoBian = singleSideDirection == 1 ||
-                        (singleSideDirection == 0 && strcmp(BaoBian, "¶Ì°ü³¤") == 0);
+                        (singleSideDirection == 0 && shortWrapLong);
                     double cutThroughSideLength = 0.0;
                     bool forceThroughHeightForJiaoBian = IsThroughHeightCornerType(cornerType);
                     if (cornerType!=3)
@@ -3491,12 +3573,8 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     Point3d Ver_Point3d2;
                     ask_edge_wcs_Vertices(JiaoEdge, Ver_Point3d1, Ver_Point3d2);
 
-                    //°ü±ß·½Ê½
-                    PropertyList* enum0Props = enum0->GetProperties();
-                    NXString Theenum0 = enum0Props->GetEnumAsString("Value");
-                    delete enum0Props;
-                    enum0Props = NULL;
-                    const char* FanSi = (char*)Theenum0.GetLocaleText();
+                    //ï¿½ï¿½ï¿½ß·ï¿½Ê½
+                    bool diagonalJoint = IsDiagonalJointMode(enum0);
 
                     Point3d DuanDian1;
                     Point3d DuanDian2;
@@ -3533,7 +3611,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                         {
                             MeasureDistance* measureDistance1;
                             measureDistance1 = workPart->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, BanHouEdge[i], JiaoEdge);
-                            double distance1 = measureDistance1->Value();//»ñÈ¡²âÁ¿µÄÖµ
+                            double distance1 = measureDistance1->Value();//ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Öµ
                             delete measureDistance1;
                             measureDistance1 = NULL;
                             if (distance1 < doublemin)
@@ -3561,7 +3639,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
                     if (cornerType == 1)
                     {
-                        if (strcmp(FanSi, "Ð±½Ç") == 0&&aaa==0)
+                        if (diagonalJoint && aaa==0)
                         {
                             if (fabs(Ver_Point3d1.Z) < 0.001)
                             {
@@ -3621,14 +3699,10 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                         JiaoEdge->GetVertices(&JiaoBianPoint1, &JiaoBianPoint2);
                         NXObject* nXObject1 = NULL;
                         NXObject* nXObject2 = NULL;
-                        //°ü±ß·½Ê½
-                        PropertyList* enum0Props = enum0->GetProperties();
-                        NXString Theenum0 = enum0Props->GetEnumAsString("Value");
-                        delete enum0Props;
-                        enum0Props = NULL;
-                        const char* FanSi = (char*)Theenum0.GetLocaleText();
+                        //ï¿½ï¿½ï¿½ß·ï¿½Ê½
+                        bool diagonalJoint = IsDiagonalJointMode(enum0);
 
-                        if (strcmp(FanSi, "Ð±½Ç") == 0)
+                        if (diagonalJoint)
                         {
                                 Create_DuiJiao_Box(JiaoEdge,BanHouEdge[bb], tearGapValue, nXObject1);
                                 TrackCreatedObject(nXObject1);
@@ -3668,7 +3742,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
             }
             if (singleCornerEdgeMode && !singleCornerCreated)
             {
-                MenBanSiBian::theUI->NXMessageBox()->Show("µ¥½ÇÇÐ½Ç", NXOpen::NXMessageBox::DialogTypeWarning, "Î´ÕÒµ½¿É´´½¨µÄÇÐ½ÇÖ§Â·£¬ÇëÈ·ÈÏÑ¡ÔñµÄÊÇ½Ç±ß¡£");
+                MenBanSiBian::theUI->NXMessageBox()->Show("ï¿½ï¿½ï¿½ï¿½ï¿½Ð½ï¿½", NXOpen::NXMessageBox::DialogTypeWarning, "Î´ï¿½Òµï¿½ï¿½É´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð½ï¿½Ö§Â·ï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½ï¿½Ç½Ç±ß¡ï¿½");
             }
             RestoreWcsAndDeleteTemporary(workPart, previousWcs, wcsChanged, baselineCoordinateSystems);
             createdFaceCsys = NULL;
@@ -3763,7 +3837,7 @@ PropertyList* MenBanSiBian::GetBlockProperties(const char *blockID)
 {
     return theDialog->GetBlockProperties(blockID);
 }
-//´´½¨ÃÅ°åµÄ·´ÕÛ±ß·Ö¸îÌå
+//ï¿½ï¿½ï¿½ï¿½ï¿½Å°ï¿½Ä·ï¿½ï¿½Û±ß·Ö¸ï¿½ï¿½ï¿½
 void MenBanSiBian::Create_DuiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double tearGap, NXObject*& nXObject)
 {
     nXObject = NULL;
@@ -3842,13 +3916,13 @@ void MenBanSiBian::Create_DuiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double t
         if (fabs(Ver_Point3d1a.Z- input_point1[2])<0.001)
         {
             DirectionX = workPart->Directions()->CreateDirection(workPart->Points()->CreatePoint(position), workPart->Points()->CreatePoint(banhouV1), NXOpen::SmartObject::UpdateOptionAfterModeling);
-            doublemin = sqrt(pow(fabs(Ver_Point3d1a.X - input_point1[0]), 2) + pow(fabs(Ver_Point3d1a.Y - input_point1[1]), 2));//¹´¹É¶¨Àí
+            doublemin = sqrt(pow(fabs(Ver_Point3d1a.X - input_point1[0]), 2) + pow(fabs(Ver_Point3d1a.Y - input_point1[1]), 2));//ï¿½ï¿½ï¿½É¶ï¿½ï¿½ï¿½
 
         }
         else
         {
             DirectionX = workPart->Directions()->CreateDirection(workPart->Points()->CreatePoint(position), workPart->Points()->CreatePoint(banhouV2), NXOpen::SmartObject::UpdateOptionAfterModeling);
-            doublemin = sqrt(pow(fabs(Ver_Point3d2a.X - input_point1[0]), 2) + pow(fabs(Ver_Point3d2a.Y - input_point1[1]), 2));//¹´¹É¶¨Àí
+            doublemin = sqrt(pow(fabs(Ver_Point3d2a.X - input_point1[0]), 2) + pow(fabs(Ver_Point3d2a.Y - input_point1[1]), 2));//ï¿½ï¿½ï¿½É¶ï¿½ï¿½ï¿½
         }
 
         DirectionZ = workPart->Directions()->CreateDirection(workPart->Points()->CreatePoint(JiaoV1), workPart->Points()->CreatePoint(JiaoV2), NXOpen::SmartObject::UpdateOptionAfterModeling);
@@ -3882,7 +3956,7 @@ void MenBanSiBian::Create_DuiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double t
         MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
 }
-//´´½¨¶¥µãÁ¢·½Ìå
+//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 void MenBanSiBian::Create_DinDian_Box(Point3d DuanDian1, double BanHou, double bendInnerR, CartesianCoordinateSystem* cartesianCoordinateSystem1, NXObject*& nXObject)
 {
     nXObject = NULL;
@@ -3910,7 +3984,7 @@ void MenBanSiBian::Create_DinDian_Box(Point3d DuanDian1, double BanHou, double b
         MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
 }
-//½Ç±ß´´½¨·½Ìå
+//ï¿½Ç±ß´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 void MenBanSiBian::Create_JiaoBian_Box(Point3d position1, double BanHou, Edge* JiaoEdge, CartesianCoordinateSystem* cartesianCoordinateSystem1, int cornerType, int forceDirection, double tearGap, NXObject*& nXObject, double cutThroughHeight, double cutThroughSideLength)
 {
     nXObject = NULL;
@@ -3923,14 +3997,10 @@ void MenBanSiBian::Create_JiaoBian_Box(Point3d position1, double BanHou, Edge* J
 
         toolingBoxBuilder1->SetBoxMatrixAndPosition(cartesianCoordinateSystem1->Orientation()->Element(), position1);
 
-        //°ü±ß·½Ê½
-        PropertyList* enum01Props = enum01->GetProperties();
-        NXString Theenum01 = enum01Props->GetEnumAsString("Value");
-        delete enum01Props;
-        enum01Props = NULL;
-        const char* BaoBian = (char*)Theenum01.GetLocaleText();
+        //ï¿½ï¿½ï¿½ß·ï¿½Ê½
+        bool shortWrapLong = IsShortWrapLongMode(enum01);
         bool useXDirectionForJiaoBian = forceDirection == 1 ||
-            (forceDirection == 0 && strcmp(BaoBian, "¶Ì°ü³¤") == 0);
+            (forceDirection == 0 && shortWrapLong);
         double sideLength = cutThroughSideLength > 0.001 ? cutThroughSideLength : BanHou * 2 + tearGap * 2.0;
         char gapFormula[256];
         sprintf(gapFormula, "%f\n", tearGap);
@@ -3990,7 +4060,7 @@ void MenBanSiBian::Create_JiaoBian_Box(Point3d position1, double BanHou, Edge* J
         MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
 }
-//´´½¨ÃÅ°åµÄ·´ÕÛ±ßÖ±½Ç·Ö¸îÌå
+//ï¿½ï¿½ï¿½ï¿½ï¿½Å°ï¿½Ä·ï¿½ï¿½Û±ï¿½Ö±ï¿½Ç·Ö¸ï¿½ï¿½ï¿½
 void MenBanSiBian::Create_ZiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double tearGap, NXObject*& nXObject, NXObject*& nXObject1)
 {
     nXObject = NULL;
@@ -4005,17 +4075,13 @@ void MenBanSiBian::Create_ZiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double te
         Point3d Ver_Point3d2a;
         ask_edge_wcs_Vertices(BanHouEdge, Ver_Point3d1a, Ver_Point3d2a);
 
-        //°ü±ß·½Ê½
-        PropertyList* enum01Props = enum01->GetProperties();
-        NXString Theenum01 = enum01Props->GetEnumAsString("Value");
-        delete enum01Props;
-        enum01Props = NULL;
-        const char* BaoBian = (char*)Theenum01.GetLocaleText();
+        //ï¿½ï¿½ï¿½ß·ï¿½Ê½
+        bool shortWrapLong = IsShortWrapLongMode(enum01);
         double tearGapHalf = tearGap / 2.0;
 
         double input_point1[3];
         double input_point2[3];
-        if (strcmp(BaoBian, "¶Ì°ü³¤") == 0)
+        if (shortWrapLong)
         {
 
             if (Ver_Point3d1.X > 0)
@@ -4093,7 +4159,7 @@ void MenBanSiBian::Create_ZiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double te
             toolingBoxBuilder4->SetBoxMatrixAndPosition(workPart->WCS()->CoordinateSystem()->Orientation()->Element(), position1);
             char gapFormula[256];
             sprintf(gapFormula, "%f\n", tearGap);
-            if (strcmp(BaoBian, "¶Ì°ü³¤") == 0)
+            if (shortWrapLong)
             {
                 toolingBoxBuilder4->XValue()->SetFormula(gapFormula);
                 char AA[256];
@@ -4124,7 +4190,7 @@ void MenBanSiBian::Create_ZiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double te
             toolingBoxBuilder5 = workPart->Features()->ToolingFeatureCollection()->CreateToolingBoxBuilder(nullNXOpen_Features_ToolingBox);
             toolingBoxBuilder5->SetType(NXOpen::Features::ToolingBoxBuilder::TypesCenterAndLengths);
             toolingBoxBuilder5->SetBoxMatrixAndPosition(workPart->WCS()->CoordinateSystem()->Orientation()->Element(), position2);
-            if (strcmp(BaoBian, "¶Ì°ü³¤") == 0)
+            if (shortWrapLong)
             {
                 char CC[256];
                 sprintf(CC, "%f\n", fabs(Ver_Point3d1.X - Ver_Point3d1a.X) - BanHouEdge->GetLength());

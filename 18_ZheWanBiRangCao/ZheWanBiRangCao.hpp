@@ -6,12 +6,13 @@
 #include <NXOpen/DisplayableObject.hxx>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/Face.hxx>
-#include <NXOpen/Features_ToolingBox.hxx>
 #include <NXOpen/Session.hxx>
 #include <NXOpen/UI.hxx>
 
 #include <string>
 #include <vector>
+
+#include <uf_defs.h>
 
 class ZheWanBiRangCaoDialog
 {
@@ -40,19 +41,11 @@ private:
 
     struct SlotFeatureRecord
     {
-        NXOpen::Features::ToolingBox* toolingBox;
-        NXOpen::Edge* edge;
-        NXOpen::Point3d boundedPoint;
-        NXOpen::Vector3d xDirection;
-        NXOpen::Vector3d yDirection;
-        NXOpen::Vector3d zDirection;
-        double offsetPositiveX;
-        double offsetNegativeX;
-        double offsetPositiveY;
-        double offsetNegativeY;
-        double offsetPositiveZ;
-        double offsetNegativeZ;
-        double baseNegativeZ;
+        NXOpen::Point3d pointA;
+        NXOpen::Point3d pointB;
+        NXOpen::Vector3d widthDirection;
+        NXOpen::Vector3d depthDirection;
+        tag_t lines[5];
     };
 
     void initialize_cb();
@@ -66,16 +59,21 @@ private:
     NXOpen::Face* GetSelectedFace() const;
     NXOpen::Point3d GetSelectionPickPoint() const;
     void ClearSelectedEdge() const;
-    int GetSlotMode() const;
     double GetSlotWidthY() const;
     double GetSlotDepthZ() const;
+    void SetDoubleValue(NXOpen::BlockStyler::UIBlock* block, double value) const;
+    void LoadDialogState() const;
+    void SaveDialogState() const;
     void ShowError(const std::string& message) const;
     void ColorFaceBlue(NXOpen::Face* face) const;
 
     NXOpen::Edge* FindClosestLinearEdgeOnFace(NXOpen::Face* face, const NXOpen::Point3d& pickPoint) const;
     double EstimateThickness(NXOpen::Body* body, NXOpen::Face* referenceFace) const;
     double ComputeInnerEdgeDistance(NXOpen::Edge* selectedEdge) const;
-    std::vector<SlotReferenceEdge> FindInnerReferenceEdges(NXOpen::Edge* selectedEdge, NXOpen::Face* face) const;
+    std::vector<SlotReferenceEdge> FindInnerReferenceEdges(NXOpen::Edge* selectedEdge,
+                                                           NXOpen::Face* face,
+                                                           const NXOpen::Point3d& selectedPlanePoint,
+                                                           const NXOpen::Vector3d& selectedPlaneNormal) const;
     NXOpen::Point3d FindNearestOuterPoint(const NXOpen::Point3d& innerPoint,
                                           const NXOpen::Point3d& outerStart,
                                           const NXOpen::Point3d& outerEnd) const;
@@ -96,50 +94,39 @@ private:
                                const NXOpen::Vector3d& outerEdgeDirection,
                                NXOpen::Body* body,
                                double thickness) const;
-    bool CreateBoundedSlot(NXOpen::Edge* edge,
-                           const NXOpen::Point3d& boundedPoint,
-                           const NXOpen::Vector3d& xDirection,
-                           const NXOpen::Vector3d& yDirection,
-                           const NXOpen::Vector3d& zDirection,
-                           double offsetPositiveX,
-                           double offsetNegativeX,
-                           double offsetPositiveY,
-                           double offsetNegativeY,
-                           double offsetPositiveZ,
-                           double offsetNegativeZ,
-                           NXOpen::Features::ToolingBox** createdToolingBox = nullptr,
-                           bool useDefaultMatrix = false) const;
-    bool EditSlotFeature(SlotFeatureRecord& record);
+    bool CreateSlotOutlineOnSelectedFace(NXOpen::Edge* selectedEdge,
+                                         NXOpen::Face* selectedFace,
+                                         const NXOpen::Point3d& innerPoint,
+                                         const NXOpen::Point3d& selectedPlanePoint,
+                                         const NXOpen::Vector3d& selectedPlaneNormal,
+                                         double slotWidth,
+                                         double slotDepth);
+    bool EditSlotOutline(SlotFeatureRecord& record, double slotWidth, double slotDepth) const;
+    NXOpen::Vector3d AskSelectedFaceInnerNormal(NXOpen::Face* face,
+                                                NXOpen::Body* body,
+                                                const NXOpen::Point3d& referencePoint,
+                                                double thickness) const;
+    bool ExtrudeSubtractAndDeleteCurves(NXOpen::Body* targetBody,
+                                        NXOpen::Face* selectedFace,
+                                        const NXOpen::Point3d& referencePoint,
+                                        const std::vector<tag_t>& curveTags,
+                                        double thickness);
+    void HideObjects(const std::vector<tag_t>& objectTags) const;
+    void HideObject(tag_t objectTag) const;
+    void CleanupHiddenTemporaryObjects();
+    void CleanupPreviewObjects();
     bool UpdateAllSlots();
-    bool CreateOrEditSlot(NXOpen::Edge* edge,
-                          const NXOpen::Point3d& boundedPoint,
-                          const NXOpen::Vector3d& xDirection,
-                          const NXOpen::Vector3d& yDirection,
-                          const NXOpen::Vector3d& zDirection,
-                          double offsetPositiveX,
-                          double offsetNegativeX,
-                          double offsetPositiveY,
-                          double offsetNegativeY,
-                          double offsetPositiveZ,
-                          double offsetNegativeZ,
-                          double baseNegativeZ,
-                          bool useDefaultMatrix = false);
     int Execute();
-    bool CreateSlotAtEnd(NXOpen::Edge* edge,
-                         NXOpen::Face* largerFace,
-                         const NXOpen::Point3d& innerPoint,
-                         const NXOpen::Point3d& outerPoint,
-                         const NXOpen::Vector3d& yDirection,
-                         const SlotParameters& parameters);
 
 private:
     NXOpen::UI* ui_;
     NXOpen::Session* session_;
     NXOpen::BlockStyler::BlockDialog* dialog_;
     NXOpen::BlockStyler::UIBlock* mainGroup_;
-    NXOpen::BlockStyler::UIBlock* slotModeBlock_;
     NXOpen::BlockStyler::UIBlock* edgeSelectBlock_;
     NXOpen::BlockStyler::UIBlock* slotWidthBlock_;
     NXOpen::BlockStyler::UIBlock* slotDepthBlock_;
     std::vector<SlotFeatureRecord> slotRecords_;
+    std::vector<tag_t> hiddenTemporaryTags_;
+    std::vector<tag_t> previewFeatureTags_;
 };

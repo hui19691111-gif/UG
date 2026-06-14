@@ -182,6 +182,8 @@ private:
                                  bool value) const;
     void ConfigurePointSelectionsForCurrentMode() const;
     void CacheStartPointOwner();
+    void LoadDialogMemory();
+    void SaveDialogMemory();
     double ReadDouble(NXOpen::BlockStyler::UIBlock* block, double fallback) const;
     bool ReadLogical(NXOpen::BlockStyler::UIBlock* block, bool fallback) const;
     int ReadEnumValue(NXOpen::BlockStyler::UIBlock* block, int fallback) const;

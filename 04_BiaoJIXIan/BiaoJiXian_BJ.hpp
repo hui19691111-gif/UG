@@ -96,6 +96,13 @@ private:
     int GetEnumerationValue(NXOpen::BlockStyler::Enumeration* block) const;
     double GetDoubleValue(NXOpen::BlockStyler::DoubleBlock* block) const;
     int GetIntegerValue(NXOpen::BlockStyler::IntegerBlock* block) const;
+    void SetEnumerationValue(NXOpen::BlockStyler::Enumeration* block, int value) const;
+    void SetDoubleValue(NXOpen::BlockStyler::DoubleBlock* block, double value) const;
+    void SetIntegerValue(NXOpen::BlockStyler::IntegerBlock* block, int value) const;
+    void SetLineFontValue(NXOpen::BlockStyler::LineFont* block, int value) const;
+    void SetColorValue(NXOpen::BlockStyler::ObjectColorPicker* block, int value) const;
+    void LoadRememberedDialogValues() const;
+    void SaveRememberedDialogValues() const;
 
     // 控件显示/隐藏、启用/禁用辅助函数。
     void SetShow(NXOpen::BlockStyler::UIBlock* block, bool show) const;
@@ -137,9 +144,9 @@ private:
     // 输出方式枚举：曲线标记 / 浅槽标记。
     NXOpen::BlockStyler::Enumeration* MarkOutputMode;
 
-    // 浅槽参数：槽深、槽宽偏置。
+    // 浅槽参数：槽深、槽宽。
     NXOpen::BlockStyler::DoubleBlock* GrooveDepth;
-    NXOpen::BlockStyler::DoubleBlock* GrooveOffset;
+    NXOpen::BlockStyler::DoubleBlock* GrooveWidth;
 
     // 分段规则分组。
     NXOpen::BlockStyler::Group* SegmentRuleGroup;

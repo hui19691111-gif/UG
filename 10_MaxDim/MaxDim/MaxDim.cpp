@@ -35,7 +35,11 @@
 //These includes are needed for the following template code
 //------------------------------------------------------------------------------
 #include "MaxDim.hpp"
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 #include <cmath>
 #include <vector>
 using namespace NXOpen;
@@ -467,8 +471,19 @@ MaxDim::MaxDim()
         // Initialize the NX Open C++ API environment
         MaxDim::theSession = NXOpen::Session::GetSession();
         MaxDim::theUI = UI::GetUI();
-        theDlxFileName = "MaxDim.dlx";
-        theDialog = MaxDim::theUI->CreateDialog(theDlxFileName);
+        const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_MAXDIM_DLX);
+
+        if (dlxPath.empty())
+
+        {
+
+            throw std::runtime_error("MaxDim dialog resource is missing.");
+
+        }
+
+        theDlxFileName = NULL;
+
+        theDialog = MaxDim::theUI->CreateDialog(dlxPath.c_str());
         // Registration of callback functions
         theDialog->AddApplyHandler(make_callback(this, &MaxDim::apply_cb));
         theDialog->AddOkHandler(make_callback(this, &MaxDim::ok_cb));
@@ -593,10 +608,6 @@ void ShowLicenseDeniedMessage(const wchar_t* title, const wchar_t* message)
 
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = { 0 };
     HMODULE module = LoadProtectedLicenseGate();
     if (module == NULL)

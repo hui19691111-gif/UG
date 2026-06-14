@@ -22,6 +22,7 @@
 #include <uf_defs.h>
 #include <uf_ui_types.h>
 #include <iostream>
+#include <string>
 #include <NXOpen/Session.hxx>
 #include <NXOpen/UI.hxx>
 #include <NXOpen/NXMessageBox.hxx>
@@ -64,7 +65,7 @@ public:
     PropertyList* GetBlockProperties(const char *blockID);
     
 private:
-    const char* theDlxFileName;
+    std::string theDlxFileName;
     NXOpen::BlockStyler::BlockDialog* theDialog;
     NXOpen::BlockStyler::Group* group;// Block type: Group
     NXOpen::BlockStyler::Toggle* category_layout;// Block type: Toggle

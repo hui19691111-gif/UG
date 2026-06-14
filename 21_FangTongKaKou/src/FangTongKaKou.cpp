@@ -52,6 +52,9 @@
 #include <string>
 #include <vector>
 
+#include "../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../embedded_dialog_resources.h"
+
 #ifndef DllExport
 #define DllExport __declspec(dllexport)
 #endif
@@ -116,7 +119,7 @@ HMODULE LoadProtectedLicenseGate()
         }
     }
 
-    HMODULE fixedModule = LoadLibraryW(L"D:\\UG??????\\application\\ZhaoFuNxLicenseGate.dll");
+    HMODULE fixedModule = LoadLibraryW(L"D:\\UG智辉钣金插件\\application\\ZhaoFuNxLicenseGate.dll");
     if (fixedModule != NULL)
     {
         return fixedModule;
@@ -127,10 +130,6 @@ HMODULE LoadProtectedLicenseGate()
 
 bool EnsureAuthorized(const wchar_t* featureCode, const wchar_t* displayName)
 {
-    (void)featureCode;
-    (void)displayName;
-    return true;
-
     wchar_t message[1024] = {0};
     HMODULE module = LoadProtectedLicenseGate();
     if (module == NULL)
@@ -336,6 +335,149 @@ std::string GetModuleDirectory()
     return directory.substr(0, slash);
 }
 
+std::string WideToSystemString(const wchar_t* text)
+{
+    if (text == NULL || text[0] == L'\0')
+    {
+        return std::string();
+    }
+
+    const int size = WideCharToMultiByte(CP_ACP, 0, text, -1, NULL, 0, NULL, NULL);
+    if (size <= 0)
+    {
+        return std::string();
+    }
+
+    std::string result(static_cast<size_t>(size), '\0');
+    WideCharToMultiByte(CP_ACP, 0, text, -1, &result[0], size, NULL, NULL);
+    if (!result.empty() && result[result.size() - 1] == '\0')
+    {
+        result.erase(result.size() - 1);
+    }
+    return result;
+}
+
+const wchar_t* DeploymentConfigDirectory()
+{
+    return L"D:\\UG智辉钣金插件\\config";
+}
+
+const wchar_t* FangTongKaKouStatePath()
+{
+    return L"D:\\UG智辉钣金插件\\config\\FangTongKaKou_state.ini";
+}
+
+bool ReadTextFileWide(const wchar_t* path, std::string& text)
+{
+    text.clear();
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > 1024 * 1024)
+    {
+        CloseHandle(file);
+        return false;
+    }
+
+    text.resize(static_cast<size_t>(size.QuadPart));
+    DWORD bytesRead = 0;
+    BOOL ok = TRUE;
+    if (!text.empty())
+    {
+        ok = ReadFile(file, &text[0], static_cast<DWORD>(text.size()), &bytesRead, NULL);
+        text.resize(static_cast<size_t>(bytesRead));
+    }
+    CloseHandle(file);
+    return ok == TRUE;
+}
+
+bool WriteTextFileWide(const wchar_t* path, const std::string& text)
+{
+    CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+    CreateDirectoryW(DeploymentConfigDirectory(), NULL);
+
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    DWORD bytesWritten = 0;
+    const BOOL ok = WriteFile(file, text.c_str(), static_cast<DWORD>(text.size()), &bytesWritten, NULL);
+    CloseHandle(file);
+    return ok == TRUE && bytesWritten == text.size();
+}
+
+std::map<std::string, std::string> LoadKeyValueFile(const wchar_t* path)
+{
+    std::map<std::string, std::string> values;
+    std::string text;
+    if (!ReadTextFileWide(path, text))
+    {
+        return values;
+    }
+
+    std::istringstream input(text);
+    std::string line;
+    while (std::getline(input, line))
+    {
+        const std::string::size_type comment = line.find('#');
+        if (comment != std::string::npos)
+        {
+            line = line.substr(0, comment);
+        }
+
+        const std::string::size_type separator = line.find('=');
+        if (separator == std::string::npos)
+        {
+            continue;
+        }
+
+        const std::string key = Trim(line.substr(0, separator));
+        const std::string value = Trim(line.substr(separator + 1));
+        if (!key.empty())
+        {
+            values[key] = value;
+        }
+    }
+    return values;
+}
+
+int ReadStateInt(const std::map<std::string, std::string>& values, const char* key, int fallback)
+{
+    std::map<std::string, std::string>::const_iterator it = values.find(key);
+    if (it == values.end())
+    {
+        return fallback;
+    }
+    return std::atoi(it->second.c_str());
+}
+
+double ReadStateDouble(const std::map<std::string, std::string>& values, const char* key, double fallback)
+{
+    std::map<std::string, std::string>::const_iterator it = values.find(key);
+    if (it == values.end())
+    {
+        return fallback;
+    }
+    return std::atof(it->second.c_str());
+}
+
+bool ReadStateBool(const std::map<std::string, std::string>& values, const char* key, bool fallback)
+{
+    std::map<std::string, std::string>::const_iterator it = values.find(key);
+    if (it == values.end())
+    {
+        return fallback;
+    }
+    const std::string value = Trim(it->second);
+    return value == "1" || value == "true" || value == "TRUE" || value == "yes" || value == "YES";
+}
+
 void LoadSpecsFromFile(const std::string& path, std::set<std::pair<int, int> >& specs)
 {
     std::ifstream input(path.c_str());
@@ -384,6 +526,7 @@ const std::set<std::pair<int, int> >& GetTubeSpecs()
     }
 
     loaded = true;
+    LoadSpecsFromFile(WideToSystemString(L"D:\\UG智辉钣金插件\\config\\FangTongKaKou_specs.txt"), specs);
     const std::string moduleDirectory = GetModuleDirectory();
     if (!moduleDirectory.empty())
     {
@@ -400,25 +543,39 @@ const std::set<std::pair<int, int> >& GetTubeSpecs()
 
 void OpenSpecTable()
 {
-    const std::string moduleDirectory = GetModuleDirectory();
-    if (moduleDirectory.empty())
-    {
-        MessageBoxW(NULL, L"Could not resolve FangTongKaKou application directory.", L"FangTongKaKou", MB_ICONERROR);
-        return;
-    }
-
-    const std::string path = moduleDirectory + "\\config\\FangTongKaKou_specs.txt";
-    DWORD attributes = GetFileAttributesA(path.c_str());
+    wchar_t widePath[MAX_PATH] = L"D:\\UG智辉钣金插件\\config\\FangTongKaKou_specs.txt";
+    DWORD attributes = GetFileAttributesW(widePath);
     if (attributes == INVALID_FILE_ATTRIBUTES)
     {
-        MessageBoxA(NULL, path.c_str(), "FangTongKaKou spec table not found", MB_ICONERROR);
+        const std::string moduleDirectory = GetModuleDirectory();
+        if (!moduleDirectory.empty())
+        {
+            const std::string fallbackPath = moduleDirectory + "\\FangTongKaKou_specs.txt";
+            std::wstring fallbackWidePath(MAX_PATH, L'\0');
+            const int converted = MultiByteToWideChar(CP_ACP, 0, fallbackPath.c_str(), -1, &fallbackWidePath[0], MAX_PATH);
+            if (converted > 0)
+            {
+                fallbackWidePath.resize(static_cast<size_t>(converted - 1));
+                if (GetFileAttributesW(fallbackWidePath.c_str()) != INVALID_FILE_ATTRIBUTES)
+                {
+                    wcsncpy_s(widePath, fallbackWidePath.c_str(), _TRUNCATE);
+                    attributes = GetFileAttributesW(widePath);
+                }
+            }
+        }
+    }
+
+    if (attributes == INVALID_FILE_ATTRIBUTES)
+    {
+        std::wstring message = L"找不到方通卡口规格表：\nD:\\UG智辉钣金插件\\config\\FangTongKaKou_specs.txt";
+        MessageBoxW(NULL, message.c_str(), L"方通卡口规格表", MB_ICONERROR);
         return;
     }
 
-    HINSTANCE result = ShellExecuteA(NULL, "open", path.c_str(), NULL, NULL, SW_SHOWNORMAL);
+    HINSTANCE result = ShellExecuteW(NULL, L"open", widePath, NULL, NULL, SW_SHOWNORMAL);
     if (reinterpret_cast<INT_PTR>(result) <= 32)
     {
-        ShellExecuteA(NULL, "open", "notepad.exe", path.c_str(), NULL, SW_SHOWNORMAL);
+        ShellExecuteW(NULL, L"open", L"notepad.exe", widePath, NULL, SW_SHOWNORMAL);
     }
 }
 
@@ -686,6 +843,51 @@ struct TouchingPortPlacement
     FacePlacement malePlacement;
     tag_t femaleBodyTag;
 };
+
+const char* CreatedPortFaceAttributeName()
+{
+    return "ZHIHUI_FANGTONGKAKOU_PORT_CREATED";
+}
+
+std::string CreatedPortPlacementAttributeName(const FacePlacement& placement)
+{
+    std::string coord = FormatDouble(placement.endCoord);
+    std::replace(coord.begin(), coord.end(), '-', 'm');
+    std::replace(coord.begin(), coord.end(), '.', 'p');
+    return std::string(CreatedPortFaceAttributeName()) + "_" + coord;
+}
+
+std::string CreatedPortPlacementRuntimeKey(const FacePlacement& placement)
+{
+    std::ostringstream key;
+    key << placement.faceTag << ":" << CreatedPortPlacementAttributeName(placement);
+    return key.str();
+}
+
+std::string NxStringToUtf8Text(const NXOpen::NXString& value)
+{
+    const char* text = value.GetUTF8Text();
+    return text == NULL ? std::string() : std::string(text);
+}
+
+bool TryReadPortEndCoordFromAttributeName(const std::string& attributeName, double& endCoord)
+{
+    const std::string prefix = std::string(CreatedPortFaceAttributeName()) + "_";
+    if (attributeName.compare(0, prefix.size(), prefix) != 0)
+    {
+        return false;
+    }
+
+    std::string coordText = attributeName.substr(prefix.size());
+    if (coordText.empty())
+    {
+        return false;
+    }
+    std::replace(coordText.begin(), coordText.end(), 'm', '-');
+    std::replace(coordText.begin(), coordText.end(), 'p', '.');
+    endCoord = std::atof(coordText.c_str());
+    return true;
+}
 
 struct SelectedFaceInfo
 {
@@ -1547,7 +1749,14 @@ double ResolvePortHeight(double inputHeight, double outerRadius, bool autoRecogn
     return resolvedHeight;
 }
 
-bool CreateMalePortAtPlacement(const FacePlacement& placement, double width, double height)
+std::set<tag_t> AskBodyFaceSet(tag_t bodyTag);
+std::vector<tag_t> AskNewBodyFaces(tag_t bodyTag, const std::set<tag_t>& beforeFaces);
+
+bool CreateMalePortAtPlacement(
+    const FacePlacement& placement,
+    double width,
+    double height,
+    std::vector<tag_t>* createdFaces)
 {
     const double faceWidth = placement.widthMax - placement.widthMin;
     if (width <= 0.0 || height <= 0.0 || width >= faceWidth - 0.1)
@@ -1577,6 +1786,7 @@ bool CreateMalePortAtPlacement(const FacePlacement& placement, double width, dou
 
     std::vector<tag_t> profile = CreateRectangleProfile(placement, lengthStart, lengthEnd, widthStart, widthEnd);
     tag_t toolBody = NULL_TAG;
+    const std::set<tag_t> beforeFaces = AskBodyFaceSet(placement.bodyTag);
     try
     {
         toolBody = CreateExtrudedToolBody(profile, placement.normal, -tabThickness, 0.0);
@@ -1606,6 +1816,10 @@ bool CreateMalePortAtPlacement(const FacePlacement& placement, double width, dou
             AppendDebugLog(log.str());
         }
         DeleteObjects(profile);
+        if (createdFaces != NULL)
+        {
+            *createdFaces = AskNewBodyFaces(placement.bodyTag, beforeFaces);
+        }
         return true;
     }
     catch (...)
@@ -1615,7 +1829,12 @@ bool CreateMalePortAtPlacement(const FacePlacement& placement, double width, dou
     }
 }
 
-bool CreateTaperMalePortAtPlacement(const FacePlacement& placement, double width, double height, double angle)
+bool CreateTaperMalePortAtPlacement(
+    const FacePlacement& placement,
+    double width,
+    double height,
+    double angle,
+    std::vector<tag_t>* createdFaces)
 {
     const double faceWidth = placement.widthMax - placement.widthMin;
     const double tipWidth = ComputeTaperTipWidth(width, height, angle);
@@ -1646,6 +1865,7 @@ bool CreateTaperMalePortAtPlacement(const FacePlacement& placement, double width
     std::vector<tag_t> profile =
         CreateTrapezoidProfile(placement, lengthStart, lengthEnd, widthCenter, width, tipWidth);
     tag_t toolBody = NULL_TAG;
+    const std::set<tag_t> beforeFaces = AskBodyFaceSet(placement.bodyTag);
     try
     {
         toolBody = CreateExtrudedToolBody(profile, placement.normal, -tabThickness, 0.0);
@@ -1677,6 +1897,10 @@ bool CreateTaperMalePortAtPlacement(const FacePlacement& placement, double width
             AppendDebugLog(log.str());
         }
         DeleteObjects(profile);
+        if (createdFaces != NULL)
+        {
+            *createdFaces = AskNewBodyFaces(placement.bodyTag, beforeFaces);
+        }
         return true;
     }
     catch (...)
@@ -1686,7 +1910,14 @@ bool CreateTaperMalePortAtPlacement(const FacePlacement& placement, double width
     }
 }
 
-void CreateFemalePortAtPlacement(const FacePlacement& placement, tag_t targetBodyTag, double width, double height, double femaleExtrudeDepth, double clearance)
+void CreateFemalePortAtPlacement(
+    const FacePlacement& placement,
+    tag_t targetBodyTag,
+    double width,
+    double height,
+    double femaleExtrudeDepth,
+    double clearance,
+    std::vector<tag_t>* createdFaces)
 {
     if (targetBodyTag == NULL_TAG)
     {
@@ -1708,7 +1939,7 @@ void CreateFemalePortAtPlacement(const FacePlacement& placement, tag_t targetBod
     const double lengthEnd = placement.endCoord - placement.inwardSign * (height + clearance);
     const double tabThickness = femaleExtrudeDepth;
     const double thicknessStart = -femaleExtrudeDepth;
-    const double thicknessEnd = 0.0;
+    const double thicknessEnd = clearance;
 
     {
         std::ostringstream log;
@@ -1734,6 +1965,7 @@ void CreateFemalePortAtPlacement(const FacePlacement& placement, tag_t targetBod
 
     std::vector<tag_t> profile = CreateRectangleProfile(placement, lengthStart, lengthEnd, widthStart, widthEnd);
     tag_t toolBody = NULL_TAG;
+    const std::set<tag_t> beforeFaces = AskBodyFaceSet(targetBodyTag);
     try
     {
         toolBody = CreateExtrudedToolBody(profile, placement.normal, thicknessStart, thicknessEnd);
@@ -1741,6 +1973,10 @@ void CreateFemalePortAtPlacement(const FacePlacement& placement, tag_t targetBod
         UF_OBJ_delete_object(toolBody);
         toolBody = NULL_TAG;
         DeleteObjects(profile);
+        if (createdFaces != NULL)
+        {
+            *createdFaces = AskNewBodyFaces(targetBodyTag, beforeFaces);
+        }
     }
     catch (...)
     {
@@ -1749,7 +1985,15 @@ void CreateFemalePortAtPlacement(const FacePlacement& placement, tag_t targetBod
     }
 }
 
-void CreateTaperFemalePortAtPlacement(const FacePlacement& placement, tag_t targetBodyTag, double width, double height, double femaleExtrudeDepth, double clearance, double angle)
+void CreateTaperFemalePortAtPlacement(
+    const FacePlacement& placement,
+    tag_t targetBodyTag,
+    double width,
+    double height,
+    double femaleExtrudeDepth,
+    double clearance,
+    double angle,
+    std::vector<tag_t>* createdFaces)
 {
     if (targetBodyTag == NULL_TAG)
     {
@@ -1768,7 +2012,7 @@ void CreateTaperFemalePortAtPlacement(const FacePlacement& placement, tag_t targ
     const double lengthEnd = placement.endCoord - placement.inwardSign * height;
     const double tabThickness = femaleExtrudeDepth;
     const double thicknessStart = -femaleExtrudeDepth;
-    const double thicknessEnd = 0.0;
+    const double thicknessEnd = clearance;
     std::vector<FaceProfilePoint> maleProfile;
     FaceProfilePoint point = {};
     point.length = lengthStart;
@@ -1835,6 +2079,7 @@ void CreateTaperFemalePortAtPlacement(const FacePlacement& placement, tag_t targ
 
     std::vector<tag_t> profile = CreateFaceProfile(placement, clearanceProfile);
     tag_t toolBody = NULL_TAG;
+    const std::set<tag_t> beforeFaces = AskBodyFaceSet(targetBodyTag);
     try
     {
         toolBody = CreateExtrudedToolBody(profile, placement.normal, thicknessStart, thicknessEnd);
@@ -1842,6 +2087,10 @@ void CreateTaperFemalePortAtPlacement(const FacePlacement& placement, tag_t targ
         UF_OBJ_delete_object(toolBody);
         toolBody = NULL_TAG;
         DeleteObjects(profile);
+        if (createdFaces != NULL)
+        {
+            *createdFaces = AskNewBodyFaces(targetBodyTag, beforeFaces);
+        }
     }
     catch (...)
     {
@@ -3625,6 +3874,174 @@ void RedisplayTag(tag_t objectTag)
     }
 }
 
+NXOpen::Face* FaceFromTag(tag_t faceTag)
+{
+    if (faceTag == NULL_TAG)
+    {
+        return NULL;
+    }
+    return dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(faceTag));
+}
+
+std::set<tag_t> AskBodyFaceSet(tag_t bodyTag)
+{
+    std::set<tag_t> faces;
+    uf_list_p_t faceList = NULL;
+    if (bodyTag == NULL_TAG || UF_MODL_ask_body_faces(bodyTag, &faceList) != 0 || faceList == NULL)
+    {
+        return faces;
+    }
+
+    std::vector<tag_t> faceTags = UfListToTags(faceList);
+    UF_MODL_delete_list(&faceList);
+    faces.insert(faceTags.begin(), faceTags.end());
+    return faces;
+}
+
+std::vector<tag_t> AskNewBodyFaces(tag_t bodyTag, const std::set<tag_t>& beforeFaces)
+{
+    std::vector<tag_t> newFaces;
+    const std::set<tag_t> afterFaces = AskBodyFaceSet(bodyTag);
+    for (std::set<tag_t>::const_iterator it = afterFaces.begin(); it != afterFaces.end(); ++it)
+    {
+        if (beforeFaces.find(*it) == beforeFaces.end())
+        {
+            newFaces.push_back(*it);
+        }
+    }
+    return newFaces;
+}
+
+bool FaceHasMatchingCreatedPortAttribute(tag_t faceTag, const FacePlacement& placement)
+{
+    NXOpen::Face* face = FaceFromTag(faceTag);
+    if (face == NULL)
+    {
+        return false;
+    }
+
+    try
+    {
+        const std::vector<NXOpen::NXObject::AttributeInformation> attributes = face->GetUserAttributes();
+        const double endCoordTolerance = std::max(8.0, placement.wallThickness * 12.0);
+        for (std::size_t index = 0; index < attributes.size(); ++index)
+        {
+            if (attributes[index].Unset || attributes[index].OwnedBySystem)
+            {
+                continue;
+            }
+
+            const std::string title = Trim(NxStringToUtf8Text(attributes[index].Title));
+            double markedEndCoord = 0.0;
+            if (!TryReadPortEndCoordFromAttributeName(title, markedEndCoord))
+            {
+                continue;
+            }
+
+            if (std::fabs(markedEndCoord - placement.endCoord) <= endCoordTolerance)
+            {
+                return true;
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    return false;
+}
+
+bool BodyFacesHaveMatchingCreatedPortAttribute(tag_t bodyTag, const FacePlacement& placement)
+{
+    const std::set<tag_t> faces = AskBodyFaceSet(bodyTag);
+    for (std::set<tag_t>::const_iterator it = faces.begin(); it != faces.end(); ++it)
+    {
+        if (FaceHasMatchingCreatedPortAttribute(*it, placement))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool HasCreatedPortMarker(const TouchingPortPlacement& portPlacement)
+{
+    return BodyFacesHaveMatchingCreatedPortAttribute(
+               portPlacement.malePlacement.bodyTag,
+               portPlacement.malePlacement) ||
+           BodyFacesHaveMatchingCreatedPortAttribute(
+               portPlacement.femaleBodyTag,
+               portPlacement.malePlacement);
+}
+
+void MarkCreatedPortFace(tag_t faceTag, const std::string& attributeName, bool updateColor)
+{
+    NXOpen::Face* face = FaceFromTag(faceTag);
+    if (face == NULL)
+    {
+        return;
+    }
+
+    try
+    {
+        face->SetUserAttribute(
+            attributeName.c_str(),
+            -1,
+            "1",
+            NXOpen::Update::OptionNow);
+    }
+    catch (...)
+    {
+    }
+
+    const int greenColor = 36;
+    if (updateColor && UF_OBJ_set_color(faceTag, greenColor) == 0)
+    {
+        RedisplayTag(faceTag);
+    }
+}
+
+void MarkCreatedPortFaces(const FacePlacement& placement, const std::vector<tag_t>& faceTags, bool updateColor)
+{
+    const std::string attributeName = CreatedPortPlacementAttributeName(placement);
+    for (std::size_t index = 0; index < faceTags.size(); ++index)
+    {
+        MarkCreatedPortFace(faceTags[index], attributeName, updateColor);
+    }
+}
+
+std::vector<TouchingPortPlacement> FilterUnmarkedPortPlacements(const std::vector<TouchingPortPlacement>& placements)
+{
+    std::vector<TouchingPortPlacement> filtered;
+    filtered.reserve(placements.size());
+    int skippedCount = 0;
+    std::set<std::string> seenPlacements;
+    for (std::size_t index = 0; index < placements.size(); ++index)
+    {
+        const FacePlacement& placement = placements[index].malePlacement;
+        const std::string placementKey = CreatedPortPlacementRuntimeKey(placement);
+        if (!seenPlacements.insert(placementKey).second)
+        {
+            ++skippedCount;
+            continue;
+        }
+
+        if (HasCreatedPortMarker(placements[index]))
+        {
+            ++skippedCount;
+            continue;
+        }
+
+        filtered.push_back(placements[index]);
+    }
+
+    std::ostringstream log;
+    log << "AutoPortExistingMarkerFilter input=" << placements.size()
+        << " output=" << filtered.size()
+        << " skipped=" << skippedCount;
+    AppendDebugLog(log.str());
+    return filtered;
+}
+
 std::vector<FacePlacement> CollectCoplanarTubeFacePlacements(
     const FacePlacement& referencePlacement,
     std::map<tag_t, SquareTubeCandidate>* candidateCache = NULL)
@@ -3848,34 +4265,6 @@ std::vector<FacePlacement> CollectCoplanarTubeFacePlacements(
     return placements;
 }
 
-int MarkCreatedPortFaces(const std::vector<TouchingPortPlacement>& touchingEndPlacements)
-{
-    const int greenColor = 36;
-    int markedCount = 0;
-    std::set<tag_t> markedFaces;
-    for (std::size_t index = 0; index < touchingEndPlacements.size(); ++index)
-    {
-        const tag_t faceTag = touchingEndPlacements[index].malePlacement.faceTag;
-        if (faceTag == NULL_TAG || markedFaces.find(faceTag) != markedFaces.end())
-        {
-            continue;
-        }
-
-        if (UF_OBJ_set_color(faceTag, greenColor) == 0)
-        {
-            RedisplayTag(faceTag);
-            markedFaces.insert(faceTag);
-            ++markedCount;
-        }
-    }
-
-    std::ostringstream log;
-    log << "CreatedPortFacesMarked count=" << markedCount
-        << " touchingEnds=" << touchingEndPlacements.size();
-    AppendDebugLog(log.str());
-    return markedCount;
-}
-
 NXOpen::Body* BodyFromSelectedObject(NXOpen::TaggedObject* object)
 {
     if (object == NULL)
@@ -4057,7 +4446,13 @@ public:
           specButton(NULL)
     {
         ui = NXOpen::UI::GetUI();
-        dialog = ui->CreateDialog("FangTongKaKou.dlx");
+        const std::string dlxPath =
+            zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_FANGTONGKAKOU_DLX);
+        if (dlxPath.empty())
+        {
+            throw std::runtime_error("FangTongKaKou dialog resource is missing.");
+        }
+        dialog = ui->CreateDialog(dlxPath.c_str());
         dialog->AddInitializeHandler(NXOpen::make_callback(this, &FangTongKaKouDialog::Initialize));
         dialog->AddDialogShownHandler(NXOpen::make_callback(this, &FangTongKaKouDialog::DialogShown));
         dialog->AddUpdateHandler(NXOpen::make_callback(this, &FangTongKaKouDialog::Update));
@@ -4294,6 +4689,122 @@ private:
         portTypeBlock->SetValueAsString(members.front());
     }
 
+    void SetEnumValue(NXOpen::BlockStyler::Enumeration* block, int value)
+    {
+        if (block == NULL)
+        {
+            return;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties = NULL;
+        try
+        {
+            properties = block->GetProperties();
+            properties->SetEnum("Value", value);
+        }
+        catch (...)
+        {
+        }
+        if (properties != NULL)
+        {
+            delete properties;
+        }
+    }
+
+    void SetDoubleValue(NXOpen::BlockStyler::DoubleBlock* block, double value)
+    {
+        if (block == NULL)
+        {
+            return;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties = NULL;
+        try
+        {
+            properties = block->GetProperties();
+            properties->SetDouble("Value", value);
+        }
+        catch (...)
+        {
+        }
+        if (properties != NULL)
+        {
+            delete properties;
+        }
+    }
+
+    void SetToggleValue(NXOpen::BlockStyler::Toggle* block, bool value)
+    {
+        if (block == NULL)
+        {
+            return;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties = NULL;
+        try
+        {
+            properties = block->GetProperties();
+            properties->SetLogical("Value", value);
+        }
+        catch (...)
+        {
+        }
+        if (properties != NULL)
+        {
+            delete properties;
+        }
+    }
+
+    void LoadDialogState()
+    {
+        const std::map<std::string, std::string> values = LoadKeyValueFile(FangTongKaKouStatePath());
+        if (values.empty())
+        {
+            return;
+        }
+
+        SetEnumValue(createModeBlock, ReadStateInt(values, "createMode", GetCreateModeValue()) == 0 ? 0 : 1);
+        SetEnumValue(portTypeBlock, ReadStateInt(values, "portType", GetPortTypeValue()) == 0 ? 0 : 1);
+
+        SetDoubleValue(widthValueBlock, ReadStateDouble(values, "width", widthValueBlock != NULL ? widthValueBlock->Value() : 10.0));
+        SetDoubleValue(heightValueBlock, ReadStateDouble(values, "height", heightValueBlock != NULL ? heightValueBlock->Value() : 1.0));
+        SetDoubleValue(
+            femaleDepthValueBlock,
+            ReadStateDouble(values, "femaleDepth", femaleDepthValueBlock != NULL ? femaleDepthValueBlock->Value() : 1.0));
+        SetDoubleValue(clearanceValueBlock, ReadStateDouble(values, "clearance", clearanceValueBlock != NULL ? clearanceValueBlock->Value() : 0.2));
+        SetDoubleValue(angleValueBlock, ReadStateDouble(values, "angle", angleValueBlock != NULL ? angleValueBlock->Value() : 10.0));
+
+        SetToggleValue(
+            autoRecognizeTubeRToggle,
+            ReadStateBool(
+                values,
+                "autoRecognizeTubeR",
+                autoRecognizeTubeRToggle != NULL && autoRecognizeTubeRToggle->Value()));
+        SetToggleValue(
+            mistakeProofToggle,
+            ReadStateBool(
+                values,
+                "mistakeProof",
+                mistakeProofToggle != NULL && mistakeProofToggle->Value()));
+    }
+
+    void SaveDialogState()
+    {
+        std::ostringstream output;
+        output << "version=1\n";
+        output << "createMode=" << GetCreateModeValue() << "\n";
+        output << "portType=" << GetPortTypeValue() << "\n";
+        output << "width=" << FormatDouble(widthValueBlock != NULL ? widthValueBlock->Value() : 0.0) << "\n";
+        output << "height=" << FormatDouble(heightValueBlock != NULL ? heightValueBlock->Value() : 0.0) << "\n";
+        output << "femaleDepth=" << FormatDouble(femaleDepthValueBlock != NULL ? femaleDepthValueBlock->Value() : 0.0) << "\n";
+        output << "clearance=" << FormatDouble(clearanceValueBlock != NULL ? clearanceValueBlock->Value() : 0.0) << "\n";
+        output << "angle=" << FormatDouble(angleValueBlock != NULL ? angleValueBlock->Value() : 0.0) << "\n";
+        output << "autoRecognizeTubeR=" << (autoRecognizeTubeRToggle != NULL && autoRecognizeTubeRToggle->Value() ? 1 : 0) << "\n";
+        output << "mistakeProof=" << (mistakeProofToggle != NULL && mistakeProofToggle->Value() ? 1 : 0) << "\n";
+
+        WriteTextFileWide(FangTongKaKouStatePath(), output.str());
+    }
+
     void UpdatePortTypeControls()
     {
         const int portType = GetPortTypeValue();
@@ -4448,6 +4959,7 @@ private:
         SetPortTypeMembers();
         SetFaceSelectionFilter(maleFaceBlock);
         SetFaceSelectionFilter(femaleFaceBlock);
+        LoadDialogState();
         UpdateCreateModeControls();
         UpdatePortTypeControls();
         UpdateDimensionTitles();
@@ -4507,6 +5019,7 @@ private:
                 autoRecognizeTubeRToggle != NULL && autoRecognizeTubeRToggle->Value();
             const bool mistakeProof =
                 mistakeProofToggle != NULL && mistakeProofToggle->Value();
+            SaveDialogState();
             if (width <= 0.0 || (!autoRecognizeTubeR && height <= 0.0) ||
                 (autoRecognizeTubeR && height < 0.0) ||
                 (!autoRecognizeTubeR && femaleDepth <= 0.0) ||
@@ -4599,6 +5112,8 @@ private:
                         touchingEndPlacements.push_back(portPlacement);
                     }
                 }
+
+                touchingEndPlacements = FilterUnmarkedPortPlacements(touchingEndPlacements);
             }
 
             std::vector<double> resolvedWidths(touchingEndPlacements.size(), width);
@@ -4665,6 +5180,8 @@ private:
             }
 
             std::vector<int> femaleSucceeded(touchingEndPlacements.size(), 0);
+            std::vector<std::vector<tag_t> > femaleCreatedFaces(touchingEndPlacements.size());
+            std::vector<std::vector<tag_t> > maleCreatedFaces(touchingEndPlacements.size());
             std::vector<TouchingPortPlacement> createdPortPlacements;
 
             for (std::size_t index = 0; index < touchingEndPlacements.size(); ++index)
@@ -4680,7 +5197,8 @@ private:
                             resolvedMaleHeights[index],
                             resolvedFemaleDepths[index],
                             clearance,
-                            angle);
+                            angle,
+                            &femaleCreatedFaces[index]);
                     }
                     else
                     {
@@ -4690,7 +5208,8 @@ private:
                             resolvedWidths[index],
                             resolvedMaleHeights[index],
                             resolvedFemaleDepths[index],
-                            clearance);
+                            clearance,
+                            &femaleCreatedFaces[index]);
                     }
                     femaleSucceeded[index] = 1;
                 }
@@ -4720,18 +5239,28 @@ private:
                             touchingEndPlacements[index].malePlacement,
                             resolvedWidths[index],
                             resolvedMaleHeights[index],
-                            angle);
+                            angle,
+                            &maleCreatedFaces[index]);
                     }
                     else
                     {
                         maleSucceeded = CreateMalePortAtPlacement(
                             touchingEndPlacements[index].malePlacement,
                             resolvedWidths[index],
-                            resolvedMaleHeights[index]);
+                            resolvedMaleHeights[index],
+                            &maleCreatedFaces[index]);
                     }
 
                     if (maleSucceeded)
                     {
+                        MarkCreatedPortFaces(
+                            touchingEndPlacements[index].malePlacement,
+                            femaleCreatedFaces[index],
+                            false);
+                        MarkCreatedPortFaces(
+                            touchingEndPlacements[index].malePlacement,
+                            maleCreatedFaces[index],
+                            true);
                         createdPortPlacements.push_back(touchingEndPlacements[index]);
                     }
                     else
@@ -4748,7 +5277,6 @@ private:
                 }
             }
 
-            MarkCreatedPortFaces(createdPortPlacements);
             return 0;
         }
         catch (const NXOpen::NXException& ex)

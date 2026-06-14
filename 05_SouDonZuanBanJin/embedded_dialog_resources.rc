@@ -1,3 +1,4 @@
 #include "embedded_dialog_resources.h"
 
 IDR_ZH_DLX_SOUDONZUANBANJIN_DLX RCDATA "SouDonZuanBanJin.dlx"
+IDR_ZH_DLX_PILIANZUANBANJIN_RULES_TABLE_DLX RCDATA "PiLianZuanBanJinRulesTable.dlx"

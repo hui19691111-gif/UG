@@ -109,6 +109,11 @@
 #include <string>
 #include <vector>
 
+#include "../../../../common/ZhihuiEmbeddedDialog.hpp"
+#include "../../../../common/ZhihuiDialogMemory.hpp"
+#include "../../../../protection/native/ZhihuiLicenseGuard.hpp"
+#include "../../embedded_dialog_resources.h"
+
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
 
@@ -138,8 +143,10 @@ static const unsigned int kCodePageAcp = 0;
 static const unsigned int kCodePageUtf8 = 65001;
 static const char* kPluginSheetNamePrefix = "PILianDaoCuZKT";
 static const char* kDefaultBodyNoteFormat = "{\xE7\xBC\x96\xE5\x8F\xB7=}{\xE6\x9D\x90\xE6\x96\x99} T={\xE5\x8E\x9A\xE5\xBA\xA6} {\xE6\x95\xB0\xE9\x87\x8F}PCS{\xE9\x95\x9C\xE5\x83\x8F}";
+static const wchar_t* kFallbackPluginDirectory = L"D:\\UG\x667A\x8F89\x94A3\x91D1\x63D2\x4EF6\\application";
 static const double kSheetMargin = 40.0;
 static const double kDimensionPlacementGap = 7.0;
+static int kModuleAddressAnchor = 0;
 struct CommandOptions
 {
     bool categoryLayout;
@@ -289,6 +296,52 @@ static double GetDoubleValue(DoubleBlock* block, double fallback)
     return value;
 }
 
+static void LoadPILianDaoCuZKTDialogMemory(
+    Toggle* categoryLayout,
+    Toggle* annotateMaxDimension,
+    Toggle* showBendLines,
+    DoubleBlock* sheetHeight,
+    DoubleBlock* sheetWidth,
+    DoubleBlock* viewSpacing,
+    DoubleBlock* rowSpacing,
+    DoubleBlock* noteTextSize,
+    DoubleBlock* dimensionGlobalScale)
+{
+    const wchar_t* fileName = L"PILianDaoCuZKT_state.ini";
+    zhihui_dialog_memory::LoadLogical(fileName, L"categoryLayout", categoryLayout);
+    zhihui_dialog_memory::LoadLogical(fileName, L"annotateMaxDimension", annotateMaxDimension);
+    zhihui_dialog_memory::LoadLogical(fileName, L"showBendLines", showBendLines);
+    zhihui_dialog_memory::LoadDouble(fileName, L"sheetHeight", sheetHeight);
+    zhihui_dialog_memory::LoadDouble(fileName, L"sheetWidth", sheetWidth);
+    zhihui_dialog_memory::LoadDouble(fileName, L"viewSpacing", viewSpacing);
+    zhihui_dialog_memory::LoadDouble(fileName, L"rowSpacing", rowSpacing);
+    zhihui_dialog_memory::LoadDouble(fileName, L"noteTextSize", noteTextSize);
+    zhihui_dialog_memory::LoadDouble(fileName, L"dimensionGlobalScale", dimensionGlobalScale);
+}
+
+static void SavePILianDaoCuZKTDialogMemory(
+    Toggle* categoryLayout,
+    Toggle* annotateMaxDimension,
+    Toggle* showBendLines,
+    DoubleBlock* sheetHeight,
+    DoubleBlock* sheetWidth,
+    DoubleBlock* viewSpacing,
+    DoubleBlock* rowSpacing,
+    DoubleBlock* noteTextSize,
+    DoubleBlock* dimensionGlobalScale)
+{
+    const wchar_t* fileName = L"PILianDaoCuZKT_state.ini";
+    zhihui_dialog_memory::SaveLogical(fileName, L"categoryLayout", categoryLayout);
+    zhihui_dialog_memory::SaveLogical(fileName, L"annotateMaxDimension", annotateMaxDimension);
+    zhihui_dialog_memory::SaveLogical(fileName, L"showBendLines", showBendLines);
+    zhihui_dialog_memory::SaveDouble(fileName, L"sheetHeight", sheetHeight);
+    zhihui_dialog_memory::SaveDouble(fileName, L"sheetWidth", sheetWidth);
+    zhihui_dialog_memory::SaveDouble(fileName, L"viewSpacing", viewSpacing);
+    zhihui_dialog_memory::SaveDouble(fileName, L"rowSpacing", rowSpacing);
+    zhihui_dialog_memory::SaveDouble(fileName, L"noteTextSize", noteTextSize);
+    zhihui_dialog_memory::SaveDouble(fileName, L"dimensionGlobalScale", dimensionGlobalScale);
+}
+
 static std::string FormatReal(double value)
 {
     std::ostringstream stream;
@@ -419,7 +472,36 @@ static std::string Utf8ToLocaleEncoding(const std::string& text)
 
 static std::wstring PluginDirectory()
 {
-    return L"D:\\\x667A\x8F89\\application";
+    static std::wstring directory;
+    if (!directory.empty())
+    {
+        return directory;
+    }
+
+    const unsigned long kGetModuleHandleExFlagFromAddress = 0x00000004;
+    const unsigned long kGetModuleHandleExFlagUnchangedRefcount = 0x00000002;
+    HMODULE moduleHandle = NULL;
+    if (GetModuleHandleExW(
+            kGetModuleHandleExFlagFromAddress | kGetModuleHandleExFlagUnchangedRefcount,
+            reinterpret_cast<const wchar_t*>(&kModuleAddressAnchor),
+            &moduleHandle) != 0)
+    {
+        wchar_t modulePath[1024] = { 0 };
+        const DWORD length = GetModuleFileNameW(moduleHandle, modulePath, static_cast<DWORD>(sizeof(modulePath) / sizeof(modulePath[0])));
+        if (length > 0 && length < static_cast<DWORD>(sizeof(modulePath) / sizeof(modulePath[0])))
+        {
+            std::wstring path(modulePath, modulePath + length);
+            const size_t slash = path.find_last_of(L"\\/");
+            if (slash != std::wstring::npos)
+            {
+                directory = path.substr(0, slash);
+                return directory;
+            }
+        }
+    }
+
+    directory = kFallbackPluginDirectory;
+    return directory;
 }
 
 static std::wstring BodyNoteConfigFilePath()
@@ -861,7 +943,8 @@ static std::string LoadBodyNoteFormat()
 
 static const std::string& CachedBodyNoteFormat()
 {
-    static const std::string format = LoadBodyNoteFormat();
+    static std::string format;
+    format = LoadBodyNoteFormat();
     return format;
 }
 
@@ -5080,8 +5163,12 @@ PILianDaoCuZKTDialog::PILianDaoCuZKTDialog()
     LogLine("[Dialog::ctor] begin");
     PILianDaoCuZKTDialog::theSession = NXOpen::Session::GetSession();
     PILianDaoCuZKTDialog::theUI = UI::GetUI();
-    theDlxFileName = "PILianDaoCuZKTDialog.dlx";
-    theDialog = PILianDaoCuZKTDialog::theUI->CreateDialog(theDlxFileName);
+    theDlxFileName = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_PILIANDAOCUZKTDIALOG_DLX);
+    if (theDlxFileName.empty())
+    {
+        throw std::runtime_error("PILianDaoCuZKT dialog resource is missing.");
+    }
+    theDialog = PILianDaoCuZKTDialog::theUI->CreateDialog(theDlxFileName.c_str());
     theDialog->AddOkHandler(make_callback(this, &PILianDaoCuZKTDialog::ok_cb));
     theDialog->AddUpdateHandler(make_callback(this, &PILianDaoCuZKTDialog::update_cb));
     theDialog->AddInitializeHandler(make_callback(this, &PILianDaoCuZKTDialog::initialize_cb));
@@ -5101,6 +5188,12 @@ PILianDaoCuZKTDialog::~PILianDaoCuZKTDialog()
 extern "C" DllExport void ufusr(char* param, int* retcod, int param_len)
 {
     LogLine("[ufusr] entered");
+    if (!zhihui_license_guard::EnsureAuthorized(L"ZHIHUI.PILIANDACUZKT", L"PILianDaoCuZKT"))
+    {
+        LogLine("[ufusr] authorization denied");
+        return;
+    }
+
     int initStatus = UF_initialize();
     LogLine("[ufusr] UF_initialize status=" + std::to_string(initStatus));
     PILianDaoCuZKTDialog* dialog = NULL;
@@ -5169,6 +5262,16 @@ void PILianDaoCuZKTDialog::initialize_cb()
         row_spacing = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("row_spacing"));
         note_text_size = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("note_text_size"));
         dimension_global_scale = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("dimension_global_scale"));
+        LoadPILianDaoCuZKTDialogMemory(
+            category_layout,
+            annotate_max_dimension,
+            show_bend_lines,
+            sheet_height,
+            sheet_width,
+            view_spacing,
+            row_spacing,
+            note_text_size,
+            dimension_global_scale);
         LogLine("[initialize_cb] done");
     }
     catch (const std::exception& ex)
@@ -5193,6 +5296,16 @@ int PILianDaoCuZKTDialog::ok_cb()
     try
     {
         LogLine("[PILianDaoCuZKT] OK clicked, batch flat-pattern drawing started.");
+        SavePILianDaoCuZKTDialogMemory(
+            category_layout,
+            annotate_max_dimension,
+            show_bend_lines,
+            sheet_height,
+            sheet_width,
+            view_spacing,
+            row_spacing,
+            note_text_size,
+            dimension_global_scale);
         CommandOptions options;
         options.categoryLayout = GetToggleValue(category_layout, true);
         options.annotateMaxDimension = GetToggleValue(annotate_max_dimension, true);

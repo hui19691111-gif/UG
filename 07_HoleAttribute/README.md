@@ -13,9 +13,9 @@ UG/NX 2412 C++ 孔属性插件。
 
 ## 规则表
 
-规则表与 `KonBiaoZu` 共用，文件名为 `KonBiaoZuRules.xlsx`。程序优先查找 DLL 同级或上级目录里的 `DATA\KonBiaoZuRules.xlsx`，开发环境下会自动查找 `D:\UGPluginRepo\KonBiaoZu\data\KonBiaoZuRules.xlsx`。
+规则表与 `KonBiaoZu` 共用，文件名为 `config\KonBiaoZuRules.ini`。程序统一读取插件根目录下的 `config\KonBiaoZuRules.ini`。
 
-插件直接调用 Excel 读取所有工作表。支持 `KonBiaoZuRules.xlsx` 的配置表格式：第 2 行为类别，第 3 行为标注文本模板，第 4 行为注释模板，第 7 行开始为底孔和规格映射。
+插件通过共享规则管理器读取 INI 规则。每个 `[RuleNNN]` 为一条规则，字段包含 `annotationType`、`series`、`size`、`threadSpec`、`lengthText`、`bottomHole`、`displayText`、`standardComment`、`note`。
 
 | 列 | 含义 |
 |---|---|
@@ -32,7 +32,7 @@ UG/NX 2412 C++ 孔属性插件。
 
 1. 确认环境变量 `UGII_BASE_DIR` 指向 `D:\Program Files\Siemens\NX2412`。
 2. 用 Visual Studio 打开 `HoleAttribute.vcxproj`，选择 `x64|Debug` 或 `x64|Release` 编译。
-3. 运行时让 `HoleAttribute.dll`、`HoleAttribute.dlx` 和共享的 `DATA\KonBiaoZuRules.xlsx` 保持在同一套部署目录中。
+3. 运行时让 `HoleAttribute.dll`、`HoleAttribute.dlx` 和共享的 `config\KonBiaoZuRules.ini` 保持在同一套部署目录中。
 4. 在 NX 中通过“文件 -> 执行 -> NX Open”运行 `HoleAttribute.dll`。
 
 ## 界面控件
