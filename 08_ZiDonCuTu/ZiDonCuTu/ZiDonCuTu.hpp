@@ -107,6 +107,7 @@
 #include <NXOpen/Drawings_DraftingView.hxx>
 #include <NXOpen/Drawings_DraftingViewCollection.hxx>
 #include <NXOpen/Drawings_SelectDraftingView.hxx>
+#include <NXOpen/ViewDependentDisplayManager.hxx>
 #include <NXOpen/DraftingManager.hxx>
 #include <NXOpen/Drawings_DraftingDrawingSheetBuilder.hxx>
 #include <NXOpen/Drawings_DraftingDrawingSheetCollection.hxx>
@@ -260,6 +261,11 @@ private:
     NXOpen::BlockStyler::Toggle* toggleHoleAttribute;// Block type: Toggle
     NXOpen::BlockStyler::StringBlock* stringHoleMarker;// Block type: String
     NXOpen::BlockStyler::DoubleBlock* doubleRInnerThreshold;// Block type: Double
+    NXOpen::BlockStyler::Toggle* toggleBendNote;// Block type: Toggle
+    NXOpen::BlockStyler::DoubleBlock* doubleBendNoteTextHeight;// Block type: Double
+    NXOpen::BlockStyler::Toggle* toggleBreakBendLine;// Block type: Toggle
+    NXOpen::BlockStyler::DoubleBlock* doubleBendLineUpKeepLength;// Block type: Double
+    NXOpen::BlockStyler::DoubleBlock* doubleBendLineDownKeepLength;// Block type: Double
     NXOpen::BlockStyler::Button* buttonNoteFormatConfig;// Block type: Button
     NXOpen::BlockStyler::Enumeration* enum01;// Block type: Enumeration
     NXOpen::BlockStyler::Enumeration* enumProjection;// Block type: Enumeration

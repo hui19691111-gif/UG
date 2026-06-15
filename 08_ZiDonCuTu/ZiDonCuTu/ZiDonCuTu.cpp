@@ -1136,6 +1136,11 @@ static void SaveZiDonCuTuDialogState(
 	NXOpen::BlockStyler::Toggle* holeAttributeToggleBlock,
 	NXOpen::BlockStyler::StringBlock* holeMarkerBlock,
 	NXOpen::BlockStyler::DoubleBlock* innerRThresholdBlock,
+	NXOpen::BlockStyler::Toggle* bendNoteToggleBlock,
+	NXOpen::BlockStyler::DoubleBlock* bendNoteTextHeightBlock,
+	NXOpen::BlockStyler::Toggle* breakBendLineToggleBlock,
+	NXOpen::BlockStyler::DoubleBlock* bendLineUpKeepLengthBlock,
+	NXOpen::BlockStyler::DoubleBlock* bendLineDownKeepLengthBlock,
 	NXOpen::BlockStyler::Enumeration* hiddenLineEnumBlock,
 	NXOpen::BlockStyler::Enumeration* projectionEnumBlock,
 	NXOpen::BlockStyler::Enumeration* flatPatternPositionEnumBlock)
@@ -1160,6 +1165,11 @@ static void SaveZiDonCuTuDialogState(
 		file << "hole_attribute=" << (GetToggleBlockValue(holeAttributeToggleBlock, false) ? 1 : 0) << "\r\n";
 		file << "hole_marker=" << EncodeConfigEscapes(GetStringBlockValue(holeMarkerBlock, "A")) << "\r\n";
 		file << "inner_r_threshold=" << GetDoubleBlockValue(innerRThresholdBlock, 0.5) << "\r\n";
+		file << "bend_note=" << (GetToggleBlockValue(bendNoteToggleBlock, false) ? 1 : 0) << "\r\n";
+		file << "bend_note_text_height=" << GetDoubleBlockValue(bendNoteTextHeightBlock, 2.0) << "\r\n";
+		file << "break_bend_line=" << (GetToggleBlockValue(breakBendLineToggleBlock, false) ? 1 : 0) << "\r\n";
+		file << "bend_line_up_keep_length=" << GetDoubleBlockValue(bendLineUpKeepLengthBlock, 5.0) << "\r\n";
+		file << "bend_line_down_keep_length=" << GetDoubleBlockValue(bendLineDownKeepLengthBlock, 5.0) << "\r\n";
 		file << "hidden_line=" << EncodeConfigEscapes(GetEnumBlockUtf8Value(hiddenLineEnumBlock, "\xE6\x97\xA0")) << "\r\n";
 		file << "projection=" << EncodeConfigEscapes(GetEnumBlockUtf8Value(projectionEnumBlock, "\xE7\xAC\xAC\xE4\xB8\x80\xE8\xA7\x92\xE6\xB3\x95")) << "\r\n";
 		file << "flat_position=" << EncodeConfigEscapes(GetEnumBlockUtf8Value(flatPatternPositionEnumBlock, "\xE5\xB7\xA6")) << "\r\n";
@@ -1178,6 +1188,11 @@ static void RestoreZiDonCuTuDialogState(
 	NXOpen::BlockStyler::Toggle* holeAttributeToggleBlock,
 	NXOpen::BlockStyler::StringBlock* holeMarkerBlock,
 	NXOpen::BlockStyler::DoubleBlock* innerRThresholdBlock,
+	NXOpen::BlockStyler::Toggle* bendNoteToggleBlock,
+	NXOpen::BlockStyler::DoubleBlock* bendNoteTextHeightBlock,
+	NXOpen::BlockStyler::Toggle* breakBendLineToggleBlock,
+	NXOpen::BlockStyler::DoubleBlock* bendLineUpKeepLengthBlock,
+	NXOpen::BlockStyler::DoubleBlock* bendLineDownKeepLengthBlock,
 	NXOpen::BlockStyler::Enumeration* hiddenLineEnumBlock,
 	NXOpen::BlockStyler::Enumeration* projectionEnumBlock,
 	NXOpen::BlockStyler::Enumeration* flatPatternPositionEnumBlock)
@@ -1208,6 +1223,26 @@ static void RestoreZiDonCuTuDialogState(
 		{
 			innerRThresholdBlock->SetValue(std::max(0.0, ConfigReadDouble(path, "inner_r_threshold", innerRThresholdBlock->Value())));
 		}
+		if (bendNoteToggleBlock != NULL)
+		{
+			bendNoteToggleBlock->SetValue(ConfigReadBool(path, "bend_note", GetToggleBlockValue(bendNoteToggleBlock, false)));
+		}
+		if (bendNoteTextHeightBlock != NULL)
+		{
+			bendNoteTextHeightBlock->SetValue(std::max(0.1, ConfigReadDouble(path, "bend_note_text_height", bendNoteTextHeightBlock->Value())));
+		}
+		if (breakBendLineToggleBlock != NULL)
+		{
+			breakBendLineToggleBlock->SetValue(ConfigReadBool(path, "break_bend_line", GetToggleBlockValue(breakBendLineToggleBlock, false)));
+		}
+		if (bendLineUpKeepLengthBlock != NULL)
+		{
+			bendLineUpKeepLengthBlock->SetValue(std::max(0.1, ConfigReadDouble(path, "bend_line_up_keep_length", bendLineUpKeepLengthBlock->Value())));
+		}
+		if (bendLineDownKeepLengthBlock != NULL)
+		{
+			bendLineDownKeepLengthBlock->SetValue(std::max(0.1, ConfigReadDouble(path, "bend_line_down_keep_length", bendLineDownKeepLengthBlock->Value())));
+		}
 		SetEnumBlockUtf8Value(hiddenLineEnumBlock, ConfigReadString(path, "hidden_line", GetEnumBlockUtf8Value(hiddenLineEnumBlock, "\xE6\x97\xA0")));
 		SetEnumBlockUtf8Value(projectionEnumBlock, ConfigReadString(path, "projection", GetEnumBlockUtf8Value(projectionEnumBlock, "\xE7\xAC\xAC\xE4\xB8\x80\xE8\xA7\x92\xE6\xB3\x95")));
 		SetEnumBlockUtf8Value(flatPatternPositionEnumBlock, ConfigReadString(path, "flat_position", GetEnumBlockUtf8Value(flatPatternPositionEnumBlock, "\xE5\xB7\xA6")));
@@ -1228,6 +1263,37 @@ static void UpdateHoleMarkerControls(
 	const bool showMarker = GetToggleBlockValue(holeAttributeToggle, false);
 	markerBlock->SetShow(showMarker);
 	markerBlock->SetEnable(showMarker);
+}
+
+static void UpdateBendNoteControls(
+	NXOpen::BlockStyler::Toggle* bendNoteToggle,
+	NXOpen::BlockStyler::DoubleBlock* textHeightBlock)
+{
+	if (textHeightBlock == NULL)
+	{
+		return;
+	}
+	const bool showTextHeight = GetToggleBlockValue(bendNoteToggle, false);
+	textHeightBlock->SetShow(showTextHeight);
+	textHeightBlock->SetEnable(showTextHeight);
+}
+
+static void UpdateBreakBendLineControls(
+	NXOpen::BlockStyler::Toggle* breakBendLineToggle,
+	NXOpen::BlockStyler::DoubleBlock* upKeepLengthBlock,
+	NXOpen::BlockStyler::DoubleBlock* downKeepLengthBlock)
+{
+	const bool showKeepLength = GetToggleBlockValue(breakBendLineToggle, false);
+	if (upKeepLengthBlock != NULL)
+	{
+		upKeepLengthBlock->SetShow(showKeepLength);
+		upKeepLengthBlock->SetEnable(showKeepLength);
+	}
+	if (downKeepLengthBlock != NULL)
+	{
+		downKeepLengthBlock->SetShow(showKeepLength);
+		downKeepLengthBlock->SetEnable(showKeepLength);
+	}
 }
 
 static void HoleNoteInvokeDebugLog(const std::string& message)
@@ -2825,16 +2891,13 @@ static std::string ReadPartFileNameText(NXOpen::Part* part)
 
 static std::string ReadPartFileNameReferenceText(NXOpen::Annotations::TextWithSymbolsBuilder* textBlock, NXOpen::Part* part)
 {
-	const std::string fileName = ReadPartFileNameText(part);
-	if (fileName.empty())
+	const char* nameTitle = "\xE5\x90\x8D\xE7\xA7\xB0";
+	const std::string nameReference = DraftAttributeReferenceText(textBlock, part, nameTitle);
+	if (!nameReference.empty())
 	{
-		return "";
+		return nameReference;
 	}
-
-	const char* title = "\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D";
-	SetStringUserAttribute(part, title, fileName);
-	const std::string reference = DraftAttributeReferenceText(textBlock, part, title);
-	return reference.empty() ? fileName : reference;
+	return ReadPartFileNameText(part);
 }
 
 static std::string ReadBodyTotalQuantityDraftText(
@@ -2992,18 +3055,18 @@ static bool ReadPartFileNameDraftNxString(
 	NXOpen::Part* part,
 	NXOpen::NXString& value)
 {
+	const char* nameTitle = "\xE5\x90\x8D\xE7\xA7\xB0";
+	if (DraftAttributeReferenceNxString(textBlock, part, nameTitle, value))
+	{
+		return true;
+	}
+
 	const std::string fileName = ReadPartFileNameText(part);
 	if (fileName.empty())
 	{
 		return false;
 	}
 
-	const char* title = "\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D";
-	SetStringUserAttribute(part, title, fileName);
-	if (DraftAttributeReferenceNxString(textBlock, part, title, value))
-	{
-		return true;
-	}
 	value = NXOpen::NXString(fileName.c_str(), NXOpen::NXString::UTF8);
 	return true;
 }
@@ -3427,20 +3490,22 @@ static bool PrepareDraftNoteReferenceForToken(
 
 	if (token == "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}")
 	{
-		const std::string fileName = ReadPartFileNameText(part);
-		if (!fileName.empty())
+		const char* nameTitle = "\xE5\x90\x8D\xE7\xA7\xB0";
+		if (HasAnyUserAttribute(part, nameTitle))
 		{
-			const char* title = "\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D";
-			SetStringUserAttribute(part, title, fileName);
-			if (HasAnyUserAttribute(part, title))
-			{
-				insert.kind = DraftNoteReferenceInsert::KindAttribute;
-				insert.owner = part;
-				insert.title = title;
-				return true;
-			}
-			fallbackText = fileName;
+			insert.kind = DraftNoteReferenceInsert::KindAttribute;
+			insert.owner = part;
+			insert.title = nameTitle;
+			return true;
 		}
+		if (HasAnyUserAttribute(body, nameTitle))
+		{
+			insert.kind = DraftNoteReferenceInsert::KindAttribute;
+			insert.owner = body;
+			insert.title = nameTitle;
+			return true;
+		}
+		fallbackText = ReadPartFileNameText(part);
 		return false;
 	}
 
@@ -9127,6 +9192,11 @@ void ZiDonCuTu::initialize_cb()
 		toggleHoleAttribute = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleHoleAttribute"));
 		stringHoleMarker = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("stringHoleMarker"));
 		doubleRInnerThreshold = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleRInnerThreshold"));
+		toggleBendNote = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendNote"));
+		doubleBendNoteTextHeight = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendNoteTextHeight"));
+		toggleBreakBendLine = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBreakBendLine1"));
+		doubleBendLineUpKeepLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineUpKeepLength1"));
+		doubleBendLineDownKeepLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineDownKeepLength1"));
 		buttonNoteFormatConfig = dynamic_cast<NXOpen::BlockStyler::Button*>(theDialog->TopBlock()->FindBlock("buttonNoteFormatConfig"));
 		enum01 = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(theDialog->TopBlock()->FindBlock("enum01"));
 		enumProjection = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(theDialog->TopBlock()->FindBlock("enumProjection"));
@@ -9204,6 +9274,18 @@ void ZiDonCuTu::dialogShown_cb()
 		{
 			doubleRInnerThreshold->SetValue(0.5);
 		}
+		if (doubleBendNoteTextHeight != NULL && doubleBendNoteTextHeight->Value() <= 0.0)
+		{
+			doubleBendNoteTextHeight->SetValue(2.0);
+		}
+		if (doubleBendLineUpKeepLength != NULL && doubleBendLineUpKeepLength->Value() <= 0.0)
+		{
+			doubleBendLineUpKeepLength->SetValue(5.0);
+		}
+		if (doubleBendLineDownKeepLength != NULL && doubleBendLineDownKeepLength->Value() <= 0.0)
+		{
+			doubleBendLineDownKeepLength->SetValue(5.0);
+		}
 		RestoreZiDonCuTuDialogState(
 			enumDrawingMode,
 			enumSheetLayout,
@@ -9213,6 +9295,11 @@ void ZiDonCuTu::dialogShown_cb()
 			toggleHoleAttribute,
 			stringHoleMarker,
 			doubleRInnerThreshold,
+			toggleBendNote,
+			doubleBendNoteTextHeight,
+			toggleBreakBendLine,
+			doubleBendLineUpKeepLength,
+			doubleBendLineDownKeepLength,
 			enum01,
 			enumProjection,
 			enum0);
@@ -9247,6 +9334,8 @@ void ZiDonCuTu::dialogShown_cb()
 			enum01->SetShow(false);
 		}
 		UpdateHoleMarkerControls(toggleHoleAttribute, stringHoleMarker);
+		UpdateBendNoteControls(toggleBendNote, doubleBendNoteTextHeight);
+		UpdateBreakBendLineControls(toggleBreakBendLine, doubleBendLineUpKeepLength, doubleBendLineDownKeepLength);
 		if (enum01 != NULL)
 		{
 			enum01->SetShow(false);
@@ -9285,6 +9374,11 @@ int ZiDonCuTu::apply_cb()
 			toggleHoleAttribute,
 			stringHoleMarker,
 			doubleRInnerThreshold,
+			toggleBendNote,
+			doubleBendNoteTextHeight,
+			toggleBreakBendLine,
+			doubleBendLineUpKeepLength,
+			doubleBendLineDownKeepLength,
 			enum01,
 			enumProjection,
 			enum0);
@@ -10684,6 +10778,45 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 			blockName = "toggleHoleAttribute";
 			phase = "toggleHoleAttribute";
 			UpdateHoleMarkerControls(toggleHoleAttribute, stringHoleMarker);
+		}
+		else if (block == toggleBendNote)
+		{
+			blockName = "toggleBendNote";
+			phase = "toggleBendNote";
+			UpdateBendNoteControls(toggleBendNote, doubleBendNoteTextHeight);
+		}
+		else if (block == doubleBendNoteTextHeight)
+		{
+			blockName = "doubleBendNoteTextHeight";
+			phase = "doubleBendNoteTextHeight";
+			if (doubleBendNoteTextHeight != NULL && doubleBendNoteTextHeight->Value() <= 0.0)
+			{
+				doubleBendNoteTextHeight->SetValue(2.0);
+			}
+		}
+		else if (block == toggleBreakBendLine)
+		{
+			blockName = "toggleBreakBendLine";
+			phase = "toggleBreakBendLine";
+			UpdateBreakBendLineControls(toggleBreakBendLine, doubleBendLineUpKeepLength, doubleBendLineDownKeepLength);
+		}
+		else if (block == doubleBendLineUpKeepLength)
+		{
+			blockName = "doubleBendLineUpKeepLength";
+			phase = "doubleBendLineUpKeepLength";
+			if (doubleBendLineUpKeepLength != NULL && doubleBendLineUpKeepLength->Value() <= 0.0)
+			{
+				doubleBendLineUpKeepLength->SetValue(5.0);
+			}
+		}
+		else if (block == doubleBendLineDownKeepLength)
+		{
+			blockName = "doubleBendLineDownKeepLength";
+			phase = "doubleBendLineDownKeepLength";
+			if (doubleBendLineDownKeepLength != NULL && doubleBendLineDownKeepLength->Value() <= 0.0)
+			{
+				doubleBendLineDownKeepLength->SetValue(5.0);
+			}
 		}
 		else if (block == buttonNoteFormatConfig)
 		{
@@ -14105,12 +14238,22 @@ int ZiDonCuTu::aabb_cb()
 
 				const bool coordinateHoleEnabled = GetToggleBlockValue(toggleHoleCoordinate, false);
 				const bool attributeHoleEnabled = GetToggleBlockValue(toggleHoleAttribute, false);
+				const bool bendNoteEnabled = GetToggleBlockValue(toggleBendNote, false);
+				const double bendNoteTextHeight = std::max(0.1, GetDoubleBlockValue(doubleBendNoteTextHeight, 2.0));
+				const bool breakBendLineEnabled = GetToggleBlockValue(toggleBreakBendLine, false);
+				const double bendLineUpKeepLength = std::max(0.1, GetDoubleBlockValue(doubleBendLineUpKeepLength, 5.0));
+				const double bendLineDownKeepLength = std::max(0.1, GetDoubleBlockValue(doubleBendLineDownKeepLength, 5.0));
 				const std::string holeMarkerStart = GetStringBlockValue(stringHoleMarker, "A");
 				{
 					std::ostringstream holeLog;
 					holeLog << "[HoleNoteInvoke] flat view reached viewTag=" << baseView3C->Tag()
 						<< " coordinateEnabled=" << (coordinateHoleEnabled ? "true" : "false")
 						<< " attributeEnabled=" << (attributeHoleEnabled ? "true" : "false")
+						<< " bendNoteEnabled=" << (bendNoteEnabled ? "true" : "false")
+						<< " bendNoteTextHeight=" << bendNoteTextHeight
+						<< " breakBendLineEnabled=" << (breakBendLineEnabled ? "true" : "false")
+						<< " bendLineUpKeepLength=" << bendLineUpKeepLength
+						<< " bendLineDownKeepLength=" << bendLineDownKeepLength
 						<< " markerStart='" << holeMarkerStart << "'";
 					HoleNoteInvokeDebugLog(holeLog.str());
 				}
@@ -14129,6 +14272,46 @@ int ZiDonCuTu::aabb_cb()
 				else
 				{
 					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped hole attribute dimensions");
+				}
+				NXOpen::Features::FlatPattern* matchedFlatPattern = NULL;
+				if (bendNoteEnabled || breakBendLineEnabled)
+				{
+					const std::vector<FlatPatternDraftingInfo>& flatPatternInfos = GetFlatPatternDraftingInfos(workPart);
+					for (size_t infoIndex = 0; infoIndex < flatPatternInfos.size(); ++infoIndex)
+					{
+						if (FlatPatternFeatureReferencesBodyForDrawing(
+							flatPatternInfos[infoIndex].feature,
+							flatPatternInfos[infoIndex].flatPattern,
+							Body1))
+						{
+							matchedFlatPattern = flatPatternInfos[infoIndex].flatPattern;
+							break;
+						}
+					}
+				}
+				if (bendNoteEnabled && matchedFlatPattern != NULL)
+				{
+					CreateFlatPatternBendNotes(baseView3C, matchedFlatPattern, bendNoteTextHeight);
+				}
+				else if (bendNoteEnabled)
+				{
+					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped bend notes: no matching flat pattern");
+				}
+				else
+				{
+					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped bend notes");
+				}
+				if (breakBendLineEnabled && matchedFlatPattern != NULL)
+				{
+					BreakFlatPatternBendLines(baseView3C, matchedFlatPattern, bendLineUpKeepLength, bendLineDownKeepLength);
+				}
+				else if (breakBendLineEnabled)
+				{
+					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped bend line break: no matching flat pattern");
+				}
+				else
+				{
+					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped bend line break");
 				}
 
 				std::vector<Drawings::DraftingBody*>DraftingBodyVector;

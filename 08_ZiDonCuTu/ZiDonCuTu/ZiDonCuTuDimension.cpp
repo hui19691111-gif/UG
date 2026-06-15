@@ -4767,6 +4767,417 @@ bool CreateMultiHoleOrdinateDimension(
 	builder->Destroy();
 	return success;
 }
+
+void BendNoteDebugLog(const std::string& message)
+{
+	try
+	{
+		std::ofstream out("D:\\UG智辉钣金插件\\logs\\bend_note_debug.log", std::ios::out | std::ios::app);
+		if (out.is_open())
+		{
+			out << message << std::endl;
+		}
+	}
+	catch (...)
+	{
+	}
+}
+
+bool DraftingCurveReferencesObject(
+	NXOpen::Drawings::DraftingCurve* curve,
+	tag_t objectTag)
+{
+	if (curve == NULL || objectTag == NULL_TAG)
+	{
+		return false;
+	}
+
+	try
+	{
+		const std::vector<NXOpen::NXObject*> parents = curve->GetDraftingCurveInfo()->GetParents();
+		for (size_t i = 0; i < parents.size(); ++i)
+		{
+			if (parents[i] != NULL && parents[i]->Tag() == objectTag)
+			{
+				return true;
+			}
+		}
+	}
+	catch (...)
+	{
+	}
+
+	int parentsCount = 0;
+	tag_t* parentTags = NULL;
+	if (UF_DRAW_ask_drafting_curve_parents(curve->Tag(), &parentsCount, &parentTags) != 0 || parentTags == NULL)
+	{
+		return false;
+	}
+
+	bool matched = false;
+	for (int i = 0; i < parentsCount; ++i)
+	{
+		if (parentTags[i] == objectTag)
+		{
+			matched = true;
+			break;
+		}
+	}
+	UF_free(parentTags);
+	return matched;
+}
+
+NXOpen::Drawings::DraftingCurve* FindDraftingCurveForFlatPatternCurve(
+	const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+	NXOpen::Curve* flatPatternCurve)
+{
+	if (flatPatternCurve == NULL)
+	{
+		return NULL;
+	}
+
+	const tag_t flatPatternCurveTag = flatPatternCurve->Tag();
+	for (size_t i = 0; i < curves.size(); ++i)
+	{
+		if (DraftingCurveReferencesObject(curves[i], flatPatternCurveTag))
+		{
+			return curves[i];
+		}
+	}
+	return NULL;
+}
+
+bool TryMeasureArcSpanDegrees(tag_t objectTag, double& degrees)
+{
+	degrees = 0.0;
+	if (objectTag == NULL_TAG)
+	{
+		return false;
+	}
+
+	UF_EVAL_p_t evaluator = NULL;
+	if (UF_EVAL_initialize(objectTag, &evaluator) != 0 || evaluator == NULL)
+	{
+		return false;
+	}
+
+	logical isArc = false;
+	if (UF_EVAL_is_arc(evaluator, &isArc) != 0 || !isArc)
+	{
+		UF_EVAL_free(evaluator);
+		return false;
+	}
+
+	double limits[2] = { 0.0, 0.0 };
+	if (UF_EVAL_ask_limits(evaluator, limits) != 0)
+	{
+		UF_EVAL_free(evaluator);
+		return false;
+	}
+	UF_EVAL_free(evaluator);
+
+	double span = std::fabs(limits[1] - limits[0]);
+	while (span > (2.0 * PI))
+	{
+		span -= 2.0 * PI;
+	}
+	degrees = span * 180.0 / PI;
+	return degrees > 1.0e-3 && degrees <= 360.0;
+}
+
+bool TryMeasureBendAngleDegrees(NXOpen::Face* bendFace, double& degrees)
+{
+	degrees = 0.0;
+	if (bendFace == NULL)
+	{
+		return false;
+	}
+
+	const std::vector<NXOpen::Edge*> edges = bendFace->GetEdges();
+	double bestDegrees = 0.0;
+	for (size_t i = 0; i < edges.size(); ++i)
+	{
+		if (edges[i] == NULL)
+		{
+			continue;
+		}
+		double edgeDegrees = 0.0;
+		if (!TryMeasureArcSpanDegrees(edges[i]->Tag(), edgeDegrees))
+		{
+			continue;
+		}
+		if (edgeDegrees > bestDegrees && edgeDegrees < 359.0)
+		{
+			bestDegrees = edgeDegrees;
+		}
+	}
+
+	if (bestDegrees <= 1.0e-3)
+	{
+		return false;
+	}
+	degrees = bestDegrees;
+	return true;
+}
+
+std::string FormatBendNoteText(const char* directionUtf8, double angleDegrees, bool hasAngle)
+{
+	std::ostringstream text;
+	text << directionUtf8;
+	if (hasAngle)
+	{
+		const double rounded = std::round(angleDegrees * 10.0) / 10.0;
+		if (std::fabs(rounded - std::round(rounded)) < 1.0e-6)
+		{
+			text << static_cast<int>(std::round(rounded));
+		}
+		else
+		{
+			text << std::fixed << std::setprecision(1) << rounded;
+		}
+		text << "\xC2\xB0";
+	}
+	return text.str();
+}
+
+bool CreateFlatPatternBendNote(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingCurve* curve,
+	const NXOpen::Point3d& drawingPoint,
+	const std::string& noteText,
+	double textHeight)
+{
+	if (baseView == NULL || curve == NULL || noteText.empty())
+	{
+		return false;
+	}
+
+	NXOpen::Drawings::DraftingView* draftingView =
+		dynamic_cast<NXOpen::Drawings::DraftingView*>(NXOpen::NXObjectManager::Get(baseView->Tag()));
+	if (draftingView == NULL)
+	{
+		return false;
+	}
+
+	NXOpen::Annotations::SimpleDraftingAid* nullAid(NULL);
+	NXOpen::Annotations::DraftingNoteBuilder* builder =
+		workPart->Annotations()->CreateDraftingNoteBuilder(nullAid);
+	if (builder == NULL)
+	{
+		return false;
+	}
+
+	NXOpen::NXObject* created = NULL;
+	try
+	{
+		NXOpen::Annotations::Annotation::AssociativeOriginData assocOrigin;
+		NXOpen::Point* nullPoint(NULL);
+		NXOpen::Annotations::Annotation* nullAnnotation(NULL);
+		assocOrigin.OriginType = NXOpen::Annotations::AssociativeOriginTypeRelativeToView;
+		assocOrigin.View = draftingView;
+		assocOrigin.ViewOfGeometry = draftingView;
+		assocOrigin.PointOnGeometry = nullPoint;
+		assocOrigin.VertAnnotation = nullAnnotation;
+		assocOrigin.VertAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+		assocOrigin.HorizAnnotation = nullAnnotation;
+		assocOrigin.HorizAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+		assocOrigin.AlignedAnnotation = nullAnnotation;
+		assocOrigin.DimensionLine = 0;
+		assocOrigin.AssociatedView = draftingView;
+		assocOrigin.AssociatedPoint = nullPoint;
+		assocOrigin.OffsetAnnotation = nullAnnotation;
+		assocOrigin.OffsetAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+		assocOrigin.XOffsetFactor = 0.0;
+		assocOrigin.YOffsetFactor = 0.0;
+		assocOrigin.StackAlignmentPosition = NXOpen::Annotations::StackAlignmentPositionAbove;
+		builder->Origin()->SetAssociativeOrigin(assocOrigin);
+		builder->Origin()->SetInferRelativeToGeometry(false);
+		builder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
+		builder->Style()->LetteringStyle()->SetGeneralTextSize(std::max(0.1, textHeight));
+		builder->Origin()->SetOriginPoint(drawingPoint);
+
+		std::vector<NXOpen::NXString> lines(1);
+		lines[0] = NXOpen::NXString(noteText.c_str(), NXOpen::NXString::UTF8);
+		builder->Text()->TextBlock()->SetText(lines);
+
+		created = builder->Commit();
+		std::ostringstream log;
+		log << "[BendNote] commit=" << (created != NULL ? "ok" : "null")
+			<< " curveTag=" << curve->Tag()
+			<< " text='" << noteText << "'"
+			<< " point=(" << drawingPoint.X << "," << drawingPoint.Y << ")";
+		BendNoteDebugLog(log.str());
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[BendNote] create failed: ") + ex.Message());
+	}
+
+	builder->Destroy();
+	return created != NULL;
+}
+
+bool CreateFlatPatternBendNotesForObjects(
+	NXOpen::Drawings::BaseView* baseView,
+	const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+	const std::vector<NXOpen::Features::FlatPattern::ObjectDataFace>& objects,
+	const char* directionUtf8,
+	double textHeight,
+	std::unordered_set<tag_t>& usedFlatPatternCurveTags)
+{
+	bool createdAny = false;
+	for (size_t i = 0; i < objects.size(); ++i)
+	{
+		NXOpen::Curve* flatPatternCurve = objects[i].FlatPatternObject;
+		if (flatPatternCurve == NULL || flatPatternCurve->Tag() == NULL_TAG)
+		{
+			continue;
+		}
+		if (!usedFlatPatternCurveTags.insert(flatPatternCurve->Tag()).second)
+		{
+			continue;
+		}
+
+		NXOpen::Drawings::DraftingCurve* draftingCurve =
+			FindDraftingCurveForFlatPatternCurve(curves, flatPatternCurve);
+		if (draftingCurve == NULL)
+		{
+			std::ostringstream log;
+			log << "[BendNote] no drafting curve for flatCurveTag=" << flatPatternCurve->Tag();
+			BendNoteDebugLog(log.str());
+			continue;
+		}
+
+		double startPoint[2] = { 0.0, 0.0 };
+		double endPoint[2] = { 0.0, 0.0 };
+		UF_CURVE_line_t lineData;
+		if (!TryGetLineCurveData(baseView, draftingCurve, lineData, startPoint, endPoint))
+		{
+			std::ostringstream log;
+			log << "[BendNote] cannot map line to drawing tag=" << draftingCurve->Tag();
+			BendNoteDebugLog(log.str());
+			continue;
+		}
+
+		double angleDegrees = 0.0;
+		bool hasAngle = TryMeasureBendAngleDegrees(objects[i].FormedBodyObject, angleDegrees);
+		if (!hasAngle)
+		{
+			hasAngle = TryMeasureBendAngleDegrees(objects[i].FlatSolidObject, angleDegrees);
+		}
+		if (hasAngle)
+		{
+			angleDegrees = 180.0 - angleDegrees;
+			if (angleDegrees < 0.0)
+			{
+				angleDegrees = -angleDegrees;
+			}
+		}
+
+		const NXOpen::Point3d drawingPoint(
+			(startPoint[0] + endPoint[0]) * 0.5,
+			(startPoint[1] + endPoint[1]) * 0.5,
+			0.0);
+		{
+			std::ostringstream log;
+			log << "[BendNote] mappedLine curveTag=" << draftingCurve->Tag()
+				<< " start=(" << startPoint[0] << "," << startPoint[1] << ")"
+				<< " end=(" << endPoint[0] << "," << endPoint[1] << ")"
+				<< " mid=(" << drawingPoint.X << "," << drawingPoint.Y << ")";
+			BendNoteDebugLog(log.str());
+		}
+		const std::string noteText = FormatBendNoteText(directionUtf8, angleDegrees, hasAngle);
+		createdAny = CreateFlatPatternBendNote(baseView, draftingCurve, drawingPoint, noteText, textHeight) || createdAny;
+	}
+	return createdAny;
+}
+
+bool BreakFlatPatternBendLinesForObjects(
+	NXOpen::Drawings::BaseView* baseView,
+	const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+	const std::vector<NXOpen::Features::FlatPattern::ObjectDataFace>& objects,
+	double keepLength,
+	const char* directionName,
+	std::unordered_set<tag_t>& usedFlatPatternCurveTags)
+{
+	if (baseView == NULL || keepLength <= 0.0)
+	{
+		return false;
+	}
+
+	bool editedAny = false;
+	for (size_t i = 0; i < objects.size(); ++i)
+	{
+		NXOpen::Curve* flatPatternCurve = objects[i].FlatPatternObject;
+		if (flatPatternCurve == NULL || flatPatternCurve->Tag() == NULL_TAG)
+		{
+			continue;
+		}
+		if (!usedFlatPatternCurveTags.insert(flatPatternCurve->Tag()).second)
+		{
+			continue;
+		}
+
+		NXOpen::Drawings::DraftingCurve* draftingCurve =
+			FindDraftingCurveForFlatPatternCurve(curves, flatPatternCurve);
+		if (draftingCurve == NULL)
+		{
+			std::ostringstream log;
+			log << "[BendLineBreak] no drafting curve direction=" << directionName
+				<< " flatCurveTag=" << flatPatternCurve->Tag();
+			BendNoteDebugLog(log.str());
+			continue;
+		}
+
+		double curveLength = 0.0;
+		try
+		{
+			curveLength = draftingCurve->GetLength();
+		}
+		catch (const NXOpen::NXException& ex)
+		{
+			BendNoteDebugLog(std::string("[BendLineBreak] get length failed: ") + ex.Message());
+			continue;
+		}
+
+		if (curveLength <= keepLength * 2.0 + 1.0e-6)
+		{
+			std::ostringstream log;
+			log << "[BendLineBreak] skip short curve direction=" << directionName
+				<< " curveTag=" << draftingCurve->Tag()
+				<< " length=" << curveLength
+				<< " keep=" << keepLength;
+			BendNoteDebugLog(log.str());
+			continue;
+		}
+
+		std::vector<double> segmentStart(1, keepLength / curveLength);
+		std::vector<double> segmentEnd(1, (curveLength - keepLength) / curveLength);
+		try
+		{
+			baseView->DependentDisplay()->ApplySegmentEdit(
+				draftingCurve,
+				NXOpen::ViewDependentDisplayManager::FontInvisible,
+				NXOpen::ViewDependentDisplayManager::WidthObject,
+				segmentStart,
+				segmentEnd);
+			editedAny = true;
+
+			std::ostringstream log;
+			log << "[BendLineBreak] edited direction=" << directionName
+				<< " curveTag=" << draftingCurve->Tag()
+				<< " length=" << curveLength
+				<< " keep=" << keepLength
+				<< " hide=(" << segmentStart[0] << "," << segmentEnd[0] << ")";
+			BendNoteDebugLog(log.str());
+		}
+		catch (const NXOpen::NXException& ex)
+		{
+			BendNoteDebugLog(std::string("[BendLineBreak] segment edit failed: ") + ex.Message());
+		}
+	}
+	return editedAny;
+}
 }
 
 bool CreateFlatPatternHoleCoordinateDimensions(
@@ -4907,6 +5318,146 @@ bool CreateFlatPatternHoleCoordinateDimensions(
 		ordinateOrigin) || createdAny;
 	LogPluginMessage(std::string("[HoleCoord] createdAny=") + (createdAny ? "true" : "false"));
 	return createdAny;
+}
+
+bool CreateFlatPatternBendNotes(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Features::FlatPattern* flatPattern,
+	double textHeight)
+{
+	try
+	{
+		std::ofstream reset("D:\\UG智辉钣金插件\\logs\\bend_note_debug.log", std::ios::out | std::ios::trunc);
+		reset << "[BendNote] reset\n";
+	}
+	catch (...)
+	{
+	}
+
+	if (baseView == NULL || flatPattern == NULL)
+	{
+		BendNoteDebugLog("[BendNote] baseView or flatPattern is null");
+		return false;
+	}
+
+	const std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(baseView);
+	if (curves.empty())
+	{
+		BendNoteDebugLog("[BendNote] no drafting curves");
+		return false;
+	}
+
+	bool createdAny = false;
+	std::unordered_set<tag_t> usedFlatPatternCurveTags;
+	try
+	{
+		std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> upObjects;
+		flatPattern->GetBendUpCenterLines(upObjects);
+		std::ostringstream log;
+		log << "[BendNote] upObjects=" << upObjects.size();
+		BendNoteDebugLog(log.str());
+		createdAny = CreateFlatPatternBendNotesForObjects(
+			baseView,
+			curves,
+			upObjects,
+			"\xE4\xB8\x8A\xE6\x8A\x98",
+			textHeight,
+			usedFlatPatternCurveTags) || createdAny;
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[BendNote] get bend up failed: ") + ex.Message());
+	}
+
+	try
+	{
+		std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> downObjects;
+		flatPattern->GetBendDownCenterLines(downObjects);
+		std::ostringstream log;
+		log << "[BendNote] downObjects=" << downObjects.size();
+		BendNoteDebugLog(log.str());
+		createdAny = CreateFlatPatternBendNotesForObjects(
+			baseView,
+			curves,
+			downObjects,
+			"\xE4\xB8\x8B\xE6\x8A\x98",
+			textHeight,
+			usedFlatPatternCurveTags) || createdAny;
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[BendNote] get bend down failed: ") + ex.Message());
+	}
+
+	BendNoteDebugLog(std::string("[BendNote] createdAny=") + (createdAny ? "true" : "false"));
+	return createdAny;
+}
+
+bool BreakFlatPatternBendLines(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Features::FlatPattern* flatPattern,
+	double upKeepLength,
+	double downKeepLength)
+{
+	if (baseView == NULL || flatPattern == NULL)
+	{
+		BendNoteDebugLog("[BendLineBreak] baseView or flatPattern is null");
+		return false;
+	}
+
+	const std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(baseView);
+	if (curves.empty())
+	{
+		BendNoteDebugLog("[BendLineBreak] no drafting curves");
+		return false;
+	}
+
+	bool editedAny = false;
+	std::unordered_set<tag_t> usedFlatPatternCurveTags;
+	try
+	{
+		std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> upObjects;
+		flatPattern->GetBendUpCenterLines(upObjects);
+		std::ostringstream log;
+		log << "[BendLineBreak] upObjects=" << upObjects.size()
+			<< " keep=" << upKeepLength;
+		BendNoteDebugLog(log.str());
+		editedAny = BreakFlatPatternBendLinesForObjects(
+			baseView,
+			curves,
+			upObjects,
+			std::max(0.1, upKeepLength),
+			"up",
+			usedFlatPatternCurveTags) || editedAny;
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[BendLineBreak] get bend up failed: ") + ex.Message());
+	}
+
+	try
+	{
+		std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> downObjects;
+		flatPattern->GetBendDownCenterLines(downObjects);
+		std::ostringstream log;
+		log << "[BendLineBreak] downObjects=" << downObjects.size()
+			<< " keep=" << downKeepLength;
+		BendNoteDebugLog(log.str());
+		editedAny = BreakFlatPatternBendLinesForObjects(
+			baseView,
+			curves,
+			downObjects,
+			std::max(0.1, downKeepLength),
+			"down",
+			usedFlatPatternCurveTags) || editedAny;
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[BendLineBreak] get bend down failed: ") + ex.Message());
+	}
+
+	BendNoteDebugLog(std::string("[BendLineBreak] editedAny=") + (editedAny ? "true" : "false"));
+	return editedAny;
 }
 
 bool CreateFlatPatternHoleAttributeNotes(

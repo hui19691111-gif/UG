@@ -105,5 +105,14 @@ bool CreateFlatPatternHoleCoordinateDimensions(
 bool CreateFlatPatternHoleAttributeNotes(
 	NXOpen::Drawings::BaseView* baseView,
 	const std::string& markerStart = "");
+bool CreateFlatPatternBendNotes(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Features::FlatPattern* flatPattern,
+	double textHeight);
+bool BreakFlatPatternBendLines(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Features::FlatPattern* flatPattern,
+	double upKeepLength,
+	double downKeepLength);
 
 #endif // ZIDONCUTU_DIMENSION_H_INCLUDED
