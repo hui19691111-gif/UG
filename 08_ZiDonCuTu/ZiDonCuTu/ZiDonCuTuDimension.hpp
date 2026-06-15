@@ -62,7 +62,11 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 	double centerX,
 	double centerY,
 	NXOpen::Face* guideFace = NULL,
-	bool reverseGuideDirection = false);
+	bool reverseGuideDirection = false,
+	bool forceMeasurementMethod = false,
+	NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethod measurementMethod =
+		NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodVertical,
+	const std::vector<NXOpen::Drawings::DraftingCurve*>* candidateCurves = NULL);
 bool CreateFacePairAngleDimensionFromModelPoint(
 	NXOpen::Drawings::BaseView* baseView,
 	NXOpen::Face* firstFace,

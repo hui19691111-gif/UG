@@ -357,7 +357,18 @@ static void SideDimensionDebugLog(const std::string& message)
 		std::ofstream out("D:\\ZiDonCuTu_side_dim_debug.log", std::ios::out | std::ios::app);
 		if (out.is_open())
 		{
-			out << message << std::endl;
+			SYSTEMTIME now{};
+			GetLocalTime(&now);
+			out << "["
+				<< now.wYear << "-"
+				<< now.wMonth << "-"
+				<< now.wDay << " "
+				<< now.wHour << ":"
+				<< now.wMinute << ":"
+				<< now.wSecond << "."
+				<< now.wMilliseconds
+				<< " tid=" << GetCurrentThreadId()
+				<< "] " << message << std::endl;
 		}
 	}
 	catch (...)
@@ -707,6 +718,48 @@ static void LogSideDimensionAttempt(
 		<< " point=(" << modelPoint[0] << "," << modelPoint[1] << "," << modelPoint[2] << ")"
 		<< " center=(" << centerX << "," << centerY << ")";
 	SideDimensionDebugLog(log.str());
+}
+
+static const char* FaceGroupNameForLog(int group)
+{
+	switch (group)
+	{
+	case 90:
+		return "R90";
+	case 180:
+		return "R180";
+	case 1:
+		return "Not90";
+	default:
+		return "Skipped";
+	}
+}
+
+static void ResetSideDimensionDebugLog()
+{
+	return;
+	try
+	{
+		std::ofstream out("D:\\ZiDonCuTu_side_dim_debug.log", std::ios::out | std::ios::trunc);
+		if (out.is_open())
+		{
+			SYSTEMTIME now{};
+			GetLocalTime(&now);
+			out << "["
+				<< now.wYear << "-"
+				<< now.wMonth << "-"
+				<< now.wDay << " "
+				<< now.wHour << ":"
+				<< now.wMinute << ":"
+				<< now.wSecond << "."
+				<< now.wMilliseconds
+				<< " tid=" << GetCurrentThreadId()
+				<< "] [side.debug.reset]" << std::endl;
+		}
+	}
+	catch (...)
+	{
+	}
 }
 
 static bool g_deferWorkViewRegenerate = true;
@@ -1573,6 +1626,77 @@ struct OuterRadiusFaceGroups
 	std::vector<NXOpen::Face*> straightAngleFaces;
 };
 
+bool TryMeasureArcSpanDegrees(tag_t objectTag, double& degrees)
+{
+	degrees = 0.0;
+	UF_EVAL_p_t evaluator = NULL;
+	if (UF_EVAL_initialize(objectTag, &evaluator) != 0 || evaluator == NULL)
+	{
+		return false;
+	}
+
+	logical isArc = false;
+	if (UF_EVAL_is_arc(evaluator, &isArc) != 0 || !isArc)
+	{
+		UF_EVAL_free(evaluator);
+		return false;
+	}
+
+	double limits[2] = { 0.0, 0.0 };
+	if (UF_EVAL_ask_limits(evaluator, limits) != 0)
+	{
+		UF_EVAL_free(evaluator);
+		return false;
+	}
+	UF_EVAL_free(evaluator);
+
+	const double pi = 3.14159265358979323846;
+	double span = fabs(limits[1] - limits[0]);
+	while (span > (2.0 * pi))
+	{
+		span -= 2.0 * pi;
+	}
+	degrees = span * 180.0 / pi;
+	return degrees > 1.0e-3 && degrees <= 360.0;
+}
+
+bool TryMeasureBendAngleDegrees(NXOpen::Face* bendFace, double& degrees)
+{
+	degrees = 0.0;
+	if (bendFace == NULL)
+	{
+		return false;
+	}
+
+	const std::vector<NXOpen::Edge*> edges = bendFace->GetEdges();
+	double bestArcDegrees = 0.0;
+	for (size_t i = 0; i < edges.size(); i++)
+	{
+		if (edges[i] == NULL)
+		{
+			continue;
+		}
+
+		double edgeDegrees = 0.0;
+		if (!TryMeasureArcSpanDegrees(edges[i]->Tag(), edgeDegrees))
+		{
+			continue;
+		}
+		if (edgeDegrees > bestArcDegrees && edgeDegrees < 359.0)
+		{
+			bestArcDegrees = edgeDegrees;
+		}
+	}
+
+	if (bestArcDegrees <= 1.0e-3)
+	{
+		return false;
+	}
+
+	degrees = fabs(180.0 - bestArcDegrees);
+	return true;
+}
+
 OuterRadiusFaceGroups ClassifyOuterRadiusFacesForView(
 	const std::vector<NXOpen::Face*>& outerRadiusFaces,
 	NXOpen::Drawings::BaseView* baseView)
@@ -1594,21 +1718,55 @@ OuterRadiusFaceGroups ClassifyOuterRadiusFacesForView(
 		int type, normDir;
 		UF_MODL_ask_face_data(outerRadiusFaces[i]->Tag(), &type, point, dir, box, &radius, &radData, &normDir);
 
+		double bendAngleDegrees = 0.0;
+		if (TryMeasureBendAngleDegrees(outerRadiusFaces[i], bendAngleDegrees))
+		{
+			int classifiedGroup = 1;
+			if (fabs(bendAngleDegrees - 90.0) < 1.0)
+			{
+				groups.rightAngleFaces.push_back(outerRadiusFaces[i]);
+				classifiedGroup = 90;
+			}
+			else if (bendAngleDegrees < 1.0 || fabs(bendAngleDegrees - 180.0) < 1.0)
+			{
+				groups.straightAngleFaces.push_back(outerRadiusFaces[i]);
+				classifiedGroup = 180;
+			}
+			else
+			{
+				groups.notRightAngleFaces.push_back(outerRadiusFaces[i]);
+			}
+			std::ostringstream sideLog;
+			sideLog << "[side.radius.classify.angle]"
+				<< " faceTag=" << outerRadiusFaces[i]->Tag()
+				<< " type=" << type
+				<< " radius=" << radius
+				<< " bendAngle=" << bendAngleDegrees
+				<< " group=" << FaceGroupNameForLog(classifiedGroup);
+			SideDimensionDebugLog(sideLog.str());
+			continue;
+		}
+
 		std::vector<NXOpen::Edge*> projectedLineEdges;
 		std::vector<NXOpen::Edge*> outerEdges = outerRadiusFaces[i]->GetEdges();
 		for (size_t edgeIndex = 0; edgeIndex < outerEdges.size(); edgeIndex++)
 		{
-			UF_EVAL_p_t evaluator;
+			UF_EVAL_p_t evaluator = NULL;
 			bool isLine;
-			UF_EVAL_initialize(outerEdges[edgeIndex]->Tag(), &evaluator);
+			if (UF_EVAL_initialize(outerEdges[edgeIndex]->Tag(), &evaluator) != 0 || evaluator == NULL)
+			{
+				continue;
+			}
 			UF_EVAL_is_line(evaluator, &isLine);
 			if (!isLine)
 			{
+				UF_EVAL_free(evaluator);
 				continue;
 			}
 
 			UF_EVAL_line_t lineCoords;
 			UF_EVAL_ask_line(evaluator, &lineCoords);
+			UF_EVAL_free(evaluator);
 			double startPoint[3] = { lineCoords.start[0], lineCoords.start[1], lineCoords.start[2] };
 			double endPoint[3] = { lineCoords.end[0], lineCoords.end[1], lineCoords.end[2] };
 			if (AreModelPointsCoincidentInDrawing(baseView, startPoint, endPoint, 0.01))
@@ -1619,13 +1777,22 @@ OuterRadiusFaceGroups ClassifyOuterRadiusFacesForView(
 
 		if (projectedLineEdges.size() < 2 || projectedLineEdges[0] == NULL || projectedLineEdges[1] == NULL)
 		{
+			std::ostringstream sideLog;
+			sideLog << "[side.radius.classify.skip]"
+				<< " faceTag=" << outerRadiusFaces[i]->Tag()
+				<< " type=" << type
+				<< " radius=" << radius
+				<< " projectedLineEdges=" << projectedLineEdges.size();
+			SideDimensionDebugLog(sideLog.str());
 			continue;
 		}
 
 		double projectedDistance = MeasureMinimumDistance(workPart, projectedLineEdges[0], projectedLineEdges[1]);
+		int classifiedGroup = 1;
 		if (fabs(projectedDistance - sqrt(2 * pow(radius, 2))) < 0.001)
 		{
 			groups.rightAngleFaces.push_back(outerRadiusFaces[i]);
+			classifiedGroup = 90;
 		}
 		else if (fabs(projectedDistance - radius * 2) > 0.01)
 		{
@@ -1634,7 +1801,20 @@ OuterRadiusFaceGroups ClassifyOuterRadiusFacesForView(
 		else
 		{
 			groups.straightAngleFaces.push_back(outerRadiusFaces[i]);
+			classifiedGroup = 180;
 		}
+		std::ostringstream sideLog;
+		sideLog << "[side.radius.classify.projected]"
+			<< " faceTag=" << outerRadiusFaces[i]->Tag()
+			<< " type=" << type
+			<< " radius=" << radius
+			<< " projectedDistance=" << projectedDistance
+			<< " expected90=" << sqrt(2 * pow(radius, 2))
+			<< " expected180=" << radius * 2
+			<< " edge0=" << projectedLineEdges[0]->Tag()
+			<< " edge1=" << projectedLineEdges[1]->Tag()
+			<< " group=" << FaceGroupNameForLog(classifiedGroup);
+		SideDimensionDebugLog(sideLog.str());
 	}
 
 	return groups;
@@ -11104,6 +11284,7 @@ int ZiDonCuTu::aaaa_cb()
 {
 	int errorCode = 0;
 	const char* phase = "aaaa_cb.enter";
+	ResetSideDimensionDebugLog();
 	SyncSessionPartGlobalsToObject(Body1);
 	std::ostringstream aaaaPerfLabel;
 	aaaaPerfLabel << "aaaa_cb bodyTag=" << PerfTagOf(Body1);
@@ -12902,7 +13083,11 @@ int ZiDonCuTu::aaaa_cb()
 								point1,
 								CenX[p],
 								CenY[p],
-								SharedGuideFace2a2b != NULL ? SharedGuideFace2a2b : DimFace2a[0]);
+								SharedGuideFace2a2b != NULL ? SharedGuideFace2a2b : DimFace2a[0],
+								false,
+								true,
+								NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodPerpendicular,
+								&DraftingCurvevector1[p]);
 						}
 
 						//如果没有相邻的共面，判断是否是另一侧相邻的圆柱面，是的话标注尺寸
@@ -12967,7 +13152,11 @@ int ZiDonCuTu::aaaa_cb()
 											point1,
 											CenX[p],
 											CenY[p],
-											SharedGuideFace90To90Inner != NULL ? SharedGuideFace90To90Inner : DimFace2b[0]);
+											SharedGuideFace90To90Inner != NULL ? SharedGuideFace90To90Inner : DimFace2b[0],
+											false,
+											true,
+											NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodPerpendicular,
+											&DraftingCurvevector1[p]);
 									}
 								}
 							}
