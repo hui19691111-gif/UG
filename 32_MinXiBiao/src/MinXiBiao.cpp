@@ -73,6 +73,9 @@ namespace
     struct BodyRecord
     {
         tag_t tag = NULL_TAG;
+        tag_t attributeTag = NULL_TAG;
+        std::string displayName;
+        bool fromAssemblyComponent = false;
     };
 
     std::string Utf8ToSystem(const std::string& utf8)
@@ -330,6 +333,36 @@ namespace
         ShowNxMessage(std::string(message == nullptr ? "" : message));
     }
 
+    std::string FormatRealValue(double value)
+    {
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(1) << value;
+        return out.str();
+    }
+
+    bool TryParsePlainDecimalText(const std::string& text, double& value)
+    {
+        const std::string trimmed = Trim(text);
+        if (trimmed.empty() || trimmed.find('.') == std::string::npos)
+        {
+            return false;
+        }
+
+        char* end = nullptr;
+        value = std::strtod(trimmed.c_str(), &end);
+        return end != nullptr && *end == '\0';
+    }
+
+    std::string FormatDecimalTextIfNeeded(const std::string& text)
+    {
+        double value = 0.0;
+        if (!TryParsePlainDecimalText(text, value))
+        {
+            return text;
+        }
+        return FormatRealValue(value);
+    }
+
     std::string ToStringValue(const NXOpen::NXObject::AttributeInformation& info)
     {
         using Type = NXOpen::NXObject::AttributeType;
@@ -340,7 +373,7 @@ namespace
         case Type::AttributeTypeInteger:
             return std::to_string(info.IntegerValue);
         case Type::AttributeTypeReal:
-            return std::to_string(info.RealValue);
+            return FormatRealValue(info.RealValue);
         case Type::AttributeTypeTime:
             return ToUtf8(info.TimeValue);
         case Type::AttributeTypeBoolean:
@@ -378,7 +411,10 @@ namespace
             LogBodyScan("skip flat pattern generated body tag=" + std::to_string(bodyTag));
             return;
         }
-        bodies.push_back(BodyRecord{bodyTag});
+        BodyRecord record;
+        record.tag = bodyTag;
+        record.attributeTag = bodyTag;
+        bodies.push_back(record);
     }
 
     bool IsSolidBodyTag(tag_t objectTag)
@@ -472,6 +508,100 @@ namespace
         AddBodyIfMissing(bodies, bodyTag, seen);
         LogBodyScan(std::string(source == nullptr ? "UF" : source) + ": body " + DescribeBodyTagForLog(bodyTag) +
                     " added=" + (bodies.size() > before ? "yes" : "no"));
+    }
+
+    std::string PartDisplayName(NXOpen::Part* part)
+    {
+        if (part == nullptr)
+        {
+            return {};
+        }
+        try
+        {
+            const std::string name = Trim(ToUtf8(part->Name()));
+            if (!name.empty())
+            {
+                return name;
+            }
+        }
+        catch (...)
+        {
+        }
+        try
+        {
+            const std::filesystem::path fullPath(ToUtf8(part->FullPath()));
+            const std::string stem = fullPath.stem().u8string();
+            if (!stem.empty())
+            {
+                return stem;
+            }
+        }
+        catch (...)
+        {
+        }
+        return {};
+    }
+
+    void AddComponentRecordIfMissing(std::vector<BodyRecord>& records, NXOpen::Assemblies::Component* component, std::set<tag_t>& seen)
+    {
+        if (component == nullptr)
+        {
+            return;
+        }
+
+        try
+        {
+            NXOpen::Part* prototypePart = dynamic_cast<NXOpen::Part*>(component->Prototype());
+            if (prototypePart == nullptr)
+            {
+                LogBodyScan("assembly component skipped: prototype is not part");
+                return;
+            }
+
+            const tag_t uniqueKey = component->Tag();
+            if (uniqueKey == NULL_TAG || !seen.insert(uniqueKey).second)
+            {
+                return;
+            }
+
+            BodyRecord record;
+            record.tag = component->Tag();
+            record.attributeTag = prototypePart->Tag();
+            record.displayName = PartDisplayName(prototypePart);
+            record.fromAssemblyComponent = true;
+            records.push_back(record);
+            LogBodyScan("assembly component added componentTag=" + std::to_string(record.tag) +
+                        " partTag=" + std::to_string(record.attributeTag) +
+                        " name=" + record.displayName);
+        }
+        catch (const std::exception& ex)
+        {
+            LogBodyScan(std::string("AddComponentRecordIfMissing exception ") + ex.what());
+        }
+        catch (...)
+        {
+            LogBodyScan("AddComponentRecordIfMissing unknown exception");
+        }
+    }
+
+    void CollectComponentRecords(NXOpen::Assemblies::Component* component, std::vector<BodyRecord>& records, std::set<tag_t>& seen)
+    {
+        if (component == nullptr)
+        {
+            return;
+        }
+
+        std::vector<NXOpen::Assemblies::Component*> children = component->GetChildren();
+        if (children.empty())
+        {
+            AddComponentRecordIfMissing(records, component, seen);
+            return;
+        }
+
+        for (NXOpen::Assemblies::Component* child : children)
+        {
+            CollectComponentRecords(child, records, seen);
+        }
     }
 
     size_t CollectBodiesFromPart(NXOpen::Part* part, std::vector<BodyRecord>& bodies, std::set<tag_t>& seen, const char* source)
@@ -663,12 +793,6 @@ namespace
             LogBodyScan("workPart: " + PartInfo(workPart));
             LogBodyScan("displayPart: " + PartInfo(displayPart));
 
-            CollectBodiesFromPart(workPart, bodies, seen, "NXOpen workPart");
-            if (displayPart != workPart)
-            {
-                CollectBodiesFromPart(displayPart, bodies, seen, "NXOpen displayPart");
-            }
-
             NXOpen::Part* assemblyPart = displayPart != nullptr ? displayPart : workPart;
             if (assemblyPart != nullptr && assemblyPart->ComponentAssembly() != nullptr)
             {
@@ -678,11 +802,26 @@ namespace
                 {
                     std::vector<NXOpen::Assemblies::Component*> children = root->GetChildren();
                     LogBodyScan("assembly child count=" + std::to_string(children.size()));
-                    for (NXOpen::Assemblies::Component* child : children)
+                    if (!children.empty())
                     {
-                        CollectBodiesFromComponent(child, bodies, seen);
+                        std::set<tag_t> componentSeen;
+                        for (NXOpen::Assemblies::Component* child : children)
+                        {
+                            CollectComponentRecords(child, bodies, componentSeen);
+                        }
+                        if (!bodies.empty())
+                        {
+                            LogBodyScan("return assembly component records count=" + std::to_string(bodies.size()));
+                            return bodies;
+                        }
                     }
                 }
+            }
+
+            CollectBodiesFromPart(workPart, bodies, seen, "NXOpen workPart");
+            if (displayPart != workPart)
+            {
+                CollectBodiesFromPart(displayPart, bodies, seen, "NXOpen displayPart");
             }
         }
         catch (const std::exception& ex)
@@ -729,6 +868,14 @@ namespace
             {
                 continue;
             }
+            if (body.fromAssemblyComponent)
+            {
+                if (seen.insert(body.tag).second)
+                {
+                    filtered.push_back(body);
+                }
+                continue;
+            }
             if (!IsEligibleBodyTag(body.tag))
             {
                 int type = 0;
@@ -754,7 +901,7 @@ namespace
         names.insert(kBodyNameAttributeName);
         for (const BodyRecord& body : bodies)
         {
-            const auto values = CollectBodyAttributeMap(body.tag);
+            const auto values = CollectBodyAttributeMap(body.attributeTag != NULL_TAG ? body.attributeTag : body.tag);
             for (const auto& item : values)
             {
                 names.insert(item.first);
@@ -827,7 +974,7 @@ namespace
         case UF_ATTR_integer:
             return std::to_string(info.integer_value);
         case UF_ATTR_real:
-            return std::to_string(info.real_value);
+            return FormatRealValue(info.real_value);
         case UF_ATTR_time:
             return info.time_string != nullptr ? SystemToUtf8(info.time_string) : std::string();
         case UF_ATTR_string:
@@ -867,7 +1014,7 @@ namespace
                     continue;
                 }
                 const std::string key = Trim(SystemToUtf8(infos[i].title));
-                const std::string value = Trim(ToStringValue(infos[i]));
+                const std::string value = Trim(FormatDecimalTextIfNeeded(ToStringValue(infos[i])));
                 if (!key.empty() && !value.empty())
                 {
                     values[key] = value;
@@ -926,6 +1073,10 @@ namespace
 
     std::string ReadBodyDisplayName(const BodyRecord& body, size_t bodyIndex)
     {
+        if (!Trim(body.displayName).empty())
+        {
+            return Trim(body.displayName);
+        }
         if (body.tag != NULL_TAG)
         {
             char name[MAX_LINE_BUFSIZE] = {};
@@ -967,7 +1118,7 @@ namespace
         size_t bodyIndex = 0;
         for (const BodyRecord& body : bodies)
         {
-            const auto values = CollectBodyAttributeMap(body.tag);
+            const auto values = CollectBodyAttributeMap(body.attributeTag != NULL_TAG ? body.attributeTag : body.tag);
             const std::string bodyDisplayName = ReadBodyDisplayName(body, bodyIndex);
             if (!firstBody) out << ",\n";
             firstBody = false;
@@ -980,8 +1131,7 @@ namespace
                 {
                     continue;
                 }
-                if (!firstAttr) out << ", ";
-                firstAttr = false;
+                out << ", ";
                 out << "\"" << JsonEscape(item.first) << "\": \"" << JsonEscape(item.second) << "\"";
             }
             out << "}}";
@@ -1263,18 +1413,18 @@ namespace
         return ParseWpfSelectedColumns(outputJson, columns, includedBodyNames, options);
     }
 
-    bool TryReadAttributeFromMap(tag_t bodyTag, const std::string& name, std::string& value)
+    bool TryReadAttributeFromMap(tag_t objectTag, const std::string& name, std::string& value)
     {
-        if (bodyTag == NULL_TAG || Trim(name).empty())
+        if (objectTag == NULL_TAG || Trim(name).empty())
         {
             return false;
         }
 
-        const auto values = CollectBodyAttributeMap(bodyTag);
+        const auto values = CollectBodyAttributeMap(objectTag);
         const auto it = values.find(name);
         if (it != values.end() && !Trim(it->second).empty())
         {
-            value = Trim(it->second);
+            value = Trim(FormatDecimalTextIfNeeded(it->second));
             return true;
         }
         return false;
@@ -1287,7 +1437,7 @@ namespace
             value = ReadBodyDisplayName(body, bodyIndex);
             return !Trim(value).empty();
         }
-        return TryReadAttributeFromMap(body.tag, name, value);
+        return TryReadAttributeFromMap(body.attributeTag != NULL_TAG ? body.attributeTag : body.tag, name, value);
     }
 
     std::vector<BodyValueRow> BuildRows(const std::vector<BodyRecord>& bodies, const std::vector<ColumnDef>& columns, const std::set<std::string>* includedBodyNames = nullptr)
@@ -1308,7 +1458,7 @@ namespace
             }
 
             BodyValueRow row;
-            row.bodyTag = body.tag;
+            row.bodyTag = body.attributeTag != NULL_TAG ? body.attributeTag : body.tag;
             row.bodyName = bodyName;
             bool keep = false;
             for (const ColumnDef& column : columns)
@@ -1362,7 +1512,15 @@ namespace
 
     std::string NormalizeCellText(const std::string& text)
     {
-        return Trim(text);
+        std::string normalized = Trim(text);
+        for (char& ch : normalized)
+        {
+            if (ch == '\r' || ch == '\n' || ch == '\t')
+            {
+                ch = ' ';
+            }
+        }
+        return Trim(normalized);
     }
 
     std::string MakeColumnHeaderText(const ColumnDef& column, size_t index)
@@ -1446,8 +1604,8 @@ namespace
                 ++wideCount;
             }
         }
-        const double units = static_cast<double>(asciiCount) * 0.58 + static_cast<double>(wideCount) * 1.05;
-        return std::max(10.0, units * textHeight + textHeight * 2.0);
+        const double units = static_cast<double>(asciiCount) * 0.85 + static_cast<double>(wideCount) * 1.25;
+        return std::max(12.0, units * textHeight + textHeight * 4.0);
     }
 
     std::vector<double> EstimateColumnWidths(const std::vector<ColumnDef>& columns, const std::vector<BodyValueRow>& rows, double textHeight)
@@ -1465,9 +1623,9 @@ namespace
                     width = std::max(width, EstimateTextWidth(row.values[c], textHeight));
                 }
             }
-            widths[c + 1] = ClampDouble(width, 12.0, 80.0);
+            widths[c + 1] = ClampDouble(width, 14.0, 160.0);
         }
-        widths[0] = ClampDouble(widths[0], 10.0, 24.0);
+        widths[0] = ClampDouble(widths[0], 12.0, 32.0);
         return widths;
     }
 
@@ -1479,11 +1637,13 @@ namespace
             if (UF_TABNOT_ask_cell_prefs(cell, &prefs) == 0)
             {
                 prefs.text_height = textHeight;
+                prefs.nm_fit_methods = 1;
+                prefs.fit_methods[0] = UF_TABNOT_fit_method_auto_size_col;
                 UF_TABNOT_set_cell_prefs(cell, &prefs);
             }
         }
 
-        const std::string systemText = Utf8ToSystem(text);
+        const std::string systemText = Utf8ToSystem(NormalizeCellText(text));
         return UF_TABNOT_set_cell_text(cell, systemText.c_str()) == 0;
     }
 
@@ -1522,7 +1682,15 @@ namespace
             }
 
             NXOpen::NXString attributeTitle(attributeName.c_str(), NXOpen::NXString::UTF8);
-            NXOpen::NXString nxText = associativeText->GetObjectAttributeText(object, attributeTitle);
+            NXOpen::NXString nxText;
+            try
+            {
+                nxText = associativeText->GetObjectAttributeTextFormatted(object, attributeTitle, 1);
+            }
+            catch (...)
+            {
+                nxText = associativeText->GetObjectAttributeText(object, attributeTitle);
+            }
             delete associativeText;
 
             const char* utf8 = nxText.GetUTF8Text();
@@ -1658,7 +1826,9 @@ namespace
                 }
                 const std::string text = c < rows[r].values.size() ? NormalizeCellText(rows[r].values[c]) : std::string();
                 std::string associativeText;
-                if (!Trim(columns[c].attributeName).empty() &&
+                double decimalValue = 0.0;
+                if (!TryParsePlainDecimalText(text, decimalValue) &&
+                    !Trim(columns[c].attributeName).empty() &&
                     TryMakeAssociativeAttributeText(rows[r].bodyTag, columns[c].attributeName, associativeText))
                 {
                     ApplyCellText(cell, associativeText, textHeight);

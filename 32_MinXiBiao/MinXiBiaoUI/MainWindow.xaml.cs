@@ -190,6 +190,17 @@ public partial class MainWindow : Window
         RefreshAvailableAttributesFromPreview();
     }
 
+    private static string FormatDecimalText(string text)
+    {
+        string trimmed = text.Trim();
+        if (!trimmed.Contains('.') ||
+            !double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out double value))
+        {
+            return text;
+        }
+        return value.ToString("0.0", CultureInfo.InvariantCulture);
+    }
+
     private void RefreshPreview()
     {
         previewRows.Clear();
@@ -201,6 +212,7 @@ public partial class MainWindow : Window
             Header = "序号",
             Binding = new System.Windows.Data.Binding(nameof(PreviewRow.Sequence)),
             Width = new DataGridLength(64),
+            ElementStyle = (Style)FindResource("NoWrapCellText"),
             IsReadOnly = true
         });
 
@@ -211,7 +223,9 @@ public partial class MainWindow : Window
             {
                 Header = BuildColumnHeader(i),
                 Binding = new System.Windows.Data.Binding($"Values[{columnIndex}]"),
-                Width = new DataGridLength(1, DataGridLengthUnitType.Star),
+                Width = DataGridLength.Auto,
+                MinWidth = 120,
+                ElementStyle = (Style)FindResource("NoWrapCellText"),
                 IsReadOnly = true
             });
         }
@@ -231,7 +245,7 @@ public partial class MainWindow : Window
             for (int i = 0; i < AttributeColumnCount; i++)
             {
                 string name = SelectedColumns[i];
-                row.Values.Add(string.IsNullOrWhiteSpace(name) ? "" : body.Attributes.GetValueOrDefault(name, ""));
+                row.Values.Add(string.IsNullOrWhiteSpace(name) ? "" : FormatDecimalText(body.Attributes.GetValueOrDefault(name, "")));
             }
 
             row.Sequence = sequence.ToString();
@@ -248,7 +262,8 @@ public partial class MainWindow : Window
         StackPanel panel = new()
         {
             Orientation = Orientation.Vertical,
-            Margin = new Thickness(0)
+            Margin = new Thickness(0),
+            MinWidth = 120
         };
         panel.Children.Add(BuildEditableHeader(index));
 
@@ -275,6 +290,7 @@ public partial class MainWindow : Window
             Text = GetHeaderDisplayText(index),
             Tag = index,
             BorderThickness = new Thickness(0),
+            MinWidth = 116,
             Padding = new Thickness(2, 0, 2, 0),
             Background = System.Windows.Media.Brushes.Transparent,
             VerticalContentAlignment = VerticalAlignment.Center
