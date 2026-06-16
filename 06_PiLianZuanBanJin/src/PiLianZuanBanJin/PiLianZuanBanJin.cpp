@@ -5172,6 +5172,20 @@ namespace
         return true;
     }
 
+    bool UpdateBodyFlatPatternSizeAttribute(Body* body, const FlatSolidThicknessCheckInfo& flatCheck)
+    {
+        if (body == NULL || flatCheck.flatSizeU <= 1e-6 || flatCheck.flatSizeV <= 1e-6)
+        {
+            return false;
+        }
+
+        const double sizeX = std::min(flatCheck.flatSizeU, flatCheck.flatSizeV);
+        const double sizeY = std::max(flatCheck.flatSizeU, flatCheck.flatSizeV);
+        std::string text = FormatDouble(sizeX, 1) + "*" + FormatDouble(sizeY, 1);
+        body->SetUserAttribute(u8"展开尺寸", -1, text.c_str(), Update::OptionNow);
+        return true;
+    }
+
     std::string UiTextToUtf8(const NXString& value)
     {
         const char* text = value.GetUTF8Text();
@@ -8861,6 +8875,14 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                                   << ", measured=" << FormatDouble(flatCheck.measuredThickness, 6);
                         }
                         result.error = error.str();
+                    }
+                    else
+                    {
+                        UpdateBodyFlatPatternSizeAttribute(activeBody, flatCheck);
+                        if (flatCheck.flatBody != NULL && (activeBody == NULL || flatCheck.flatBody->Tag() != activeBody->Tag()))
+                        {
+                            UpdateBodyFlatPatternSizeAttribute(flatCheck.flatBody, flatCheck);
+                        }
                     }
                 }
             }
