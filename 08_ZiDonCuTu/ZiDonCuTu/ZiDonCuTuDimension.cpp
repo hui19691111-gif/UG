@@ -972,6 +972,90 @@ bool TryFindArcExtremeDrawingPoint(
 	return found;
 }
 
+double PointToLineDistanceSquared2d(
+	const NXOpen::Point3d& point,
+	const double lineStart[2],
+	const double lineEnd[2])
+{
+	const double vx = lineEnd[0] - lineStart[0];
+	const double vy = lineEnd[1] - lineStart[1];
+	const double lengthSquared = vx * vx + vy * vy;
+	if (lengthSquared < 1.0e-12)
+	{
+		const double dx = point.X - lineStart[0];
+		const double dy = point.Y - lineStart[1];
+		return dx * dx + dy * dy;
+	}
+
+	const double wx = point.X - lineStart[0];
+	const double wy = point.Y - lineStart[1];
+	const double cross = vx * wy - vy * wx;
+	return (cross * cross) / lengthSquared;
+}
+
+bool TryFindArcPointFarthestFromDrawingLine(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingCurve* arcCurve,
+	const double lineStart[2],
+	const double lineEnd[2],
+	NXOpen::Point3d& arcPoint)
+{
+	arcPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
+	if (baseView == NULL || arcCurve == NULL || lineStart == NULL || lineEnd == NULL)
+	{
+		return false;
+	}
+
+	UF_EVAL_p_t evaluator = NULL;
+	if (UF_EVAL_initialize(arcCurve->Tag(), &evaluator) != 0 || evaluator == NULL)
+	{
+		return false;
+	}
+
+	logical isArc = false;
+	if (UF_EVAL_is_arc(evaluator, &isArc) != 0 || !isArc)
+	{
+		UF_EVAL_free(evaluator);
+		return false;
+	}
+
+	double limits[2] = { 0.0, 0.0 };
+	if (UF_EVAL_ask_limits(evaluator, limits) != 0 ||
+		std::fabs(limits[1] - limits[0]) < 1.0e-8)
+	{
+		UF_EVAL_free(evaluator);
+		return false;
+	}
+
+	bool found = false;
+	double bestDistanceSquared = -1.0;
+	const int sampleCount = 128;
+	for (int i = 0; i <= sampleCount; ++i)
+	{
+		const double parameter = limits[0] + (limits[1] - limits[0]) * static_cast<double>(i) / static_cast<double>(sampleCount);
+		double pointOnCurve[3] = { 0.0, 0.0, 0.0 };
+		double derivatives[3] = { 0.0, 0.0, 0.0 };
+		if (UF_EVAL_evaluate(evaluator, 0, parameter, pointOnCurve, derivatives) != 0)
+		{
+			continue;
+		}
+
+		double drawingPoint[2] = { pointOnCurve[0], pointOnCurve[1] };
+		UF_VIEW_map_model_to_drawing(baseView->Tag(), pointOnCurve, drawingPoint);
+		const NXOpen::Point3d candidateDrawingPoint(drawingPoint[0], drawingPoint[1], 0.0);
+		const double distanceSquared = PointToLineDistanceSquared2d(candidateDrawingPoint, lineStart, lineEnd);
+		if (!found || distanceSquared > bestDistanceSquared)
+		{
+			found = true;
+			bestDistanceSquared = distanceSquared;
+			arcPoint = NXOpen::Point3d(pointOnCurve[0], pointOnCurve[1], pointOnCurve[2]);
+		}
+	}
+
+	UF_EVAL_free(evaluator);
+	return found;
+}
+
 bool TryBuildOuterTangentAssociativityForFace(
 	NXOpen::Drawings::BaseView* baseView,
 	NXOpen::Face* face,
@@ -1879,8 +1963,25 @@ bool CreateCurveEndToFaceTangentDimensionFromModelPoint(
 		NXOpen::Point3d point(0.0, 0.0, 0.0);
 		NXOpen::View* nullView(NULL);
 		ApplyDefaultRapidDimensionStyle(builder);
-		builder->FirstAssociativity()->SetValue(
-			NXOpen::InferSnapType::SnapTypeEnd, curve, baseView, point, NULL, nullView, point);
+		builder->Measurement()->SetMethod(NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodPerpendicular);
+		UF_CURVE_line_t firstLineData;
+		double firstLineStart[2] = { 0.0, 0.0 };
+		double firstLineEnd[2] = { 0.0, 0.0 };
+		const bool hasFirstLine =
+			TryGetLineCurveData(baseView, curve, firstLineData, firstLineStart, firstLineEnd);
+		if (hasFirstLine)
+		{
+			const NXOpen::Point3d firstAssociativityPoint(
+				(firstLineData.start_point[0] + firstLineData.end_point[0]) * 0.5,
+				(firstLineData.start_point[1] + firstLineData.end_point[1]) * 0.5,
+				(firstLineData.start_point[2] + firstLineData.end_point[2]) * 0.5);
+			builder->FirstAssociativity()->SetValue(curve, baseView, firstAssociativityPoint);
+		}
+		else
+		{
+			builder->FirstAssociativity()->SetValue(
+				NXOpen::InferSnapType::SnapTypeEnd, curve, baseView, point, NULL, nullView, point);
+		}
 		const NXOpen::Point3d modelAssociativityPoint =
 			BuildAssociativityPointFromModelPoint(baseView, modelPoint);
 		const NXOpen::Point3d originPoint =
@@ -1890,6 +1991,12 @@ bool CreateCurveEndToFaceTangentDimensionFromModelPoint(
 		NXOpen::Point3d tangentPoint(0.0, 0.0, 0.0);
 		if (TryGetOuterTangentAssociativityForFace(baseView, face, centerX, centerY, tangentCurve, tangentPoint))
 		{
+			NXOpen::Point3d farthestTangentPoint(0.0, 0.0, 0.0);
+			if (hasFirstLine &&
+				TryFindArcPointFarthestFromDrawingLine(baseView, tangentCurve, firstLineStart, firstLineEnd, farthestTangentPoint))
+			{
+				tangentPoint = farthestTangentPoint;
+			}
 			builder->SecondAssociativity()->SetValue(
 				NXOpen::InferSnapType::SnapTypeDrfTangent, tangentCurve, baseView, tangentPoint, NULL, nullView, point);
 		}
@@ -2107,6 +2214,9 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 			BuildOffsetOriginFromModelPointAndGuideFace(baseView, modelPoint, guideFace != NULL ? guideFace : firstFace, centerX, centerY, 5.0, reverseGuideDirection);
 		NXOpen::Drawings::DraftingCurve* tangentCurve = NULL;
 		NXOpen::Point3d tangentPoint(0.0, 0.0, 0.0);
+		double firstLineStart[2] = { 0.0, 0.0 };
+		double firstLineEnd[2] = { 0.0, 0.0 };
+		bool firstLineAvailable = false;
 		if (forceMeasurementMethod)
 		{
 			NXOpen::Point3d firstAssociativityPoint(0.0, 0.0, 0.0);
@@ -2119,6 +2229,8 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 			}
 			builder->FirstAssociativity()->SetValue(
 				NXOpen::InferSnapType::SnapTypeExist, firstCurve, baseView, firstAssociativityPoint, NULL, nullView, point);
+			UF_CURVE_line_t firstLineData;
+			firstLineAvailable = TryGetLineCurveData(baseView, firstCurve, firstLineData, firstLineStart, firstLineEnd);
 			DimensionDebugLog(std::string("[dimension.assoc.faceToObject.firstCurve] curveTag=") + std::to_string(firstCurve->Tag()));
 		}
 		else if (TryGetOuterTangentAssociativityForFace(baseView, firstFace, centerX, centerY, tangentCurve, tangentPoint))
@@ -2138,6 +2250,8 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 			}
 			builder->FirstAssociativity()->SetValue(
 				NXOpen::InferSnapType::SnapTypeExist, firstCurve, baseView, firstAssociativityPoint, NULL, nullView, point);
+			UF_CURVE_line_t firstLineData;
+			firstLineAvailable = TryGetLineCurveData(baseView, firstCurve, firstLineData, firstLineStart, firstLineEnd);
 		}
 
 		NXOpen::Face* secondFace = dynamic_cast<NXOpen::Face*>(secondObject);
@@ -2158,6 +2272,12 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 		else if (secondFace != NULL &&
 			TryGetOuterTangentAssociativityForFace(baseView, secondFace, centerX, centerY, tangentCurve, tangentPoint))
 		{
+			NXOpen::Point3d farthestTangentPoint(0.0, 0.0, 0.0);
+			if (firstLineAvailable &&
+				TryFindArcPointFarthestFromDrawingLine(baseView, tangentCurve, firstLineStart, firstLineEnd, farthestTangentPoint))
+			{
+				tangentPoint = farthestTangentPoint;
+			}
 			builder->SecondAssociativity()->SetValue(
 				NXOpen::InferSnapType::SnapTypeDrfTangent, tangentCurve, baseView, tangentPoint, NULL, nullView, point);
 		}
