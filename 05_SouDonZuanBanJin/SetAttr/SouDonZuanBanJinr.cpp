@@ -555,6 +555,185 @@ namespace
         return true;
     }
 
+    NXOpen::Body* BodyFromFlatSolidTaggedObject(NXOpen::TaggedObject* object)
+    {
+        if (object == NULL)
+        {
+            return NULL;
+        }
+
+        try
+        {
+            NXOpen::Edge* edge = dynamic_cast<NXOpen::Edge*>(object);
+            if (edge != NULL)
+            {
+                NXOpen::Body* body = edge->GetBody();
+                return body != NULL && IsAlive(body->Tag()) ? body : NULL;
+            }
+        }
+        catch (...) {}
+        try
+        {
+            NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(object);
+            if (face != NULL)
+            {
+                NXOpen::Body* body = face->GetBody();
+                return body != NULL && IsAlive(body->Tag()) ? body : NULL;
+            }
+        }
+        catch (...) {}
+        return NULL;
+    }
+
+    NXOpen::Body* ResolveFlatSolidBody(NXOpen::Features::Feature* flatFeature)
+    {
+        if (flatFeature == NULL)
+        {
+            return NULL;
+        }
+
+        NXOpen::Features::FlatPattern* flatPattern = dynamic_cast<NXOpen::Features::FlatPattern*>(flatFeature);
+        if (flatPattern == NULL)
+        {
+            try
+            {
+                flatPattern = dynamic_cast<NXOpen::Features::FlatPattern*>(NXOpen::NXObjectManager::Get(flatFeature->Tag()));
+            }
+            catch (...) {}
+        }
+        if (flatPattern == NULL)
+        {
+            return NULL;
+        }
+
+        auto tryEdgeObjects = [](const std::vector<NXOpen::Features::FlatPattern::ObjectDataEdge>& objects) -> NXOpen::Body*
+        {
+            for (size_t i = 0; i < objects.size(); ++i)
+            {
+                NXOpen::Body* body = BodyFromFlatSolidTaggedObject(objects[i].FlatSolidObject);
+                if (body != NULL)
+                {
+                    return body;
+                }
+            }
+            return NULL;
+        };
+
+        try
+        {
+            std::vector<NXOpen::Features::FlatPattern::ObjectDataEdge> edgeObjects;
+            flatPattern->GetExteriorCurves(edgeObjects);
+            NXOpen::Body* body = tryEdgeObjects(edgeObjects);
+            if (body != NULL) return body;
+
+            edgeObjects.clear();
+            flatPattern->GetInteriorCutoutCurves(edgeObjects);
+            body = tryEdgeObjects(edgeObjects);
+            if (body != NULL) return body;
+
+            edgeObjects.clear();
+            flatPattern->GetInteriorFeatureCurves(edgeObjects);
+            body = tryEdgeObjects(edgeObjects);
+            if (body != NULL) return body;
+
+            edgeObjects.clear();
+            flatPattern->GetHoleFeatureCurves(edgeObjects);
+            body = tryEdgeObjects(edgeObjects);
+            if (body != NULL) return body;
+        }
+        catch (...) {}
+        return NULL;
+    }
+
+    bool MeasureFlatPatternSizeXY(NXOpen::Body* body, double* sizeX, double* sizeY)
+    {
+        if (workPart == NULL || body == NULL || sizeX == NULL || sizeY == NULL ||
+            workPart->ToolingManager() == NULL || workPart->ToolingManager()->StockSizes() == NULL)
+        {
+            return false;
+        }
+
+        NXOpen::Tooling::StockSizeBuilder* stockSizeBuilder = NULL;
+        try
+        {
+            stockSizeBuilder = workPart->ToolingManager()->StockSizes()->CreateStocksizeBuilder();
+            if (stockSizeBuilder == NULL)
+            {
+                return false;
+            }
+
+            stockSizeBuilder->SelectBody()->Clear();
+            if (!stockSizeBuilder->SelectBody()->Add(body))
+            {
+                stockSizeBuilder->Destroy();
+                return false;
+            }
+
+            NXOpen::Matrix3x3 identityMatrix;
+            identityMatrix.Xx = 1.0; identityMatrix.Xy = 0.0; identityMatrix.Xz = 0.0;
+            identityMatrix.Yx = 0.0; identityMatrix.Yy = 1.0; identityMatrix.Yz = 0.0;
+            identityMatrix.Zx = 0.0; identityMatrix.Zy = 0.0; identityMatrix.Zz = 1.0;
+            stockSizeBuilder->SetManipulatorOrientation(identityMatrix);
+            stockSizeBuilder->SetType(NXOpen::Tooling::StockSizeBuilder::TypesBlock);
+            stockSizeBuilder->Clearance()->SetFormula("0");
+            stockSizeBuilder->SetSizePrecision(6);
+            stockSizeBuilder->SetRadialOffset(0.0);
+            stockSizeBuilder->SetReferenceCsysType(NXOpen::Tooling::StockSizeBuilder::RefCsysTypeAbsoluteDisplayedPart);
+
+            NXOpen::Point3d minPoint(0.0, 0.0, 0.0);
+            std::vector<double> edgeLengths;
+            NXOpen::Matrix3x3 boxMatrix;
+            stockSizeBuilder->CalculateBoxSize(&minPoint, edgeLengths, &boxMatrix);
+            stockSizeBuilder->Destroy();
+            stockSizeBuilder = NULL;
+
+            if (edgeLengths.size() < 2)
+            {
+                return false;
+            }
+
+            *sizeX = std::fabs(edgeLengths[0]);
+            *sizeY = std::fabs(edgeLengths[1]);
+            return *sizeX > 1e-6 && *sizeY > 1e-6;
+        }
+        catch (...) {}
+
+        if (stockSizeBuilder != NULL)
+        {
+            try { stockSizeBuilder->Destroy(); } catch (...) {}
+        }
+        return false;
+    }
+
+    bool UpdateBodyFlatPatternSizeAttribute(NXOpen::Body* targetBody, NXOpen::Features::Feature* flatFeature)
+    {
+        if (targetBody == NULL || flatFeature == NULL)
+        {
+            return false;
+        }
+
+        NXOpen::Body* flatBody = ResolveFlatSolidBody(flatFeature);
+        if (flatBody == NULL)
+        {
+            flatBody = targetBody;
+        }
+
+        double sizeX = 0.0;
+        double sizeY = 0.0;
+        if (!MeasureFlatPatternSizeXY(flatBody, &sizeX, &sizeY))
+        {
+            return false;
+        }
+
+        std::string text = FormatDouble(sizeX, 1) + "*" + FormatDouble(sizeY, 1);
+        targetBody->SetUserAttribute("\xE5\xB1\x95\xE5\xBC\x80\xE5\xB0\xBA\xE5\xAF\xB8", -1, text.c_str(), Update::OptionNow);
+        if (flatBody != targetBody)
+        {
+            flatBody->SetUserAttribute("\xE5\xB1\x95\xE5\xBC\x80\xE5\xB0\xBA\xE5\xAF\xB8", -1, text.c_str(), Update::OptionNow);
+        }
+        return true;
+    }
+
     std::string TrimRuleText(const std::string& value)
     {
         return zhihui_bend_rules_ini::Trim(value);
@@ -3299,6 +3478,7 @@ int SouDonZuanBanJin::update_cb(NXOpen::BlockStyler::UIBlock* block)
              if (!directionEdgeRequired)
              {
                  feature3 = CreateDefaultFlatPattern(face2);
+                 UpdateBodyFlatPatternSizeAttribute(Body1, feature3);
              }
         }
 
@@ -3367,6 +3547,7 @@ int SouDonZuanBanJin::update_cb(NXOpen::BlockStyler::UIBlock* block)
             feature3 = flatPatternBuilder1->CommitFeature();
             flatPatternBuilder1->Destroy();
             theSession->CleanUpFacetedFacesAndEdges();
+            UpdateBodyFlatPatternSizeAttribute(Body1, feature3);
 
         }
 

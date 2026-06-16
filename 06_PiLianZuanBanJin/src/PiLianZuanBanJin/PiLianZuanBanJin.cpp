@@ -211,6 +211,8 @@ namespace
         Face* largestFace = NULL;
         double expectedThickness = 0.0;
         double measuredThickness = 0.0;
+        double flatSizeX = 0.0;
+        double flatSizeY = 0.0;
         double flatSizeU = 0.0;
         double flatSizeV = 0.0;
         double flatSizeNormal = 0.0;
@@ -5174,14 +5176,12 @@ namespace
 
     bool UpdateBodyFlatPatternSizeAttribute(Body* body, const FlatSolidThicknessCheckInfo& flatCheck)
     {
-        if (body == NULL || flatCheck.flatSizeU <= 1e-6 || flatCheck.flatSizeV <= 1e-6)
+        if (body == NULL || flatCheck.flatSizeX <= 1e-6 || flatCheck.flatSizeY <= 1e-6)
         {
             return false;
         }
 
-        const double sizeX = std::min(flatCheck.flatSizeU, flatCheck.flatSizeV);
-        const double sizeY = std::max(flatCheck.flatSizeU, flatCheck.flatSizeV);
-        std::string text = FormatDouble(sizeX, 1) + "*" + FormatDouble(sizeY, 1);
+        std::string text = FormatDouble(flatCheck.flatSizeX, 1) + "*" + FormatDouble(flatCheck.flatSizeY, 1);
         body->SetUserAttribute(u8"展开尺寸", -1, text.c_str(), Update::OptionNow);
         return true;
     }
@@ -7821,6 +7821,8 @@ namespace
             dims.push_back(std::fabs(edgeLengths[0]));
             dims.push_back(std::fabs(edgeLengths[1]));
             dims.push_back(std::fabs(edgeLengths[2]));
+            info->flatSizeX = dims[0];
+            info->flatSizeY = dims[1];
             std::sort(dims.begin(), dims.end(), std::greater<double>());
             info->flatSizeU = dims[0];
             info->flatSizeV = dims[1];

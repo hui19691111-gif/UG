@@ -107,11 +107,15 @@
 #include <NXOpen/Builder.hxx>
 #include <NXOpen/Features_ToolingBoxBuilder.hxx>
 #include <NXOpen/Features_ToolingFeatureCollection.hxx>
+#include <NXOpen/Features_FlatPattern.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
 #include <NXOpen/ScCollector.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
+#include <NXOpen/SelectBodyList.hxx>
+#include <NXOpen/Tooling_StockSizeCollection.hxx>
 #include <NXOpen/Tooling_ToolingSession.hxx>
+#include <NXOpen/Tooling_StockSizeBuilder.hxx>
 #include <NXOpen/Features_SheetMetal_FlatPatternBuilder.hxx>
 #include <NXOpen/Plane.hxx>
 #include <NXOpen/PlaneCollection.hxx>
