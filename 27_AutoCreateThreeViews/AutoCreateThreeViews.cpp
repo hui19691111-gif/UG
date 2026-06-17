@@ -2328,6 +2328,37 @@ bool TryReadPlanarFaceNormal(tag_t faceTag, NXOpen::Vector3d& normal)
     return TryReadPlanarFacePointAndNormal(faceTag, nullptr, normal);
 }
 
+bool TryReadPlanarFaceNormalWithNxOpenDirection(
+    NXOpen::Part* part,
+    NXOpen::Face* face,
+    NXOpen::Vector3d& normal)
+{
+    if (part == nullptr || part->Directions() == nullptr || face == nullptr)
+    {
+        return false;
+    }
+
+    try
+    {
+        NXOpen::Direction* direction =
+            part->Directions()->CreateDirection(
+                face,
+                NXOpen::SenseForward,
+                NXOpen::SmartObject::UpdateOptionWithinModeling);
+        if (direction == nullptr)
+        {
+            return false;
+        }
+
+        normal = NormalizeVector(direction->Vector());
+        return VectorLength(normal) > 1.0e-6;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 bool TryReadStraightEdgeDirection(tag_t edgeTag, const NXOpen::Point3d& referenceVertex, NXOpen::Vector3d& xDirection, double& edgeLength)
 {
     edgeLength = 0.0;
@@ -2503,15 +2534,9 @@ bool TryComputeAutoFrontDirectionFromSheetMetalFlatPattern(
             continue;
         }
 
-        std::string featureType;
-        try
-        {
-            featureType = feature->FeatureType().GetLocaleText();
-        }
-        catch (...)
-        {
-        }
-        if (featureType != "FLAT_PATTERN")
+        NXOpen::Features::FlatPattern* flatPattern =
+            dynamic_cast<NXOpen::Features::FlatPattern*>(NXOpen::NXObjectManager::Get(feature->Tag()));
+        if (flatPattern == nullptr)
         {
             continue;
         }
@@ -2519,8 +2544,6 @@ bool TryComputeAutoFrontDirectionFromSheetMetalFlatPattern(
         NXOpen::Features::SheetMetal::FlatPatternBuilder* flatPatternBuilder = nullptr;
         try
         {
-            NXOpen::Features::FlatPattern* flatPattern =
-                dynamic_cast<NXOpen::Features::FlatPattern*>(NXOpen::NXObjectManager::Get(feature->Tag()));
             flatPatternBuilder = part->Features()->SheetmetalManager()->CreateFlatPatternBuilder(flatPattern);
             if (flatPatternBuilder == nullptr ||
                 flatPatternBuilder->UpwardFace() == nullptr ||
@@ -2546,7 +2569,9 @@ bool TryComputeAutoFrontDirectionFromSheetMetalFlatPattern(
             NXOpen::Vector3d xDirection(0.0, 0.0, 0.0);
             double edgeLength = 0.0;
             tag_t edgeTag = NULL_TAG;
-            bool hasDirection = TryReadPlanarFaceNormal(upwardFaceTag, normal);
+            bool hasDirection =
+                TryReadPlanarFaceNormalWithNxOpenDirection(part, upwardFace, normal) ||
+                TryReadPlanarFaceNormal(upwardFaceTag, normal);
 
             NXOpen::Edge* xAxisEdge = nullptr;
             try
@@ -17252,7 +17277,10 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         const double temporarySheetScaleDenominator = 100.0;
         ApplyDrawingSheetScale(session, workPart, sheet, temporarySheetScaleDenominator);
         const double viewScaleDenominator = temporarySheetScaleDenominator;
-        PreferOverallBoxDirectionWithMostCurves(session, workPart, frontDirection, viewScaleDenominator);
+        if (request.assemblyDrawing || frontDirectionMode == "overallBoxMaxArea")
+        {
+            PreferOverallBoxDirectionWithMostCurves(session, workPart, frontDirection, viewScaleDenominator);
+        }
         if (!frontDirection.valid && !request.assemblyDrawing)
         {
             PreferBackSideIfMoreCurves(session, workPart, frontDirection, viewScaleDenominator);
