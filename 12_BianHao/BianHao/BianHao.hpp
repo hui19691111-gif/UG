@@ -1,4 +1,4 @@
-﻿//==============================================================================
+//==============================================================================
 //  WARNING!!  This file is overwritten by the Block Styler while generating
 //  the automation code. Any modifications to this file will be lost after
 //  generating the code again.
@@ -33,13 +33,24 @@
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_SelectObject.hxx>
 #include <NXOpen/BlockStyler_SpecifyPoint.hxx>
+#include <NXOpen/BlockStyler_Button.hxx>
+#include <NXOpen/BlockStyler_Label.hxx>
+#include <NXOpen/BlockStyler_DoubleBlock.hxx>
+#include <NXOpen/BlockStyler_Enumeration.hxx>
 #include <uf_defs.h>
 #include <uf_so.h>
 #include <uf_obj.h>
 #include <uf_modl.h>
+#include <uf_assem.h>
 #include <uf.h>
 #include <uf_ui_ugopen.h>
+#include <uf_object_types.h>
+#include <uf_tabnot.h>
 #include <NXOpen/Annotations_AnnotationManager.hxx>
+#include <NXOpen/Annotations_IdSymbol.hxx>
+#include <NXOpen/Annotations_IdSymbolBuilder.hxx>
+#include <NXOpen/Annotations_IdSymbolCollection.hxx>
+#include <NXOpen/Assemblies_Component.hxx>
 #include <NXOpen/Annotations_LeaderDataList.hxx>
 #include <NXOpen/Drawings_BaseView.hxx>
 #include <NXOpen/Face.hxx>
@@ -135,13 +146,41 @@ public:
     int ok_cb();
     int update_cb(NXOpen::BlockStyler::UIBlock* block);
     PropertyList* GetBlockProperties(const char *blockID);
+    bool RecreatePreviewFromCache();
     
 private:
     const char* theDlxFileName;
     NXOpen::BlockStyler::BlockDialog* theDialog;
     NXOpen::BlockStyler::SpecifyPoint* point0;// Block type: Specify Point
     NXOpen::BlockStyler::SpecifyPoint* point01;// Block type: Specify Point
-    NXOpen::Annotations::DraftingNoteBuilder* draftingNoteBuilder1;
+    NXOpen::BlockStyler::Button* styleCircle;// Block type: Button
+    NXOpen::BlockStyler::Button* styleTriangleDown;// Block type: Button
+    NXOpen::BlockStyler::Button* styleHexagon;// Block type: Button
+    NXOpen::BlockStyler::Button* styleRoundedBox;// Block type: Button
+    NXOpen::BlockStyler::Button* styleUnderline;// Block type: Button
+    NXOpen::BlockStyler::Button* styleNoSymbol;// Block type: Button
+    NXOpen::BlockStyler::Label* styleCircleBar;// Block type: Label
+    NXOpen::BlockStyler::Label* styleTriangleDownBar;// Block type: Label
+    NXOpen::BlockStyler::Label* styleHexagonBar;// Block type: Label
+    NXOpen::BlockStyler::Label* styleRoundedBoxBar;// Block type: Label
+    NXOpen::BlockStyler::Label* styleUnderlineBar;// Block type: Label
+    NXOpen::BlockStyler::Label* styleNoSymbolBar;// Block type: Label
+    NXOpen::BlockStyler::Enumeration* textSource;// Block type: Enumeration
+    NXOpen::BlockStyler::Enumeration* attributeName;// Block type: Enumeration
+    NXOpen::BlockStyler::DoubleBlock* balloonSize;// Block type: Double
+    NXOpen::BlockStyler::DoubleBlock* textHeight;// Block type: Double
+    NXOpen::Annotations::IdSymbolBuilder* idSymbolBuilder1;
+    NXOpen::Annotations::BalloonTypes selectedBalloonType;
+    NXOpen::TaggedObject* cachedLeaderTarget;
+    NXOpen::View* cachedLeaderView;
+    NXOpen::NXObject* cachedPartObject;
+    NXOpen::NXObject* cachedBodyObject;
+    NXOpen::Point3d cachedFirstPoint;
+    NXOpen::Point3d cachedSecondPoint;
+    NXOpen::NXString cachedUpperText;
+    NXOpen::TaggedObject* cachedCommittedSymbol;
+    bool hasPreviewCache;
+    bool hasSecondPointCache;
     
 };
 #endif //BIANHAO_H_INCLUDED
