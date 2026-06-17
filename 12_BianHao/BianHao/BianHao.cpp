@@ -38,6 +38,8 @@
 #include "../../../common/ZhihuiEmbeddedDialog.hpp"
 #include "../embedded_dialog_resources.h"
 #include <NXOpen/Annotations_AssociativeText.hxx>
+#include <NXOpen/Assemblies_ComponentAssembly.hxx>
+#include <NXOpen/BasePart.hxx>
 #include <NXOpen/ListingWindow.hxx>
 #include <NXOpen/LogFile.hxx>
 #include <NXOpen/Update.hxx>
@@ -60,6 +62,8 @@ using namespace NXOpen::BlockStyler;
 
 namespace
 {
+void BianHao_DebugTrace(const std::string& message);
+
 class UfSessionGuard
 {
 public:
@@ -261,6 +265,39 @@ void BianHao_SetBlockVisible(NXOpen::BlockStyler::UIBlock* block, bool visible)
     }
 }
 
+void BianHao_EnableAssemblyPointSelection(NXOpen::BlockStyler::SpecifyPoint* pointBlock, int snapMask)
+{
+    if (pointBlock == NULL)
+    {
+        return;
+    }
+
+    NXOpen::BlockStyler::PropertyList* properties = NULL;
+    try
+    {
+        properties = pointBlock->GetProperties();
+        if (properties != NULL)
+        {
+            properties->SetLogical("CreateInterpartLink", false);
+            properties->SetEnum("InterpartSelection", 2);
+            if (snapMask > 0)
+            {
+                properties->SetBits("SnapPointTypesEnabled", snapMask);
+                properties->SetBits("SnapPointTypesOnByDefault", snapMask);
+                BianHao_DebugTrace(std::string("point snap mask set=") + std::to_string(snapMask));
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+
+    if (properties != NULL)
+    {
+        delete properties;
+    }
+}
+
 void BianHao_SetEnumMembers(NXOpen::BlockStyler::Enumeration* block,
     const std::vector<NXOpen::NXString>& values,
     int selectedIndex)
@@ -281,13 +318,27 @@ void BianHao_UpdateTextSourceBlocks(NXOpen::BlockStyler::Enumeration* textSource
     if (textSource != NULL)
     {
         BianHao_SetEnumMembers(textSource,
-            BianHao_MakeEnumMembers({ "明细表序号", "部件属性", "体属性" }),
+            BianHao_MakeEnumMembers({ "明细表序号", "部件属性", "体属性", "文件名" }),
             BianHao_GetEnumValue(textSource, 0));
     }
 
     const int source = BianHao_GetEnumValue(textSource, 0);
-    const bool showAttributeName = source != 0;
+    const bool showAttributeName = source == 1 || source == 2;
     BianHao_SetBlockVisible(attributeName, showAttributeName);
+}
+
+std::string BianHao_GetMissingTextMessage(NXOpen::BlockStyler::Enumeration* textSource)
+{
+    const int source = BianHao_GetEnumValue(textSource, 0);
+    if (source == 3)
+    {
+        return "没有找到文件名。";
+    }
+    if (source == 1 || source == 2)
+    {
+        return "没有找到选择的属性。";
+    }
+    return "没有找到明细表序号。";
 }
 
 std::string BianHao_NxStringToUtf8(const NXOpen::NXString& value)
@@ -305,6 +356,46 @@ std::string BianHao_NxStringToUtf8(const NXOpen::NXString& value)
 NXOpen::NXString BianHao_Utf8ToNxString(const std::string& value)
 {
     return NXOpen::NXString(value, NXOpen::NXString::UTF8);
+}
+
+std::string BianHao_RemovePrtExtension(const std::string& value)
+{
+    if (value.size() < 4)
+    {
+        return value;
+    }
+
+    const size_t dotPos = value.size() - 4;
+    if (value[dotPos] == '.' &&
+        std::tolower(static_cast<unsigned char>(value[dotPos + 1])) == 'p' &&
+        std::tolower(static_cast<unsigned char>(value[dotPos + 2])) == 'r' &&
+        std::tolower(static_cast<unsigned char>(value[dotPos + 3])) == 't')
+    {
+        return value.substr(0, dotPos);
+    }
+
+    return value;
+}
+
+NXOpen::NXString BianHao_MakeDisplayName(const std::string& value)
+{
+    return NXOpen::NXString(BianHao_RemovePrtExtension(value), NXOpen::NXString::UTF8);
+}
+
+NXOpen::NXString BianHao_MakeDisplayName(const NXOpen::NXString& value)
+{
+    return BianHao_MakeDisplayName(BianHao_NxStringToUtf8(value));
+}
+
+NXOpen::NXString BianHao_MakeFileDisplayName(const NXOpen::NXString& value)
+{
+    std::string text = BianHao_NxStringToUtf8(value);
+    const std::string::size_type slashPos = text.find_last_of("\\/");
+    if (slashPos != std::string::npos)
+    {
+        text = text.substr(slashPos + 1);
+    }
+    return BianHao_MakeDisplayName(text);
 }
 
 bool BianHao_IsNxStringEmpty(const NXOpen::NXString& value)
@@ -338,6 +429,85 @@ std::string BianHao_NormalizeText(const std::string& value)
         text = BianHao_Trim(text);
     }
     return text;
+}
+
+bool BianHao_IsValidUtf8(const std::string& value)
+{
+    int remaining = 0;
+    for (size_t i = 0; i < value.size(); ++i)
+    {
+        const unsigned char ch = static_cast<unsigned char>(value[i]);
+        if (remaining == 0)
+        {
+            if ((ch >> 7) == 0)
+            {
+                continue;
+            }
+            if ((ch >> 5) == 0x6)
+            {
+                remaining = 1;
+            }
+            else if ((ch >> 4) == 0xE)
+            {
+                remaining = 2;
+            }
+            else if ((ch >> 3) == 0x1E)
+            {
+                remaining = 3;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if ((ch >> 6) != 0x2)
+            {
+                return false;
+            }
+            --remaining;
+        }
+    }
+    return remaining == 0;
+}
+
+std::string BianHao_SystemToUtf8(const std::string& value)
+{
+    if (value.empty() || BianHao_IsValidUtf8(value))
+    {
+        return value;
+    }
+
+    int wideLength = MultiByteToWideChar(CP_ACP, 0, value.c_str(), -1, NULL, 0);
+    if (wideLength <= 0)
+    {
+        return value;
+    }
+
+    std::wstring wide(static_cast<size_t>(wideLength), L'\0');
+    if (MultiByteToWideChar(CP_ACP, 0, value.c_str(), -1, &wide[0], wideLength) <= 0)
+    {
+        return value;
+    }
+
+    int utf8Length = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, NULL, 0, NULL, NULL);
+    if (utf8Length <= 0)
+    {
+        return value;
+    }
+
+    std::string utf8(static_cast<size_t>(utf8Length), '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, &utf8[0], utf8Length, NULL, NULL) <= 0)
+    {
+        return value;
+    }
+
+    if (!utf8.empty() && utf8[utf8.size() - 1] == '\0')
+    {
+        utf8.pop_back();
+    }
+    return utf8;
 }
 
 std::string BianHao_NormalizeHeaderKey(const std::string& value)
@@ -405,7 +575,7 @@ std::string BianHao_GetUfAllocatedText(int (*askText)(tag_t, char**), tag_t cell
     std::string value;
     if (cell != NULL_TAG && askText(cell, &text) == 0 && text != NULL)
     {
-        value = text;
+        value = BianHao_SystemToUtf8(text);
     }
     if (text != NULL)
     {
@@ -458,6 +628,7 @@ void BianHao_AddCandidateTag(std::set<tag_t>& tags, tag_t tag)
 }
 
 std::string BianHao_GetObjectAttributeString(NXOpen::NXObject* object, const std::string& attribute);
+bool BianHao_AddEntityOccurrenceTags(std::set<tag_t>& tags, tag_t entityTag);
 
 std::set<tag_t> BianHao_GetRelatedObjectTags(NXOpen::NXObject* partObject, NXOpen::NXObject* bodyObject)
 {
@@ -548,6 +719,11 @@ std::set<tag_t> BianHao_GetComparableObjectTags(NXOpen::NXObject* object)
     try
     {
         BianHao_AddCandidateTag(tags, object->Tag());
+        BianHao_AddEntityOccurrenceTags(tags, object->Tag());
+
+        NXOpen::BasePart* owningPart = object->OwningPart();
+        NXOpen::NXObject* owningPartObject = dynamic_cast<NXOpen::NXObject*>(owningPart);
+        BianHao_AddCandidateTag(tags, owningPartObject != NULL ? owningPartObject->Tag() : NULL_TAG);
 
         NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(object);
         if (body != NULL)
@@ -575,6 +751,473 @@ std::set<tag_t> BianHao_GetComparableObjectTags(NXOpen::NXObject* object)
     {
     }
 
+    BianHao_AddOccurrenceEquivalentTags(tags);
+    return tags;
+}
+
+std::set<tag_t> BianHao_GetStrictBodyComparableTags(NXOpen::NXObject* object)
+{
+    std::set<tag_t> tags;
+    if (object == NULL)
+    {
+        return tags;
+    }
+
+    try
+    {
+        BianHao_AddCandidateTag(tags, object->Tag());
+        if (UF_ASSEM_is_occurrence(object->Tag()))
+        {
+            BianHao_AddCandidateTag(tags, UF_ASSEM_ask_prototype_of_occ(object->Tag()));
+        }
+
+        NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(object);
+        if (body != NULL)
+        {
+            BianHao_AddCandidateTag(tags, body->Tag());
+            BianHao_AddEntityOccurrenceTags(tags, body->Tag());
+        }
+    }
+    catch (...)
+    {
+    }
+
+    std::vector<tag_t> current(tags.begin(), tags.end());
+    for (size_t i = 0; i < current.size(); ++i)
+    {
+        if (UF_ASSEM_is_occurrence(current[i]))
+        {
+            BianHao_AddCandidateTag(tags, UF_ASSEM_ask_prototype_of_occ(current[i]));
+        }
+    }
+
+    return tags;
+}
+
+std::set<tag_t> BianHao_GetAssociativeTextComparableTags(NXOpen::NXObject* object)
+{
+    if (dynamic_cast<NXOpen::Body*>(object) != NULL)
+    {
+        return BianHao_GetStrictBodyComparableTags(object);
+    }
+
+    return BianHao_GetComparableObjectTags(object);
+}
+
+void BianHao_AddComponentAndPrototypeTags(std::set<tag_t>& tags, NXOpen::Assemblies::Component* component)
+{
+    if (component == NULL)
+    {
+        return;
+    }
+
+    BianHao_AddCandidateTag(tags, component->Tag());
+    try
+    {
+        NXOpen::NXObject* prototype = dynamic_cast<NXOpen::NXObject*>(component->Prototype());
+        BianHao_AddCandidateTag(tags, prototype != NULL ? prototype->Tag() : NULL_TAG);
+    }
+    catch (...)
+    {
+    }
+}
+
+void BianHao_AddOccurrenceAndPrototypeTags(std::set<tag_t>& tags, tag_t occurrence)
+{
+    if (occurrence == NULL_TAG)
+    {
+        return;
+    }
+
+    BianHao_AddCandidateTag(tags, occurrence);
+    if (UF_ASSEM_is_occurrence(occurrence))
+    {
+        BianHao_AddCandidateTag(tags, UF_ASSEM_ask_prototype_of_occ(occurrence));
+        const tag_t partOccurrence = UF_ASSEM_ask_part_occurrence(occurrence);
+        BianHao_AddCandidateTag(tags, partOccurrence);
+        if (partOccurrence != NULL_TAG)
+        {
+            BianHao_AddCandidateTag(tags, UF_ASSEM_ask_prototype_of_occ(partOccurrence));
+            BianHao_AddCandidateTag(tags, UF_ASSEM_ask_inst_of_part_occ(partOccurrence));
+        }
+    }
+}
+
+NXOpen::Part* BianHao_GetDisplayPart()
+{
+    try
+    {
+        return BianHao::theSession != NULL && BianHao::theSession->Parts() != NULL ? BianHao::theSession->Parts()->Display() : NULL;
+    }
+    catch (...)
+    {
+        return NULL;
+    }
+}
+
+void BianHao_AddUniquePartTag(std::vector<tag_t>& partTags, tag_t partTag)
+{
+    if (partTag == NULL_TAG || std::find(partTags.begin(), partTags.end(), partTag) != partTags.end())
+    {
+        return;
+    }
+
+    partTags.push_back(partTag);
+}
+
+bool BianHao_AddPartOccurrenceTags(std::set<tag_t>& tags, tag_t partTag, std::ostringstream* debug = NULL)
+{
+    if (partTag == NULL_TAG)
+    {
+        return false;
+    }
+
+    std::vector<tag_t> parentParts;
+    NXOpen::Part* displayPart = BianHao_GetDisplayPart();
+    NXOpen::Part* workPart = BianHao::theSession != NULL ? BianHao::theSession->Parts()->Work() : NULL;
+    BianHao_AddUniquePartTag(parentParts, displayPart != NULL ? displayPart->Tag() : NULL_TAG);
+    BianHao_AddUniquePartTag(parentParts, workPart != NULL ? workPart->Tag() : NULL_TAG);
+    parentParts.push_back(NULL_TAG);
+
+    bool added = false;
+    BianHao_AddCandidateTag(tags, partTag);
+    for (size_t p = 0; p < parentParts.size(); ++p)
+    {
+        tag_t* partOccurrences = NULL;
+        const int count = UF_ASSEM_ask_occs_of_part(parentParts[p], partTag, &partOccurrences);
+        if (debug != NULL)
+        {
+            *debug << "    UF_ASSEM_ask_occs_of_part parent=" << parentParts[p]
+                << " part=" << partTag << " count=" << count << "\r\n";
+        }
+
+        if (count <= 0 || partOccurrences == NULL)
+        {
+            if (partOccurrences != NULL)
+            {
+                UF_free(partOccurrences);
+            }
+            continue;
+        }
+
+        for (int i = 0; i < count; ++i)
+        {
+            const tag_t partOccurrence = partOccurrences[i];
+            if (partOccurrence == NULL_TAG)
+            {
+                continue;
+            }
+
+            added = true;
+            BianHao_AddOccurrenceAndPrototypeTags(tags, partOccurrence);
+            BianHao_AddCandidateTag(tags, UF_ASSEM_ask_inst_of_part_occ(partOccurrence));
+        }
+
+        if (partOccurrences != NULL)
+        {
+            UF_free(partOccurrences);
+        }
+    }
+
+    return added;
+}
+
+bool BianHao_AddEntityOccurrenceTags(std::set<tag_t>& tags, tag_t entityTag)
+{
+    if (entityTag == NULL_TAG)
+    {
+        return false;
+    }
+
+    tag_t* occurrences = NULL;
+    const int count = UF_ASSEM_ask_occs_of_entity(entityTag, &occurrences);
+    if (count <= 0 || occurrences == NULL)
+    {
+        if (occurrences != NULL)
+        {
+            UF_free(occurrences);
+        }
+        return false;
+    }
+
+    bool added = false;
+    BianHao_AddCandidateTag(tags, entityTag);
+    for (int i = 0; i < count; ++i)
+    {
+        const tag_t occurrence = occurrences[i];
+        if (occurrence == NULL_TAG)
+        {
+            continue;
+        }
+
+        added = true;
+        BianHao_AddCandidateTag(tags, occurrence);
+        BianHao_AddCandidateTag(tags, UF_ASSEM_ask_prototype_of_occ(occurrence));
+
+        const tag_t partOccurrence = UF_ASSEM_ask_part_occurrence(occurrence);
+        BianHao_AddCandidateTag(tags, partOccurrence);
+        if (partOccurrence != NULL_TAG)
+        {
+            BianHao_AddCandidateTag(tags, UF_ASSEM_ask_prototype_of_occ(partOccurrence));
+            BianHao_AddCandidateTag(tags, UF_ASSEM_ask_inst_of_part_occ(partOccurrence));
+        }
+    }
+
+    UF_free(occurrences);
+    return added;
+}
+
+void BianHao_AddObjectOccurrenceUnderComponent(std::set<tag_t>& tags,
+    NXOpen::Assemblies::Component* component,
+    NXOpen::NXObject* prototypeObject,
+    bool& assemblyContextFound,
+    std::ostringstream* debug,
+    const char* reason)
+{
+    if (component == NULL || prototypeObject == NULL)
+    {
+        return;
+    }
+
+    try
+    {
+        NXOpen::NXObject* occurrenceObject = component->FindOccurrence(prototypeObject);
+        if (occurrenceObject != NULL)
+        {
+            assemblyContextFound = true;
+            BianHao_AddOccurrenceAndPrototypeTags(tags, occurrenceObject->Tag());
+            if (debug != NULL)
+            {
+                *debug << "    " << reason << " FindOccurrence component=" << component->Tag()
+                    << " prototype=" << prototypeObject->Tag()
+                    << " occurrence=" << occurrenceObject->Tag() << "\r\n";
+            }
+        }
+    }
+    catch (const std::exception& ex)
+    {
+        if (debug != NULL)
+        {
+            *debug << "    " << reason << " FindOccurrence failed component=" << component->Tag()
+                << " prototype=" << prototypeObject->Tag() << " error=" << ex.what() << "\r\n";
+        }
+    }
+    catch (...)
+    {
+        if (debug != NULL)
+        {
+            *debug << "    " << reason << " FindOccurrence failed component=" << component->Tag()
+                << " prototype=" << prototypeObject->Tag() << " error=unknown\r\n";
+        }
+    }
+
+    const tag_t ufOccurrence = UF_ASSEM_find_occurrence(component->Tag(), prototypeObject->Tag());
+    if (ufOccurrence != NULL_TAG)
+    {
+        assemblyContextFound = true;
+        BianHao_AddOccurrenceAndPrototypeTags(tags, ufOccurrence);
+        if (debug != NULL)
+        {
+            *debug << "    " << reason << " UF_ASSEM_find_occurrence component=" << component->Tag()
+                << " prototype=" << prototypeObject->Tag()
+                << " occurrence=" << ufOccurrence << "\r\n";
+        }
+    }
+}
+
+void BianHao_CollectComponentTreeMatchTags(std::set<tag_t>& tags,
+    NXOpen::Assemblies::Component* component,
+    tag_t prototypePartTag,
+    NXOpen::NXObject* prototypeObject,
+    bool& assemblyContextFound,
+    std::set<tag_t>& visitedComponents,
+    std::ostringstream* debug,
+    int depth)
+{
+    if (component == NULL || component->Tag() == NULL_TAG || visitedComponents.find(component->Tag()) != visitedComponents.end())
+    {
+        return;
+    }
+
+    visitedComponents.insert(component->Tag());
+
+    tag_t componentPrototypeTag = NULL_TAG;
+    try
+    {
+        NXOpen::NXObject* prototype = dynamic_cast<NXOpen::NXObject*>(component->Prototype());
+        componentPrototypeTag = prototype != NULL ? prototype->Tag() : NULL_TAG;
+    }
+    catch (...)
+    {
+    }
+
+    if (debug != NULL)
+    {
+        *debug << "    component tree depth=" << depth
+            << " component=" << component->Tag()
+            << " prototype=" << componentPrototypeTag << "\r\n";
+    }
+
+    if (prototypePartTag != NULL_TAG && componentPrototypeTag == prototypePartTag)
+    {
+        assemblyContextFound = true;
+        BianHao_AddComponentAndPrototypeTags(tags, component);
+        BianHao_AddOccurrenceAndPrototypeTags(tags, component->Tag());
+        if (debug != NULL)
+        {
+            *debug << "      component prototype part matched selected part=" << prototypePartTag << "\r\n";
+        }
+    }
+
+    BianHao_AddObjectOccurrenceUnderComponent(tags, component, prototypeObject, assemblyContextFound, debug, "component tree");
+
+    std::vector<NXOpen::Assemblies::Component*> children;
+    try
+    {
+        children = component->GetChildren();
+    }
+    catch (...)
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < children.size(); ++i)
+    {
+        BianHao_CollectComponentTreeMatchTags(tags, children[i], prototypePartTag, prototypeObject,
+            assemblyContextFound, visitedComponents, debug, depth + 1);
+    }
+}
+
+bool BianHao_AddDisplayAssemblyComponentTags(std::set<tag_t>& tags,
+    NXOpen::NXObject* partObject,
+    NXOpen::NXObject* bodyObject,
+    std::ostringstream* debug)
+{
+    NXOpen::Part* displayPart = BianHao_GetDisplayPart();
+    if (displayPart == NULL)
+    {
+        if (debug != NULL)
+        {
+            *debug << "    display assembly scan skipped: no display part\r\n";
+        }
+        return false;
+    }
+
+    NXOpen::Assemblies::ComponentAssembly* componentAssembly = NULL;
+    try
+    {
+        componentAssembly = displayPart->ComponentAssembly();
+    }
+    catch (...)
+    {
+        componentAssembly = NULL;
+    }
+
+    NXOpen::Assemblies::Component* rootComponent = NULL;
+    try
+    {
+        rootComponent = componentAssembly != NULL ? componentAssembly->RootComponent() : NULL;
+    }
+    catch (...)
+    {
+        rootComponent = NULL;
+    }
+
+    if (rootComponent == NULL)
+    {
+        if (debug != NULL)
+        {
+            *debug << "    display assembly scan skipped: no root component displayPart=" << displayPart->Tag() << "\r\n";
+        }
+        return false;
+    }
+
+    tag_t prototypePartTag = partObject != NULL ? partObject->Tag() : NULL_TAG;
+    NXOpen::NXObject* prototypeObject = bodyObject != NULL ? bodyObject : partObject;
+    try
+    {
+        NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(bodyObject);
+        if (body != NULL && body->OwningPart() != NULL)
+        {
+            prototypePartTag = body->OwningPart()->Tag();
+        }
+    }
+    catch (...)
+    {
+    }
+
+    if (debug != NULL)
+    {
+        *debug << "    display assembly scan displayPart=" << displayPart->Tag()
+            << " rootComponent=" << rootComponent->Tag()
+            << " prototypePart=" << prototypePartTag
+            << " prototypeObject=" << (prototypeObject != NULL ? prototypeObject->Tag() : NULL_TAG) << "\r\n";
+    }
+
+    bool assemblyContextFound = false;
+    std::set<tag_t> visitedComponents;
+    BianHao_CollectComponentTreeMatchTags(tags, rootComponent, prototypePartTag, prototypeObject,
+        assemblyContextFound, visitedComponents, debug, 0);
+    return assemblyContextFound;
+}
+
+std::set<tag_t> BianHao_GetAssemblyComponentMatchTags(NXOpen::NXObject* partObject, NXOpen::NXObject* bodyObject, std::ostringstream* debug = NULL)
+{
+    std::set<tag_t> tags;
+    bool assemblyContextFound = false;
+
+    try
+    {
+        NXOpen::NXObject* primaryObject = bodyObject != NULL ? bodyObject : partObject;
+        if (primaryObject != NULL)
+        {
+            NXOpen::Assemblies::Component* directComponent = dynamic_cast<NXOpen::Assemblies::Component*>(primaryObject);
+            if (directComponent != NULL)
+            {
+                assemblyContextFound = true;
+                BianHao_AddComponentAndPrototypeTags(tags, directComponent);
+            }
+
+            NXOpen::Assemblies::Component* component = primaryObject->OwningComponent();
+            if (component != NULL)
+            {
+                assemblyContextFound = true;
+                BianHao_AddComponentAndPrototypeTags(tags, component);
+            }
+        }
+
+        NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(bodyObject);
+        if (body != NULL)
+        {
+            BianHao_AddComponentAndPrototypeTags(tags, body->OwningComponent());
+            assemblyContextFound = assemblyContextFound || body->OwningComponent() != NULL;
+            assemblyContextFound = BianHao_AddEntityOccurrenceTags(tags, body->Tag()) || assemblyContextFound;
+            try
+            {
+                NXOpen::NXObject* owningPart = dynamic_cast<NXOpen::NXObject*>(body->OwningPart());
+                assemblyContextFound = BianHao_AddPartOccurrenceTags(tags, owningPart != NULL ? owningPart->Tag() : NULL_TAG, debug) || assemblyContextFound;
+            }
+            catch (...)
+            {
+            }
+        }
+
+        NXOpen::Part* part = dynamic_cast<NXOpen::Part*>(partObject);
+        assemblyContextFound = BianHao_AddPartOccurrenceTags(tags, part != NULL ? part->Tag() : NULL_TAG, debug) || assemblyContextFound;
+        assemblyContextFound = BianHao_AddDisplayAssemblyComponentTags(tags, partObject, bodyObject, debug) || assemblyContextFound;
+    }
+    catch (...)
+    {
+    }
+
+    if (!assemblyContextFound)
+    {
+        tags.clear();
+        return tags;
+    }
+
+    const std::set<tag_t> strictTags = BianHao_GetComparableObjectTags(bodyObject != NULL ? bodyObject : partObject);
+    tags.insert(strictTags.begin(), strictTags.end());
     BianHao_AddOccurrenceEquivalentTags(tags);
     return tags;
 }
@@ -686,24 +1329,7 @@ std::string BianHao_GetSequenceDebugLogPath()
 
 void BianHao_WriteSequenceDebugLog(const std::string& text)
 {
-    std::ofstream log(BianHao_GetSequenceDebugLogPath().c_str(), std::ios::out | std::ios::app | std::ios::binary);
-    if (!log)
-    {
-        return;
-    }
-
-    SYSTEMTIME now;
-    GetLocalTime(&now);
-    char stamp[64] = "";
-    sprintf_s(stamp, "%04d-%02d-%02d %02d:%02d:%02d",
-        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
-
-    log << "\r\n===== " << stamp << " =====\r\n";
-    log << text;
-    if (text.empty() || (text[text.size() - 1] != '\n' && text[text.size() - 1] != '\r'))
-    {
-        log << "\r\n";
-    }
+    (void)text;
 }
 
 std::string BianHao_GetErrorDebugLogPath()
@@ -725,20 +1351,8 @@ std::string BianHao_GetErrorDebugLogPath()
 
 void BianHao_WriteErrorDebugLog(const std::string& context, const std::string& message)
 {
-    std::ofstream log(BianHao_GetErrorDebugLogPath().c_str(), std::ios::out | std::ios::app | std::ios::binary);
-    if (!log)
-    {
-        return;
-    }
-
-    SYSTEMTIME now;
-    GetLocalTime(&now);
-    char stamp[64] = "";
-    sprintf_s(stamp, "%04d-%02d-%02d %02d:%02d:%02d",
-        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
-
-    log << "\r\n===== " << stamp << " =====\r\n";
-    log << context << "\r\n" << message << "\r\n";
+    (void)context;
+    (void)message;
 }
 
 void BianHao_DebugTrace(const std::string& message)
@@ -885,6 +1499,42 @@ std::string BianHao_GetObjectAttributeString(NXOpen::NXObject* object, const std
     return "";
 }
 
+std::string BianHao_GetAttributeValueFromObject(NXOpen::NXObject* object, const std::string& attribute)
+{
+    if (object == NULL || attribute.empty())
+    {
+        return "";
+    }
+
+    try
+    {
+        std::vector<NXOpen::NXObject::AttributeInformation> attributes = object->GetUserAttributes();
+        for (size_t i = 0; i < attributes.size(); ++i)
+        {
+            if (!attributes[i].Unset && BianHao_NxStringToUtf8(attributes[i].Title) == attribute)
+            {
+                std::string value = BianHao_NxStringToUtf8(
+                    object->GetUserAttributeAsString(attributes[i].Title, attributes[i].Type, attributes[i].ArrayElementIndex));
+                if (attribute == "文件名称" || attribute == "文件名")
+                {
+                    value = BianHao_RemovePrtExtension(value);
+                    BianHao_DebugTrace(std::string("filename attribute value stripped prt=") + value);
+                }
+                BianHao_DebugTrace(std::string("attribute value found tag=")
+                    + std::to_string(static_cast<unsigned long long>(object->Tag()))
+                    + " attribute=" + attribute
+                    + " value=" + value);
+                return value;
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+
+    return "";
+}
+
 NXOpen::NXObject* BianHao_GetPartAttributeObject(NXOpen::NXObject* partObject, NXOpen::NXObject* bodyObject)
 {
     NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(bodyObject);
@@ -937,25 +1587,82 @@ NXOpen::NXObject* BianHao_GetPartAttributeObject(NXOpen::NXObject* partObject, N
     return NULL;
 }
 
+NXOpen::NXObject* BianHao_GetPartDisplayNameObject(NXOpen::NXObject* partObject, NXOpen::NXObject* bodyObject)
+{
+    NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(bodyObject);
+    if (body != NULL)
+    {
+        try
+        {
+            NXOpen::Assemblies::Component* component = body->OwningComponent();
+            NXOpen::NXObject* componentObject = dynamic_cast<NXOpen::NXObject*>(component);
+            if (componentObject != NULL)
+            {
+                BianHao_DebugTrace(std::string("part name uses body owning component tag=")
+                    + std::to_string(static_cast<unsigned long long>(componentObject->Tag())));
+                return componentObject;
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    if (partObject != NULL)
+    {
+        NXOpen::Assemblies::Component* component = dynamic_cast<NXOpen::Assemblies::Component*>(partObject);
+        if (component != NULL)
+        {
+            BianHao_DebugTrace(std::string("part name uses selected component tag=")
+                + std::to_string(static_cast<unsigned long long>(component->Tag())));
+            return partObject;
+        }
+
+        try
+        {
+            component = partObject->OwningComponent();
+            NXOpen::NXObject* componentObject = dynamic_cast<NXOpen::NXObject*>(component);
+            if (componentObject != NULL)
+            {
+                BianHao_DebugTrace(std::string("part name uses part owning component tag=")
+                    + std::to_string(static_cast<unsigned long long>(componentObject->Tag())));
+                return componentObject;
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    return BianHao_GetPartAttributeObject(partObject, bodyObject);
+}
+
 void BianHao_UpdateAttributeNameMembers(NXOpen::BlockStyler::Enumeration* textSource,
     NXOpen::BlockStyler::Enumeration* attributeName,
     NXOpen::NXObject* partObject,
-    NXOpen::NXObject* bodyObject)
+    NXOpen::NXObject* bodyObject,
+    const std::string& preferredAttributeName = "")
 {
     const int source = BianHao_GetEnumValue(textSource, 0);
-    if (source == 0)
+    if (source == 0 || source == 3)
     {
         BianHao_SetBlockVisible(attributeName, false);
         return;
     }
 
     BianHao_SetBlockVisible(attributeName, true);
-    const std::string previous = BianHao_GetSelectedAttributeName(attributeName);
+    const std::string previous = !preferredAttributeName.empty()
+        ? preferredAttributeName
+        : BianHao_GetSelectedAttributeName(attributeName);
     NXOpen::NXObject* sourceObject = source == 2 ? bodyObject : BianHao_GetPartAttributeObject(partObject, bodyObject);
     std::vector<std::string> names = BianHao_GetAttributeNames(sourceObject);
     if (names.empty())
     {
         names = BianHao_CollectWorkPartAttributeNames(source);
+    }
+    if (!previous.empty() && std::find(names.begin(), names.end(), previous) == names.end())
+    {
+        names.insert(names.begin(), previous);
     }
     if (names.empty())
     {
@@ -973,6 +1680,11 @@ void BianHao_UpdateAttributeNameMembers(NXOpen::BlockStyler::Enumeration* textSo
         members.push_back(NXOpen::NXString(names[i], NXOpen::NXString::UTF8));
     }
     BianHao_SetEnumMembers(attributeName, members, selectedIndex);
+    BianHao_DebugTrace(std::string("attribute members refreshed source=")
+        + std::to_string(source)
+        + " preferred=" + previous
+        + " selected=" + BianHao_GetSelectedAttributeName(attributeName)
+        + " count=" + std::to_string(static_cast<unsigned long long>(names.size())));
 }
 
 std::string BianHao_GetSelectedAttributeName(NXOpen::BlockStyler::Enumeration* attributeName)
@@ -1209,6 +1921,7 @@ bool BianHao_CellReferencesSelectedObject(const std::string& rawText, const std:
 }
 
 bool BianHao_CellAssociativeTextReferencesSelectedObject(const std::string& rawText,
+    tag_t cell,
     NXOpen::NXObject* selectedObject,
     std::ostringstream* debug,
     size_t columnIndex)
@@ -1218,7 +1931,7 @@ bool BianHao_CellAssociativeTextReferencesSelectedObject(const std::string& rawT
         return false;
     }
 
-    const std::set<tag_t> selectedTags = BianHao_GetComparableObjectTags(selectedObject);
+    const std::set<tag_t> selectedTags = BianHao_GetAssociativeTextComparableTags(selectedObject);
     if (selectedTags.empty())
     {
         return false;
@@ -1238,8 +1951,27 @@ bool BianHao_CellAssociativeTextReferencesSelectedObject(const std::string& rawT
         return false;
     }
 
-    NXOpen::Part* workPart = BianHao::theSession != NULL ? BianHao::theSession->Parts()->Work() : NULL;
-    if (workPart == NULL)
+    NXOpen::Part* associativeTextPart = NULL;
+    NXOpen::NXObject* cellObject = NULL;
+    try
+    {
+        cellObject = dynamic_cast<NXOpen::NXObject*>(NXOpen::NXObjectManager::Get(cell));
+        associativeTextPart = dynamic_cast<NXOpen::Part*>(cellObject != NULL ? cellObject->OwningPart() : NULL);
+    }
+    catch (...)
+    {
+        associativeTextPart = NULL;
+    }
+
+    if (associativeTextPart == NULL && BianHao::theSession != NULL && BianHao::theSession->Parts() != NULL)
+    {
+        associativeTextPart = BianHao::theSession->Parts()->Display();
+    }
+    if (associativeTextPart == NULL && BianHao::theSession != NULL && BianHao::theSession->Parts() != NULL)
+    {
+        associativeTextPart = BianHao::theSession->Parts()->Work();
+    }
+    if (associativeTextPart == NULL)
     {
         return false;
     }
@@ -1247,7 +1979,7 @@ bool BianHao_CellAssociativeTextReferencesSelectedObject(const std::string& rawT
     NXOpen::Annotations::AssociativeText* associativeText = NULL;
     try
     {
-        associativeText = workPart->Annotations()->CreateAssociativeText();
+        associativeText = associativeTextPart->Annotations()->CreateAssociativeText();
         NXOpen::NXObject* referencedObject = NULL;
         NXOpen::NXString attributeTitle;
         const bool found = associativeText->GetObjectAttribute(BianHao_Utf8ToNxString(rawText), &referencedObject, &attributeTitle);
@@ -1264,11 +1996,27 @@ bool BianHao_CellAssociativeTextReferencesSelectedObject(const std::string& rawT
         if (debug != NULL)
         {
             *debug << "    col=" << columnIndex
+                << " assoc partTag=" << associativeTextPart->Tag()
                 << " assoc objectTag=" << referencedTag
                 << " title=[" << title << "] raw=[" << rawText << "]\r\n";
         }
 
-        const std::set<tag_t> referencedTags = BianHao_GetComparableObjectTags(referencedObject);
+        const std::set<tag_t> referencedTags = BianHao_GetAssociativeTextComparableTags(referencedObject);
+        if (debug != NULL)
+        {
+            *debug << "    col=" << columnIndex << " selectedAssocTags:";
+            for (std::set<tag_t>::const_iterator it = selectedTags.begin(); it != selectedTags.end(); ++it)
+            {
+                *debug << " " << *it;
+            }
+            *debug << "\r\n";
+            *debug << "    col=" << columnIndex << " referencedAssocTags:";
+            for (std::set<tag_t>::const_iterator it = referencedTags.begin(); it != referencedTags.end(); ++it)
+            {
+                *debug << " " << *it;
+            }
+            *debug << "\r\n";
+        }
         return BianHao_TagsIntersect(selectedTags, referencedTags);
     }
     catch (const std::exception& ex)
@@ -1291,6 +2039,114 @@ bool BianHao_CellAssociativeTextReferencesSelectedObject(const std::string& rawT
         if (debug != NULL)
         {
             *debug << "    col=" << columnIndex << " assoc parse failed: unknown raw=[" << rawText << "]\r\n";
+        }
+    }
+
+    return false;
+}
+
+bool BianHao_CellAssociativeTextReferencesAssemblyTags(const std::string& rawText,
+    tag_t cell,
+    const std::set<tag_t>& selectedAssemblyTags,
+    std::ostringstream* debug,
+    size_t columnIndex)
+{
+    if (rawText.empty() || selectedAssemblyTags.empty())
+    {
+        return false;
+    }
+
+    if (BianHao_CellReferencesSelectedObject(rawText, selectedAssemblyTags))
+    {
+        if (debug != NULL)
+        {
+            *debug << "    col=" << columnIndex << " assembly raw contains selected tag, raw=[" << rawText << "]\r\n";
+        }
+        return true;
+    }
+
+    if (rawText.find("<W") == std::string::npos)
+    {
+        return false;
+    }
+
+    NXOpen::Part* associativeTextPart = NULL;
+    NXOpen::NXObject* cellObject = NULL;
+    try
+    {
+        cellObject = dynamic_cast<NXOpen::NXObject*>(NXOpen::NXObjectManager::Get(cell));
+        associativeTextPart = dynamic_cast<NXOpen::Part*>(cellObject != NULL ? cellObject->OwningPart() : NULL);
+    }
+    catch (...)
+    {
+        associativeTextPart = NULL;
+    }
+
+    if (associativeTextPart == NULL && BianHao::theSession != NULL && BianHao::theSession->Parts() != NULL)
+    {
+        associativeTextPart = BianHao::theSession->Parts()->Display();
+    }
+    if (associativeTextPart == NULL && BianHao::theSession != NULL && BianHao::theSession->Parts() != NULL)
+    {
+        associativeTextPart = BianHao::theSession->Parts()->Work();
+    }
+    if (associativeTextPart == NULL)
+    {
+        return false;
+    }
+
+    NXOpen::Annotations::AssociativeText* associativeText = NULL;
+    try
+    {
+        associativeText = associativeTextPart->Annotations()->CreateAssociativeText();
+        NXOpen::NXObject* referencedObject = NULL;
+        NXOpen::NXString attributeTitle;
+        const bool found = associativeText->GetObjectAttribute(BianHao_Utf8ToNxString(rawText), &referencedObject, &attributeTitle);
+        delete associativeText;
+        associativeText = NULL;
+
+        if (!found || referencedObject == NULL)
+        {
+            return false;
+        }
+
+        std::set<tag_t> referencedTags = BianHao_GetAssemblyComponentMatchTags(referencedObject, referencedObject, debug);
+        if (referencedTags.empty())
+        {
+            referencedTags = BianHao_GetComparableObjectTags(referencedObject);
+        }
+
+        const std::string title = BianHao_NxStringToUtf8(attributeTitle);
+        if (debug != NULL)
+        {
+            *debug << "    col=" << columnIndex
+                << " assembly assoc partTag=" << associativeTextPart->Tag()
+                << " assembly assoc objectTag=" << referencedObject->Tag()
+                << " title=[" << title << "] raw=[" << rawText << "]\r\n";
+        }
+
+        return BianHao_TagsIntersect(selectedAssemblyTags, referencedTags);
+    }
+    catch (const std::exception& ex)
+    {
+        if (associativeText != NULL)
+        {
+            delete associativeText;
+        }
+        if (debug != NULL)
+        {
+            *debug << "    col=" << columnIndex << " assembly assoc parse failed: " << ex.what() << " raw=[" << rawText << "]\r\n";
+        }
+    }
+    catch (...)
+    {
+        if (associativeText != NULL)
+        {
+            delete associativeText;
+        }
+        if (debug != NULL)
+        {
+            *debug << "    col=" << columnIndex << " assembly assoc parse failed: unknown raw=[" << rawText << "]\r\n";
         }
     }
 
@@ -1338,7 +2194,7 @@ bool BianHao_RowMatchesSelectedObject(const std::vector<tag_t>& rows,
         }
 
         const std::string rawText = BianHao_GetCellRawText(cell);
-        if (BianHao_CellAssociativeTextReferencesSelectedObject(rawText, bodyObject != NULL ? bodyObject : partObject, debug, c))
+        if (BianHao_CellAssociativeTextReferencesSelectedObject(rawText, cell, bodyObject != NULL ? bodyObject : partObject, debug, c))
         {
             if (debug != NULL)
             {
@@ -1375,6 +2231,68 @@ bool BianHao_RowMatchesSelectedObject(const std::vector<tag_t>& rows,
     if (debug != NULL)
     {
         *debug << "  row result=no match\r\n";
+    }
+    return false;
+}
+
+bool BianHao_RowMatchesSelectedAssemblyComponent(const std::vector<tag_t>& rows,
+    const std::vector<tag_t>& columns,
+    int rowIndex,
+    int headerRow,
+    int sequenceColumn,
+    const std::set<tag_t>& selectedAssemblyTags,
+    std::ostringstream* debug)
+{
+    if (rowIndex < 0 || static_cast<size_t>(rowIndex) >= rows.size() || selectedAssemblyTags.empty())
+    {
+        return false;
+    }
+
+    if (debug != NULL)
+    {
+        *debug << "  assembly row=" << rowIndex << " rowTag=" << rows[static_cast<size_t>(rowIndex)] << "\r\n";
+        *debug << "    selectedAssemblyTags:";
+        for (std::set<tag_t>::const_iterator it = selectedAssemblyTags.begin(); it != selectedAssemblyTags.end(); ++it)
+        {
+            *debug << " " << *it;
+        }
+        *debug << "\r\n";
+    }
+
+    for (size_t c = 0; c < columns.size(); ++c)
+    {
+        if (static_cast<int>(c) == sequenceColumn)
+        {
+            continue;
+        }
+
+        tag_t cell = NULL_TAG;
+        if (!BianHao_GetTableCell(rows[static_cast<size_t>(rowIndex)], columns[c], cell))
+        {
+            continue;
+        }
+
+        const std::string rawText = BianHao_GetCellRawText(cell);
+        if (BianHao_CellAssociativeTextReferencesAssemblyTags(rawText, cell, selectedAssemblyTags, debug, c))
+        {
+            if (debug != NULL)
+            {
+                *debug << "    col=" << c << " assembly linked component matched, raw=[" << rawText << "]\r\n";
+            }
+            return true;
+        }
+
+        if (debug != NULL)
+        {
+            const std::string header = BianHao_GetHeaderText(rows, columns, headerRow, c);
+            const std::string evaluated = BianHao_GetCellEvaluatedText(cell);
+            *debug << "    col=" << c << " assembly no match, header=[" << header << "] value=[" << evaluated << "] raw=[" << rawText << "]\r\n";
+        }
+    }
+
+    if (debug != NULL)
+    {
+        *debug << "  assembly row result=no match\r\n";
     }
     return false;
 }
@@ -1422,6 +2340,13 @@ NXOpen::NXString BianHao_FindSequenceNumberInDrawingTable(NXOpen::NXObject* part
         << ", bodyObjectTag=" << (bodyObject != NULL ? bodyObject->Tag() : NULL_TAG) << "\r\n";
     debug << "relatedTags:";
     for (std::set<tag_t>::const_iterator it = relatedTags.begin(); it != relatedTags.end(); ++it)
+    {
+        debug << " " << *it;
+    }
+    debug << "\r\n";
+    const std::set<tag_t> assemblyTags = BianHao_GetAssemblyComponentMatchTags(partObject, bodyObject, &debug);
+    debug << "assemblyComponentTags:";
+    for (std::set<tag_t>::const_iterator it = assemblyTags.begin(); it != assemblyTags.end(); ++it)
     {
         debug << " " << *it;
     }
@@ -1496,6 +2421,73 @@ NXOpen::NXString BianHao_FindSequenceNumberInDrawingTable(NXOpen::NXObject* part
                 }
             }
         }
+
+        if (matches.empty() && !assemblyTags.empty())
+        {
+            debug << "strict object scan found no sequence; start assembly component fallback\r\n";
+            tabnote = NULL_TAG;
+            while (UF_OBJ_cycle_objs_in_part(workPart->Tag(), UF_tabular_note_type, &tabnote) == 0 && tabnote != NULL_TAG)
+            {
+                int type = 0;
+                int subtype = 0;
+                if (UF_OBJ_ask_type_and_subtype(tabnote, &type, &subtype) != 0 ||
+                    type != UF_tabular_note_type ||
+                    (subtype != UF_tabular_note_subtype && subtype != UF_parts_list_subtype))
+                {
+                    continue;
+                }
+
+                debug << "assembly fallback tabnote=" << tabnote << " subtype=" << subtype << "\r\n";
+
+                std::vector<tag_t> rows;
+                std::vector<tag_t> columns;
+                if (!BianHao_GetTabularNoteRowsAndColumns(tabnote, rows, columns))
+                {
+                    debug << "  assembly fallback unable to read rows/columns\r\n";
+                    continue;
+                }
+
+                int headerRow = -1;
+                int sequenceColumn = -1;
+                if (!BianHao_FindSequenceHeader(tabnote, rows, columns, headerRow, sequenceColumn))
+                {
+                    if (!BianHao_InferSequenceColumn(rows, columns, headerRow, sequenceColumn, debug))
+                    {
+                        continue;
+                    }
+                    debug << "  assembly fallback inferred sequenceColumn=" << sequenceColumn << "\r\n";
+                }
+                else
+                {
+                    debug << "  assembly fallback headerRow=" << headerRow << " sequenceColumn=" << sequenceColumn << "\r\n";
+                }
+
+                for (size_t r = 0; r < rows.size(); ++r)
+                {
+                    if (static_cast<int>(r) == headerRow)
+                    {
+                        continue;
+                    }
+
+                    if (!BianHao_RowMatchesSelectedAssemblyComponent(rows, columns, static_cast<int>(r), headerRow, sequenceColumn, assemblyTags, &debug))
+                    {
+                        continue;
+                    }
+
+                    std::string seq = BianHao_GetSequenceTextAtRow(rows, columns, static_cast<int>(r), headerRow, sequenceColumn);
+                    debug << "  assembly fallback matched row=" << r << " sequence=[" << seq << "]\r\n";
+                    BianHao_DebugTrace(std::string("FindSequenceNumberInDrawingTable assembly matched row sequence=") + seq);
+                    if (!seq.empty())
+                    {
+                        matches.push_back(seq);
+                    }
+                }
+            }
+        }
+        else if (matches.empty())
+        {
+            debug << "assembly component fallback skipped: no assembly occurrence/component tags\r\n";
+        }
     }
     catch (const std::exception& ex)
     {
@@ -1533,6 +2525,8 @@ NXOpen::NXString BianHao_FindSequenceNumberInDrawingTable(NXOpen::NXObject* part
         throw std::runtime_error("工程图表格里找到多个匹配序号，请检查明细表属性是否唯一。");
     }
 
+    debug << "final result: sequence=[" << matches[0] << "]\r\n";
+    BianHao_WriteSequenceDebugLog(debug.str());
     return NXOpen::NXString(matches[0], NXOpen::NXString::UTF8);
 }
 
@@ -1543,13 +2537,69 @@ NXOpen::NXString BianHao_GetObjectDisplayName(NXOpen::NXObject* object)
         return "";
     }
 
+    try
+    {
+        NXOpen::Assemblies::Component* component = dynamic_cast<NXOpen::Assemblies::Component*>(object);
+        if (component != NULL)
+        {
+            NXOpen::NXString displayName = component->DisplayName();
+            if (!BianHao_IsNxStringEmpty(displayName))
+            {
+                BianHao_DebugTrace(std::string("display name from component DisplayName tag=")
+                    + std::to_string(static_cast<unsigned long long>(component->Tag()))
+                    + " name=" + BianHao_NxStringToUtf8(displayName));
+                return BianHao_MakeFileDisplayName(displayName);
+            }
+
+            NXOpen::NXString componentName = component->Name();
+            if (!BianHao_IsNxStringEmpty(componentName))
+            {
+                BianHao_DebugTrace(std::string("display name from component Name tag=")
+                    + std::to_string(static_cast<unsigned long long>(component->Tag()))
+                    + " name=" + BianHao_NxStringToUtf8(componentName));
+                return BianHao_MakeFileDisplayName(componentName);
+            }
+
+            NXOpen::BasePart* prototypePart = dynamic_cast<NXOpen::BasePart*>(component->Prototype());
+            if (prototypePart != NULL)
+            {
+                NXOpen::NXString leaf = prototypePart->Leaf();
+                if (!BianHao_IsNxStringEmpty(leaf))
+                {
+                    BianHao_DebugTrace(std::string("display name from component prototype Leaf tag=")
+                        + std::to_string(static_cast<unsigned long long>(component->Tag()))
+                        + " name=" + BianHao_NxStringToUtf8(leaf));
+                    return BianHao_MakeFileDisplayName(leaf);
+                }
+
+                NXOpen::NXString fullPath = prototypePart->FullPath();
+                if (!BianHao_IsNxStringEmpty(fullPath))
+                {
+                    BianHao_DebugTrace(std::string("display name from component prototype FullPath tag=")
+                        + std::to_string(static_cast<unsigned long long>(component->Tag()))
+                        + " name=" + BianHao_NxStringToUtf8(fullPath));
+                    return BianHao_MakeFileDisplayName(fullPath);
+                }
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+
     char name[128] = "";
     if (UF_OBJ_ask_name(object->Tag(), name) == 0 && name[0] != '\0')
     {
-        return NXOpen::NXString(name, NXOpen::NXString::UTF8);
+        BianHao_DebugTrace(std::string("display name from UF_OBJ_ask_name tag=")
+            + std::to_string(static_cast<unsigned long long>(object->Tag()))
+            + " name=" + name);
+        return BianHao_MakeFileDisplayName(NXOpen::NXString(name, NXOpen::NXString::UTF8));
     }
 
-    return object->Name();
+    BianHao_DebugTrace(std::string("display name from object Name tag=")
+        + std::to_string(static_cast<unsigned long long>(object->Tag()))
+        + " name=" + BianHao_NxStringToUtf8(object->Name()));
+    return BianHao_MakeFileDisplayName(object->Name());
 }
 
 NXOpen::NXString BianHao_GetAttributeValueText(NXOpen::BlockStyler::Enumeration* textSource,
@@ -1565,6 +2615,18 @@ NXOpen::NXString BianHao_GetAttributeValueText(NXOpen::BlockStyler::Enumeration*
         BianHao_DebugTrace("GetAttributeValueText source is sequence, calling table lookup");
         return BianHao_FindSequenceNumberInDrawingTable(partObject, bodyObject);
     }
+    if (source == 3)
+    {
+        NXOpen::NXObject* nameObject = BianHao_GetPartDisplayNameObject(partObject, bodyObject);
+        if (nameObject == NULL)
+        {
+            throw std::runtime_error("没有找到对应的部件对象。");
+        }
+
+        BianHao_DebugTrace(std::string("GetAttributeValueText source is file name object tag=")
+            + std::to_string(static_cast<unsigned long long>(nameObject->Tag())));
+        return BianHao_GetObjectDisplayName(nameObject);
+    }
 
     BianHao_DebugTrace("GetAttributeValueText source is attribute");
     NXOpen::NXObject* sourceObject = source == 2 ? bodyObject : BianHao_GetPartAttributeObject(partObject, bodyObject);
@@ -1574,25 +2636,31 @@ NXOpen::NXString BianHao_GetAttributeValueText(NXOpen::BlockStyler::Enumeration*
     }
 
     const std::string attribute = BianHao_GetSelectedAttributeName(attributeName);
-    if (attribute == "名称")
+    std::vector<NXOpen::NXObject*> searchObjects;
+    if (source == 1)
     {
-        return BianHao_GetObjectDisplayName(sourceObject);
+        searchObjects = BianHao_GetRelatedAttributeObjects(partObject, bodyObject);
+    }
+    else
+    {
+        searchObjects.push_back(sourceObject);
     }
 
-    try
+    for (size_t i = 0; i < searchObjects.size(); ++i)
     {
-        std::vector<NXOpen::NXObject::AttributeInformation> attributes = sourceObject->GetUserAttributes();
-        for (size_t i = 0; i < attributes.size(); ++i)
+        const std::string value = BianHao_GetAttributeValueFromObject(searchObjects[i], attribute);
+        if (!value.empty())
         {
-            if (!attributes[i].Unset && BianHao_NxStringToUtf8(attributes[i].Title) == attribute)
-            {
-                return BianHao_Utf8ToNxString(BianHao_NxStringToUtf8(
-                    sourceObject->GetUserAttributeAsString(attributes[i].Title, attributes[i].Type, attributes[i].ArrayElementIndex)));
-            }
+            return BianHao_Utf8ToNxString(value);
         }
     }
-    catch (...)
+
+    if (attribute == "名称")
     {
+        NXOpen::NXObject* nameObject = source == 1 ? BianHao_GetPartDisplayNameObject(partObject, bodyObject) : sourceObject;
+        BianHao_DebugTrace(std::string("GetAttributeValueText name attribute object tag=")
+            + std::to_string(static_cast<unsigned long long>(nameObject != NULL ? nameObject->Tag() : NULL_TAG)));
+        return BianHao_GetObjectDisplayName(nameObject);
     }
 
     throw std::runtime_error("没有找到选择的属性。");
@@ -1665,7 +2733,9 @@ std::string BianHao_GetSettingsPath()
 
 void BianHao_LoadSettings(NXOpen::Annotations::BalloonTypes& selectedType,
     NXOpen::BlockStyler::DoubleBlock* sizeBlock,
-    NXOpen::BlockStyler::DoubleBlock* textHeightBlock)
+    NXOpen::BlockStyler::DoubleBlock* textHeightBlock,
+    int* textSourceValue = NULL,
+    std::string* attributeNameValue = NULL)
 {
     std::ifstream input(BianHao_GetSettingsPath().c_str());
     if (!input.is_open())
@@ -1710,12 +2780,26 @@ void BianHao_LoadSettings(NXOpen::Annotations::BalloonTypes& selectedType,
                 textHeightBlock->SetValue(std::max(0.1, heightValue));
             }
         }
+        else if (key == "textSource" && textSourceValue != NULL)
+        {
+            int sourceValue = 0;
+            if (converter >> sourceValue)
+            {
+                *textSourceValue = std::max(0, std::min(3, sourceValue));
+            }
+        }
+        else if (key == "attributeName" && attributeNameValue != NULL)
+        {
+            *attributeNameValue = value.empty() ? "名称" : value;
+        }
     }
 }
 
 void BianHao_SaveSettings(NXOpen::Annotations::BalloonTypes selectedType,
     NXOpen::BlockStyler::DoubleBlock* sizeBlock,
-    NXOpen::BlockStyler::DoubleBlock* textHeightBlock)
+    NXOpen::BlockStyler::DoubleBlock* textHeightBlock,
+    int textSourceValue = 0,
+    const std::string& attributeNameValue = "名称")
 {
     std::ofstream output(BianHao_GetSettingsPath().c_str(), std::ios::trunc);
     if (!output.is_open())
@@ -1726,6 +2810,8 @@ void BianHao_SaveSettings(NXOpen::Annotations::BalloonTypes selectedType,
     output << "style=" << BalloonTypeToSettingValue(selectedType) << "\n";
     output << "balloonSize=" << GetSelectedBalloonSize(sizeBlock) << "\n";
     output << "textHeight=" << GetSelectedTextHeight(textHeightBlock) << "\n";
+    output << "textSource=" << std::max(0, std::min(3, textSourceValue)) << "\n";
+    output << "attributeName=" << (attributeNameValue.empty() ? "名称" : attributeNameValue) << "\n";
 }
 
 void ApplyIdSymbolStyle(NXOpen::Annotations::IdSymbolBuilder* builder,
@@ -1984,7 +3070,10 @@ BianHao::BianHao() :
     cachedUpperText(""),
     cachedCommittedSymbol(NULL),
     hasPreviewCache(false),
-    hasSecondPointCache(false)
+    hasSecondPointCache(false),
+    rememberedTextSourceValue(0),
+    rememberedAttributeName("名称"),
+    restoringDialogState(false)
 {
     try
     {
@@ -2247,7 +3336,9 @@ void BianHao::initialize_cb()
         textHeight = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("textHeight"));
         point0 = dynamic_cast<NXOpen::BlockStyler::SpecifyPoint*>(theDialog->TopBlock()->FindBlock("point0"));
         point01 = dynamic_cast<NXOpen::BlockStyler::SpecifyPoint*>(theDialog->TopBlock()->FindBlock("point01"));
-        BianHao_LoadSettings(selectedBalloonType, balloonSize, textHeight);
+        BianHao_EnableAssemblyPointSelection(point0, 0x400);
+        BianHao_EnableAssemblyPointSelection(point01, 0);
+        BianHao_LoadSettings(selectedBalloonType, balloonSize, textHeight, &rememberedTextSourceValue, &rememberedAttributeName);
         const std::string appDir = BianHao_GetApplicationDirectory();
         BianHao_SetButtonBitmap(styleCircle, appDir, "BianHao_style_circle.bmp");
         BianHao_SetButtonBitmap(styleTriangleDown, appDir, "BianHao_style_triangle_down.bmp");
@@ -2255,7 +3346,11 @@ void BianHao::initialize_cb()
         BianHao_SetButtonBitmap(styleRoundedBox, appDir, "BianHao_style_rounded_box.bmp");
         BianHao_SetButtonBitmap(styleUnderline, appDir, "BianHao_style_underline.bmp");
         BianHao_SetButtonBitmap(styleNoSymbol, appDir, "BianHao_style_no_symbol.bmp");
+        BianHao_SetEnumValue(textSource, rememberedTextSourceValue);
         BianHao_UpdateTextSourceBlocks(textSource, attributeName);
+        BianHao_UpdateAttributeNameMembers(textSource, attributeName, cachedPartObject, cachedBodyObject, rememberedAttributeName);
+        rememberedTextSourceValue = BianHao_GetEnumValue(textSource, rememberedTextSourceValue);
+        rememberedAttributeName = BianHao_GetSelectedAttributeName(attributeName);
         BianHao_UpdateStyleButtonSelection(styleCircleBar, styleTriangleDownBar, styleHexagonBar, styleRoundedBoxBar, styleUnderlineBar, styleNoSymbolBar, selectedBalloonType);
 
     }
@@ -2291,6 +3386,16 @@ int BianHao::apply_cb()
     int errorCode = 0;
     try
     {
+        rememberedTextSourceValue = BianHao_GetEnumValue(textSource, rememberedTextSourceValue);
+        if (rememberedTextSourceValue == 1 || rememberedTextSourceValue == 2)
+        {
+            rememberedAttributeName = BianHao_GetSelectedAttributeName(attributeName);
+        }
+        BianHao_DebugTrace(std::string("apply remember dialog state source=")
+            + std::to_string(rememberedTextSourceValue)
+            + " attribute=" + rememberedAttributeName);
+        BianHao_SaveSettings(selectedBalloonType, balloonSize, textHeight, rememberedTextSourceValue, rememberedAttributeName);
+
         DestroyIdSymbolBuilder(idSymbolBuilder1);
         hasPreviewCache = false;
         hasSecondPointCache = false;
@@ -2300,12 +3405,22 @@ int BianHao::apply_cb()
         cachedBodyObject = NULL;
         cachedCommittedSymbol = NULL;
         cachedUpperText = "";
+        restoringDialogState = true;
+        BianHao_SetEnumValue(textSource, rememberedTextSourceValue);
+        BianHao_SetBlockVisible(attributeName, rememberedTextSourceValue == 1 || rememberedTextSourceValue == 2);
+        BianHao_UpdateAttributeNameMembers(textSource, attributeName, cachedPartObject, cachedBodyObject, rememberedAttributeName);
+        rememberedAttributeName = BianHao_GetSelectedAttributeName(attributeName);
+        restoringDialogState = false;
+        BianHao_DebugTrace(std::string("apply restored dialog state source=")
+            + std::to_string(rememberedTextSourceValue)
+            + " attribute=" + rememberedAttributeName);
         BianHao_UpdateStyleButtonSelection(styleCircleBar, styleTriangleDownBar, styleHexagonBar, styleRoundedBoxBar, styleUnderlineBar, styleNoSymbolBar, selectedBalloonType);
         theSession->CleanUpFacetedFacesAndEdges();
     }
     catch(exception& ex)
     {
         //---- Enter your exception handling code here -----
+        restoringDialogState = false;
         errorCode = 1;
         BianHao_ReportCallbackMessage("apply_cb", ex.what());
     }
@@ -2335,12 +3450,19 @@ int BianHao::update_cb(NXOpen::BlockStyler::UIBlock* block)
             block == textHeight || blockName == "textHeight";
 
         const bool isTextSourceBlock =
-            block == textSource || blockName == "textSource" ||
+            block == textSource || blockName == "textSource";
+
+        const bool isAttributeNameBlock =
             block == attributeName || blockName == "attributeName";
 
         if (isStyleBlock)
         {
             BianHao_DebugTrace(std::string("style block begin block=") + blockName);
+            rememberedTextSourceValue = BianHao_GetEnumValue(textSource, rememberedTextSourceValue);
+            if (rememberedTextSourceValue == 1 || rememberedTextSourceValue == 2)
+            {
+                rememberedAttributeName = BianHao_GetSelectedAttributeName(attributeName);
+            }
             if (block == styleCircle || blockName == "styleCircle")
                 selectedBalloonType = NXOpen::Annotations::BalloonTypesCircle;
             else if (block == styleTriangleDown || blockName == "styleTriangleDown")
@@ -2356,7 +3478,7 @@ int BianHao::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
             BianHao_UpdateStyleButtonSelection(styleCircleBar, styleTriangleDownBar, styleHexagonBar, styleRoundedBoxBar, styleUnderlineBar, styleNoSymbolBar, selectedBalloonType);
             BianHao_DebugTrace("style selection updated");
-            BianHao_SaveSettings(selectedBalloonType, balloonSize, textHeight);
+            BianHao_SaveSettings(selectedBalloonType, balloonSize, textHeight, rememberedTextSourceValue, rememberedAttributeName);
             BianHao_DebugTrace("style settings saved");
             RecreatePreviewFromCache();
             BianHao_DebugTrace("style preview recreated");
@@ -2366,7 +3488,12 @@ int BianHao::update_cb(NXOpen::BlockStyler::UIBlock* block)
         if (isSizeBlock)
         {
             BianHao_DebugTrace(std::string("size block begin block=") + blockName);
-            BianHao_SaveSettings(selectedBalloonType, balloonSize, textHeight);
+            rememberedTextSourceValue = BianHao_GetEnumValue(textSource, rememberedTextSourceValue);
+            if (rememberedTextSourceValue == 1 || rememberedTextSourceValue == 2)
+            {
+                rememberedAttributeName = BianHao_GetSelectedAttributeName(attributeName);
+            }
+            BianHao_SaveSettings(selectedBalloonType, balloonSize, textHeight, rememberedTextSourceValue, rememberedAttributeName);
             BianHao_DebugTrace("size settings saved");
             RecreatePreviewFromCache();
             BianHao_DebugTrace("size preview recreated");
@@ -2376,12 +3503,36 @@ int BianHao::update_cb(NXOpen::BlockStyler::UIBlock* block)
         if (isTextSourceBlock)
         {
             BianHao_DebugTrace(std::string("text source block begin block=") + blockName);
+            rememberedTextSourceValue = BianHao_GetEnumValue(textSource, rememberedTextSourceValue);
             BianHao_UpdateTextSourceBlocks(textSource, attributeName);
             BianHao_DebugTrace("text source blocks updated");
-            BianHao_UpdateAttributeNameMembers(textSource, attributeName, cachedPartObject, cachedBodyObject);
+            BianHao_UpdateAttributeNameMembers(textSource, attributeName, cachedPartObject, cachedBodyObject, rememberedAttributeName);
+            rememberedAttributeName = BianHao_GetSelectedAttributeName(attributeName);
+            BianHao_SaveSettings(selectedBalloonType, balloonSize, textHeight, rememberedTextSourceValue, rememberedAttributeName);
+            BianHao_DebugTrace(std::string("text source remembered source=")
+                + std::to_string(rememberedTextSourceValue)
+                + " attribute=" + rememberedAttributeName);
             BianHao_DebugTrace("attribute members updated");
             RecreatePreviewFromCache();
             BianHao_DebugTrace("text source preview recreated");
+            return 0;
+        }
+
+        if (isAttributeNameBlock)
+        {
+            if (restoringDialogState)
+            {
+                BianHao_DebugTrace("attribute update ignored during dialog state restore");
+                return 0;
+            }
+            rememberedTextSourceValue = BianHao_GetEnumValue(textSource, rememberedTextSourceValue);
+            rememberedAttributeName = BianHao_GetSelectedAttributeName(attributeName);
+            BianHao_SaveSettings(selectedBalloonType, balloonSize, textHeight, rememberedTextSourceValue, rememberedAttributeName);
+            BianHao_DebugTrace(std::string("attribute selection remembered source=")
+                + std::to_string(rememberedTextSourceValue)
+                + " attribute=" + rememberedAttributeName);
+            RecreatePreviewFromCache();
+            BianHao_DebugTrace("attribute preview recreated");
             return 0;
         }
 
@@ -2452,8 +3603,18 @@ int BianHao::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
                 int n_parents = 0;
                 tag_p_t parents = NULL;
+                int selectedType = 0;
+                int selectedSubtype = 0;
+                if (UF_OBJ_ask_type_and_subtype(TagObj1[0]->Tag(), &selectedType, &selectedSubtype) == 0)
+                {
+                    BianHao_DebugTrace(std::string("point0 selected tag=")
+                        + std::to_string(static_cast<unsigned long long>(TagObj1[0]->Tag()))
+                        + " type=" + std::to_string(selectedType)
+                        + " subtype=" + std::to_string(selectedSubtype));
+                }
 				if (UF_SO_ask_parents(TagObj1[0]->Tag(), UF_SO_ASK_ALL_PARENTS | UF_SO_ASK_PARENTS_RECURSIVELY, &n_parents, &parents) != 0)
                 {
+                    BianHao_DebugTrace("point0 UF_SO_ask_parents failed");
                     DestroyIdSymbolBuilder(idSymbolBuilder1);
                     return 1;
                 }
@@ -2472,6 +3633,13 @@ int BianHao::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
                     int candidateType = 0;
                     int candidateSubtype = 0;
+                    if (UF_OBJ_ask_type_and_subtype(candidateTags[i], &candidateType, &candidateSubtype) == 0)
+                    {
+                        BianHao_DebugTrace(std::string("point0 candidate tag=")
+                            + std::to_string(static_cast<unsigned long long>(candidateTags[i]))
+                            + " type=" + std::to_string(candidateType)
+                            + " subtype=" + std::to_string(candidateSubtype));
+                    }
                     if (UF_OBJ_ask_type_and_subtype(candidateTags[i], &candidateType, &candidateSubtype) == 0 &&
                         candidateType == 70 &&
                         (candidateSubtype == 2 || candidateSubtype == 3))
@@ -2491,13 +3659,14 @@ int BianHao::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
                             NXOpen::NXObject* partObject = dynamic_cast<NXOpen::NXObject*>(face1->GetBody()->OwningPart());
                             BianHao_DebugTrace("point0 direct face got body/part");
-                            BianHao_UpdateAttributeNameMembers(textSource, attributeName, partObject, face1->GetBody());
+                            BianHao_UpdateAttributeNameMembers(textSource, attributeName, partObject, face1->GetBody(), rememberedAttributeName);
+                            rememberedAttributeName = BianHao_GetSelectedAttributeName(attributeName);
                             BianHao_DebugTrace("point0 direct face attribute members updated");
                             text2[0] = BianHao_GetAttributeValueText(textSource, attributeName, partObject, face1->GetBody());
                             BianHao_DebugTrace("point0 direct face text resolved");
                             if (BianHao_IsNxStringEmpty(text2[0]))
                             {
-                                throw std::runtime_error("没有找到明细表序号。");
+                                throw std::runtime_error(BianHao_GetMissingTextMessage(textSource));
                             }
                             leaderData1->Leader()->SetValue(NXOpen::InferSnapType::SnapTypeSurf, face1, selectionView, originPoint1, NULL, nullNXOpen_View, originPoint1);
                             BianHao_DebugTrace("point0 direct face leader set");
@@ -2516,13 +3685,14 @@ int BianHao::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
                             NXOpen::NXObject* partObject = dynamic_cast<NXOpen::NXObject*>(edge1->GetBody()->OwningPart());
                             BianHao_DebugTrace("point0 direct edge got body/part");
-                            BianHao_UpdateAttributeNameMembers(textSource, attributeName, partObject, edge1->GetBody());
+                            BianHao_UpdateAttributeNameMembers(textSource, attributeName, partObject, edge1->GetBody(), rememberedAttributeName);
+                            rememberedAttributeName = BianHao_GetSelectedAttributeName(attributeName);
                             BianHao_DebugTrace("point0 direct edge attribute members updated");
                             text2[0] = BianHao_GetAttributeValueText(textSource, attributeName, partObject, edge1->GetBody());
                             BianHao_DebugTrace("point0 direct edge text resolved");
                             if (BianHao_IsNxStringEmpty(text2[0]))
                             {
-                                throw std::runtime_error("没有找到明细表序号。");
+                                throw std::runtime_error(BianHao_GetMissingTextMessage(textSource));
                             }
                             leaderData1->Leader()->SetValue(NXOpen::InferSnapType::SnapTypeSurf, edge1, selectionView, originPoint1, NULL, nullNXOpen_View, originPoint1);
                             BianHao_DebugTrace("point0 direct edge leader set");
@@ -2596,13 +3766,14 @@ int BianHao::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
                         NXOpen::NXObject* partObject = dynamic_cast<NXOpen::NXObject*>(edge1->GetBody()->OwningPart());
                         BianHao_DebugTrace("point0 drafting edge got body/part");
-                        BianHao_UpdateAttributeNameMembers(textSource, attributeName, partObject, edge1->GetBody());
+                        BianHao_UpdateAttributeNameMembers(textSource, attributeName, partObject, edge1->GetBody(), rememberedAttributeName);
+                        rememberedAttributeName = BianHao_GetSelectedAttributeName(attributeName);
                         BianHao_DebugTrace("point0 drafting edge attribute members updated");
                         text2[0] = BianHao_GetAttributeValueText(textSource, attributeName, partObject, edge1->GetBody());
                         BianHao_DebugTrace("point0 drafting edge text resolved");
                         if (BianHao_IsNxStringEmpty(text2[0]))
                         {
-                            throw std::runtime_error("没有找到明细表序号。");
+                            throw std::runtime_error(BianHao_GetMissingTextMessage(textSource));
                         }
                         leaderData1->Leader()->SetValue(NXOpen::InferSnapType::SnapTypeSurf, edge1, baseView1, originPoint1, NULL, nullNXOpen_View, originPoint1);
                         BianHao_DebugTrace("point0 drafting edge leader set");
@@ -2622,13 +3793,14 @@ int BianHao::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
                         NXOpen::NXObject* partObject = dynamic_cast<NXOpen::NXObject*>(Face1->GetBody()->OwningPart());
                         BianHao_DebugTrace("point0 drafting face got body/part");
-                        BianHao_UpdateAttributeNameMembers(textSource, attributeName, partObject, Face1->GetBody());
+                        BianHao_UpdateAttributeNameMembers(textSource, attributeName, partObject, Face1->GetBody(), rememberedAttributeName);
+                        rememberedAttributeName = BianHao_GetSelectedAttributeName(attributeName);
                         BianHao_DebugTrace("point0 drafting face attribute members updated");
                         text2[0] = BianHao_GetAttributeValueText(textSource, attributeName, partObject, Face1->GetBody());
                         BianHao_DebugTrace("point0 drafting face text resolved");
                         if (BianHao_IsNxStringEmpty(text2[0]))
                         {
-                            throw std::runtime_error("没有找到明细表序号。");
+                            throw std::runtime_error(BianHao_GetMissingTextMessage(textSource));
                         }
                         leaderData1->Leader()->SetValue(NXOpen::InferSnapType::SnapTypeSurf, Face1, baseView1, originPoint1, NULL, nullNXOpen_View, originPoint1);
                         BianHao_DebugTrace("point0 drafting face leader set");

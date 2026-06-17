@@ -290,6 +290,7 @@
         <Option name="明细表序号" value="0" />
         <Option name="部件属性" value="1" />
         <Option name="体属性" value="2" />
+        <Option name="文件名" value="3" />
       </Property>
       <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Top" loc="1" mask="16384" name="Top" offset="0" sname="Top" source="3" target="Default" type="attachment" />
       <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Left" loc="2" mask="16384" name="Left" offset="0" sname="Left" source="3" target="Default" type="attachment" />
@@ -389,7 +390,7 @@
       <Property ClassID="UGS::UICOMP_point" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="NoHandle" mask="69636" name="NoHandle" sname="NoHandle" source="1" type="logical" value="False" />
       <Property ClassID="UGS::UICOMP_point" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="GwifType" mask="69636" name="GwifType" sname="GwifType" source="1" type="integer" value="0" />
       <Property ClassID="UGS::UICOMP_point" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="CreateInterpartLink" mask="0" name="CreateInterpartLink" sname="CreateInterpartLink" source="2" type="logical" value="False" />
-      <Property ClassID="UGS::UICOMP_point" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="InterpartSelection" mask="0" name="InterpartSelection" selected="0" sname="InterpartSelection" source="1" type="enum">
+      <Property ClassID="UGS::UICOMP_point" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="InterpartSelection" mask="0" name="InterpartSelection" selected="2" sname="InterpartSelection" source="1" type="enum">
         <Option name="Simple" value="0" />
         <Option name="Non-associative Interpart Copy Only" value="1" />
         <Option name="Associative and Non-associative Interpart Copy" value="2" />
@@ -408,9 +409,9 @@
       <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Left" loc="2" mask="16384" name="Left" offset="0" sname="Left" source="3" target="Default" type="attachment" />
       <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment" />
       <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Bottom" loc="4" mask="16384" name="Bottom" offset="0" sname="Bottom" source="3" target="Default" type="attachment" />
-      <Property AskForcedBits="0" AskRequiresSetting="0" ClassID="UGS::UICOMP_point" dynamic="1" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="SnapMask" mask="16640" name="SnapMask" sname="SnapPointTypesEnabled" source="1" type="bits" value="0x800" />
-      <Property AskForcedBits="0" AskRequiresSetting="0" ClassID="UGS::UICOMP_point" dynamic="1" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="ToolbarToggleMask" mask="256" name="ToolbarToggleMask" sname="SnapPointTypesOnByDefault" source="2" type="bits" value="0x800" />
-      <Property ClassID="UGS::UICOMP_point" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="LabelString" mask="256" name="LabelString" sname="LabelString" source="3" type="utfstring" value="面上的点" />
+      <Property AskForcedBits="0" AskRequiresSetting="0" ClassID="UGS::UICOMP_point" dynamic="1" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="SnapMask" mask="16640" name="SnapMask" sname="SnapPointTypesEnabled" source="1" type="bits" value="0x400" />
+      <Property AskForcedBits="0" AskRequiresSetting="0" ClassID="UGS::UICOMP_point" dynamic="1" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="ToolbarToggleMask" mask="256" name="ToolbarToggleMask" sname="SnapPointTypesOnByDefault" source="2" type="bits" value="0x400" />
+      <Property ClassID="UGS::UICOMP_point" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="LabelString" mask="256" name="LabelString" sname="LabelString" source="3" type="utfstring" value="边上的点" />
     </PropertyList>
   </item>
   <item Expanded="1" class="UICOMP_point" hierarchy="UICOMP_point" icon="inferpoint.bmp" id="point01" name="point01" notes="" presentation="Specify Point" type="uicomp">
@@ -442,7 +443,7 @@
       <Property ClassID="UGS::UICOMP_point" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="NoHandle" mask="69636" name="NoHandle" sname="NoHandle" source="1" type="logical" value="False" />
       <Property ClassID="UGS::UICOMP_point" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="GwifType" mask="69636" name="GwifType" sname="GwifType" source="1" type="integer" value="0" />
       <Property ClassID="UGS::UICOMP_point" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="CreateInterpartLink" mask="0" name="CreateInterpartLink" sname="CreateInterpartLink" source="2" type="logical" value="False" />
-      <Property ClassID="UGS::UICOMP_point" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="InterpartSelection" mask="0" name="InterpartSelection" selected="0" sname="InterpartSelection" source="1" type="enum">
+      <Property ClassID="UGS::UICOMP_point" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_point" id="InterpartSelection" mask="0" name="InterpartSelection" selected="2" sname="InterpartSelection" source="1" type="enum">
         <Option name="Simple" value="0" />
         <Option name="Non-associative Interpart Copy Only" value="1" />
         <Option name="Associative and Non-associative Interpart Copy" value="2" />

@@ -70,6 +70,7 @@
 #include <NXOpen/Drawings_DraftingViewCollection.hxx>
 #include <NXOpen/Drawings_SelectDraftingView.hxx>
 #include <uf_view.h>
+#include <string>
 //------------------------------------------------------------------------------
 //Bit Option for Property: SnapPointTypesEnabled
 //------------------------------------------------------------------------------
@@ -181,6 +182,9 @@ private:
     NXOpen::TaggedObject* cachedCommittedSymbol;
     bool hasPreviewCache;
     bool hasSecondPointCache;
+    int rememberedTextSourceValue;
+    std::string rememberedAttributeName;
+    bool restoringDialogState;
     
 };
 #endif //BIANHAO_H_INCLUDED
