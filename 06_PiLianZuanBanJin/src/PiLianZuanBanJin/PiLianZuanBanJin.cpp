@@ -1896,16 +1896,6 @@ namespace
         return slash == std::string::npos ? std::string() : path.substr(0, slash);
     }
 
-    void AppendMarkerLineLog(const std::string& message)
-    {
-        (void)message;
-    }
-
-    void AppendRunTraceLog(const std::string& message)
-    {
-        (void)message;
-    }
-
     bool FileExists(const std::string& path)
     {
         std::wstring widePath = PathTextToWide(path);
@@ -4269,13 +4259,6 @@ namespace
         const char* chainName,
         double markerGapTolerance)
     {
-        std::ostringstream header;
-        header << "check bend side marker chain=" << (chainName == NULL ? "" : chainName)
-               << " faceTags=" << chainTags.size()
-               << " tolerance=" << markerGapTolerance;
-        AppendRunTraceLog(header.str());
-        AppendMarkerLineLog(header.str());
-
         for (std::map<tag_t, bool>::const_iterator it = chainTags.begin(); it != chainTags.end(); ++it)
         {
             Face* face = dynamic_cast<Face*>(ObjectFromTag(it->first));
@@ -4285,17 +4268,6 @@ namespace
             }
 
             MarkerLineScanInfo scan = ScanMarkerLineOnFace(face, markerGapTolerance);
-            std::ostringstream line;
-            line << "  chain=" << (chainName == NULL ? "" : chainName)
-                 << " face=" << it->first
-                 << " planar=" << (scan.planar ? 1 : 0)
-                 << " markedFace=" << (HasMarkedBaseAttribute(face->Tag()) ? 1 : 0)
-                 << " matchedLine=" << (scan.matched ? 1 : 0)
-                 << " closestPositiveDistance=" << (scan.closestParallelDistance < std::numeric_limits<double>::max() ? scan.closestParallelDistance : -1.0)
-                 << " reason=" << scan.reason;
-            AppendRunTraceLog(line.str());
-            AppendMarkerLineLog(line.str());
-
             if (scan.matched || HasMarkedBaseAttribute(face->Tag()))
             {
                 return true;
@@ -4314,12 +4286,6 @@ namespace
                     }
                     if (HasMarkedBaseAttribute(adjacentFace->Tag()))
                     {
-                        std::ostringstream marked;
-                        marked << "  chain=" << (chainName == NULL ? "" : chainName)
-                               << " face=" << face->Tag()
-                               << " adjacentMarkedFace=" << adjacentFace->Tag();
-                        AppendRunTraceLog(marked.str());
-                        AppendMarkerLineLog(marked.str());
                         return true;
                     }
                 }
@@ -4331,38 +4297,10 @@ namespace
 
     bool HasMarkerLineInFaceTags(const std::map<tag_t, bool>& faceTags, const char* chainName)
     {
-        std::ostringstream header;
-        header << "scan chain=" << (chainName == NULL ? "" : chainName) << " faceTags=" << faceTags.size();
-        AppendMarkerLineLog(header.str());
-
         for (std::map<tag_t, bool>::const_iterator it = faceTags.begin(); it != faceTags.end(); ++it)
         {
             Face* face = dynamic_cast<Face*>(ObjectFromTag(it->first));
             MarkerLineScanInfo scan = ScanMarkerLineOnFace(face);
-            if (scan.planar || scan.matched)
-            {
-                std::ostringstream line;
-                line << "  face=" << it->first
-                     << " planar=" << (scan.planar ? 1 : 0)
-                     << " type=" << scan.faceType
-                     << " edges=" << scan.edgeCount
-                     << " testedPairs=" << scan.testedPairCount
-                     << " shortSkips=" << scan.shortEdgeSkipCount
-                     << " parallelPairs=" << scan.parallelPairCount
-                     << " bestParallel=" << scan.bestParallel
-                     << " bestDistance=" << (scan.bestDistance < std::numeric_limits<double>::max() ? scan.bestDistance : -1.0)
-                     << " closestPositiveDistance=" << (scan.closestParallelDistance < std::numeric_limits<double>::max() ? scan.closestParallelDistance : -1.0)
-                     << " closestParallel=" << scan.closestParallel
-                     << " closestLenA=" << scan.closestLengthA
-                     << " closestLenB=" << scan.closestLengthB
-                     << " matched=" << (scan.matched ? 1 : 0)
-                     << " matchedDistance=" << scan.matchedDistance
-                     << " matchedLenA=" << scan.matchedLengthA
-                     << " matchedLenB=" << scan.matchedLengthB
-                     << " reason=" << scan.reason;
-                AppendMarkerLineLog(line.str());
-            }
-
             if (scan.matched)
             {
                 return true;
@@ -4374,38 +4312,10 @@ namespace
 
     Face* FindMarkerLineFaceInFaceTags(const std::map<tag_t, bool>& faceTags, const char* chainName)
     {
-        std::ostringstream header;
-        header << "scan chain=" << (chainName == NULL ? "" : chainName) << " faceTags=" << faceTags.size();
-        AppendMarkerLineLog(header.str());
-
         for (std::map<tag_t, bool>::const_iterator it = faceTags.begin(); it != faceTags.end(); ++it)
         {
             Face* face = dynamic_cast<Face*>(ObjectFromTag(it->first));
             MarkerLineScanInfo scan = ScanMarkerLineOnFace(face);
-            if (scan.planar || scan.matched)
-            {
-                std::ostringstream line;
-                line << "  face=" << it->first
-                     << " planar=" << (scan.planar ? 1 : 0)
-                     << " type=" << scan.faceType
-                     << " edges=" << scan.edgeCount
-                     << " testedPairs=" << scan.testedPairCount
-                     << " shortSkips=" << scan.shortEdgeSkipCount
-                     << " parallelPairs=" << scan.parallelPairCount
-                     << " bestParallel=" << scan.bestParallel
-                     << " bestDistance=" << (scan.bestDistance < std::numeric_limits<double>::max() ? scan.bestDistance : -1.0)
-                     << " closestPositiveDistance=" << (scan.closestParallelDistance < std::numeric_limits<double>::max() ? scan.closestParallelDistance : -1.0)
-                     << " closestParallel=" << scan.closestParallel
-                     << " closestLenA=" << scan.closestLengthA
-                     << " closestLenB=" << scan.closestLengthB
-                     << " matched=" << (scan.matched ? 1 : 0)
-                     << " matchedDistance=" << scan.matchedDistance
-                     << " matchedLenA=" << scan.matchedLengthA
-                     << " matchedLenB=" << scan.matchedLengthB
-                     << " reason=" << scan.reason;
-                AppendMarkerLineLog(line.str());
-            }
-
             if (scan.matched)
             {
                 return face;
@@ -4443,25 +4353,10 @@ namespace
         }
         if (scoringTags.empty())
         {
-            std::ostringstream trace;
-            trace << "marker line chain intersection empty chain=" << (chainName == NULL ? "" : chainName)
-                  << " markerFace=" << markerFace->Tag()
-                  << " markerSideTags=" << markerSideTags.size()
-                  << " chainTags=" << chainTags.size();
-            AppendMarkerLineLog(trace.str());
-            AppendRunTraceLog(trace.str());
             return result;
         }
 
         std::vector<FaceCandidate> chainCandidates = FilterCandidatesByTags(allCandidates, scoringTags);
-        std::ostringstream selected;
-        selected << "marker line found in chain=" << (chainName == NULL ? "" : chainName)
-                 << " markerFace=" << markerFace->Tag()
-                 << " markerSideTags=" << markerSideTags.size()
-                 << " scoringTags=" << scoringTags.size()
-                 << " candidateCount=" << chainCandidates.size();
-        AppendMarkerLineLog(selected.str());
-        AppendRunTraceLog(selected.str());
         if (!chainCandidates.empty())
         {
             return ScoreAndSelectBaseFace(chainCandidates, scoringTags);
@@ -4476,12 +4371,6 @@ namespace
         const char* reason)
     {
         FaceInfo result;
-        std::ostringstream header;
-        header << "ScoreAndSelectBaseFace reason=" << (reason == NULL ? "" : reason)
-               << " candidateCount=" << candidates.size()
-               << " scoringChainTags=" << scoringChainTags.size();
-        AppendRunTraceLog(header.str());
-
         if (candidates.empty())
         {
             return result;
@@ -4510,18 +4399,6 @@ namespace
             double cylinderScore = AdjacentCylinderScore(candidates[i].face, scoringChainTags);
             candidates[i].score = areaScore + positionScore + innerLoopScore + cylinderScore;
 
-            std::ostringstream line;
-            line << "  candidate faceTag=" << faceTag
-                 << " type=" << candidates[i].type
-                 << " area=" << candidates[i].area
-                 << " areaScore=" << areaScore
-                 << " positionScore=" << positionScore
-                 << " innerLoopScore=" << innerLoopScore
-                 << " cylinderScore=" << cylinderScore
-                 << " totalScore=" << candidates[i].score
-                 << " inScoringChain=" << (scoringChainTags.count(faceTag) ? 1 : 0);
-            AppendRunTraceLog(line.str());
-
             if (candidates[i].score > result.totalScore ||
                 (std::fabs(candidates[i].score - result.totalScore) <= 1e-9 && candidates[i].area > result.areaScore))
             {
@@ -4532,12 +4409,6 @@ namespace
             }
         }
 
-        std::ostringstream selected;
-        selected << "ScoreAndSelectBaseFace selected reason=" << (reason == NULL ? "" : reason)
-                 << " selectedFaceTag=" << (result.face == NULL ? 0 : result.face->Tag())
-                 << " selectedArea=" << result.areaScore
-                 << " selectedScore=" << result.totalScore;
-        AppendRunTraceLog(selected.str());
         return result;
     }
 
@@ -4684,40 +4555,14 @@ namespace
         const FaceCandidate& baseCandidate,
         const std::map<tag_t, bool>& baseChainTags)
     {
-        {
-            std::ostringstream trace;
-            trace << "SelectMarkerLineBaseFaceInBendChains enter allCandidates=" << allCandidates.size()
-                  << " baseFaceTag=" << (baseCandidate.face == NULL ? 0 : baseCandidate.face->Tag())
-                  << " baseChainTags=" << baseChainTags.size();
-            AppendRunTraceLog(trace.str());
-        }
         FaceInfo baseChainMarker = SelectMarkerLineBaseFaceInChain(allCandidates, baseChainTags, "base");
         if (baseChainMarker.face != NULL)
         {
-            std::ostringstream trace;
-            trace << "SelectMarkerLineBaseFaceInBendChains hit base faceTag=" << baseChainMarker.face->Tag();
-            AppendRunTraceLog(trace.str());
             return baseChainMarker;
         }
 
         std::map<tag_t, bool> oppositeChainTags = BuildOppositeTangentChainTagsFromBaseFace(allCandidates, baseCandidate, baseChainTags);
-        std::ostringstream opposite;
-        opposite << "opposite chain built from baseFaceTag=" << (baseCandidate.face == NULL ? 0 : baseCandidate.face->Tag())
-                 << " baseFaceArea=" << baseCandidate.area
-                  << " oppositeFaceTags=" << oppositeChainTags.size();
-        AppendMarkerLineLog(opposite.str());
-        AppendRunTraceLog(opposite.str());
         FaceInfo oppositeMarker = SelectMarkerLineBaseFaceInChain(allCandidates, oppositeChainTags, "opposite");
-        if (oppositeMarker.face != NULL)
-        {
-            std::ostringstream trace;
-            trace << "SelectMarkerLineBaseFaceInBendChains hit opposite faceTag=" << oppositeMarker.face->Tag();
-            AppendRunTraceLog(trace.str());
-        }
-        else
-        {
-            AppendRunTraceLog("SelectMarkerLineBaseFaceInBendChains no marker line in base/opposite chains");
-        }
         return oppositeMarker;
     }
 
@@ -4768,14 +4613,6 @@ namespace
     {
         FaceInfo result;
         std::vector<FaceCandidate> allCandidates = GetPlanarCandidates(body);
-        {
-            std::ostringstream trace;
-            trace << "SelectConvertBaseFace enter bodyTag=" << (body == NULL ? 0 : body->Tag())
-                  << " markerLineFaceUp=" << (options.markerLineFaceUp ? 1 : 0)
-                  << " convertBaseRule=ignore markers, choose largest planar face"
-                  << " planarCandidates=" << allCandidates.size();
-            AppendRunTraceLog(trace.str());
-        }
         if (allCandidates.empty())
         {
             if (body == NULL)
@@ -4793,12 +4630,6 @@ namespace
                 }
 
                 double score = FaceAreaScore(faces[i]);
-                {
-                    std::ostringstream trace;
-                    trace << "  SelectConvertBaseFace cylinder candidate faceTag=" << (faces[i] == NULL ? 0 : faces[i]->Tag())
-                          << " areaScore=" << score;
-                    AppendRunTraceLog(trace.str());
-                }
                 if (score > result.areaScore)
                 {
                     result.face = faces[i];
@@ -4806,13 +4637,6 @@ namespace
                     result.areaScore = score;
                     result.totalScore = score;
                 }
-            }
-            {
-                std::ostringstream trace;
-                trace << "SelectConvertBaseFace selected reason=no planar, largest cylinder"
-                      << " selectedFaceTag=" << (result.face == NULL ? 0 : result.face->Tag())
-                      << " area=" << result.areaScore;
-                AppendRunTraceLog(trace.str());
             }
             return result;
         }
@@ -4822,14 +4646,6 @@ namespace
         {
             double realArea = -1.0;
             bool hasRealArea = TryMeasureFaceArea(allCandidates[i].face, &realArea);
-            std::ostringstream trace;
-            trace << "  SelectConvertBaseFace planar candidate faceTag="
-                  << (allCandidates[i].face == NULL ? 0 : allCandidates[i].face->Tag())
-                  << " type=" << allCandidates[i].type
-                  << " area=" << allCandidates[i].area
-                  << " realArea=" << (hasRealArea ? realArea : -1.0);
-            AppendRunTraceLog(trace.str());
-
             if (allCandidates[i].area > result.areaScore)
             {
                 result.face = allCandidates[i].face;
@@ -4863,16 +4679,6 @@ namespace
 
                 double score = -1.0;
                 bool hasRealArea = TryMeasureFaceArea(faces[i], &score);
-                {
-                    std::ostringstream trace;
-                    trace << "  SelectConvertBaseFace large cylinder candidate faceTag="
-                          << (faces[i] == NULL ? 0 : faces[i]->Tag())
-                          << " radius=" << radius
-                          << " realArea=" << (hasRealArea ? score : -1.0)
-                          << " largestPlanarRealArea=" << largestPlanarRealArea;
-                    AppendRunTraceLog(trace.str());
-                }
-
                 if (hasRealArea && score > bestLargeCylinder.areaScore)
                 {
                     bestLargeCylinder.face = faces[i];
@@ -4887,22 +4693,9 @@ namespace
             largestPlanarRealArea > 0.0 &&
             bestLargeCylinder.areaScore > largestPlanarRealArea)
         {
-            std::ostringstream trace;
-            trace << "SelectConvertBaseFace selected reason=large cylinder radius>5 and area>largest planar"
-                  << " selectedFaceTag=" << (bestLargeCylinder.face == NULL ? 0 : bestLargeCylinder.face->Tag())
-                  << " cylinderArea=" << bestLargeCylinder.areaScore
-                  << " largestPlanarRealArea=" << largestPlanarRealArea;
-            AppendRunTraceLog(trace.str());
             return bestLargeCylinder;
         }
 
-        {
-            std::ostringstream trace;
-            trace << "SelectConvertBaseFace selected reason=largest planar face for convert"
-                  << " selectedFaceTag=" << (result.face == NULL ? 0 : result.face->Tag())
-                  << " area=" << result.areaScore;
-            AppendRunTraceLog(trace.str());
-        }
         return result;
     }
 
@@ -5034,13 +4827,6 @@ namespace
         AddPlanarChainsAdjacentToBends(innerBendTags, innerSideTags);
         AddPlanarChainsAdjacentToBends(outerBendTags, outerSideTags);
 
-        std::ostringstream trace;
-        trace << "BuildBendSidePlanarTagSets innerBends=" << innerBendTags.size()
-              << " outerBends=" << outerBendTags.size()
-              << " innerSideFaces=" << (innerSideTags == NULL ? 0 : innerSideTags->size())
-              << " outerSideFaces=" << (outerSideTags == NULL ? 0 : outerSideTags->size());
-        AppendRunTraceLog(trace.str());
-
         return (innerSideTags != NULL && !innerSideTags->empty()) ||
             (outerSideTags != NULL && !outerSideTags->empty());
     }
@@ -5050,42 +4836,21 @@ namespace
         Body* body,
         const AutoConvertOptions& options)
     {
-        {
-            std::ostringstream trace;
-            trace << "SelectSheetmetalBaseFaceByBendDirection enter bodyTag="
-                  << (body == NULL ? 0 : body->Tag())
-                  << " markerLineFaceUp=" << (options.markerLineFaceUp ? 1 : 0);
-            AppendRunTraceLog(trace.str());
-        }
         FaceInfo fallback = SelectConvertBaseFace(body, options);
         if (fallback.face == NULL)
         {
-            AppendRunTraceLog("SelectSheetmetalBaseFaceByBendDirection fallback face null");
             return fallback;
         }
 
         std::vector<FaceCandidate> allCandidates = GetPlanarCandidates(body);
-        {
-            std::ostringstream trace;
-            trace << "SelectSheetmetalBaseFaceByBendDirection fallbackFaceTag=" << fallback.face->Tag()
-                  << " allCandidates=" << allCandidates.size();
-            AppendRunTraceLog(trace.str());
-        }
         FaceCandidate* selectedCandidate = FindCandidateByTag(allCandidates, fallback.face->Tag());
         if (selectedCandidate == NULL)
         {
-            AppendRunTraceLog("SelectSheetmetalBaseFaceByBendDirection fallback not found in planar candidates");
             return fallback;
         }
 
         std::vector<Face*> tangentFaces = CollectContinuousTangentFaces(selectedCandidate->face);
         std::map<tag_t, bool> tangentTags = FaceTagMap(tangentFaces);
-        {
-            std::ostringstream trace;
-            trace << "SelectSheetmetalBaseFaceByBendDirection tangentFaces=" << tangentFaces.size()
-                  << " tangentTags=" << tangentTags.size();
-            AppendRunTraceLog(trace.str());
-        }
         std::map<tag_t, bool> innerSideTags;
         std::map<tag_t, bool> outerSideTags;
         if (BuildBendSidePlanarTagSets(manager, body, &innerSideTags, &outerSideTags))
@@ -5097,54 +4862,33 @@ namespace
                 ChainHasMarkerLineOrMarkedFace(outerSideTags, "outerR", markerGapTolerance);
 
             std::map<tag_t, bool> selectedSideTags;
-            const char* selectedSideName = "";
             if (innerHasMarker != outerHasMarker)
             {
                 selectedSideTags = innerHasMarker ? innerSideTags : outerSideTags;
-                selectedSideName = innerHasMarker ? "innerR marker" : "outerR marker";
             }
             else if (innerHasMarker && outerHasMarker)
             {
                 selectedSideTags = options.preferUpBends ? innerSideTags : outerSideTags;
-                selectedSideName = options.preferUpBends ? "innerR marker tie preferUp" : "outerR marker tie preferDown";
             }
             else
             {
                 selectedSideTags = options.preferUpBends ? innerSideTags : outerSideTags;
-                selectedSideName = options.preferUpBends ? "innerR preferUp" : "outerR preferDown";
             }
 
             std::vector<FaceCandidate> sideCandidates = FilterCandidatesByTags(allCandidates, selectedSideTags);
             FaceInfo sideFace = ScoreAndSelectBaseFace(sideCandidates, selectedSideTags);
-            {
-                std::ostringstream trace;
-                trace << "SelectSheetmetalBaseFaceByBendDirection bend-side selected="
-                      << selectedSideName
-                      << " innerHasMarker=" << (innerHasMarker ? 1 : 0)
-                      << " outerHasMarker=" << (outerHasMarker ? 1 : 0)
-                      << " candidateCount=" << sideCandidates.size()
-                      << " selectedFaceTag=" << (sideFace.face == NULL ? 0 : sideFace.face->Tag());
-                AppendRunTraceLog(trace.str());
-                AppendMarkerLineLog(trace.str());
-            }
             if (sideFace.face != NULL)
             {
                 return sideFace;
             }
         }
 
-        AppendRunTraceLog("SelectSheetmetalBaseFaceByBendDirection no bend side faces, use large planar marker fallback");
         std::vector<FaceCandidate> chainCandidates = FilterCandidatesByTags(allCandidates, tangentTags);
         if (options.markerLineFaceUp &&
             ChainHasMarkerLineOrMarkedFace(tangentTags, "largestPlanar", 0.05) &&
             !chainCandidates.empty())
         {
             FaceInfo markerFace = ScoreAndSelectBaseFace(chainCandidates, tangentTags);
-            std::ostringstream trace;
-            trace << "SelectSheetmetalBaseFaceByBendDirection largest planar marker selectedFaceTag="
-                  << (markerFace.face == NULL ? 0 : markerFace.face->Tag())
-                  << " candidateCount=" << chainCandidates.size();
-            AppendRunTraceLog(trace.str());
             return markerFace.face == NULL ? fallback : markerFace;
         }
 
@@ -8971,14 +8715,6 @@ AutoConvertOptions PiLianZuanBanJinDialog::CollectOptions() const
 
 void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
 {
-    {
-        std::ostringstream trace;
-        trace << "Run enter markerLineFaceUp=" << (options.markerLineFaceUp ? 1 : 0)
-              << " filterLayerRange=" << (options.filterLayerRange ? 1 : 0)
-              << " largestBodyOnlyPerLayer=" << (options.largestBodyOnlyPerLayer ? 1 : 0)
-              << " skipFasteners=" << (options.skipFasteners ? 1 : 0);
-        AppendRunTraceLog(trace.str());
-    }
     UfGuard ufGuard;
     Session* session = Session::GetSession();
     Part* workPart = session->Parts()->Work();
@@ -9109,15 +8845,6 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
             }
         }
 
-        {
-            std::ostringstream trace;
-            trace << "Run part index=" << partIndex
-                  << " name=" << processPartName
-                  << " candidates=" << candidates.size()
-                  << " partAttributesOk=" << (partAttributesOk ? 1 : 0);
-            AppendRunTraceLog(trace.str());
-        }
-
         const size_t resultStart = results.size();
         for (size_t i = 0; i < candidates.size(); ++i)
         {
@@ -9130,37 +8857,18 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
 
             try
             {
-                {
-                    std::ostringstream trace;
-                    trace << "Run body begin index=" << i
-                          << " bodyTag=" << (body == NULL ? 0 : body->Tag())
-                          << " layer=" << result.layer
-                          << " name=" << result.name;
-                    AppendRunTraceLog(trace.str());
-                }
                 FaceInfo fixedFaceInfo = SelectConvertBaseFace(body, options);
                 if (fixedFaceInfo.face == NULL)
                 {
-                    AppendRunTraceLog("Run fixed face null before convert");
                     result.error = "未找到可用固定面";
                     results.push_back(result);
                     continue;
                 }
 
                 Face* fixedFace = fixedFaceInfo.face;
-                {
-                    std::ostringstream trace;
-                    trace << "Run fixed face before convert faceTag=" << fixedFace->Tag();
-                    AppendRunTraceLog(trace.str());
-                }
                 Body* activeBody = body;
                 Feature* convertFeature = NULL;
                 const bool alreadySheetmetal = IsSheetmetalBody(processPart, manager, body);
-                {
-                    std::ostringstream trace;
-                    trace << "Run alreadySheetmetal=" << (alreadySheetmetal ? 1 : 0);
-                    AppendRunTraceLog(trace.str());
-                }
                 if (!alreadySheetmetal)
                 {
                     ApplySheetmetalPreferencesBeforeConvert(processPart, options);
@@ -9179,12 +8887,6 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                     session->CleanUpFacetedFacesAndEdges();
                     activeBody = ResolveFeatureBody(convertFeature, body);
                     result.convertOk = convertFeature != NULL;
-                    {
-                        std::ostringstream trace;
-                        trace << "Run convert committed convertOk=" << (result.convertOk ? 1 : 0)
-                              << " activeBodyTag=" << (activeBody == NULL ? 0 : activeBody->Tag());
-                        AppendRunTraceLog(trace.str());
-                    }
                 }
                 else
                 {
@@ -9196,14 +8898,7 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 result.neutralFaceCount = ApplyNeutralFactorByRules(processPart, manager, activeBody, ruleConfig, bodyMaterial);
 
                 Feature* existingFlatPattern = FindExistingFlatPatternFeature(processPart, manager, activeBody);
-                AppendRunTraceLog("Run before SelectSheetmetalBaseFaceByBendDirection");
                 FaceInfo postConvertFaceInfo = SelectSheetmetalBaseFaceByBendDirection(manager, activeBody, options);
-                {
-                    std::ostringstream trace;
-                    trace << "Run post convert faceTag="
-                          << (postConvertFaceInfo.face == NULL ? 0 : postConvertFaceInfo.face->Tag());
-                    AppendRunTraceLog(trace.str());
-                }
                 Face* flatFace = postConvertFaceInfo.face == NULL ? fixedFace : postConvertFaceInfo.face;
                 if (options.applyFixedFaceColor)
                 {
@@ -9212,23 +8907,6 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 Point3d startPoint;
                 Point3d endPoint;
                 Edge* xAxisEdge = FindLongestStraightEdge(flatFace, &startPoint, &endPoint);
-                {
-                    int flatFaceType = 0;
-                    AskFaceType(flatFace, &flatFaceType);
-                    std::ostringstream trace;
-                    trace << "Run FlatPattern input"
-                          << " part=" << processPartName
-                          << " sourceBodyTag=" << (body == NULL ? 0 : body->Tag())
-                          << " activeBodyTag=" << (activeBody == NULL ? 0 : activeBody->Tag())
-                          << " fixedFaceTag=" << (fixedFace == NULL ? 0 : fixedFace->Tag())
-                          << " postConvertFaceTag=" << (postConvertFaceInfo.face == NULL ? 0 : postConvertFaceInfo.face->Tag())
-                          << " flatFaceTag=" << (flatFace == NULL ? 0 : flatFace->Tag())
-                          << " flatFaceType=" << flatFaceType
-                          << " xAxisEdgeTag=" << (xAxisEdge == NULL ? 0 : xAxisEdge->Tag())
-                          << " existingFlatPatternTag=" << (existingFlatPattern == NULL ? 0 : existingFlatPattern->Tag());
-                    AppendRunTraceLog(trace.str());
-                }
-
                 const std::set<tag_t> beforeFlatBodyTags = CollectPartSolidBodyTags(processPart);
                 Feature* flatFeature = CommitFlatPattern(processPart, existingFlatPattern, flatFace, xAxisEdge, endPoint);
                 result.flatOk = flatFeature != NULL;
@@ -9266,14 +8944,6 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
             }
             catch (const NXException& ex)
             {
-                std::ostringstream trace;
-                trace << "Run NXException bodyTag=" << (body == NULL ? 0 : body->Tag())
-                      << " layer=" << result.layer
-                      << " name=" << result.name
-                      << " code=" << ex.ErrorCode()
-                      << " message=" << NormalizeUtf8Message(ex.Message());
-                AppendRunTraceLog(trace.str());
-
                 result.error = "NX执行失败: " + NormalizeUtf8Message(ex.Message());
             }
             catch (const std::exception& ex)
@@ -9345,17 +9015,14 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
 
 extern "C" DllExport void ufusr(char* param, int* retcod, int param_len)
 {
-    AppendRunTraceLog("ufusr enter");
     if (!zhihui_license_guard::EnsureAuthorized(L"ZHIHUI.PILIANZUANBANJIN", L"PiLianZuanBanJin"))
     {
-        AppendRunTraceLog("ufusr license denied");
         if (retcod != NULL)
         {
             *retcod = 1;
         }
         return;
     }
-    AppendRunTraceLog("ufusr license ok");
 
     PiLianZuanBanJinDialog* dialog = NULL;
     try
@@ -9365,7 +9032,6 @@ extern "C" DllExport void ufusr(char* param, int* retcod, int param_len)
     }
     catch (const std::exception& ex)
     {
-        AppendRunTraceLog(std::string("ufusr exception: ") + ex.what());
         ShowMessage(UI::GetUI(), "自动转钣金 C++", NXMessageBox::DialogTypeError, ex.what());
     }
 
