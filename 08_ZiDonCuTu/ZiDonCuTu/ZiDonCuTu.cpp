@@ -6253,8 +6253,7 @@ static bool CreateOverallDimensionForView(
 	NXOpen::Annotations::Dimension* nullDimension(NULL);
 	NXOpen::Annotations::RapidDimensionBuilder* rapidDimensionBuilder = workPart->Dimensions()->CreateRapidDimensionBuilder(nullDimension);
 	NXOpen::Point3d assistPoint(0.0, 0.0, 0.0);
-	rapidDimensionBuilder->Style()->DimensionStyle()->SetTextCentered(true);
-	rapidDimensionBuilder->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
+	ApplyDefaultRapidDimensionStyle(rapidDimensionBuilder);
 	rapidDimensionBuilder->Measurement()->SetMethod(
 		horizontalDimension ?
 		NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodHorizontal :
@@ -6290,13 +6289,10 @@ static bool CreateOverallDimensionForView(
 
 	try
 	{
-		rapidDimensionBuilder->Commit();
-		rapidDimensionBuilder->Destroy();
-		return true;
+		return CommitAndDestroyRapidDimension(rapidDimensionBuilder, &origin) != NULL;
 	}
 	catch (...)
 	{
-		rapidDimensionBuilder->Destroy();
 		return false;
 	}
 }
@@ -6378,8 +6374,7 @@ static bool TryCreateOuterCircleDiameterForView(
 	NXOpen::Annotations::Dimension* nullDimension(NULL);
 	NXOpen::Annotations::RapidDimensionBuilder* rapidDimensionBuilder = workPart->Dimensions()->CreateRapidDimensionBuilder(nullDimension);
 	NXOpen::Point3d assistPoint(0.0, 0.0, 0.0);
-	rapidDimensionBuilder->Style()->DimensionStyle()->SetTextCentered(true);
-	rapidDimensionBuilder->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
+	ApplyDefaultRapidDimensionStyle(rapidDimensionBuilder);
 	rapidDimensionBuilder->Measurement()->SetMethod(NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodDiametral);
 	rapidDimensionBuilder->FirstAssociativity()->SetValue(
 		NXOpen::InferSnapType::SnapTypeExist,
@@ -6394,13 +6389,10 @@ static bool TryCreateOuterCircleDiameterForView(
 
 	try
 	{
-		rapidDimensionBuilder->Commit();
-		rapidDimensionBuilder->Destroy();
-		return true;
+		return CommitAndDestroyRapidDimension(rapidDimensionBuilder, &origin) != NULL;
 	}
 	catch (...)
 	{
-		rapidDimensionBuilder->Destroy();
 		return true;
 	}
 }
@@ -13970,15 +13962,13 @@ int ZiDonCuTu::aaaa_cb()
 
 					}
 
-					rapidDimensionBuilder1->Style()->DimensionStyle()->SetTextCentered(true);
-					rapidDimensionBuilder1->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
+					ApplyDefaultRapidDimensionStyle(rapidDimensionBuilder1);
 					rapidDimensionBuilder1->Measurement()->SetMethod(NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodHorizontal);
 					NXOpen::Point3d Originpoint1;
 					Originpoint1 = { aMax_X - 8,aMax_Y + 8,0 };
 					rapidDimensionBuilder1->Origin()->Origin()->SetValue(NULL, nullNXOpen_View, Originpoint1);
 					NXOpen::NXObject* nXObject1;
-					nXObject1 = rapidDimensionBuilder1->Commit();
-					rapidDimensionBuilder1->Destroy();
+					nXObject1 = CommitAndDestroyRapidDimension(rapidDimensionBuilder1, &Originpoint1);
 
 					{
 						std::vector<Drawings::DraftingCurve*>DraftingCurveV1;
@@ -14125,15 +14115,13 @@ int ZiDonCuTu::aaaa_cb()
 							}
 						}
 
-						rapidDimensionBuilder1->Style()->DimensionStyle()->SetTextCentered(true);
-						rapidDimensionBuilder1->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
+						ApplyDefaultRapidDimensionStyle(rapidDimensionBuilder1);
 						rapidDimensionBuilder1->Measurement()->SetMethod(NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodVertical);
 						NXOpen::Point3d Originpoint1;
 						Originpoint1 = { aMin_X - 8,aMin_Y - 8,0 };
 						rapidDimensionBuilder1->Origin()->Origin()->SetValue(NULL, nullNXOpen_View, Originpoint1);
 						NXOpen::NXObject* nXObject1;
-						nXObject1 = rapidDimensionBuilder1->Commit();
-						rapidDimensionBuilder1->Destroy();
+						nXObject1 = CommitAndDestroyRapidDimension(rapidDimensionBuilder1, &Originpoint1);
 
 						UF_terminate();
 					}
@@ -14752,16 +14740,14 @@ int ZiDonCuTu::aabb_cb()
 						}
 					}
 
-					rapidDimensionBuilder1->Style()->DimensionStyle()->SetTextCentered(true);
-					rapidDimensionBuilder1->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
+					ApplyDefaultRapidDimensionStyle(rapidDimensionBuilder1);
 					rapidDimensionBuilder1->Measurement()->SetMethod(NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodHorizontal);
 					NXOpen::Point3d Originpoint1;
 					Originpoint1 = { Max_X - 8,Max_Y + 8,0 };
 					rapidDimensionBuilder1->Origin()->Origin()->SetValue(NULL, nullNXOpen_View, Originpoint1);
 
 					NXOpen::NXObject* nXObject1;
-					nXObject1 = rapidDimensionBuilder1->Commit();
-					rapidDimensionBuilder1->Destroy();
+					nXObject1 = CommitAndDestroyRapidDimension(rapidDimensionBuilder1, &Originpoint1);
 
 
 					{
@@ -14909,15 +14895,13 @@ int ZiDonCuTu::aabb_cb()
 							}
 						}
 
-						rapidDimensionBuilder1->Style()->DimensionStyle()->SetTextCentered(true);
-						rapidDimensionBuilder1->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
+						ApplyDefaultRapidDimensionStyle(rapidDimensionBuilder1);
 						rapidDimensionBuilder1->Measurement()->SetMethod(NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodVertical);
 						NXOpen::Point3d Originpoint1;
 						Originpoint1 = { Min_X - 8,Min_Y - 8,0 };
 						rapidDimensionBuilder1->Origin()->Origin()->SetValue(NULL, nullNXOpen_View, Originpoint1);
 						NXOpen::NXObject* nXObject1;
-						nXObject1 = rapidDimensionBuilder1->Commit();
-						rapidDimensionBuilder1->Destroy();
+						nXObject1 = CommitAndDestroyRapidDimension(rapidDimensionBuilder1, &Originpoint1);
 
 						UF_terminate();
 					}

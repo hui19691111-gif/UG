@@ -6,7 +6,9 @@
 
 NXOpen::Annotations::RapidDimensionBuilder* CreateRapidDimensionBuilder();
 void ApplyDefaultRapidDimensionStyle(NXOpen::Annotations::RapidDimensionBuilder* builder);
-NXOpen::NXObject* CommitAndDestroyRapidDimension(NXOpen::Annotations::RapidDimensionBuilder* builder);
+NXOpen::NXObject* CommitAndDestroyRapidDimension(
+	NXOpen::Annotations::RapidDimensionBuilder* builder,
+	const NXOpen::Point3d* forcedOriginPoint = NULL);
 void ResetDimensionLayoutState();
 void RegisterDimensionLayoutObstacles(
 	NXOpen::Drawings::BaseView* baseView,

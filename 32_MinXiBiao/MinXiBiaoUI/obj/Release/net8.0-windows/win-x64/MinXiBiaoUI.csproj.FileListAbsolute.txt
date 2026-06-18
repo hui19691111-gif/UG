@@ -1,0 +1,17 @@
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\bin\Release\net8.0-windows\win-x64\MinXiBiaoUI.exe
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\bin\Release\net8.0-windows\win-x64\MinXiBiaoUI.deps.json
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\bin\Release\net8.0-windows\win-x64\MinXiBiaoUI.runtimeconfig.json
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\bin\Release\net8.0-windows\win-x64\MinXiBiaoUI.dll
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\MainWindow.baml
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\MainWindow.g.cs
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\App.g.cs
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\MinXiBiaoUI_MarkupCompile.cache
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\MinXiBiaoUI.g.resources
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\MinXiBiaoUI.GeneratedMSBuildEditorConfig.editorconfig
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\MinXiBiaoUI.AssemblyInfoInputs.cache
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\MinXiBiaoUI.AssemblyInfo.cs
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\MinXiBiaoUI.csproj.CoreCompileInputs.cache
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\MinXiBiaoUI.dll
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\refint\MinXiBiaoUI.dll
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\MinXiBiaoUI.genruntimeconfig.cache
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\obj\Release\net8.0-windows\win-x64\ref\MinXiBiaoUI.dll

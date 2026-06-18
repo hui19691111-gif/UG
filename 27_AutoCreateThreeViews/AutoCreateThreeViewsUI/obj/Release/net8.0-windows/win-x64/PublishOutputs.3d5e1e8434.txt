@@ -1,4 +1,3 @@
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\bin\Release\AutoCreateThreeViewsUI\AutoCreateThreeViewsUI.pdb
 G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\bin\Release\AutoCreateThreeViewsUI\Assets\technical_requirements.default.cfg
 G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\bin\Release\AutoCreateThreeViewsUI\Assets\ViewButtons\back.png
 G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\bin\Release\AutoCreateThreeViewsUI\Assets\ViewButtons\backbottom.png

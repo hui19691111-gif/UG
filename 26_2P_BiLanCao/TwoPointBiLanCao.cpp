@@ -4570,8 +4570,10 @@ void TwoPointBiLanCaoDialog::CacheStartPointOwner()
 void TwoPointBiLanCaoDialog::LoadDialogMemory()
 {
     const wchar_t* fileName = L"TwoPointBiLanCao_state.ini";
-    zhihui_dialog_memory::LoadDouble(fileName, L"slotClearance", slotClearanceBlock_);
-    zhihui_dialog_memory::LoadDouble(fileName, L"bendRadius", bendRadiusBlock_);
+    SetDouble(slotClearanceBlock_,
+              zhihui_dialog_memory::ReadDouble(fileName, L"slotClearance", ReadDouble(slotClearanceBlock_, 0.5)));
+    SetDouble(bendRadiusBlock_,
+              zhihui_dialog_memory::ReadDouble(fileName, L"bendRadius", ReadDouble(bendRadiusBlock_, 1.0)));
     zhihui_dialog_memory::LoadLogical(fileName, L"chamferEdge", chamferEdgeToggleBlock_);
     zhihui_dialog_memory::LoadLogical(fileName, L"gapOnly", gapOnlyToggleBlock_);
     zhihui_dialog_memory::LoadEnum(fileName, L"wrapCornerMode", wrapCornerModeBlock_);
@@ -4585,8 +4587,8 @@ void TwoPointBiLanCaoDialog::LoadDialogMemory()
 void TwoPointBiLanCaoDialog::SaveDialogMemory()
 {
     const wchar_t* fileName = L"TwoPointBiLanCao_state.ini";
-    zhihui_dialog_memory::SaveDouble(fileName, L"slotClearance", slotClearanceBlock_);
-    zhihui_dialog_memory::SaveDouble(fileName, L"bendRadius", bendRadiusBlock_);
+    zhihui_dialog_memory::WriteDouble(fileName, L"slotClearance", ReadDouble(slotClearanceBlock_, 0.5));
+    zhihui_dialog_memory::WriteDouble(fileName, L"bendRadius", ReadDouble(bendRadiusBlock_, 1.0));
     zhihui_dialog_memory::SaveLogical(fileName, L"chamferEdge", chamferEdgeToggleBlock_);
     zhihui_dialog_memory::SaveLogical(fileName, L"gapOnly", gapOnlyToggleBlock_);
     zhihui_dialog_memory::SaveEnum(fileName, L"wrapCornerMode", wrapCornerModeBlock_);

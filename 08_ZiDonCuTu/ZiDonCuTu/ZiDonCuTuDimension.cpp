@@ -1,5 +1,6 @@
 ﻿#include "ZiDonCuTuDimension.hpp"
 #include "ZiDonCuTuSupport.hpp"
+#include <NXOpen/Annotations_Annotation.hxx>
 #include <NXOpen/Annotations_OrdinateDimension.hxx>
 #include <NXOpen/Annotations_OrdinateDimensionBuilder.hxx>
 #include <NXOpen/Annotations_HorizontalOrdinateMargin.hxx>
@@ -637,6 +638,42 @@ void Normalize2d(double& x, double& y)
 	}
 	x /= length;
 	y /= length;
+}
+
+bool TryMeasureDrawingLineAngleDegrees(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingCurve* firstCurve,
+	NXOpen::Drawings::DraftingCurve* secondCurve,
+	double& angleDegrees)
+{
+	angleDegrees = 0.0;
+	UF_CURVE_line_t firstLineData;
+	UF_CURVE_line_t secondLineData;
+	double firstStart[2] = { 0.0, 0.0 };
+	double firstEnd[2] = { 0.0, 0.0 };
+	double secondStart[2] = { 0.0, 0.0 };
+	double secondEnd[2] = { 0.0, 0.0 };
+	if (!TryGetLineCurveData(baseView, firstCurve, firstLineData, firstStart, firstEnd) ||
+		!TryGetLineCurveData(baseView, secondCurve, secondLineData, secondStart, secondEnd))
+	{
+		return false;
+	}
+
+	double firstX = firstEnd[0] - firstStart[0];
+	double firstY = firstEnd[1] - firstStart[1];
+	double secondX = secondEnd[0] - secondStart[0];
+	double secondY = secondEnd[1] - secondStart[1];
+	Normalize2d(firstX, firstY);
+	Normalize2d(secondX, secondY);
+	if ((std::fabs(firstX) < 1.0e-9 && std::fabs(firstY) < 1.0e-9) ||
+		(std::fabs(secondX) < 1.0e-9 && std::fabs(secondY) < 1.0e-9))
+	{
+		return false;
+	}
+
+	const double dot = std::max(-1.0, std::min(1.0, std::fabs(firstX * secondX + firstY * secondY)));
+	angleDegrees = std::acos(dot) * 180.0 / PI;
+	return true;
 }
 
 void Rotate2d(double x, double y, double radians, double& rotatedX, double& rotatedY)
@@ -1521,7 +1558,7 @@ NXOpen::Point3d BuildOffsetOriginFromGuideFace(
 	}
 	return ChooseBestOriginAlongDirection(
 		baseView,
-		drawingPoint,
+		drawingStart,
 		unitX,
 		unitY,
 		centerX,
@@ -1637,6 +1674,20 @@ bool CreateCurvePairAngleDimensionFromModelPoint(
 		return false;
 	}
 
+	double measuredAngleDegrees = 0.0;
+	if (TryMeasureDrawingLineAngleDegrees(baseView, firstCurve, secondCurve, measuredAngleDegrees) &&
+		std::fabs(measuredAngleDegrees - 90.0) < 0.02)
+	{
+		std::ostringstream log;
+		log << "[dimension.angle.skip90]"
+			<< " viewTag=" << baseView->Tag()
+			<< " firstCurveTag=" << firstCurve->Tag()
+			<< " secondCurveTag=" << secondCurve->Tag()
+			<< " angle=" << measuredAngleDegrees;
+		DimensionDebugLog(log.str());
+		return false;
+	}
+
 	NXOpen::Annotations::BaseAngularDimension* nullAngularDimension(NULL);
 	NXOpen::Annotations::BaseAngularDimensionBuilder* builder = allowSupplementaryAngle
 		? static_cast<NXOpen::Annotations::BaseAngularDimensionBuilder*>(
@@ -1747,11 +1798,75 @@ void ApplyDefaultRapidDimensionStyle(NXOpen::Annotations::RapidDimensionBuilder*
 	{
 		return;
 	}
+	builder->Origin()->SetInferRelativeToGeometry(false);
+	builder->Origin()->SetInferRelativeToGeometryFromLeader(false);
+	builder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
+	builder->Style()->DimensionStyle()->SetTextArrowPlacement(NXOpen::Annotations::TextPlacementAutomatic);
 	builder->Style()->DimensionStyle()->SetTextCentered(true);
 	builder->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
 }
 
-NXOpen::NXObject* CommitAndDestroyRapidDimension(NXOpen::Annotations::RapidDimensionBuilder* builder)
+void ForceCommittedAnnotationOrigin(NXOpen::NXObject* object, const NXOpen::Point3d* originPoint)
+{
+	if (object == NULL || originPoint == NULL)
+	{
+		return;
+	}
+
+	NXOpen::Annotations::Annotation* annotation =
+		dynamic_cast<NXOpen::Annotations::Annotation*>(object);
+	if (annotation == NULL)
+	{
+		return;
+	}
+
+	try
+	{
+		NXOpen::Annotations::Annotation::AssociativeOriginData assocOrigin;
+		NXOpen::View* nullView(NULL);
+		NXOpen::Point* nullPoint(NULL);
+		NXOpen::Annotations::Annotation* nullAnnotation(NULL);
+		assocOrigin.OriginType = NXOpen::Annotations::AssociativeOriginTypeDrag;
+		assocOrigin.View = nullView;
+		assocOrigin.ViewOfGeometry = nullView;
+		assocOrigin.PointOnGeometry = nullPoint;
+		assocOrigin.VertAnnotation = nullAnnotation;
+		assocOrigin.VertAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+		assocOrigin.HorizAnnotation = nullAnnotation;
+		assocOrigin.HorizAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+		assocOrigin.AlignedAnnotation = nullAnnotation;
+		assocOrigin.DimensionLine = 0;
+		assocOrigin.AssociatedView = nullView;
+		assocOrigin.AssociatedPoint = nullPoint;
+		assocOrigin.OffsetAnnotation = nullAnnotation;
+		assocOrigin.OffsetAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+		assocOrigin.XOffsetFactor = 0.0;
+		assocOrigin.YOffsetFactor = 0.0;
+		assocOrigin.StackAlignmentPosition = NXOpen::Annotations::StackAlignmentPositionAbove;
+		annotation->SetAssociativeOrigin(assocOrigin, *originPoint);
+		annotation->SetAnnotationOrigin(*originPoint);
+		std::ostringstream log;
+		log << "[dimension.forceOrigin.ok] tag=" << object->Tag()
+			<< " origin=(" << originPoint->X << "," << originPoint->Y << "," << originPoint->Z << ")";
+		DimensionDebugLog(log.str());
+	}
+	catch (NXOpen::NXException& ex)
+	{
+		DimensionDebugLog(std::string("[dimension.forceOrigin.NXException] message=") + ex.what());
+	}
+	catch (std::exception& ex)
+	{
+		DimensionDebugLog(std::string("[dimension.forceOrigin.std] message=") + ex.what());
+	}
+	catch (...)
+	{
+		DimensionDebugLog("[dimension.forceOrigin.unknown]");
+	}
+}
+
+NXOpen::NXObject* CommitAndDestroyRapidDimension(
+	NXOpen::Annotations::RapidDimensionBuilder* builder,
+	const NXOpen::Point3d* forcedOriginPoint)
 {
 	if (builder == NULL)
 	{
@@ -1761,6 +1876,7 @@ NXOpen::NXObject* CommitAndDestroyRapidDimension(NXOpen::Annotations::RapidDimen
 	try
 	{
 		object = builder->Commit();
+		ForceCommittedAnnotationOrigin(object, forcedOriginPoint);
 	}
 	catch (NXOpen::NXException& ex)
 	{
@@ -1929,11 +2045,13 @@ bool CreateCurveEndToSymbolDimensionFromDrawingPoint(
 	builder->SecondAssociativity()->SetValue(
 		NXOpen::InferSnapType::SnapTypeExist, symbol, baseView, point, NULL, nullView, point);
 	ApplyDefaultRapidDimensionStyle(builder);
+	const NXOpen::Point3d originPoint =
+		BuildOffsetOriginFromGuideFace(baseView, drawingPoint, guideFace, centerX, centerY, 5.0, 3.0, reverseGuideDirection);
 	builder->Origin()->Origin()->SetValue(
 		NULL,
 		nullView,
-		BuildOffsetOriginFromGuideFace(baseView, drawingPoint, guideFace, centerX, centerY, 5.0, 3.0, reverseGuideDirection));
-	CommitAndDestroyRapidDimension(builder);
+		originPoint);
+	CommitAndDestroyRapidDimension(builder, &originPoint);
 	return true;
 }
 
@@ -2017,7 +2135,7 @@ bool CreateCurveEndToFaceTangentDimensionFromModelPoint(
 			NULL,
 			nullView,
 			originPoint);
-		return CommitAndDestroyRapidDimension(builder) != NULL;
+		return CommitAndDestroyRapidDimension(builder, &originPoint) != NULL;
 	}
 	catch (NXOpen::NXException& ex)
 	{
@@ -2078,11 +2196,10 @@ bool CreateSymbolToSymbolDimensionFromModelPoint(
 		NXOpen::InferSnapType::SnapTypeExist, firstSymbol, baseView, point, NULL, nullView, point);
 	builder->SecondAssociativity()->SetValue(
 		NXOpen::InferSnapType::SnapTypeExist, secondSymbol, baseView, point, NULL, nullView, point);
-	builder->Origin()->Origin()->SetValue(
-		NULL,
-		nullView,
-		BuildOffsetOriginFromModelPointAndGuideFace(baseView, modelPoint, guideFace, centerX, centerY, 5.0, reverseGuideDirection));
-	CommitAndDestroyRapidDimension(builder);
+	const NXOpen::Point3d originPoint =
+		BuildOffsetOriginFromModelPointAndGuideFace(baseView, modelPoint, guideFace, centerX, centerY, 5.0, reverseGuideDirection);
+	builder->Origin()->Origin()->SetValue(NULL, nullView, originPoint);
+	CommitAndDestroyRapidDimension(builder, &originPoint);
 	return true;
 }
 
@@ -2142,7 +2259,7 @@ bool CreateFaceToSymbolDimensionFromModelPoint(
 			NULL,
 			nullView,
 			originPoint);
-		return CommitAndDestroyRapidDimension(builder) != NULL;
+		return CommitAndDestroyRapidDimension(builder, &originPoint) != NULL;
 	}
 	catch (NXOpen::NXException& ex)
 	{
@@ -2185,7 +2302,7 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 			<< " modelPoint=(" << (modelPoint != NULL ? modelPoint[0] : 0.0) << "," << (modelPoint != NULL ? modelPoint[1] : 0.0) << "," << (modelPoint != NULL ? modelPoint[2] : 0.0) << ")"
 			<< " center=(" << centerX << "," << centerY << ")"
 			<< " reverse=" << (reverseGuideDirection ? 1 : 0)
-			<< " method=" << (forceMeasurementMethod ? "Forced" : "<NXAuto>");
+			<< " method=" << (forceMeasurementMethod ? "Forced" : "Perpendicular");
 		DimensionDebugLog(log.str());
 	}
 	if (baseView == NULL || firstFace == NULL || secondObject == NULL || modelPoint == NULL)
@@ -2204,10 +2321,10 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 		NXOpen::Point3d point(0.0, 0.0, 0.0);
 		NXOpen::View* nullView(NULL);
 		ApplyDefaultRapidDimensionStyle(builder);
-		if (forceMeasurementMethod)
-		{
-			builder->Measurement()->SetMethod(measurementMethod);
-		}
+		builder->Measurement()->SetMethod(
+			forceMeasurementMethod
+			? measurementMethod
+			: NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodPerpendicular);
 		const NXOpen::Point3d modelAssociativityPoint =
 			BuildAssociativityPointFromModelPoint(baseView, modelPoint);
 		const NXOpen::Point3d originPoint =
@@ -2300,7 +2417,7 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 			NULL,
 			nullView,
 			originPoint);
-		return CommitAndDestroyRapidDimension(builder) != NULL;
+		return CommitAndDestroyRapidDimension(builder, &originPoint) != NULL;
 	}
 	catch (NXOpen::NXException& ex)
 	{
@@ -2348,7 +2465,7 @@ bool CreateCurveToCurveEnvelopeDimension(
 	ApplyDefaultRapidDimensionStyle(builder);
 	builder->Measurement()->SetMethod(measurementMethod);
 	builder->Origin()->Origin()->SetValue(NULL, nullView, originPoint);
-	CommitAndDestroyRapidDimension(builder);
+	CommitAndDestroyRapidDimension(builder, &originPoint);
 	return true;
 }
 
