@@ -1385,24 +1385,7 @@ std::string BianHao_GetSequenceDebugLogPath()
 
 void BianHao_WriteSequenceDebugLog(const std::string& text)
 {
-    std::ofstream log(BianHao_GetSequenceDebugLogPath().c_str(), std::ios::out | std::ios::trunc | std::ios::binary);
-    if (!log)
-    {
-        return;
-    }
-
-    SYSTEMTIME now;
-    GetLocalTime(&now);
-    char stamp[64] = "";
-    sprintf_s(stamp, "%04d-%02d-%02d %02d:%02d:%02d",
-        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
-
-    log << "\r\n===== " << stamp << " =====\r\n";
-    log << text;
-    if (text.empty() || (text[text.size() - 1] != '\n' && text[text.size() - 1] != '\r'))
-    {
-        log << "\r\n";
-    }
+    (void)text;
 }
 
 std::string BianHao_GetErrorDebugLogPath()
@@ -1435,23 +1418,7 @@ void BianHao_DebugTrace(const std::string& message)
 
 void BianHao_ReportCallbackMessage(const std::string& context, const std::string& message)
 {
-    const std::string text = context.empty() ? message : (context + ": " + message);
     BianHao_WriteErrorDebugLog(context, message);
-
-    try
-    {
-        NXOpen::Session* session = NXOpen::Session::GetSession();
-        if (session != NULL)
-        {
-            if (session->LogFile() != NULL)
-            {
-                session->LogFile()->WriteLine(text.c_str());
-            }
-        }
-    }
-    catch (...)
-    {
-    }
 }
 
 std::vector<std::string> BianHao_GetAttributeNames(NXOpen::NXObject* object)
