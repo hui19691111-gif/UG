@@ -41,6 +41,7 @@
             <Setter Property="SelectionMode" Value="Extended"/>
             <Setter Property="SelectionUnit" Value="FullRow"/>
             <Setter Property="RowHeaderWidth" Value="0"/>
+            <Setter Property="AllowDrop" Value="True"/>
             <Setter Property="HorizontalScrollBarVisibility" Value="Auto"/>
             <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
         </Style>
@@ -92,6 +93,10 @@
             </StackPanel>
         </Grid>
 
-        <DataGrid x:Name="PreviewGrid"/>
+        <DataGrid x:Name="PreviewGrid"
+                  Sorting="PreviewGrid_Sorting"
+                  PreviewMouseLeftButtonDown="PreviewGrid_PreviewMouseLeftButtonDown"
+                  MouseMove="PreviewGrid_MouseMove"
+                  Drop="PreviewGrid_Drop"/>
     </DockPanel>
 </Window>

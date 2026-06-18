@@ -70,6 +70,12 @@ namespace
         std::vector<std::string> values;
     };
 
+    struct ManualRowValues
+    {
+        std::string bodyName;
+        std::vector<std::string> values;
+    };
+
     struct BodyRecord
     {
         tag_t tag = NULL_TAG;
@@ -1044,25 +1050,7 @@ namespace
 
     bool IsFlatPatternGeneratedBody(tag_t bodyTag)
     {
-        if (bodyTag == NULL_TAG)
-        {
-            return false;
-        }
-
-        char name[MAX_LINE_BUFSIZE] = {};
-        if (UF_OBJ_ask_name(bodyTag, name) == 0 && LooksLikeFlatPatternText(SystemToUtf8(name)))
-        {
-            return true;
-        }
-
-        const auto attrs = CollectBodyAttributeMap(bodyTag);
-        for (const auto& item : attrs)
-        {
-            if (LooksLikeFlatPatternText(item.first) || LooksLikeFlatPatternText(item.second))
-            {
-                return true;
-            }
-        }
+        (void)bodyTag;
         return false;
     }
 
@@ -1206,6 +1194,107 @@ namespace
         return true;
     }
 
+    bool ParseJsonStringValue(const std::string& json, const std::string& propertyName, std::string& value);
+
+    size_t FindMatchingJsonBracket(const std::string& json, size_t openPos, char openChar, char closeChar)
+    {
+        if (openPos >= json.size() || json[openPos] != openChar)
+        {
+            return std::string::npos;
+        }
+
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+        for (size_t pos = openPos; pos < json.size(); ++pos)
+        {
+            const char ch = json[pos];
+            if (inString)
+            {
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (ch == '\\')
+                {
+                    escaped = true;
+                }
+                else if (ch == '"')
+                {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (ch == '"')
+            {
+                inString = true;
+            }
+            else if (ch == openChar)
+            {
+                ++depth;
+            }
+            else if (ch == closeChar)
+            {
+                --depth;
+                if (depth == 0)
+                {
+                    return pos;
+                }
+            }
+        }
+        return std::string::npos;
+    }
+
+    bool ParseManualRows(const std::string& json, std::map<std::string, std::vector<std::string>>& manualRows)
+    {
+        manualRows.clear();
+        const std::string key = "\"manualRows\"";
+        size_t pos = json.find(key);
+        if (pos == std::string::npos)
+        {
+            return false;
+        }
+
+        pos = json.find('[', pos);
+        if (pos == std::string::npos)
+        {
+            return false;
+        }
+        const size_t end = FindMatchingJsonBracket(json, pos, '[', ']');
+        if (end == std::string::npos)
+        {
+            return false;
+        }
+
+        ++pos;
+        while (pos < end)
+        {
+            pos = json.find('{', pos);
+            if (pos == std::string::npos || pos >= end)
+            {
+                break;
+            }
+            const size_t objectEnd = FindMatchingJsonBracket(json, pos, '{', '}');
+            if (objectEnd == std::string::npos || objectEnd > end)
+            {
+                break;
+            }
+
+            const std::string objectJson = json.substr(pos, objectEnd - pos + 1);
+            std::string bodyName;
+            std::vector<std::string> values;
+            if (ParseJsonStringValue(objectJson, "bodyName", bodyName) &&
+                ParseJsonStringArray(objectJson, "values", values, kAttributeColumnCount) &&
+                !bodyName.empty())
+            {
+                manualRows[bodyName] = std::move(values);
+            }
+            pos = objectEnd + 1;
+        }
+        return true;
+    }
+
     bool ParseJsonStringValue(const std::string& json, const std::string& propertyName, std::string& value)
     {
         const std::string key = "\"" + propertyName + "\"";
@@ -1299,7 +1388,7 @@ namespace
         return std::max(minValue, std::min(maxValue, value));
     }
 
-    bool ParseWpfSelectedColumns(const std::string& json, std::vector<ColumnDef>& columns, std::set<std::string>& includedBodyNames, TableOptions& options)
+    bool ParseWpfSelectedColumns(const std::string& json, std::vector<ColumnDef>& columns, std::vector<std::string>& includedBodyNames, std::map<std::string, std::vector<std::string>>& manualRows, TableOptions& options)
     {
         if (json.find("\"confirmed\"") == std::string::npos || json.find("true") == std::string::npos)
         {
@@ -1344,12 +1433,13 @@ namespace
         std::vector<std::string> bodyNames;
         if (ParseJsonStringArray(json, "includedBodyNames", bodyNames))
         {
-            includedBodyNames.insert(bodyNames.begin(), bodyNames.end());
+            includedBodyNames = std::move(bodyNames);
         }
+        ParseManualRows(json, manualRows);
         return true;
     }
 
-    bool LaunchWpfConfigurator(const std::vector<BodyRecord>& bodies, std::vector<ColumnDef>& columns, std::set<std::string>& includedBodyNames, TableOptions& options, std::string& error)
+    bool LaunchWpfConfigurator(const std::vector<BodyRecord>& bodies, std::vector<ColumnDef>& columns, std::vector<std::string>& includedBodyNames, std::map<std::string, std::vector<std::string>>& manualRows, TableOptions& options, std::string& error)
     {
         const std::filesystem::path uiDir = CurrentModuleDirectory() / "MinXiBiaoUI";
         const std::filesystem::path exePath = uiDir / "MinXiBiaoUI.exe";
@@ -1410,7 +1500,7 @@ namespace
         {
             return false;
         }
-        return ParseWpfSelectedColumns(outputJson, columns, includedBodyNames, options);
+        return ParseWpfSelectedColumns(outputJson, columns, includedBodyNames, manualRows, options);
     }
 
     bool TryReadAttributeFromMap(tag_t objectTag, const std::string& name, std::string& value)
@@ -1440,9 +1530,10 @@ namespace
         return TryReadAttributeFromMap(body.attributeTag != NULL_TAG ? body.attributeTag : body.tag, name, value);
     }
 
-    std::vector<BodyValueRow> BuildRows(const std::vector<BodyRecord>& bodies, const std::vector<ColumnDef>& columns, const std::set<std::string>* includedBodyNames = nullptr)
+    std::vector<BodyValueRow> BuildRows(const std::vector<BodyRecord>& bodies, const std::vector<std::string>* includedBodyNames, const std::map<std::string, std::vector<std::string>>& manualRows, const std::vector<ColumnDef>& columns)
     {
-        std::vector<BodyValueRow> rows;
+        std::vector<BodyValueRow> collectedRows;
+        std::map<std::string, size_t> rowIndexByName;
         for (size_t bodyIndex = 0; bodyIndex < bodies.size(); ++bodyIndex)
         {
             const BodyRecord& body = bodies[bodyIndex];
@@ -1452,11 +1543,6 @@ namespace
             }
 
             const std::string bodyName = MakeBodyRecordName(bodyIndex);
-            if (includedBodyNames != nullptr && !includedBodyNames->empty() && includedBodyNames->find(bodyName) == includedBodyNames->end())
-            {
-                continue;
-            }
-
             BodyValueRow row;
             row.bodyTag = body.attributeTag != NULL_TAG ? body.attributeTag : body.tag;
             row.bodyName = bodyName;
@@ -1464,7 +1550,16 @@ namespace
             for (const ColumnDef& column : columns)
             {
                 std::string value;
-                if (TryReadAttribute(body, bodyIndex, column.attributeName, value))
+                const size_t columnIndex = row.values.size();
+                const auto manual = manualRows.find(bodyName);
+                if (Trim(column.attributeName).empty() &&
+                    manual != manualRows.end() &&
+                    columnIndex < manual->second.size())
+                {
+                    value = manual->second[columnIndex];
+                    keep = keep || !Trim(value).empty();
+                }
+                else if (TryReadAttribute(body, bodyIndex, column.attributeName, value))
                 {
                     keep = true;
                 }
@@ -1473,10 +1568,27 @@ namespace
 
             if (keep)
             {
-                rows.push_back(std::move(row));
+                rowIndexByName[row.bodyName] = collectedRows.size();
+                collectedRows.push_back(std::move(row));
             }
         }
-        return rows;
+
+        if (includedBodyNames == nullptr || includedBodyNames->empty())
+        {
+            return collectedRows;
+        }
+
+        std::vector<BodyValueRow> orderedRows;
+        std::set<std::string> addedNames;
+        for (const std::string& bodyName : *includedBodyNames)
+        {
+            const auto found = rowIndexByName.find(bodyName);
+            if (found != rowIndexByName.end() && addedNames.insert(bodyName).second)
+            {
+                orderedRows.push_back(collectedRows[found->second]);
+            }
+        }
+        return orderedRows;
     }
 
     bool AskTableOrigin(double origin[3], std::string& error)
@@ -1644,6 +1756,24 @@ namespace
         }
 
         const std::string systemText = Utf8ToSystem(NormalizeCellText(text));
+        return UF_TABNOT_set_cell_text(cell, systemText.c_str()) == 0;
+    }
+
+    bool ApplyAssociativeCellText(tag_t cell, const std::string& text, double textHeight)
+    {
+        if (textHeight > 0.0)
+        {
+            UF_TABNOT_cell_prefs_t prefs;
+            if (UF_TABNOT_ask_cell_prefs(cell, &prefs) == 0)
+            {
+                prefs.text_height = textHeight;
+                prefs.nm_fit_methods = 1;
+                prefs.fit_methods[0] = UF_TABNOT_fit_method_auto_size_col;
+                UF_TABNOT_set_cell_prefs(cell, &prefs);
+            }
+        }
+
+        const std::string systemText = Utf8ToSystem(text);
         return UF_TABNOT_set_cell_text(cell, systemText.c_str()) == 0;
     }
 
@@ -1826,12 +1956,10 @@ namespace
                 }
                 const std::string text = c < rows[r].values.size() ? NormalizeCellText(rows[r].values[c]) : std::string();
                 std::string associativeText;
-                double decimalValue = 0.0;
-                if (!TryParsePlainDecimalText(text, decimalValue) &&
-                    !Trim(columns[c].attributeName).empty() &&
+                if (!Trim(columns[c].attributeName).empty() &&
                     TryMakeAssociativeAttributeText(rows[r].bodyTag, columns[c].attributeName, associativeText))
                 {
-                    ApplyCellText(cell, associativeText, textHeight);
+                    ApplyAssociativeCellText(cell, associativeText, textHeight);
                 }
                 else
                 {
@@ -1865,11 +1993,12 @@ namespace MinXiBiao
         }
 
         std::vector<ColumnDef> columns;
-        std::set<std::string> includedBodyNames;
+        std::vector<std::string> includedBodyNames;
+        std::map<std::string, std::vector<std::string>> manualRows;
         TableOptions tableOptions;
         std::string error;
         LogBodyScan("RunWpfWorkflow launch WPF");
-        if (!LaunchWpfConfigurator(bodies, columns, includedBodyNames, tableOptions, error))
+        if (!LaunchWpfConfigurator(bodies, columns, includedBodyNames, manualRows, tableOptions, error))
         {
             if (!error.empty())
             {
@@ -1896,7 +2025,7 @@ namespace MinXiBiao
             return true;
         }
 
-        const std::vector<BodyValueRow> rows = BuildRows(bodies, columns, &includedBodyNames);
+        const std::vector<BodyValueRow> rows = BuildRows(bodies, &includedBodyNames, manualRows, columns);
         LogBodyScan("RunWpfWorkflow rows=" + std::to_string(rows.size()));
         if (rows.empty())
         {

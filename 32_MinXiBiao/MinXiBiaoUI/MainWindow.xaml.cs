@@ -7,7 +7,9 @@ using System.Text.Json.Serialization;
 using System.Text.Unicode;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
 
 namespace MinXiBiaoUI;
 
@@ -24,6 +26,10 @@ public partial class MainWindow : Window
     private bool updating;
     private string headerLocation = "above";
     private double textHeight = 3.5;
+    private Point dragStartPoint;
+    private PreviewRow? draggedRow;
+    private int? sortedColumnIndex;
+    private bool sortAscending = true;
 
     public MainWindow()
     {
@@ -211,6 +217,7 @@ public partial class MainWindow : Window
         {
             Header = "序号",
             Binding = new System.Windows.Data.Binding(nameof(PreviewRow.Sequence)),
+            SortMemberPath = nameof(PreviewRow.Sequence),
             Width = new DataGridLength(64),
             ElementStyle = (Style)FindResource("NoWrapCellText"),
             IsReadOnly = true
@@ -223,10 +230,11 @@ public partial class MainWindow : Window
             {
                 Header = BuildColumnHeader(i),
                 Binding = new System.Windows.Data.Binding($"Values[{columnIndex}]"),
+                SortMemberPath = $"Value{columnIndex}",
                 Width = DataGridLength.Auto,
                 MinWidth = 120,
                 ElementStyle = (Style)FindResource("NoWrapCellText"),
-                IsReadOnly = true
+                IsReadOnly = !string.IsNullOrWhiteSpace(SelectedColumns[columnIndex])
             });
         }
 
@@ -301,6 +309,7 @@ public partial class MainWindow : Window
         textBox.GotKeyboardFocus += HeaderTitle_GotKeyboardFocus;
         textBox.LostKeyboardFocus += HeaderTitle_LostKeyboardFocus;
         textBox.TextChanged += HeaderTitle_TextChanged;
+        textBox.PreviewMouseLeftButtonDown += HeaderTitle_PreviewMouseLeftButtonDown;
         return textBox;
     }
 
@@ -341,6 +350,16 @@ public partial class MainWindow : Window
             ? System.Windows.Media.Brushes.Gray
             : System.Windows.Media.Brushes.Black;
         UpdateStatus();
+    }
+
+    private void HeaderTitle_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not TextBox textBox || textBox.Tag is not int index)
+        {
+            return;
+        }
+
+        SortPreviewRows(index);
     }
 
     private bool IsActiveColumn(int index)
@@ -409,6 +428,10 @@ public partial class MainWindow : Window
             }
 
             string name = SelectedColumns[index];
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return true;
+            }
             if (!string.IsNullOrWhiteSpace(name) &&
                 body.Attributes.TryGetValue(name, out string? value) &&
                 !string.IsNullOrWhiteSpace(value))
@@ -436,7 +459,12 @@ public partial class MainWindow : Window
                 HeaderTitles = HeaderTitles,
                 HeaderLocation = headerLocation,
                 TextHeight = textHeight,
-                IncludedBodyNames = previewRows.Select(static row => row.BodyName).Where(static name => !string.IsNullOrWhiteSpace(name)).ToList()
+                IncludedBodyNames = previewRows.Select(static row => row.BodyName).Where(static name => !string.IsNullOrWhiteSpace(name)).ToList(),
+                ManualRows = previewRows.Select(static row => new ManualRow
+                {
+                    BodyName = row.BodyName,
+                    Values = row.Values.ToList()
+                }).ToList()
             };
 
             JsonSerializerOptions options = new()
@@ -499,6 +527,89 @@ public partial class MainWindow : Window
         }
     }
 
+    private void PreviewGrid_Sorting(object sender, DataGridSortingEventArgs e)
+    {
+        e.Handled = true;
+        int columnIndex = PreviewGrid.Columns.IndexOf(e.Column) - 1;
+        if (columnIndex < 0)
+        {
+            columnIndex = -1;
+        }
+
+        SortPreviewRows(columnIndex);
+    }
+
+    private void SortPreviewRows(int columnIndex)
+    {
+        sortAscending = sortedColumnIndex == columnIndex ? !sortAscending : true;
+        sortedColumnIndex = columnIndex;
+
+        List<PreviewRow> sorted = columnIndex < 0
+            ? previewRows.OrderBy(static row => ParseSequence(row.Sequence)).ToList()
+            : previewRows.OrderBy(row => GetSortText(row, columnIndex), StringComparer.CurrentCultureIgnoreCase).ToList();
+        if (!sortAscending)
+        {
+            sorted.Reverse();
+        }
+
+        previewRows.Clear();
+        foreach (PreviewRow row in sorted)
+        {
+            previewRows.Add(row);
+        }
+        RenumberRows();
+    }
+
+    private void PreviewGrid_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        dragStartPoint = e.GetPosition(null);
+        draggedRow = FindVisualParent<DataGridRow>(e.OriginalSource as DependencyObject)?.Item as PreviewRow;
+    }
+
+    private void PreviewGrid_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed || draggedRow == null)
+        {
+            return;
+        }
+
+        Point currentPoint = e.GetPosition(null);
+        if (Math.Abs(currentPoint.X - dragStartPoint.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(currentPoint.Y - dragStartPoint.Y) < SystemParameters.MinimumVerticalDragDistance)
+        {
+            return;
+        }
+
+        DragDrop.DoDragDrop(PreviewGrid, draggedRow, DragDropEffects.Move);
+    }
+
+    private void PreviewGrid_Drop(object sender, DragEventArgs e)
+    {
+        if (!e.Data.GetDataPresent(typeof(PreviewRow)))
+        {
+            return;
+        }
+
+        PreviewRow? sourceRow = e.Data.GetData(typeof(PreviewRow)) as PreviewRow;
+        PreviewRow? targetRow = FindVisualParent<DataGridRow>(e.OriginalSource as DependencyObject)?.Item as PreviewRow;
+        if (sourceRow == null || targetRow == null || ReferenceEquals(sourceRow, targetRow))
+        {
+            return;
+        }
+
+        int oldIndex = previewRows.IndexOf(sourceRow);
+        int newIndex = previewRows.IndexOf(targetRow);
+        if (oldIndex < 0 || newIndex < 0)
+        {
+            return;
+        }
+
+        previewRows.Move(oldIndex, newIndex);
+        sortedColumnIndex = null;
+        RenumberRows();
+        PreviewGrid.SelectedItem = sourceRow;
+    }
+
     private void DeleteSelectedRows()
     {
         List<PreviewRow> selectedRows = PreviewGrid.SelectedItems.OfType<PreviewRow>().ToList();
@@ -517,6 +628,29 @@ public partial class MainWindow : Window
             previewRows[i].Sequence = (i + 1).ToString();
         }
         PreviewGrid.Items.Refresh();
+    }
+
+    private static int ParseSequence(string text)
+    {
+        return int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) ? value : int.MaxValue;
+    }
+
+    private static string GetSortText(PreviewRow row, int columnIndex)
+    {
+        return columnIndex >= 0 && columnIndex < row.Values.Count ? row.Values[columnIndex] : "";
+    }
+
+    private static T? FindVisualParent<T>(DependencyObject? child) where T : DependencyObject
+    {
+        while (child != null)
+        {
+            if (child is T parent)
+            {
+                return parent;
+            }
+            child = VisualTreeHelper.GetParent(child);
+        }
+        return null;
     }
 
     private void UpdateStatus()
@@ -588,6 +722,18 @@ public sealed class UiOutput
 
     [JsonPropertyName("includedBodyNames")]
     public List<string> IncludedBodyNames { get; set; } = new();
+
+    [JsonPropertyName("manualRows")]
+    public List<ManualRow> ManualRows { get; set; } = new();
+}
+
+public sealed class ManualRow
+{
+    [JsonPropertyName("bodyName")]
+    public string BodyName { get; set; } = "";
+
+    [JsonPropertyName("values")]
+    public List<string> Values { get; set; } = new();
 }
 
 public sealed class UiSettings
