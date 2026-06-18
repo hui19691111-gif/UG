@@ -116,6 +116,7 @@ namespace
 // 相贴判断容差。
 // 体与体、面与面最小距离小于这个值时，认为可以视为相贴。
 const double kContactTolerance = 0.01;
+const double kEdgePlanePairTolerance = 1.0e-6;
 const bool kDebugStopAfterProjection = false;
 const bool kDebugStopAfterPreSegment = false;
 const bool kDebugStopAfterSegmentation = false;
@@ -137,6 +138,15 @@ struct ContactMatch
     // 相贴点对，后面会用于确定阴影/投影方向
     double sourcePoint[3] = {0.0, 0.0, 0.0};
     double targetPoint[3] = {0.0, 0.0, 0.0};
+};
+
+struct EdgePlaneGroup
+{
+    tag_t sourceBody = NULL_TAG;
+    tag_t sourceFace = NULL_TAG;
+    double planePoint[3] = {0.0, 0.0, 0.0};
+    double planeNormal[3] = {0.0, 0.0, 0.0};
+    std::vector<Edge*> edges;
 };
 
 struct CurveEndData
@@ -197,6 +207,14 @@ std::string ToUtf8(const wchar_t* text);
 std::vector<tag_t> AskPlanarFaces(tag_t bodyTag);
 double DistanceSquared(const double lhs[3], const double rhs[3]);
 std::vector<tag_t> AskPeripheralLoopEdges(tag_t faceTag);
+std::vector<tag_t> AskFaceEdges(tag_t faceTag);
+std::vector<tag_t> AskPlanarFacesContainingEdge(tag_t bodyTag, tag_t edgeTag);
+bool FindBestEdgePlaneContact(
+    const EdgePlaneGroup& group,
+    tag_t workPartTag,
+    ContactMatch& match,
+    double& minCandidateDistance);
+std::vector<EdgePlaneGroup> BuildEdgePlaneGroups(const std::vector<Edge*>& selectedEdges, tag_t workPartTag);
 std::vector<tag_t> CreateCurvesFromEdges(const std::vector<tag_t>& edgeTags);
 bool AskPlanarFaceMidpoint(tag_t faceTag, double midpoint[3]);
 void DebugLog(const std::string& message);
@@ -2969,6 +2987,57 @@ std::vector<tag_t> AskPeripheralLoopEdges(tag_t faceTag)
     return edges;
 }
 
+std::vector<tag_t> AskFaceEdges(tag_t faceTag)
+{
+    std::vector<tag_t> edges;
+    if (faceTag == NULL_TAG)
+    {
+        return edges;
+    }
+
+    uf_list_p_t edgeList = nullptr;
+    if (UF_MODL_ask_face_edges(faceTag, &edgeList) != 0 || edgeList == nullptr)
+    {
+        return edges;
+    }
+
+    int count = 0;
+    UF_MODL_ask_list_count(edgeList, &count);
+    edges.reserve(static_cast<std::size_t>(std::max(0, count)));
+    for (int index = 0; index < count; ++index)
+    {
+        tag_t edgeTag = NULL_TAG;
+        if (UF_MODL_ask_list_item(edgeList, index, &edgeTag) == 0 && edgeTag != NULL_TAG)
+        {
+            edges.push_back(edgeTag);
+        }
+    }
+
+    UF_MODL_delete_list(&edgeList);
+    return edges;
+}
+
+std::vector<tag_t> AskPlanarFacesContainingEdge(tag_t bodyTag, tag_t edgeTag)
+{
+    std::vector<tag_t> containingFaces;
+    if (bodyTag == NULL_TAG || edgeTag == NULL_TAG)
+    {
+        return containingFaces;
+    }
+
+    const std::vector<tag_t> planarFaces = AskPlanarFaces(bodyTag);
+    for (tag_t faceTag : planarFaces)
+    {
+        const std::vector<tag_t> faceEdges = AskFaceEdges(faceTag);
+        if (std::find(faceEdges.begin(), faceEdges.end(), edgeTag) != faceEdges.end())
+        {
+            containingFaces.push_back(faceTag);
+        }
+    }
+
+    return containingFaces;
+}
+
 bool AskFaceNormal(tag_t faceTag, double normal[3])
 {
     if (faceTag == NULL_TAG)
@@ -3233,7 +3302,7 @@ std::vector<ContactMatch> FindContactsForTargetFace(tag_t targetFaceTag, tag_t w
                 continue;
             }
 
-            if (Dot(sourceNormal, targetNormal) > -0.95)
+            if (std::fabs(Dot(sourceNormal, targetNormal)) < 0.95)
             {
                 continue;
             }
@@ -3361,7 +3430,7 @@ bool BuildManualContactForSourceBody(tag_t targetFaceTag, tag_t sourceBodyTag, C
             continue;
         }
 
-        if (Dot(sourceNormal, targetNormal) > -0.95)
+        if (std::fabs(Dot(sourceNormal, targetNormal)) < 0.95)
         {
             continue;
         }
@@ -3556,7 +3625,7 @@ ContactMatch FindBestBottomContact(tag_t sourceBodyTag, tag_t workPartTag)
                     continue;
                 }
 
-                if (Dot(sourceNormal, targetNormal) > -0.95)
+                if (std::fabs(Dot(sourceNormal, targetNormal)) < 0.95)
                 {
                     continue;
                 }
@@ -3610,7 +3679,8 @@ std::vector<ContactMatch> FindAllBottomContacts(tag_t sourceBodyTag, tag_t workP
             continue;
         }
 
-        if (AskBoundingBoxVolume(candidateBodyTag) <= sourceVolume)
+        const double candidateVolume = AskBoundingBoxVolume(candidateBodyTag);
+        if (candidateVolume <= sourceVolume)
         {
             continue;
         }
@@ -3618,7 +3688,7 @@ std::vector<ContactMatch> FindAllBottomContacts(tag_t sourceBodyTag, tag_t workP
         double bodyDistance = 0.0;
         double sourcePoint[3] = {0.0};
         double targetPoint[3] = {0.0};
-        if (UF_MODL_ask_minimum_dist(
+        const int bodyDistanceStatus = UF_MODL_ask_minimum_dist(
                 sourceBodyTag,
                 candidateBodyTag,
                 0,
@@ -3627,7 +3697,8 @@ std::vector<ContactMatch> FindAllBottomContacts(tag_t sourceBodyTag, tag_t workP
                 nullptr,
                 &bodyDistance,
                 sourcePoint,
-                targetPoint) != 0)
+                targetPoint);
+        if (bodyDistanceStatus != 0)
         {
             continue;
         }
@@ -3655,7 +3726,7 @@ std::vector<ContactMatch> FindAllBottomContacts(tag_t sourceBodyTag, tag_t workP
                     continue;
                 }
 
-                if (Dot(sourceNormal, targetNormal) > -0.95)
+                if (std::fabs(Dot(sourceNormal, targetNormal)) < 0.95)
                 {
                     continue;
                 }
@@ -3839,6 +3910,234 @@ std::vector<ContactMatch> ResolveMatchesForMarking(
     }
 
     return resolved;
+}
+
+bool FindBestEdgePlaneContact(
+    const EdgePlaneGroup& group,
+    tag_t workPartTag,
+    ContactMatch& match,
+    double& minCandidateDistance)
+{
+    match = ContactMatch();
+    minCandidateDistance = DBL_MAX;
+    if (group.sourceBody == NULL_TAG || group.sourceFace == NULL_TAG || group.edges.empty())
+    {
+        return false;
+    }
+
+    double sourceNormal[3] = {group.planeNormal[0], group.planeNormal[1], group.planeNormal[2]};
+    if (!Normalize(sourceNormal))
+    {
+        return false;
+    }
+
+    double bestEdgeDistance = DBL_MAX;
+    for (tag_t candidateBodyTag : AskSolidBodiesInWorkPart(workPartTag))
+    {
+        if (candidateBodyTag == group.sourceBody)
+        {
+            continue;
+        }
+
+        const std::vector<tag_t> targetFaces = AskPlanarFaces(candidateBodyTag);
+        for (tag_t targetFaceTag : targetFaces)
+        {
+            double targetNormal[3] = {0.0};
+            if (!AskFaceNormal(targetFaceTag, targetNormal))
+            {
+                continue;
+            }
+
+            const double normalDot = std::fabs(Dot(sourceNormal, targetNormal));
+            if (normalDot < 0.95)
+            {
+                continue;
+            }
+
+            double sourceFaceDistance = 0.0;
+            double sourceFacePoint[3] = {0.0};
+            double targetFacePoint[3] = {0.0};
+            if (UF_MODL_ask_minimum_dist(
+                    group.sourceFace,
+                    targetFaceTag,
+                    0,
+                    nullptr,
+                    0,
+                    nullptr,
+                    &sourceFaceDistance,
+                    sourceFacePoint,
+                    targetFacePoint) != 0)
+            {
+                continue;
+            }
+
+            double maxEdgeDistance = 0.0;
+            double firstEdgePoint[3] = {0.0};
+            double firstTargetPoint[3] = {0.0};
+            bool allEdgesAtZeroDistance = true;
+            for (std::size_t edgeIndex = 0; edgeIndex < group.edges.size(); ++edgeIndex)
+            {
+                if (group.edges[edgeIndex] == NULL)
+                {
+                    allEdgesAtZeroDistance = false;
+                    break;
+                }
+
+                double edgeDistance = 0.0;
+                double edgePoint[3] = {0.0};
+                double targetPoint[3] = {0.0};
+                if (UF_MODL_ask_minimum_dist(
+                        group.edges[edgeIndex]->Tag(),
+                        targetFaceTag,
+                        0,
+                        nullptr,
+                        0,
+                        nullptr,
+                        &edgeDistance,
+                        edgePoint,
+                        targetPoint) != 0)
+                {
+                    allEdgesAtZeroDistance = false;
+                    break;
+                }
+
+                if (edgeDistance > maxEdgeDistance)
+                {
+                    maxEdgeDistance = edgeDistance;
+                }
+                if (edgeIndex == 0)
+                {
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        firstEdgePoint[axis] = edgePoint[axis];
+                        firstTargetPoint[axis] = targetPoint[axis];
+                    }
+                }
+                if (edgeDistance > kEdgePlanePairTolerance)
+                {
+                    allEdgesAtZeroDistance = false;
+                    break;
+                }
+            }
+
+            minCandidateDistance = std::min(minCandidateDistance, maxEdgeDistance);
+            if (!allEdgesAtZeroDistance)
+            {
+                continue;
+            }
+
+            if (maxEdgeDistance < bestEdgeDistance ||
+                (std::fabs(maxEdgeDistance - bestEdgeDistance) <= 1.0e-12 &&
+                 sourceFaceDistance < match.distance))
+            {
+                bestEdgeDistance = maxEdgeDistance;
+                match.targetBody = candidateBodyTag;
+                match.sourceFace = group.sourceFace;
+                match.targetFace = targetFaceTag;
+                match.distance = maxEdgeDistance;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    match.sourcePoint[axis] = firstEdgePoint[axis];
+                    match.targetPoint[axis] = firstTargetPoint[axis];
+                }
+            }
+        }
+    }
+
+    return match.targetBody != NULL_TAG && match.targetFace != NULL_TAG;
+}
+
+std::vector<EdgePlaneGroup> BuildEdgePlaneGroups(const std::vector<Edge*>& selectedEdges, tag_t workPartTag)
+{
+    std::vector<EdgePlaneGroup> groups;
+    for (std::size_t edgeIndex = 0; edgeIndex < selectedEdges.size(); ++edgeIndex)
+    {
+        Edge* edge = selectedEdges[edgeIndex];
+        if (edge == NULL)
+        {
+            continue;
+        }
+
+        tag_t edgeBodyTag = NULL_TAG;
+        if (UF_MODL_ask_edge_body(edge->Tag(), &edgeBodyTag) != 0 || edgeBodyTag == NULL_TAG)
+        {
+            continue;
+        }
+
+        const std::vector<tag_t> sourceFaces = AskPlanarFacesContainingEdge(edgeBodyTag, edge->Tag());
+        if (sourceFaces.empty())
+        {
+            continue;
+        }
+
+        tag_t chosenSourceFace = NULL_TAG;
+        double chosenMinCandidateDistance = DBL_MAX;
+        for (tag_t sourceFaceTag : sourceFaces)
+        {
+            EdgePlaneGroup probeGroup;
+            probeGroup.sourceBody = edgeBodyTag;
+            probeGroup.sourceFace = sourceFaceTag;
+            probeGroup.edges.push_back(edge);
+            AskPlanarFaceMidpoint(sourceFaceTag, probeGroup.planePoint);
+            AskFaceNormal(sourceFaceTag, probeGroup.planeNormal);
+
+            ContactMatch candidateMatch;
+            double minCandidateDistance = DBL_MAX;
+            const bool hasContact =
+                FindBestEdgePlaneContact(probeGroup, workPartTag, candidateMatch, minCandidateDistance);
+
+            if (hasContact)
+            {
+                chosenSourceFace = sourceFaceTag;
+                chosenMinCandidateDistance = minCandidateDistance;
+                break;
+            }
+            if (chosenSourceFace == NULL_TAG ||
+                minCandidateDistance < chosenMinCandidateDistance)
+            {
+                chosenSourceFace = sourceFaceTag;
+                chosenMinCandidateDistance = minCandidateDistance;
+            }
+        }
+
+        if (chosenSourceFace == NULL_TAG)
+        {
+            continue;
+        }
+
+        double chosenPoint[3] = {0.0};
+        double chosenNormal[3] = {0.0};
+        AskPlanarFaceMidpoint(chosenSourceFace, chosenPoint);
+        AskFaceNormal(chosenSourceFace, chosenNormal);
+
+        bool appended = false;
+        for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+        {
+            if (groups[groupIndex].sourceBody == edgeBodyTag &&
+                groups[groupIndex].sourceFace == chosenSourceFace)
+            {
+                groups[groupIndex].edges.push_back(edge);
+                appended = true;
+                break;
+            }
+        }
+
+        if (!appended)
+        {
+            EdgePlaneGroup group;
+            group.sourceBody = edgeBodyTag;
+            group.sourceFace = chosenSourceFace;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                group.planePoint[axis] = chosenPoint[axis];
+                group.planeNormal[axis] = chosenNormal[axis];
+            }
+            group.edges.push_back(edge);
+            groups.push_back(group);
+        }
+    }
+
+    return groups;
 }
 
 std::string ResolveDialogFilePath(const char* fileName)
@@ -4744,7 +5043,7 @@ int CreateShallowGrooveByExtrude(
         return 0;
     }
 
-    const std::string cutDepthFormula = ToFormulaString(std::max(grooveDepth * 20.0, grooveWidth * 4.0));
+    const std::string cutDepthFormula = ToFormulaString(grooveDepth);
     const std::string halfWidthFormula = ToFormulaString(grooveWidth * 0.5);
     Body* targetBody = dynamic_cast<Body*>(NXObjectManager::Get(match.targetBody));
     if (targetBody == NULL)
@@ -6226,84 +6525,53 @@ int BiaoJiXian_BJ::apply_cb()
             bool continueWithoutFlatPattern = true;
             if (!selectedEdges.empty())
             {
-                tag_t sourceBodyTag = NULL_TAG;
-                UF_MODL_ask_edge_body(selectedEdges[0]->Tag(), &sourceBodyTag);
-                const std::vector<ContactMatch> matches =
-                    ResolveMatchesForMarking(FindAllBottomContacts(sourceBodyTag, workPart->Tag()), true);
+                const std::vector<EdgePlaneGroup> edgePlaneGroups =
+                    BuildEdgePlaneGroups(selectedEdges, workPart->Tag());
+
+                for (std::size_t groupIndex = 0; groupIndex < edgePlaneGroups.size(); ++groupIndex)
                 {
-                    std::ostringstream log;
-                    log << "Edge mode begin: selectedEdges=" << selectedEdges.size()
-                        << ", firstEdgeSourceBody=" << DebugTag(sourceBodyTag)
-                        << ", matches=" << matches.size();
-                    DebugLog(log.str());
-                }
-                for (std::size_t i = 0; i < matches.size(); ++i)
-                {
-                    std::vector<tag_t> projectedCurvesForTarget;
-                    std::vector<std::vector<tag_t> > projectedCurveGroupsForTarget;
-                    for (std::size_t edgeIndex = 0; edgeIndex < selectedEdges.size(); ++edgeIndex)
+                    const EdgePlaneGroup& edgePlaneGroup = edgePlaneGroups[groupIndex];
+                    ContactMatch match;
+                    double minCandidateDistance = DBL_MAX;
+                    const bool hasMatch =
+                        FindBestEdgePlaneContact(edgePlaneGroup, workPart->Tag(), match, minCandidateDistance);
+
+                    if (!hasMatch)
                     {
-                        std::vector<Edge*> singleEdge(1, selectedEdges[edgeIndex]);
-                        const std::vector<tag_t> sourceCurves = ProjectSelectedEdgesToFace(workPart, singleEdge, matches[i]);
-                        {
-                            std::ostringstream log;
-                            log << "Edge mode match edge: matchIndex=" << i
-                                << ", edgeIndex=" << edgeIndex
-                                << ", edgeTag=" << DebugTag(selectedEdges[edgeIndex] != NULL ? selectedEdges[edgeIndex]->Tag() : NULL_TAG)
-                                << ", targetFace=" << DebugTag(matches[i].targetFace)
-                                << ", projectedCurves=" << sourceCurves.size();
-                            DebugLog(log.str());
-                        }
-                        if (!sourceCurves.empty())
-                        {
-                            projectedCurveGroupsForTarget.push_back(sourceCurves);
-                        }
-                        projectedCurvesForTarget.insert(
-                            projectedCurvesForTarget.end(),
-                            sourceCurves.begin(),
-                            sourceCurves.end());
+                        continue;
+                    }
+
+                    const std::vector<tag_t> projectedCurvesForTarget =
+                        ProjectSelectedEdgesToFace(workPart, edgePlaneGroup.edges, match);
+                    std::vector<std::vector<tag_t> > projectedCurveGroupsForTarget;
+                    if (!projectedCurvesForTarget.empty())
+                    {
+                        projectedCurveGroupsForTarget.push_back(projectedCurvesForTarget);
                     }
 
                     if (projectedCurvesForTarget.empty())
                     {
-                        DebugLog("Edge mode skipped match: projectedCurvesForTarget empty, matchIndex=" + DebugTag(static_cast<tag_t>(i)));
                         continue;
                     }
 
                     if (kDebugStopAfterProjection)
                     {
-                        applyCurveOutputStyle(projectedCurvesForTarget, matches[i].targetBody);
+                        applyCurveOutputStyle(projectedCurvesForTarget, match.targetBody);
                         continue;
                     }
 
                     const PreparedCurveGroupSet preparedCurves =
-                        ApplyPreSegmentRulesToGroups(workPart, projectedCurveGroupsForTarget, matches[i]);
-                    {
-                        std::ostringstream log;
-                        log << "Edge mode prepared: matchIndex=" << i
-                            << ", inputGroups=" << projectedCurveGroupsForTarget.size()
-                            << ", groups=" << preparedCurves.groups.size()
-                            << ", curves=" << preparedCurves.curves.size()
-                            << ", retired=" << preparedCurves.retiredCurves.size();
-                        DebugLog(log.str());
-                    }
+                        ApplyPreSegmentRulesToGroups(workPart, projectedCurveGroupsForTarget, match);
                     if (kDebugStopAfterPreSegment)
                     {
-                        applyCurveOutputStyle(preparedCurves.curves, matches[i].targetBody);
+                        applyCurveOutputStyle(preparedCurves.curves, match.targetBody);
                         continue;
                     }
 
                     const std::vector<std::vector<tag_t> > finalCurveGroups =
                         BuildSegmentedMarkCurveGroups(preparedCurves.groups, segmentParameters);
                     const std::vector<tag_t> finalCurves = FlattenCurveGroups(finalCurveGroups);
-                    {
-                        std::ostringstream log;
-                        log << "Edge mode final: matchIndex=" << i
-                            << ", groups=" << finalCurveGroups.size()
-                            << ", curves=" << finalCurves.size();
-                        DebugLog(log.str());
-                    }
-                    applyCurveOutputStyle(finalCurves, matches[i].targetBody);
+                    applyCurveOutputStyle(finalCurves, match.targetBody);
                     if (kDebugStopAfterSegmentation)
                     {
                         continue;
@@ -6314,7 +6582,7 @@ int BiaoJiXian_BJ::apply_cb()
                         const int grooveResult = CreateShallowGrooveByExtrude(
                             workPart,
                             finalCurves,
-                            matches[i],
+                            match,
                             grooveDepth,
                             grooveWidth);
                         DebugLog(std::string("Edge mode shallow groove result=") + (grooveResult != 0 ? "success" : "failed"));
@@ -6322,7 +6590,7 @@ int BiaoJiXian_BJ::apply_cb()
                     else
                     {
                         Features::Feature* flatPatternFeature =
-                            AskPreferredFlatPatternFeature(workPart, matches[i].targetBody);
+                            AskPreferredFlatPatternFeature(workPart, match.targetBody);
                         if (flatPatternFeature == NULL)
                         {
                             if (!askContinueWithoutFlatPattern(askedContinueWithoutFlatPattern, continueWithoutFlatPattern))
@@ -6333,7 +6601,7 @@ int BiaoJiXian_BJ::apply_cb()
                         }
                         const std::vector<tag_t> flatOutputCurves =
                             AppendCurvesToFlatPatternAddedGeometry(workPart, flatPatternFeature, finalCurves);
-                        applyCurveOutputStyle(flatOutputCurves, matches[i].targetBody);
+                        applyCurveOutputStyle(flatOutputCurves, match.targetBody);
                     }
                 }
             }
