@@ -630,6 +630,42 @@ void BianHao_AddCandidateTag(std::set<tag_t>& tags, tag_t tag)
 std::string BianHao_GetObjectAttributeString(NXOpen::NXObject* object, const std::string& attribute);
 bool BianHao_AddEntityOccurrenceTags(std::set<tag_t>& tags, tag_t entityTag);
 
+bool BianHao_AddEntityOnlyOccurrenceTags(std::set<tag_t>& tags, tag_t entityTag)
+{
+    if (entityTag == NULL_TAG)
+    {
+        return false;
+    }
+
+    tag_t* occurrences = NULL;
+    const int count = UF_ASSEM_ask_occs_of_entity(entityTag, &occurrences);
+    if (count <= 0 || occurrences == NULL)
+    {
+        if (occurrences != NULL)
+        {
+            UF_free(occurrences);
+        }
+        return false;
+    }
+
+    bool added = false;
+    for (int i = 0; i < count; ++i)
+    {
+        const tag_t occurrence = occurrences[i];
+        if (occurrence == NULL_TAG)
+        {
+            continue;
+        }
+
+        added = true;
+        BianHao_AddCandidateTag(tags, occurrence);
+        BianHao_AddCandidateTag(tags, UF_ASSEM_ask_prototype_of_occ(occurrence));
+    }
+
+    UF_free(occurrences);
+    return added;
+}
+
 std::set<tag_t> BianHao_GetRelatedObjectTags(NXOpen::NXObject* partObject, NXOpen::NXObject* bodyObject)
 {
     std::set<tag_t> tags;
@@ -794,14 +830,34 @@ std::set<tag_t> BianHao_GetStrictBodyComparableTags(NXOpen::NXObject* object)
     return tags;
 }
 
-std::set<tag_t> BianHao_GetAssociativeTextComparableTags(NXOpen::NXObject* object)
+std::set<tag_t> BianHao_GetDirectAssociativeObjectTags(NXOpen::NXObject* object)
 {
-    if (dynamic_cast<NXOpen::Body*>(object) != NULL)
+    std::set<tag_t> tags;
+    if (object == NULL)
     {
-        return BianHao_GetStrictBodyComparableTags(object);
+        return tags;
     }
 
-    return BianHao_GetComparableObjectTags(object);
+    try
+    {
+        const tag_t objectTag = object->Tag();
+        BianHao_AddCandidateTag(tags, objectTag);
+        if (UF_ASSEM_is_occurrence(objectTag))
+        {
+            BianHao_AddCandidateTag(tags, UF_ASSEM_ask_prototype_of_occ(objectTag));
+        }
+        BianHao_AddEntityOnlyOccurrenceTags(tags, objectTag);
+    }
+    catch (...)
+    {
+    }
+
+    return tags;
+}
+
+std::set<tag_t> BianHao_GetAssociativeTextComparableTags(NXOpen::NXObject* object)
+{
+    return BianHao_GetDirectAssociativeObjectTags(object);
 }
 
 void BianHao_AddComponentAndPrototypeTags(std::set<tag_t>& tags, NXOpen::Assemblies::Component* component)
@@ -1329,7 +1385,24 @@ std::string BianHao_GetSequenceDebugLogPath()
 
 void BianHao_WriteSequenceDebugLog(const std::string& text)
 {
-    (void)text;
+    std::ofstream log(BianHao_GetSequenceDebugLogPath().c_str(), std::ios::out | std::ios::trunc | std::ios::binary);
+    if (!log)
+    {
+        return;
+    }
+
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    char stamp[64] = "";
+    sprintf_s(stamp, "%04d-%02d-%02d %02d:%02d:%02d",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+
+    log << "\r\n===== " << stamp << " =====\r\n";
+    log << text;
+    if (text.empty() || (text[text.size() - 1] != '\n' && text[text.size() - 1] != '\r'))
+    {
+        log << "\r\n";
+    }
 }
 
 std::string BianHao_GetErrorDebugLogPath()
@@ -1910,6 +1983,16 @@ std::string BianHao_GetHeaderText(const std::vector<tag_t>& rows, const std::vec
     return BianHao_NormalizeText(text);
 }
 
+std::string BianHao_GetCellDisplayText(tag_t cell)
+{
+    std::string text = BianHao_GetCellEvaluatedText(cell);
+    if (text.empty())
+    {
+        text = BianHao_GetCellRawText(cell);
+    }
+    return BianHao_NormalizeText(text);
+}
+
 bool BianHao_CellReferencesSelectedObject(const std::string& rawText, const std::set<tag_t>& relatedTags)
 {
     if (rawText.empty())
@@ -1918,6 +2001,93 @@ bool BianHao_CellReferencesSelectedObject(const std::string& rawText, const std:
     }
 
     return BianHao_TextContainsAnyTag(rawText, relatedTags);
+}
+
+bool BianHao_GetCellAssociatedAttribute(const std::string& rawText,
+    tag_t cell,
+    NXOpen::NXObject*& referencedObject,
+    std::string& attributeTitle,
+    tag_t& associativeTextPartTag,
+    std::ostringstream* debug,
+    size_t columnIndex,
+    const char* context)
+{
+    referencedObject = NULL;
+    attributeTitle.clear();
+    associativeTextPartTag = NULL_TAG;
+
+    if (rawText.empty() || rawText.find("<W") == std::string::npos)
+    {
+        return false;
+    }
+
+    NXOpen::Part* associativeTextPart = NULL;
+    NXOpen::NXObject* cellObject = NULL;
+    try
+    {
+        cellObject = dynamic_cast<NXOpen::NXObject*>(NXOpen::NXObjectManager::Get(cell));
+        associativeTextPart = dynamic_cast<NXOpen::Part*>(cellObject != NULL ? cellObject->OwningPart() : NULL);
+    }
+    catch (...)
+    {
+        associativeTextPart = NULL;
+    }
+
+    if (associativeTextPart == NULL && BianHao::theSession != NULL && BianHao::theSession->Parts() != NULL)
+    {
+        associativeTextPart = BianHao::theSession->Parts()->Display();
+    }
+    if (associativeTextPart == NULL && BianHao::theSession != NULL && BianHao::theSession->Parts() != NULL)
+    {
+        associativeTextPart = BianHao::theSession->Parts()->Work();
+    }
+    if (associativeTextPart == NULL)
+    {
+        return false;
+    }
+
+    NXOpen::Annotations::AssociativeText* associativeText = NULL;
+    try
+    {
+        associativeText = associativeTextPart->Annotations()->CreateAssociativeText();
+        NXOpen::NXString title;
+        const bool found = associativeText->GetObjectAttribute(BianHao_Utf8ToNxString(rawText), &referencedObject, &title);
+        delete associativeText;
+        associativeText = NULL;
+
+        if (!found || referencedObject == NULL)
+        {
+            return false;
+        }
+
+        associativeTextPartTag = associativeTextPart->Tag();
+        attributeTitle = BianHao_NxStringToUtf8(title);
+        return !attributeTitle.empty();
+    }
+    catch (const std::exception& ex)
+    {
+        if (associativeText != NULL)
+        {
+            delete associativeText;
+        }
+        if (debug != NULL)
+        {
+            *debug << "    col=" << columnIndex << " " << context << " assoc parse failed: " << ex.what() << " raw=[" << rawText << "]\r\n";
+        }
+    }
+    catch (...)
+    {
+        if (associativeText != NULL)
+        {
+            delete associativeText;
+        }
+        if (debug != NULL)
+        {
+            *debug << "    col=" << columnIndex << " " << context << " assoc parse failed: unknown raw=[" << rawText << "]\r\n";
+        }
+    }
+
+    return false;
 }
 
 bool BianHao_CellAssociativeTextReferencesSelectedObject(const std::string& rawText,
@@ -1951,52 +2121,21 @@ bool BianHao_CellAssociativeTextReferencesSelectedObject(const std::string& rawT
         return false;
     }
 
-    NXOpen::Part* associativeTextPart = NULL;
-    NXOpen::NXObject* cellObject = NULL;
-    try
+    NXOpen::NXObject* referencedObject = NULL;
+    std::string title;
+    tag_t associativeTextPartTag = NULL_TAG;
+    if (BianHao_GetCellAssociatedAttribute(rawText, cell, referencedObject, title, associativeTextPartTag, debug, columnIndex, "object"))
     {
-        cellObject = dynamic_cast<NXOpen::NXObject*>(NXOpen::NXObjectManager::Get(cell));
-        associativeTextPart = dynamic_cast<NXOpen::Part*>(cellObject != NULL ? cellObject->OwningPart() : NULL);
-    }
-    catch (...)
-    {
-        associativeTextPart = NULL;
-    }
-
-    if (associativeTextPart == NULL && BianHao::theSession != NULL && BianHao::theSession->Parts() != NULL)
-    {
-        associativeTextPart = BianHao::theSession->Parts()->Display();
-    }
-    if (associativeTextPart == NULL && BianHao::theSession != NULL && BianHao::theSession->Parts() != NULL)
-    {
-        associativeTextPart = BianHao::theSession->Parts()->Work();
-    }
-    if (associativeTextPart == NULL)
-    {
-        return false;
-    }
-
-    NXOpen::Annotations::AssociativeText* associativeText = NULL;
-    try
-    {
-        associativeText = associativeTextPart->Annotations()->CreateAssociativeText();
-        NXOpen::NXObject* referencedObject = NULL;
-        NXOpen::NXString attributeTitle;
-        const bool found = associativeText->GetObjectAttribute(BianHao_Utf8ToNxString(rawText), &referencedObject, &attributeTitle);
-        delete associativeText;
-        associativeText = NULL;
-
-        if (!found || referencedObject == NULL)
+        if (referencedObject == NULL)
         {
             return false;
         }
 
         const tag_t referencedTag = referencedObject->Tag();
-        const std::string title = BianHao_NxStringToUtf8(attributeTitle);
         if (debug != NULL)
         {
             *debug << "    col=" << columnIndex
-                << " assoc partTag=" << associativeTextPart->Tag()
+                << " assoc partTag=" << associativeTextPartTag
                 << " assoc objectTag=" << referencedTag
                 << " title=[" << title << "] raw=[" << rawText << "]\r\n";
         }
@@ -2018,28 +2157,6 @@ bool BianHao_CellAssociativeTextReferencesSelectedObject(const std::string& rawT
             *debug << "\r\n";
         }
         return BianHao_TagsIntersect(selectedTags, referencedTags);
-    }
-    catch (const std::exception& ex)
-    {
-        if (associativeText != NULL)
-        {
-            delete associativeText;
-        }
-        if (debug != NULL)
-        {
-            *debug << "    col=" << columnIndex << " assoc parse failed: " << ex.what() << " raw=[" << rawText << "]\r\n";
-        }
-    }
-    catch (...)
-    {
-        if (associativeText != NULL)
-        {
-            delete associativeText;
-        }
-        if (debug != NULL)
-        {
-            *debug << "    col=" << columnIndex << " assoc parse failed: unknown raw=[" << rawText << "]\r\n";
-        }
     }
 
     return false;
@@ -2070,42 +2187,12 @@ bool BianHao_CellAssociativeTextReferencesAssemblyTags(const std::string& rawTex
         return false;
     }
 
-    NXOpen::Part* associativeTextPart = NULL;
-    NXOpen::NXObject* cellObject = NULL;
-    try
+    NXOpen::NXObject* referencedObject = NULL;
+    std::string title;
+    tag_t associativeTextPartTag = NULL_TAG;
+    if (BianHao_GetCellAssociatedAttribute(rawText, cell, referencedObject, title, associativeTextPartTag, debug, columnIndex, "assembly"))
     {
-        cellObject = dynamic_cast<NXOpen::NXObject*>(NXOpen::NXObjectManager::Get(cell));
-        associativeTextPart = dynamic_cast<NXOpen::Part*>(cellObject != NULL ? cellObject->OwningPart() : NULL);
-    }
-    catch (...)
-    {
-        associativeTextPart = NULL;
-    }
-
-    if (associativeTextPart == NULL && BianHao::theSession != NULL && BianHao::theSession->Parts() != NULL)
-    {
-        associativeTextPart = BianHao::theSession->Parts()->Display();
-    }
-    if (associativeTextPart == NULL && BianHao::theSession != NULL && BianHao::theSession->Parts() != NULL)
-    {
-        associativeTextPart = BianHao::theSession->Parts()->Work();
-    }
-    if (associativeTextPart == NULL)
-    {
-        return false;
-    }
-
-    NXOpen::Annotations::AssociativeText* associativeText = NULL;
-    try
-    {
-        associativeText = associativeTextPart->Annotations()->CreateAssociativeText();
-        NXOpen::NXObject* referencedObject = NULL;
-        NXOpen::NXString attributeTitle;
-        const bool found = associativeText->GetObjectAttribute(BianHao_Utf8ToNxString(rawText), &referencedObject, &attributeTitle);
-        delete associativeText;
-        associativeText = NULL;
-
-        if (!found || referencedObject == NULL)
+        if (referencedObject == NULL)
         {
             return false;
         }
@@ -2116,38 +2203,15 @@ bool BianHao_CellAssociativeTextReferencesAssemblyTags(const std::string& rawTex
             referencedTags = BianHao_GetComparableObjectTags(referencedObject);
         }
 
-        const std::string title = BianHao_NxStringToUtf8(attributeTitle);
         if (debug != NULL)
         {
             *debug << "    col=" << columnIndex
-                << " assembly assoc partTag=" << associativeTextPart->Tag()
+                << " assembly assoc partTag=" << associativeTextPartTag
                 << " assembly assoc objectTag=" << referencedObject->Tag()
                 << " title=[" << title << "] raw=[" << rawText << "]\r\n";
         }
 
         return BianHao_TagsIntersect(selectedAssemblyTags, referencedTags);
-    }
-    catch (const std::exception& ex)
-    {
-        if (associativeText != NULL)
-        {
-            delete associativeText;
-        }
-        if (debug != NULL)
-        {
-            *debug << "    col=" << columnIndex << " assembly assoc parse failed: " << ex.what() << " raw=[" << rawText << "]\r\n";
-        }
-    }
-    catch (...)
-    {
-        if (associativeText != NULL)
-        {
-            delete associativeText;
-        }
-        if (debug != NULL)
-        {
-            *debug << "    col=" << columnIndex << " assembly assoc parse failed: unknown raw=[" << rawText << "]\r\n";
-        }
     }
 
     return false;
@@ -2297,6 +2361,191 @@ bool BianHao_RowMatchesSelectedAssemblyComponent(const std::vector<tag_t>& rows,
     return false;
 }
 
+NXOpen::NXObject* BianHao_GetSequenceAttributeFallbackObject(NXOpen::NXObject* partObject,
+    NXOpen::NXObject* bodyObject,
+    bool usePartAttribute)
+{
+    if (usePartAttribute)
+    {
+        return BianHao_GetPartAttributeObject(partObject, bodyObject);
+    }
+
+    NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(bodyObject);
+    if (body != NULL)
+    {
+        try
+        {
+            if (body->OwningComponent() != NULL)
+            {
+                return BianHao_GetPartAttributeObject(partObject, bodyObject);
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return bodyObject;
+    }
+
+    if (partObject != NULL)
+    {
+        try
+        {
+            if (partObject->OwningComponent() != NULL)
+            {
+                return BianHao_GetPartAttributeObject(partObject, bodyObject);
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    return BianHao_GetPartAttributeObject(partObject, bodyObject);
+}
+
+bool BianHao_UsePartAttributeForSequenceFallback(NXOpen::NXObject* partObject, NXOpen::NXObject* bodyObject)
+{
+    try
+    {
+        if (dynamic_cast<NXOpen::Assemblies::Component*>(partObject) != NULL)
+        {
+            return true;
+        }
+
+        NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(bodyObject);
+        if (body != NULL && body->OwningComponent() != NULL)
+        {
+            return true;
+        }
+
+        if (partObject != NULL && partObject->OwningComponent() != NULL)
+        {
+            return true;
+        }
+
+        NXOpen::Part* displayPart = BianHao_GetDisplayPart();
+        NXOpen::Assemblies::ComponentAssembly* componentAssembly = displayPart != NULL ? displayPart->ComponentAssembly() : NULL;
+        NXOpen::Assemblies::Component* rootComponent = componentAssembly != NULL ? componentAssembly->RootComponent() : NULL;
+        return rootComponent != NULL;
+    }
+    catch (...)
+    {
+    }
+
+    return false;
+}
+
+bool BianHao_IsUniqueDisplayValueColumn(const std::vector<tag_t>& rows,
+    const std::vector<tag_t>& columns,
+    int headerRow,
+    int sequenceColumn,
+    size_t columnIndex,
+    std::ostringstream& debug)
+{
+    if (columnIndex >= columns.size() || static_cast<int>(columnIndex) == sequenceColumn)
+    {
+        return false;
+    }
+
+    std::set<std::string> values;
+    size_t checkedRows = 0;
+    for (size_t r = 0; r < rows.size(); ++r)
+    {
+        if (static_cast<int>(r) == headerRow)
+        {
+            continue;
+        }
+
+        tag_t cell = NULL_TAG;
+        if (!BianHao_GetTableCell(rows[r], columns[columnIndex], cell))
+        {
+            debug << "    unique col=" << columnIndex << " rejected: missing cell row=" << r << "\r\n";
+            return false;
+        }
+
+        const std::string value = BianHao_GetCellDisplayText(cell);
+        if (value.empty())
+        {
+            debug << "    unique col=" << columnIndex << " rejected: empty display row=" << r << "\r\n";
+            return false;
+        }
+
+        if (!values.insert(value).second)
+        {
+            debug << "    unique col=" << columnIndex << " rejected: duplicate value=[" << value << "] row=" << r << "\r\n";
+            return false;
+        }
+
+        ++checkedRows;
+    }
+
+    const bool unique = checkedRows > 0;
+    debug << "    unique col=" << columnIndex << " accepted=" << (unique ? "yes" : "no")
+        << " checkedRows=" << checkedRows << "\r\n";
+    return unique;
+}
+
+std::vector<size_t> BianHao_GetUniqueDisplayValueColumns(const std::vector<tag_t>& rows,
+    const std::vector<tag_t>& columns,
+    int headerRow,
+    int sequenceColumn,
+    std::ostringstream& debug)
+{
+    std::vector<size_t> result;
+    for (size_t c = 0; c < columns.size(); ++c)
+    {
+        if (BianHao_IsUniqueDisplayValueColumn(rows, columns, headerRow, sequenceColumn, c, debug))
+        {
+            result.push_back(c);
+        }
+    }
+    return result;
+}
+
+bool BianHao_RowMatchesUniqueAttributeColumn(const std::vector<tag_t>& rows,
+    const std::vector<tag_t>& columns,
+    int rowIndex,
+    size_t columnIndex,
+    NXOpen::NXObject* fallbackObject,
+    std::ostringstream& debug)
+{
+    if (fallbackObject == NULL || rowIndex < 0 || static_cast<size_t>(rowIndex) >= rows.size() || columnIndex >= columns.size())
+    {
+        return false;
+    }
+
+    tag_t cell = NULL_TAG;
+    if (!BianHao_GetTableCell(rows[static_cast<size_t>(rowIndex)], columns[columnIndex], cell))
+    {
+        return false;
+    }
+
+    const std::string rawText = BianHao_GetCellRawText(cell);
+    const std::string displayText = BianHao_GetCellDisplayText(cell);
+    NXOpen::NXObject* referencedObject = NULL;
+    std::string associatedAttributeName;
+    tag_t associativeTextPartTag = NULL_TAG;
+    if (!BianHao_GetCellAssociatedAttribute(rawText, cell, referencedObject, associatedAttributeName,
+        associativeTextPartTag, &debug, columnIndex, "unique attribute"))
+    {
+        debug << "    unique col=" << columnIndex << " row=" << rowIndex
+            << " rejected: cell is not associated attribute raw=[" << rawText << "]\r\n";
+        return false;
+    }
+
+    const std::string objectValue = BianHao_GetObjectAttributeString(fallbackObject, associatedAttributeName);
+    debug << "    unique col=" << columnIndex << " row=" << rowIndex
+        << " assocObject=" << (referencedObject != NULL ? referencedObject->Tag() : NULL_TAG)
+        << " assocPart=" << associativeTextPartTag
+        << " attribute=[" << associatedAttributeName << "]"
+        << " tableValue=[" << displayText << "]"
+        << " objectTag=" << fallbackObject->Tag()
+        << " objectValue=[" << objectValue << "]\r\n";
+
+    return !associatedAttributeName.empty() && !displayText.empty() && !objectValue.empty() && displayText == objectValue;
+}
+
 std::string BianHao_GetSequenceTextAtRow(const std::vector<tag_t>& rows,
     const std::vector<tag_t>& columns,
     int rowIndex,
@@ -2422,6 +2671,99 @@ NXOpen::NXString BianHao_FindSequenceNumberInDrawingTable(NXOpen::NXObject* part
             }
         }
 
+        if (matches.empty())
+        {
+            const bool usePartAttributeFallback = BianHao_UsePartAttributeForSequenceFallback(partObject, bodyObject);
+            NXOpen::NXObject* fallbackObject = BianHao_GetSequenceAttributeFallbackObject(partObject, bodyObject, usePartAttributeFallback);
+            debug << "direct associated object scan found no sequence; start unique attribute column fallback"
+                << " fallbackObject=" << (fallbackObject != NULL ? fallbackObject->Tag() : NULL_TAG)
+                << " mode=" << (usePartAttributeFallback ? "part" : "body") << "\r\n";
+
+            if (fallbackObject != NULL)
+            {
+                tabnote = NULL_TAG;
+                while (UF_OBJ_cycle_objs_in_part(workPart->Tag(), UF_tabular_note_type, &tabnote) == 0 && tabnote != NULL_TAG)
+                {
+                    int type = 0;
+                    int subtype = 0;
+                    if (UF_OBJ_ask_type_and_subtype(tabnote, &type, &subtype) != 0 ||
+                        type != UF_tabular_note_type ||
+                        (subtype != UF_tabular_note_subtype && subtype != UF_parts_list_subtype))
+                    {
+                        continue;
+                    }
+
+                    debug << "unique fallback tabnote=" << tabnote << " subtype=" << subtype << "\r\n";
+
+                    std::vector<tag_t> rows;
+                    std::vector<tag_t> columns;
+                    if (!BianHao_GetTabularNoteRowsAndColumns(tabnote, rows, columns))
+                    {
+                        debug << "  unique fallback unable to read rows/columns\r\n";
+                        continue;
+                    }
+
+                    int headerRow = -1;
+                    int sequenceColumn = -1;
+                    if (!BianHao_FindSequenceHeader(tabnote, rows, columns, headerRow, sequenceColumn))
+                    {
+                        if (!BianHao_InferSequenceColumn(rows, columns, headerRow, sequenceColumn, debug))
+                        {
+                            continue;
+                        }
+                        debug << "  unique fallback inferred sequenceColumn=" << sequenceColumn << "\r\n";
+                    }
+                    else
+                    {
+                        debug << "  unique fallback headerRow=" << headerRow << " sequenceColumn=" << sequenceColumn << "\r\n";
+                    }
+
+                    const std::vector<size_t> uniqueColumns = BianHao_GetUniqueDisplayValueColumns(rows, columns, headerRow, sequenceColumn, debug);
+                    if (uniqueColumns.empty())
+                    {
+                        debug << "  unique fallback no usable unique display columns\r\n";
+                        continue;
+                    }
+
+                    for (size_t r = 0; r < rows.size(); ++r)
+                    {
+                        if (static_cast<int>(r) == headerRow)
+                        {
+                            continue;
+                        }
+
+                        bool rowMatched = false;
+                        for (size_t i = 0; i < uniqueColumns.size(); ++i)
+                        {
+                            if (BianHao_RowMatchesUniqueAttributeColumn(rows, columns, static_cast<int>(r), uniqueColumns[i], fallbackObject, debug))
+                            {
+                                rowMatched = true;
+                                break;
+                            }
+                        }
+
+                        if (!rowMatched)
+                        {
+                            continue;
+                        }
+
+                        std::string seq = BianHao_GetSequenceTextAtRow(rows, columns, static_cast<int>(r), headerRow, sequenceColumn);
+                        debug << "  unique fallback matched row=" << r << " sequence=[" << seq << "]\r\n";
+                        if (!seq.empty())
+                        {
+                            matches.push_back(seq);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (matches.empty() && !assemblyTags.empty())
+        {
+            debug << "assembly component fallback skipped: unique attribute fallback is the final non-associated lookup\r\n";
+        }
+
+#if 0
         if (matches.empty() && !assemblyTags.empty())
         {
             debug << "strict object scan found no sequence; start assembly component fallback\r\n";
@@ -2484,6 +2826,7 @@ NXOpen::NXString BianHao_FindSequenceNumberInDrawingTable(NXOpen::NXObject* part
                 }
             }
         }
+#endif
         else if (matches.empty())
         {
             debug << "assembly component fallback skipped: no assembly occurrence/component tags\r\n";
