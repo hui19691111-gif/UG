@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -4641,23 +4642,33 @@ namespace
             return result;
         }
 
+        FaceInfo fallbackPlanarByBoxArea;
         double largestPlanarRealArea = -1.0;
         for (size_t i = 0; i < allCandidates.size(); ++i)
         {
             double realArea = -1.0;
             bool hasRealArea = TryMeasureFaceArea(allCandidates[i].face, &realArea);
-            if (allCandidates[i].area > result.areaScore)
+            if (allCandidates[i].area > fallbackPlanarByBoxArea.areaScore)
             {
-                result.face = allCandidates[i].face;
-                result.type = allCandidates[i].type;
-                result.areaScore = allCandidates[i].area;
-                result.totalScore = allCandidates[i].area;
+                fallbackPlanarByBoxArea.face = allCandidates[i].face;
+                fallbackPlanarByBoxArea.type = allCandidates[i].type;
+                fallbackPlanarByBoxArea.areaScore = allCandidates[i].area;
+                fallbackPlanarByBoxArea.totalScore = allCandidates[i].area;
             }
 
             if (hasRealArea && realArea > largestPlanarRealArea)
             {
+                result.face = allCandidates[i].face;
+                result.type = allCandidates[i].type;
+                result.areaScore = realArea;
+                result.totalScore = realArea;
                 largestPlanarRealArea = realArea;
             }
+        }
+
+        if (result.face == NULL)
+        {
+            result = fallbackPlanarByBoxArea;
         }
 
         FaceInfo bestLargeCylinder;
@@ -4783,6 +4794,12 @@ namespace
             std::vector<Edge*> edges = FaceEdgesByUf(bendFace);
             for (size_t i = 0; i < edges.size(); ++i)
             {
+                logical isSmooth = false;
+                if (UF_MODL_ask_edge_smoothness(edges[i]->Tag(), 18.2, &isSmooth) != 0 || !isSmooth)
+                {
+                    continue;
+                }
+
                 std::vector<Face*> adjacentFaces = AdjacentFacesByEdge(edges[i], bendFace);
                 for (size_t j = 0; j < adjacentFaces.size(); ++j)
                 {
@@ -5212,6 +5229,287 @@ namespace
         return true;
     }
 
+    class FormulaParser
+    {
+    public:
+        FormulaParser(const std::string& text, const std::map<std::string, double>& variables) :
+            text_(text),
+            variables_(variables),
+            pos_(0)
+        {
+        }
+
+        bool Evaluate(double* value)
+        {
+            if (value == NULL)
+            {
+                return false;
+            }
+
+            double result = 0.0;
+            if (!ParseExpression(&result))
+            {
+                return false;
+            }
+            SkipSpaces();
+            if (pos_ != text_.size())
+            {
+                return false;
+            }
+            *value = result;
+            return !std::isnan(result) && !std::isinf(result);
+        }
+
+    private:
+        const std::string& text_;
+        const std::map<std::string, double>& variables_;
+        size_t pos_;
+
+        void SkipSpaces()
+        {
+            while (pos_ < text_.size() && static_cast<unsigned char>(text_[pos_]) <= ' ')
+            {
+                ++pos_;
+            }
+        }
+
+        bool ParseExpression(double* value)
+        {
+            if (!ParseTerm(value))
+            {
+                return false;
+            }
+
+            while (true)
+            {
+                SkipSpaces();
+                if (pos_ >= text_.size() || (text_[pos_] != '+' && text_[pos_] != '-'))
+                {
+                    return true;
+                }
+
+                char op = text_[pos_++];
+                double right = 0.0;
+                if (!ParseTerm(&right))
+                {
+                    return false;
+                }
+                *value = op == '+' ? *value + right : *value - right;
+            }
+        }
+
+        bool ParseTerm(double* value)
+        {
+            if (!ParseFactor(value))
+            {
+                return false;
+            }
+
+            while (true)
+            {
+                SkipSpaces();
+                if (pos_ >= text_.size() || (text_[pos_] != '*' && text_[pos_] != '/'))
+                {
+                    return true;
+                }
+
+                char op = text_[pos_++];
+                double right = 0.0;
+                if (!ParseFactor(&right))
+                {
+                    return false;
+                }
+                if (op == '/')
+                {
+                    if (std::fabs(right) <= 1.0e-12)
+                    {
+                        return false;
+                    }
+                    *value /= right;
+                }
+                else
+                {
+                    *value *= right;
+                }
+            }
+        }
+
+        bool ParseFactor(double* value)
+        {
+            SkipSpaces();
+            if (pos_ >= text_.size())
+            {
+                return false;
+            }
+
+            if (text_[pos_] == '+')
+            {
+                ++pos_;
+                return ParseFactor(value);
+            }
+            if (text_[pos_] == '-')
+            {
+                ++pos_;
+                if (!ParseFactor(value))
+                {
+                    return false;
+                }
+                *value = -*value;
+                return true;
+            }
+            if (text_[pos_] == '(')
+            {
+                ++pos_;
+                if (!ParseExpression(value))
+                {
+                    return false;
+                }
+                SkipSpaces();
+                if (pos_ >= text_.size() || text_[pos_] != ')')
+                {
+                    return false;
+                }
+                ++pos_;
+                return true;
+            }
+
+            if (std::isdigit(static_cast<unsigned char>(text_[pos_])) || text_[pos_] == '.')
+            {
+                const char* start = text_.c_str() + pos_;
+                char* end = NULL;
+                double parsed = std::strtod(start, &end);
+                if (end == start)
+                {
+                    return false;
+                }
+                pos_ += static_cast<size_t>(end - start);
+                *value = parsed;
+                return true;
+            }
+
+            return ParseIdentifier(value);
+        }
+
+        bool ParseIdentifier(double* value)
+        {
+            size_t start = pos_;
+            while (pos_ < text_.size())
+            {
+                unsigned char c = static_cast<unsigned char>(text_[pos_]);
+                if (c <= ' ' || text_[pos_] == '+' || text_[pos_] == '-' ||
+                    text_[pos_] == '*' || text_[pos_] == '/' ||
+                    text_[pos_] == '(' || text_[pos_] == ')')
+                {
+                    break;
+                }
+                ++pos_;
+            }
+
+            std::string name = TrimCopy(text_.substr(start, pos_ - start));
+            if (name.empty())
+            {
+                return false;
+            }
+
+            std::string upper = name;
+            std::transform(upper.begin(), upper.end(), upper.begin(),
+                [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+
+            SkipSpaces();
+            if (pos_ < text_.size() && text_[pos_] == '(')
+            {
+                ++pos_;
+                double argument = 0.0;
+                if (!ParseExpression(&argument))
+                {
+                    return false;
+                }
+                SkipSpaces();
+                if (pos_ >= text_.size() || text_[pos_] != ')')
+                {
+                    return false;
+                }
+                ++pos_;
+
+                if (upper == "TAN")
+                {
+                    *value = std::tan(argument);
+                    return true;
+                }
+                if (upper == "SIN")
+                {
+                    *value = std::sin(argument);
+                    return true;
+                }
+                if (upper == "COS")
+                {
+                    *value = std::cos(argument);
+                    return true;
+                }
+                return false;
+            }
+
+            if (upper == "PI")
+            {
+                *value = 3.14159265358979323846;
+                return true;
+            }
+
+            std::map<std::string, double>::const_iterator it = variables_.find(name);
+            if (it == variables_.end())
+            {
+                it = variables_.find(upper);
+            }
+            if (it == variables_.end())
+            {
+                return false;
+            }
+
+            *value = it->second;
+            return true;
+        }
+    };
+
+    bool EvaluateKFormulaText(
+        const std::string& formula,
+        double deduction,
+        double angleDeg,
+        double innerRadius,
+        double thickness,
+        double* targetK)
+    {
+        std::string expression = TrimCopy(formula);
+        if (expression.empty() || thickness <= 0.0)
+        {
+            return false;
+        }
+
+        std::map<std::string, double> variables;
+        variables["扣除"] = deduction;
+        variables["角度"] = angleDeg;
+        variables["内R"] = innerRadius;
+        variables["板厚"] = thickness;
+        variables["DEDUCTION"] = deduction;
+        variables["Q"] = deduction;
+        variables["ANGLE"] = angleDeg;
+        variables["A"] = angleDeg;
+        variables["R"] = innerRadius;
+        variables["THICKNESS"] = thickness;
+        variables["T"] = thickness;
+
+        double value = 0.0;
+        FormulaParser parser(expression, variables);
+        if (!parser.Evaluate(&value) || value < 0.0 || value > 1.0)
+        {
+            return false;
+        }
+        if (targetK != NULL)
+        {
+            *targetK = value;
+        }
+        return true;
+    }
+
     bool CalculateTargetK(const BendRule& rule, BendFaceRecord* record)
     {
         if (record == NULL)
@@ -5602,6 +5900,32 @@ namespace
         }
     }
 
+    void TrySetBlockEnabled(UIBlock* block, bool enabled)
+    {
+        if (block == NULL)
+        {
+            return;
+        }
+
+        const char* names[] = { "Enable", "Sensitivity" };
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+        {
+            PropertyList* props = NULL;
+            try
+            {
+                props = block->GetProperties();
+                props->SetLogical(names[i], enabled);
+            }
+            catch (...)
+            {
+            }
+            if (props != NULL)
+            {
+                delete props;
+            }
+        }
+    }
+
     void SetNodeColumnText(Node* node, int columnID, const std::string& text)
     {
         if (node != NULL)
@@ -5746,6 +6070,281 @@ namespace
         }
         result += "\"";
         return result;
+    }
+
+    struct KFactorCalculatorState
+    {
+        HWND deductionEdit;
+        HWND angleEdit;
+        HWND radiusEdit;
+        HWND thicknessEdit;
+        HWND formulaEdit;
+        HWND resultText;
+        std::vector<HWND> childControls;
+        HFONT dialogFont;
+        HBRUSH backgroundBrush;
+        COLORREF backgroundColor;
+    };
+
+    void AddCalculatorControl(KFactorCalculatorState* state, HWND control)
+    {
+        if (state == NULL || control == NULL)
+        {
+            return;
+        }
+
+        state->childControls.push_back(control);
+        if (state->dialogFont != NULL)
+        {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(state->dialogFont), TRUE);
+        }
+    }
+
+    std::string GetEditUtf8(HWND edit)
+    {
+        if (edit == NULL)
+        {
+            return std::string();
+        }
+
+        int length = GetWindowTextLengthW(edit);
+        std::wstring text(static_cast<size_t>(length + 1), L'\0');
+        if (length > 0)
+        {
+            GetWindowTextW(edit, &text[0], length + 1);
+        }
+        if (!text.empty() && text[text.size() - 1] == L'\0')
+        {
+            text.resize(text.size() - 1);
+        }
+        return WidePathToUtf8(text);
+    }
+
+    bool ParseEditDouble(HWND edit, double* value)
+    {
+        std::string text = TrimCopy(GetEditUtf8(edit));
+        if (text.empty())
+        {
+            return false;
+        }
+
+        char* end = NULL;
+        double parsed = std::strtod(text.c_str(), &end);
+        if (end == text.c_str())
+        {
+            return false;
+        }
+        while (end != NULL && *end != '\0' && static_cast<unsigned char>(*end) <= ' ')
+        {
+            ++end;
+        }
+        if (end != NULL && *end != '\0')
+        {
+            return false;
+        }
+        if (value != NULL)
+        {
+            *value = parsed;
+        }
+        return true;
+    }
+
+    void SetWindowTextUtf8(HWND hwnd, const std::string& text)
+    {
+        std::wstring wide = PathTextToWide(text);
+        SetWindowTextW(hwnd, wide.c_str());
+    }
+
+    void CalculateKFactorFromDialog(HWND hwnd, KFactorCalculatorState* state)
+    {
+        if (state == NULL)
+        {
+            return;
+        }
+
+        double deduction = 0.0;
+        double angle = 0.0;
+        double radius = 0.0;
+        double thickness = 0.0;
+        if (!ParseEditDouble(state->deductionEdit, &deduction) ||
+            !ParseEditDouble(state->angleEdit, &angle) ||
+            !ParseEditDouble(state->radiusEdit, &radius) ||
+            !ParseEditDouble(state->thicknessEdit, &thickness))
+        {
+            MessageBoxW(hwnd, L"请输入有效的扣除、角度、内R、板厚。", L"计算K因子", MB_ICONWARNING | MB_OK);
+            return;
+        }
+
+        double result = 0.0;
+        if (!EvaluateKFormulaText(GetEditUtf8(state->formulaEdit), deduction, angle, radius, thickness, &result))
+        {
+            MessageBoxW(hwnd, L"公式计算失败，或结果不在 0 到 1 之间。", L"计算K因子", MB_ICONWARNING | MB_OK);
+            return;
+        }
+
+        SetWindowTextUtf8(state->resultText, "K = " + FormatDouble(result, 6));
+    }
+
+    LRESULT CALLBACK KFactorCalculatorWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        const int kIdCalculate = 2101;
+        const int kIdClose = IDCANCEL;
+
+        KFactorCalculatorState* state = reinterpret_cast<KFactorCalculatorState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        switch (message)
+        {
+        case WM_CREATE:
+        {
+            CREATESTRUCTW* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            state = reinterpret_cast<KFactorCalculatorState*>(createStruct->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+            if (state != NULL)
+            {
+                state->backgroundColor = RGB(236, 236, 236);
+                state->backgroundBrush = CreateSolidBrush(state->backgroundColor);
+                state->dialogFont = CreateNxLikeDialogFont();
+                if (state->dialogFont != NULL)
+                {
+                    SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(state->dialogFont), TRUE);
+                }
+            }
+
+            HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
+            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"扣除", WS_CHILD | WS_VISIBLE, 18, 20, 70, 22, hwnd, NULL, instance, NULL));
+            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"角度", WS_CHILD | WS_VISIBLE, 18, 54, 70, 22, hwnd, NULL, instance, NULL));
+            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"内R", WS_CHILD | WS_VISIBLE, 18, 88, 70, 22, hwnd, NULL, instance, NULL));
+            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"板厚", WS_CHILD | WS_VISIBLE, 18, 122, 70, 22, hwnd, NULL, instance, NULL));
+            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"公式", WS_CHILD | WS_VISIBLE, 18, 156, 70, 22, hwnd, NULL, instance, NULL));
+
+            if (state != NULL)
+            {
+                state->deductionEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 90, 18, 120, 24, hwnd, NULL, instance, NULL);
+                state->angleEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"90", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 90, 52, 120, 24, hwnd, NULL, instance, NULL);
+                state->radiusEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 90, 86, 120, 24, hwnd, NULL, instance, NULL);
+                state->thicknessEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"1", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 90, 120, 120, 24, hwnd, NULL, instance, NULL);
+                state->formulaEdit = CreateWindowExW(
+                    WS_EX_CLIENTEDGE,
+                    L"EDIT",
+                    L"((2*(R+T)*tan(A*pi/360)-Q)/(A*pi/180)-R)/T",
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                    90,
+                    154,
+                    430,
+                    24,
+                    hwnd,
+                    NULL,
+                    instance,
+                    NULL);
+                state->resultText = CreateWindowW(L"STATIC", L"K = ", WS_CHILD | WS_VISIBLE, 90, 190, 260, 22, hwnd, NULL, instance, NULL);
+                AddCalculatorControl(state, state->deductionEdit);
+                AddCalculatorControl(state, state->angleEdit);
+                AddCalculatorControl(state, state->radiusEdit);
+                AddCalculatorControl(state, state->thicknessEdit);
+                AddCalculatorControl(state, state->formulaEdit);
+                AddCalculatorControl(state, state->resultText);
+            }
+
+            AddCalculatorControl(state, CreateWindowW(L"BUTTON", L"计算", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 350, 222, 76, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCalculate)), instance, NULL));
+            AddCalculatorControl(state, CreateWindowW(L"BUTTON", L"关闭", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 444, 222, 76, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClose)), instance, NULL));
+            return 0;
+        }
+        case WM_CTLCOLORSTATIC:
+            if (state != NULL && state->backgroundBrush != NULL)
+            {
+                SetBkColor(reinterpret_cast<HDC>(wParam), state->backgroundColor);
+                SetTextColor(reinterpret_cast<HDC>(wParam), RGB(30, 30, 30));
+                return reinterpret_cast<LRESULT>(state->backgroundBrush);
+            }
+            break;
+        case WM_COMMAND:
+            if (LOWORD(wParam) == kIdCalculate)
+            {
+                CalculateKFactorFromDialog(hwnd, state);
+                return 0;
+            }
+            if (LOWORD(wParam) == kIdClose)
+            {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        case WM_DESTROY:
+            if (state != NULL)
+            {
+                if (state->dialogFont != NULL)
+                {
+                    DeleteObject(state->dialogFont);
+                    state->dialogFont = NULL;
+                }
+                if (state->backgroundBrush != NULL)
+                {
+                    DeleteObject(state->backgroundBrush);
+                    state->backgroundBrush = NULL;
+                }
+            }
+            return 0;
+        default:
+            break;
+        }
+
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    void ShowKFactorCalculatorDialog()
+    {
+        INITCOMMONCONTROLSEX controls = {};
+        controls.dwSize = sizeof(controls);
+        controls.dwICC = ICC_STANDARD_CLASSES;
+        InitCommonControlsEx(&controls);
+
+        const wchar_t* className = L"PiLianZuanBanJinKFactorCalculator";
+        HINSTANCE instance = reinterpret_cast<HINSTANCE>(&__ImageBase);
+        WNDCLASSEXW windowClass = {};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.lpfnWndProc = KFactorCalculatorWndProc;
+        windowClass.hInstance = instance;
+        windowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+        windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        windowClass.lpszClassName = className;
+        RegisterClassExW(&windowClass);
+
+        KFactorCalculatorState state = {};
+        HWND parent = reinterpret_cast<HWND>(UF_UI_get_default_parent());
+        HWND hwnd = CreateWindowExW(
+            WS_EX_DLGMODALFRAME,
+            className,
+            L"计算K因子",
+            WS_CAPTION | WS_SYSMENU | WS_BORDER,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            560,
+            310,
+            parent,
+            NULL,
+            instance,
+            &state);
+        if (hwnd == NULL)
+        {
+            MessageBoxW(parent, L"无法打开K因子计算窗口。", L"计算K因子", MB_ICONERROR | MB_OK);
+            return;
+        }
+
+        CenterWindowOnParent(hwnd, parent);
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+
+        MSG msg;
+        while (IsWindow(hwnd) && GetMessageW(&msg, NULL, 0, 0) > 0)
+        {
+            if (!IsDialogMessageW(hwnd, &msg))
+            {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
     }
 
     std::vector<std::string> SplitCsvLine(const std::string& line)
@@ -5976,7 +6575,7 @@ namespace
             saveButton_(NULL),
             importExcelButton_(NULL),
             exportExcelButton_(NULL),
-            deleteButton_(NULL),
+            calculateKButton_(NULL),
             selectedConditionIndex_(0),
             selectedNode_(NULL),
             columnsInserted_(false)
@@ -6036,7 +6635,7 @@ namespace
             saveButton_ = dynamic_cast<UIBlock*>(dialog_->TopBlock()->FindBlock("addNodeButton"));
             importExcelButton_ = dynamic_cast<UIBlock*>(dialog_->TopBlock()->FindBlock("importExcelButton"));
             exportExcelButton_ = dynamic_cast<UIBlock*>(dialog_->TopBlock()->FindBlock("exportExcelButton"));
-            deleteButton_ = dynamic_cast<UIBlock*>(dialog_->TopBlock()->FindBlock("deleteNodeButton"));
+            calculateKButton_ = dynamic_cast<UIBlock*>(dialog_->TopBlock()->FindBlock("deleteNodeButton"));
             LocalizeAndHideUnusedBlocks();
             settings_ = LoadRuleConfigForEditor();
             rows_ = LoadCoefficientRowsFromIni();
@@ -6094,9 +6693,9 @@ namespace
             {
                 ExportExcelData();
             }
-            else if (block == deleteButton_)
+            else if (block == calculateKButton_)
             {
-                DeleteSelectedRow();
+                ShowKFactorCalculatorDialog();
             }
             else if (block == materialPageEnum_)
             {
@@ -6177,7 +6776,7 @@ namespace
         UIBlock* saveButton_;
         UIBlock* importExcelButton_;
         UIBlock* exportExcelButton_;
-        UIBlock* deleteButton_;
+        UIBlock* calculateKButton_;
         RuleConfig settings_;
         std::vector<CoefficientRow> rows_;
         std::vector<ConditionRuleRow> conditionRows_;
@@ -6214,7 +6813,7 @@ namespace
             TrySetBlockString(saveButton_, "Label", "保存");
             TrySetBlockString(importExcelButton_, "Label", "导入EXCEL数据");
             TrySetBlockString(exportExcelButton_, "Label", "导出EXCEL数据");
-            TrySetBlockString(deleteButton_, "Label", "删除厚度");
+            TrySetBlockString(calculateKButton_, "Label", "计算K因子");
 
             const char* hideBlockIds[] = {
                 "selection0", "conditionTree", "autoTapHoleToggle", "autoPemHoleToggle", "autoCounterboreHoleToggle",
@@ -6235,7 +6834,8 @@ namespace
             TrySetBlockVisible(saveButton_, true);
             TrySetBlockVisible(importExcelButton_, true);
             TrySetBlockVisible(exportExcelButton_, true);
-            TrySetBlockVisible(deleteButton_, false);
+            TrySetBlockVisible(calculateKButton_, true);
+            TrySetBlockEnabled(calculateKButton_, true);
         }
 
         void SyncMultiBendRadiusControl()
@@ -6607,16 +7207,6 @@ namespace
                 ++guard;
             }
             return thickness;
-        }
-
-        void DeleteSelectedRow()
-        {
-            size_t index = 0;
-            if (IndexForNode(selectedNode_, &index) && index < rows_.size())
-            {
-                rows_.erase(rows_.begin() + static_cast<std::vector<CoefficientRow>::difference_type>(index));
-                RebuildTree();
-            }
         }
 
         bool Save()
