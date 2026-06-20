@@ -1874,9 +1874,8 @@ void EnsureSameBodyPlaneFaceFeatures(SameBodyFingerprint& fingerprint)
 		return lhs.weight > rhs.weight;
 	});
 
-	const size_t maxFeatureFaces = std::min<size_t>(candidates.size(), 8);
-	fingerprint.planeFaces.reserve(maxFeatureFaces);
-	for (size_t index = 0; index < maxFeatureFaces; ++index)
+	fingerprint.planeFaces.reserve(candidates.size());
+	for (size_t index = 0; index < candidates.size(); ++index)
 	{
 		SameBodyPlaneFaceFeature faceFeature = {};
 		if (BuildSameBodyPlanarFaceFeature(candidates[index].face, faceFeature))
@@ -2014,6 +2013,8 @@ bool SameBodyLocalCoordinateSignaturesMatch(const SameBodyLocalCoordinateSignatu
 
 int FindSameBodyMatchingPlaneFaceGroup(const SameBodyFingerprint& fingerprint, const SameBodyPlaneFaceFeature& referenceFace, size_t expectedCount)
 {
+	int bestGroupIndex = -1;
+	double bestArea = -1.0;
 	for (size_t groupIndex = 0; groupIndex < fingerprint.planeFaceGroups.size(); ++groupIndex)
 	{
 		const SameBodyPlaneFaceGroup& group = fingerprint.planeFaceGroups[groupIndex];
@@ -2024,10 +2025,14 @@ int FindSameBodyMatchingPlaneFaceGroup(const SameBodyFingerprint& fingerprint, c
 		const SameBodyPlaneFaceFeature& candidateFace = fingerprint.planeFaces[group.faceIndexes[0]];
 		if (SameBodyPlaneFaceMatch(referenceFace, candidateFace))
 		{
-			return static_cast<int>(groupIndex);
+			if (bestGroupIndex < 0 || SameBodyFaceAreaSignificantlyGreater(candidateFace.area, bestArea))
+			{
+				bestGroupIndex = static_cast<int>(groupIndex);
+				bestArea = candidateFace.area;
+			}
 		}
 	}
-	return -1;
+	return bestGroupIndex;
 }
 
 int FindSameBodyLargestPlaneFaceGroup(const SameBodyFingerprint& fingerprint, size_t expectedCount)
@@ -2094,15 +2099,7 @@ bool SameBodyAnchorsMatch(SameBodyFingerprint& reference, SameBodyFingerprint& c
 		const SameBodyPlaneFaceGroup& referenceGroup = reference.planeFaceGroups[static_cast<size_t>(referenceGroupIndex)];
 		const SameBodyPlaneFaceFeature& referenceFace = reference.planeFaces[referenceGroup.faceIndexes[0]];
 
-		int candidateGroupIndex = -1;
-		if (expectedCount == 1)
-		{
-			candidateGroupIndex = FindSameBodyMatchingPlaneFaceGroup(candidate, referenceFace, expectedCount);
-		}
-		else
-		{
-			candidateGroupIndex = FindSameBodyLargestPlaneFaceGroup(candidate, expectedCount);
-		}
+		const int candidateGroupIndex = FindSameBodyMatchingPlaneFaceGroup(candidate, referenceFace, expectedCount);
 		if (candidateGroupIndex < 0)
 		{
 			if (expectedCount == 1)
@@ -2113,11 +2110,6 @@ bool SameBodyAnchorsMatch(SameBodyFingerprint& reference, SameBodyFingerprint& c
 		}
 
 		const SameBodyPlaneFaceGroup& candidateGroup = candidate.planeFaceGroups[static_cast<size_t>(candidateGroupIndex)];
-		const SameBodyPlaneFaceFeature& candidateFace = candidate.planeFaces[candidateGroup.faceIndexes[0]];
-		if (expectedCount == 2 && !SameBodyPlaneFaceMatch(referenceFace, candidateFace))
-		{
-			return false;
-		}
 		if (TrySameBodyAnchorPlaneGroupMatch(reference, referenceGroup, candidate, candidateGroup))
 		{
 			return true;
