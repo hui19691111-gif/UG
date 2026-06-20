@@ -3345,9 +3345,8 @@ void EnsurePlaneFaceFeatures(BodyFingerprint& fingerprint)
         return lhs.weight > rhs.weight;
     });
 
-    const std::size_t maxFeatureFaces = std::min<std::size_t>(candidates.size(), 8);
-    fingerprint.planeFaces.reserve(maxFeatureFaces);
-    for (std::size_t index = 0; index < maxFeatureFaces; ++index)
+    fingerprint.planeFaces.reserve(candidates.size());
+    for (std::size_t index = 0; index < candidates.size(); ++index)
     {
         PlaneFaceFeature faceFeature = {};
         if (BuildPlanarFaceFeature(candidates[index].face, faceFeature))
@@ -3872,6 +3871,87 @@ int FindLargestPlaneFaceGroup(
     return bestGroupIndex;
 }
 
+int FindLargestMatchingPlaneFaceGroup(
+    const BodyFingerprint& fingerprint,
+    const PlaneFaceFeature& referenceFace,
+    std::size_t expectedCount,
+    std::ofstream* debugLog)
+{
+    int bestGroupIndex = -1;
+    double bestArea = -1.0;
+    for (std::size_t groupIndex = 0; groupIndex < fingerprint.planeFaceGroups.size(); ++groupIndex)
+    {
+        const PlaneFaceGroup& group = fingerprint.planeFaceGroups[groupIndex];
+        if (group.faceIndexes.size() != expectedCount || group.faceIndexes.empty())
+        {
+            if (debugLog != NULL && debugLog->is_open())
+            {
+                (*debugLog) << "Candidate plane group skipped: groupIndex=" << groupIndex
+                            << ", expectedCount=" << expectedCount
+                            << ", actualCount=" << group.faceIndexes.size()
+                            << std::endl;
+            }
+            continue;
+        }
+
+        const std::size_t faceIndex = group.faceIndexes[0];
+        if (faceIndex >= fingerprint.planeFaces.size())
+        {
+            continue;
+        }
+
+        const PlaneFaceFeature& candidateFace = fingerprint.planeFaces[faceIndex];
+        const std::string mismatchReason = PlaneFaceSignatureMismatch(referenceFace, candidateFace);
+        if (!mismatchReason.empty())
+        {
+            if (debugLog != NULL && debugLog->is_open())
+            {
+                (*debugLog) << "Candidate plane group signature mismatch: groupIndex="
+                            << groupIndex
+                            << ", faceTag=" << candidateFace.tag
+                            << ", expectedCount=" << expectedCount
+                            << ", area=" << FormatDouble(candidateFace.area)
+                            << ", perimeter=" << FormatDouble(candidateFace.perimeter)
+                            << ", edgeCount=" << candidateFace.edgeCount
+                            << ", lengthBuckets=" << FormatLengthBuckets(candidateFace.lengthBuckets)
+                            << ", reason=" << mismatchReason
+                            << std::endl;
+            }
+            continue;
+        }
+
+        if (bestGroupIndex < 0 || FaceAreaSignificantlyGreater(candidateFace.area, bestArea))
+        {
+            bestGroupIndex = static_cast<int>(groupIndex);
+            bestArea = candidateFace.area;
+        }
+    }
+
+    if (debugLog != NULL && debugLog->is_open())
+    {
+        if (bestGroupIndex >= 0)
+        {
+            const PlaneFaceGroup& group =
+                fingerprint.planeFaceGroups[static_cast<std::size_t>(bestGroupIndex)];
+            const PlaneFaceFeature& face = fingerprint.planeFaces[group.faceIndexes[0]];
+            (*debugLog) << "Candidate largest matching plane group selected: groupIndex="
+                        << bestGroupIndex
+                        << ", faceTag=" << face.tag
+                        << ", expectedCount=" << expectedCount
+                        << ", area=" << FormatDouble(face.area)
+                        << std::endl;
+        }
+        else
+        {
+            (*debugLog) << "Candidate largest matching plane group missing: expectedCount="
+                        << expectedCount
+                        << std::endl;
+        }
+    }
+
+    return bestGroupIndex;
+}
+
 bool TryAnchorPlaneGroupMatch(
     const BodyFingerprint& reference,
     const PlaneFaceGroup& referenceGroup,
@@ -4015,7 +4095,8 @@ bool BodiesMatchByAnchorPlaneCoordinates(
             if (debugLog != NULL && debugLog->is_open())
             {
                 (*debugLog) << "Reference anchor group missing: expectedCount="
-                            << expectedCount << std::endl;
+                            << expectedCount
+                            << std::endl;
             }
             continue;
         }
@@ -4024,26 +4105,18 @@ bool BodiesMatchByAnchorPlaneCoordinates(
             reference.planeFaceGroups[static_cast<std::size_t>(referenceGroupIndex)];
         const PlaneFaceFeature& referenceFace =
             reference.planeFaces[referenceGroup.faceIndexes[0]];
-
-        int candidateGroupIndex = -1;
-        if (expectedCount == 1)
-        {
-            candidateGroupIndex = FindMatchingPlaneFaceGroup(
-                candidate,
-                referenceFace,
-                expectedCount,
-                debugLog);
-        }
-        else
-        {
-            candidateGroupIndex = FindLargestPlaneFaceGroup(candidate, expectedCount);
-        }
+        const int candidateGroupIndex = FindLargestMatchingPlaneFaceGroup(
+            candidate,
+            referenceFace,
+            expectedCount,
+            debugLog);
 
         if (candidateGroupIndex < 0)
         {
-            std::string currentRejectReason = expectedCount == 1
-                ? "candidate largest unique anchor plane group mismatch"
-                : "candidate largest two-count anchor plane group missing";
+            std::string currentRejectReason =
+                expectedCount == 1
+                    ? "candidate largest matching unique anchor plane group missing"
+                    : "candidate largest matching two-count anchor plane group missing";
             if (debugLog != NULL && debugLog->is_open())
             {
                 (*debugLog) << "Anchor attempt skipped: expectedCount=" << expectedCount
@@ -4070,7 +4143,7 @@ bool BodiesMatchByAnchorPlaneCoordinates(
 
         if (debugLog != NULL && debugLog->is_open())
         {
-            (*debugLog) << "Fixed reference plane group selected: expectedCount="
+            (*debugLog) << "Largest reference plane group selected: expectedCount="
                         << expectedCount
                         << ", refGroupIndex=" << referenceGroupIndex
                         << ", refFaceTag=" << referenceFace.tag
@@ -4079,19 +4152,6 @@ bool BodiesMatchByAnchorPlaneCoordinates(
                         << ", candFirstFaceTag=" << candidateFace.tag
                         << ", candArea=" << FormatDouble(candidateFace.area)
                         << std::endl;
-        }
-
-        if (expectedCount == 2 && !SamePlaneFaceSignature(referenceFace, candidateFace))
-        {
-            rejectReason = "candidate largest two-count anchor plane group mismatch: " +
-                PlaneFaceSignatureMismatch(referenceFace, candidateFace);
-            if (debugLog != NULL && debugLog->is_open())
-            {
-                (*debugLog) << "Anchor attempt failed: expectedCount=" << expectedCount
-                            << ", reason=" << rejectReason
-                            << std::endl;
-            }
-            return false;
         }
 
         std::string anchorRejectReason;
