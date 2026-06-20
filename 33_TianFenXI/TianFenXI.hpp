@@ -107,7 +107,9 @@ public:
 private:
     void ConfigureFaceSelectionBlock();
     void UpdateDeleteRVisibility();
-    void PreviewSelectedFaceChain();
+    void LoadUiSettings();
+    void SaveUiSettings();
+    void PreviewSelectedFaceChain(bool createMiddlePlanes = false);
     void ClearPreviewHighlight(bool refresh = true);
 
     const char* theDlxFileName;
@@ -119,6 +121,13 @@ private:
     NXOpen::BlockStyler::StringBlock* string01;// Block type: String
     std::vector<tag_t> highlightedFaceChain;
     std::vector<tag_t> highlightedBoundaryEdges;
+    std::vector<tag_t> highlightedGapFaces;
+    std::vector<tag_t> skippedGapFaces;
+    std::vector<tag_t> autoSelectedGapFaces;
+    std::vector<tag_t> previewColoredFaces;
+    std::vector<int> previewOriginalFaceColors;
+    tag_t previewSelectedFaceTag;
+    bool updatingSelectionProgrammatically;
     bool hasPreviewThickness;
     double previewThickness;
     double previewInwardNormal[3];

@@ -50,13 +50,26 @@
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
 #include <NXOpen/DisplayableObject.hxx>
+#include <NXOpen/Features_DeleteFaceBuilder.hxx>
+#include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Plane.hxx>
+#include <NXOpen/PlaneCollection.hxx>
+#include <NXOpen/ScCollector.hxx>
+#include <NXOpen/ScRuleFactory.hxx>
+#include <NXOpen/SelectionIntentRule.hxx>
+#include <NXOpen/SelectionIntentRuleOptions.hxx>
+#include <NXOpen/FaceDumbRule.hxx>
+#include <NXOpen/Edge.hxx>
 #include <uf_modl.h>
+#include <uf_obj.h>
 #include <uf_disp.h>
 #include <uf_ui.h>
+#include <uf_curve.h>
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <deque>
+#include <cstdlib>
 #include <iomanip>
 #include <map>
 #include <set>
@@ -157,7 +170,10 @@ const double kCoplanarDistanceTolerance = 0.25;
 const double kThicknessTolerance = 0.2;
 const double kMinThickness = 0.05;
 const double kNarrowBoundaryDistance = 5.0;
+const double kSameFaceLengthTolerance = 0.2;
+const double kLongEdgeParallelCosTolerance = 0.98;
 const wchar_t* kDebugLogPath = L"D:\\UG智辉钣金插件\\logs\\TianFenXI_debug.log";
+const wchar_t* kSettingsPath = L"D:\\UG智辉钣金插件\\config\\TianFenXI.ini";
 
 struct EdgeEndpointPair
 {
@@ -174,7 +190,27 @@ struct BoundaryLoop
     double boxDiagonal;
 };
 
+struct GapEdgePair
+{
+    tag_t firstEdge;
+    tag_t secondEdge;
+};
+
+struct GapFaceGroup
+{
+    std::vector<GapEdgePair> gapEdgePairs;
+    std::vector<tag_t> faces;
+};
+
+struct FacePair
+{
+    tag_t firstFace;
+    tag_t secondFace;
+    double distance;
+};
+
 bool AskEdgeEndpointPair(tag_t edgeTag, EdgeEndpointPair& endpoints);
+bool ContainsTag(const std::vector<tag_t>& tags, tag_t tag);
 
 std::string FormatDouble(double value)
 {
@@ -1344,7 +1380,7 @@ tag_t AskBoundaryEdgeOwnerFace(tag_t edgeTag, const std::set<tag_t>& chainFaces)
     return NULL_TAG;
 }
 
-std::vector<tag_t> PickOuterAndMultiFaceInnerBoundaryLoops(
+std::vector<GapEdgePair> PickOuterAndMultiFaceInnerBoundaryLoops(
     const std::vector<tag_t>& boundaryEdgeTags,
     const std::vector<tag_t>& faceChain)
 {
@@ -1369,7 +1405,7 @@ std::vector<tag_t> PickOuterAndMultiFaceInnerBoundaryLoops(
 
     if (boundaryEdges.empty())
     {
-        return boundaryEdgeTags;
+        return std::vector<GapEdgePair>();
     }
 
     std::vector<BoundaryLoop> loops;
@@ -1392,7 +1428,7 @@ std::vector<tag_t> PickOuterAndMultiFaceInnerBoundaryLoops(
 
     if (loops.empty())
     {
-        return boundaryEdgeTags;
+        return std::vector<GapEdgePair>();
     }
 
     std::size_t bestIndex = 0;
@@ -1441,7 +1477,8 @@ std::vector<tag_t> PickOuterAndMultiFaceInnerBoundaryLoops(
         endpointByEdge[boundaryEdges[index].edgeTag] = boundaryEdges[index];
     }
 
-    std::set<tag_t> narrowEdges;
+    std::vector<GapEdgePair> gapEdgePairs;
+    std::set<std::pair<tag_t, tag_t> > visitedPairs;
     for (std::size_t firstIndex = 0; firstIndex < ringEdgesToCheck.size(); ++firstIndex)
     {
         std::map<tag_t, EdgeEndpointPair>::const_iterator firstIt =
@@ -1462,32 +1499,1472 @@ std::vector<tag_t> PickOuterAndMultiFaceInnerBoundaryLoops(
 
             if (AreBoundaryCurvesWithinNarrowDistance(firstIt->second, secondIt->second))
             {
+                tag_t pairFirst = firstIt->first;
+                tag_t pairSecond = secondIt->first;
+                if (pairSecond < pairFirst)
+                {
+                    std::swap(pairFirst, pairSecond);
+                }
+
+                if (!visitedPairs.insert(std::make_pair(pairFirst, pairSecond)).second)
+                {
+                    continue;
+                }
+
                 DebugLog("  narrow boundary edges found: edge1=" +
                     FormatTag(firstIt->first) +
                     ", edge2=" + FormatTag(secondIt->first));
-                narrowEdges.insert(firstIt->first);
-                narrowEdges.insert(secondIt->first);
+                GapEdgePair pair = {};
+                pair.firstEdge = firstIt->first;
+                pair.secondEdge = secondIt->first;
+                gapEdgePairs.push_back(pair);
             }
         }
     }
 
-    std::vector<tag_t> selectedEdges(narrowEdges.begin(), narrowEdges.end());
-    DebugLog("Narrow boundary edge selected count=" +
-        FormatTag(static_cast<tag_t>(selectedEdges.size())) +
+    DebugLog("Narrow boundary gap pair selected count=" +
+        FormatTag(static_cast<tag_t>(gapEdgePairs.size())) +
         ", checkedRingEdges=" + FormatTag(static_cast<tag_t>(ringEdgesToCheck.size())) +
         ", curveAndEndpointDistanceThreshold=" + FormatDouble(kNarrowBoundaryDistance));
-    return selectedEdges;
+    return gapEdgePairs;
 }
 
-std::vector<tag_t> FindFaceChainBoundaryEdges(const std::vector<tag_t>& faceChain)
+std::vector<GapEdgePair> FindFaceChainGapEdgePairs(const std::vector<tag_t>& faceChain)
 {
     const std::vector<tag_t> allBoundaryEdges = CollectFaceChainBoundaryEdges(faceChain);
-    const std::vector<tag_t> selectedBoundaryEdges =
+    const std::vector<GapEdgePair> gapEdgePairs =
         PickOuterAndMultiFaceInnerBoundaryLoops(allBoundaryEdges, faceChain);
-    DebugLog("Selected boundary edge result count=" +
-        FormatTag(static_cast<tag_t>(selectedBoundaryEdges.size())) +
+    DebugLog("Selected gap edge pair result count=" +
+        FormatTag(static_cast<tag_t>(gapEdgePairs.size())) +
         ", allBoundaryEdges=" + FormatTag(static_cast<tag_t>(allBoundaryEdges.size())));
-    return selectedBoundaryEdges;
+    return gapEdgePairs;
+}
+
+bool FaceHasThicknessEdge(tag_t faceTag, double thickness)
+{
+    if (faceTag == NULL_TAG || thickness <= kMinThickness)
+    {
+        return false;
+    }
+
+    const std::vector<tag_t> edges = AskFaceEdges(faceTag);
+    for (std::size_t index = 0; index < edges.size(); ++index)
+    {
+        const double length = AskEdgeLength(edges[index]);
+        if (std::fabs(length - thickness) <= kThicknessTolerance)
+        {
+            DebugLog("  gap face has thickness edge: face=" +
+                FormatTag(faceTag) +
+                ", edge=" + FormatTag(edges[index]) +
+                ", edgeLength=" + FormatDouble(length) +
+                ", thickness=" + FormatDouble(thickness));
+            return true;
+        }
+    }
+
+    DebugLog("  gap face rejected: no thickness edge, face=" +
+        FormatTag(faceTag) +
+        ", thickness=" + FormatDouble(thickness));
+    return false;
+}
+
+void AddUniqueTag(std::vector<tag_t>& tags, tag_t tag)
+{
+    if (tag == NULL_TAG)
+    {
+        return;
+    }
+
+    if (std::find(tags.begin(), tags.end(), tag) == tags.end())
+    {
+        tags.push_back(tag);
+    }
+}
+
+bool FacesShareEdge(tag_t firstFace, tag_t secondFace)
+{
+    if (firstFace == NULL_TAG || secondFace == NULL_TAG || firstFace == secondFace)
+    {
+        return firstFace == secondFace && firstFace != NULL_TAG;
+    }
+
+    const std::vector<tag_t> firstEdges = AskFaceEdges(firstFace);
+    const std::vector<tag_t> secondEdges = AskFaceEdges(secondFace);
+    for (std::size_t firstIndex = 0; firstIndex < firstEdges.size(); ++firstIndex)
+    {
+        for (std::size_t secondIndex = 0; secondIndex < secondEdges.size(); ++secondIndex)
+        {
+            if (firstEdges[firstIndex] != NULL_TAG && firstEdges[firstIndex] == secondEdges[secondIndex])
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool GapFaceGroupsConnected(const GapFaceGroup& first, const GapFaceGroup& second)
+{
+    for (std::size_t firstIndex = 0; firstIndex < first.faces.size(); ++firstIndex)
+    {
+        for (std::size_t secondIndex = 0; secondIndex < second.faces.size(); ++secondIndex)
+        {
+            if (FacesShareEdge(first.faces[firstIndex], second.faces[secondIndex]))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+void MergeGapFaceGroup(GapFaceGroup& target, const GapFaceGroup& source)
+{
+    target.gapEdgePairs.insert(
+        target.gapEdgePairs.end(),
+        source.gapEdgePairs.begin(),
+        source.gapEdgePairs.end());
+
+    for (std::size_t faceIndex = 0; faceIndex < source.faces.size(); ++faceIndex)
+    {
+        AddUniqueTag(target.faces, source.faces[faceIndex]);
+    }
+}
+
+std::vector<GapFaceGroup> MergeConnectedGapFaceGroups(std::vector<GapFaceGroup> groups)
+{
+    bool merged = true;
+    while (merged)
+    {
+        merged = false;
+        for (std::size_t firstIndex = 0; firstIndex < groups.size() && !merged; ++firstIndex)
+        {
+            for (std::size_t secondIndex = firstIndex + 1; secondIndex < groups.size(); ++secondIndex)
+            {
+                if (!GapFaceGroupsConnected(groups[firstIndex], groups[secondIndex]))
+                {
+                    continue;
+                }
+
+                DebugLog("  gap face groups merged: target=" +
+                    FormatTag(static_cast<tag_t>(firstIndex + 1)) +
+                    ", source=" + FormatTag(static_cast<tag_t>(secondIndex + 1)) +
+                    ", targetFaces=" + FormatTag(static_cast<tag_t>(groups[firstIndex].faces.size())) +
+                    ", sourceFaces=" + FormatTag(static_cast<tag_t>(groups[secondIndex].faces.size())));
+                MergeGapFaceGroup(groups[firstIndex], groups[secondIndex]);
+                groups.erase(groups.begin() + secondIndex);
+                merged = true;
+                break;
+            }
+        }
+    }
+
+    return groups;
+}
+
+std::vector<GapFaceGroup> FindGapFaceGroupsFromGapEdgePairs(const std::vector<GapEdgePair>& gapEdgePairs, double thickness)
+{
+    std::vector<GapFaceGroup> groups;
+
+    DebugLog("Gap face group search start: gapPairs=" +
+        FormatTag(static_cast<tag_t>(gapEdgePairs.size())) +
+        ", thickness=" + FormatDouble(thickness));
+
+    for (std::size_t pairIndex = 0; pairIndex < gapEdgePairs.size(); ++pairIndex)
+    {
+        GapFaceGroup group = {};
+        group.gapEdgePairs.push_back(gapEdgePairs[pairIndex]);
+        std::set<tag_t> visitedGroupFaces;
+
+        const tag_t edgesToCheck[2] =
+        {
+            gapEdgePairs[pairIndex].firstEdge,
+            gapEdgePairs[pairIndex].secondEdge
+        };
+
+        DebugLog("  gap face group begin: group=" +
+            FormatTag(static_cast<tag_t>(pairIndex + 1)) +
+            ", edge1=" + FormatTag(gapEdgePairs[pairIndex].firstEdge) +
+            ", edge2=" + FormatTag(gapEdgePairs[pairIndex].secondEdge));
+
+        for (int edgeSlot = 0; edgeSlot < 2; ++edgeSlot)
+        {
+            const tag_t edgeTag = edgesToCheck[edgeSlot];
+            const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(edgeTag);
+            DebugLog("    gap edge adjacent faces: edge=" +
+                FormatTag(edgeTag) +
+                ", adjacentFaces=" + FormatTag(static_cast<tag_t>(adjacentFaces.size())));
+            for (std::size_t faceIndex = 0; faceIndex < adjacentFaces.size(); ++faceIndex)
+            {
+                const tag_t faceTag = adjacentFaces[faceIndex];
+                if (faceTag == NULL_TAG || !visitedGroupFaces.insert(faceTag).second)
+                {
+                    continue;
+                }
+
+                if (FaceHasThicknessEdge(faceTag, thickness))
+                {
+                    DebugLog("    gap group face add: group=" +
+                        FormatTag(static_cast<tag_t>(pairIndex + 1)) +
+                        ", face=" + FormatTag(faceTag) +
+                        ", sourceEdge=" + FormatTag(edgeTag));
+                    AddUniqueTag(group.faces, faceTag);
+                }
+            }
+        }
+
+        DebugLog("  gap face group result: group=" +
+            FormatTag(static_cast<tag_t>(pairIndex + 1)) +
+            ", faces=" + FormatTag(static_cast<tag_t>(group.faces.size())));
+        if (!group.faces.empty())
+        {
+            groups.push_back(group);
+        }
+    }
+
+    DebugLog("Gap face initial group search result count=" +
+        FormatTag(static_cast<tag_t>(groups.size())));
+    groups = MergeConnectedGapFaceGroups(groups);
+    for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+    {
+        DebugLog("Gap face connected group: group=" +
+            FormatTag(static_cast<tag_t>(groupIndex + 1)) +
+            ", gapPairs=" + FormatTag(static_cast<tag_t>(groups[groupIndex].gapEdgePairs.size())) +
+            ", faces=" + FormatTag(static_cast<tag_t>(groups[groupIndex].faces.size())));
+    }
+
+    DebugLog("Gap face connected group search result count=" +
+        FormatTag(static_cast<tag_t>(groups.size())));
+    return groups;
+}
+
+std::vector<tag_t> FlattenGapEdgePairs(const std::vector<GapEdgePair>& gapEdgePairs)
+{
+    std::vector<tag_t> edges;
+    std::set<tag_t> visitedEdges;
+    for (std::size_t index = 0; index < gapEdgePairs.size(); ++index)
+    {
+        if (gapEdgePairs[index].firstEdge != NULL_TAG &&
+            visitedEdges.insert(gapEdgePairs[index].firstEdge).second)
+        {
+            edges.push_back(gapEdgePairs[index].firstEdge);
+        }
+
+        if (gapEdgePairs[index].secondEdge != NULL_TAG &&
+            visitedEdges.insert(gapEdgePairs[index].secondEdge).second)
+        {
+            edges.push_back(gapEdgePairs[index].secondEdge);
+        }
+    }
+
+    return edges;
+}
+
+std::vector<tag_t> FlattenGapFaceGroups(const std::vector<GapFaceGroup>& groups)
+{
+    std::vector<tag_t> faces;
+    std::set<tag_t> visitedFaces;
+    for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+    {
+        for (std::size_t faceIndex = 0; faceIndex < groups[groupIndex].faces.size(); ++faceIndex)
+        {
+            const tag_t faceTag = groups[groupIndex].faces[faceIndex];
+            if (faceTag != NULL_TAG && visitedFaces.insert(faceTag).second)
+            {
+                faces.push_back(faceTag);
+            }
+        }
+    }
+
+    return faces;
+}
+
+std::vector<tag_t> FlattenSkippedGapFaces(
+    const std::vector<GapFaceGroup>& groups,
+    const std::set<std::size_t>& skippedGroupIndexes)
+{
+    std::vector<tag_t> faces;
+    std::set<tag_t> visitedFaces;
+    for (std::set<std::size_t>::const_iterator groupIt = skippedGroupIndexes.begin();
+        groupIt != skippedGroupIndexes.end();
+        ++groupIt)
+    {
+        const std::size_t groupIndex = *groupIt;
+        if (groupIndex >= groups.size())
+        {
+            continue;
+        }
+
+        for (std::size_t faceIndex = 0; faceIndex < groups[groupIndex].faces.size(); ++faceIndex)
+        {
+            const tag_t faceTag = groups[groupIndex].faces[faceIndex];
+            if (faceTag != NULL_TAG && visitedFaces.insert(faceTag).second)
+            {
+                faces.push_back(faceTag);
+            }
+        }
+    }
+
+    return faces;
+}
+
+int GapGroupColor(std::size_t groupIndex)
+{
+    static const int kColors[] =
+    {
+        186, 211, 36, 6, 78, 125, 141, 181, 31, 96, 132, 164
+    };
+    return kColors[groupIndex % (sizeof(kColors) / sizeof(kColors[0]))];
+}
+
+void RememberOriginalFaceColor(
+    tag_t faceTag,
+    std::vector<tag_t>& coloredFaces,
+    std::vector<int>& originalColors)
+{
+    if (faceTag == NULL_TAG ||
+        std::find(coloredFaces.begin(), coloredFaces.end(), faceTag) != coloredFaces.end())
+    {
+        return;
+    }
+
+    UF_OBJ_disp_props_t displayProps = {};
+    if (UF_OBJ_ask_display_properties(faceTag, &displayProps) != 0)
+    {
+        return;
+    }
+
+    coloredFaces.push_back(faceTag);
+    originalColors.push_back(displayProps.color);
+}
+
+void RedisplayObject(tag_t objectTag)
+{
+    NXOpen::DisplayableObject* displayObject =
+        dynamic_cast<NXOpen::DisplayableObject*>(NXOpen::NXObjectManager::Get(objectTag));
+    if (displayObject != NULL)
+    {
+        displayObject->RedisplayObject();
+    }
+}
+
+void ColorGapFaceGroups(
+    const std::vector<GapFaceGroup>& groups,
+    std::vector<tag_t>& coloredFaces,
+    std::vector<int>& originalColors)
+{
+    for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+    {
+        const int color = GapGroupColor(groupIndex);
+        DebugLog("Color gap face group: group=" +
+            FormatTag(static_cast<tag_t>(groupIndex + 1)) +
+            ", color=" + FormatTag(static_cast<tag_t>(color)) +
+            ", gapPairs=" + FormatTag(static_cast<tag_t>(groups[groupIndex].gapEdgePairs.size())) +
+            ", faces=" + FormatTag(static_cast<tag_t>(groups[groupIndex].faces.size())));
+        for (std::size_t faceIndex = 0; faceIndex < groups[groupIndex].faces.size(); ++faceIndex)
+        {
+            const tag_t faceTag = groups[groupIndex].faces[faceIndex];
+            RememberOriginalFaceColor(faceTag, coloredFaces, originalColors);
+            if (UF_OBJ_set_color(faceTag, color) == 0)
+            {
+                RedisplayObject(faceTag);
+            }
+        }
+    }
+}
+
+void ColorFacesAsSkipped(
+    const std::vector<tag_t>& faces,
+    std::vector<tag_t>& coloredFaces,
+    std::vector<int>& originalColors)
+{
+    const int skippedColor = 36;
+    DebugLog("Color skipped gap faces count=" +
+        FormatTag(static_cast<tag_t>(faces.size())) +
+        ", color=" + FormatTag(static_cast<tag_t>(skippedColor)));
+    for (std::size_t index = 0; index < faces.size(); ++index)
+    {
+        RememberOriginalFaceColor(faces[index], coloredFaces, originalColors);
+        if (UF_OBJ_set_color(faces[index], skippedColor) == 0)
+        {
+            RedisplayObject(faces[index]);
+        }
+    }
+}
+
+void RestorePreviewFaceColors(
+    std::vector<tag_t>& coloredFaces,
+    std::vector<int>& originalColors)
+{
+    const std::size_t restoreCount = std::min(coloredFaces.size(), originalColors.size());
+    if (restoreCount > 0)
+    {
+        DebugLog("Restore preview face colors count=" +
+            FormatTag(static_cast<tag_t>(restoreCount)));
+    }
+
+    for (std::size_t index = 0; index < restoreCount; ++index)
+    {
+        const tag_t faceTag = coloredFaces[index];
+        if (faceTag == NULL_TAG)
+        {
+            continue;
+        }
+
+        UF_OBJ_set_color(faceTag, originalColors[index]);
+        UF_DISP_set_highlight(faceTag, 0);
+        RedisplayObject(faceTag);
+    }
+
+    coloredFaces.clear();
+    originalColors.clear();
+}
+
+bool EdgeMatchesAnySelectedCurve(tag_t edgeTag, const std::vector<tag_t>& curveTags)
+{
+    if (edgeTag == NULL_TAG || curveTags.empty())
+    {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < curveTags.size(); ++index)
+    {
+        if (edgeTag == curveTags[index])
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool FaceTouchesAnySelectedCurve(tag_t faceTag, const std::vector<tag_t>& curveTags)
+{
+    if (faceTag == NULL_TAG || curveTags.empty())
+    {
+        return false;
+    }
+
+    const std::vector<tag_t> edges = AskFaceEdges(faceTag);
+    for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex)
+    {
+        if (EdgeMatchesAnySelectedCurve(edges[edgeIndex], curveTags))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::set<std::size_t> FindSkippedGapGroupIndexes(
+    const std::vector<GapFaceGroup>& groups,
+    const std::vector<tag_t>& curveTags)
+{
+    std::set<std::size_t> skipped;
+    if (curveTags.empty())
+    {
+        return skipped;
+    }
+
+    for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+    {
+        bool matched = false;
+        for (std::size_t faceIndex = 0; faceIndex < groups[groupIndex].faces.size(); ++faceIndex)
+        {
+            if (FaceTouchesAnySelectedCurve(groups[groupIndex].faces[faceIndex], curveTags))
+            {
+                matched = true;
+                break;
+            }
+        }
+
+        if (matched)
+        {
+            skipped.insert(groupIndex);
+            DebugLog("Skip gap group by selected curve: group=" +
+                FormatTag(static_cast<tag_t>(groupIndex + 1)) +
+                ", curves=" + FormatTag(static_cast<tag_t>(curveTags.size())));
+        }
+    }
+
+    return skipped;
+}
+
+std::set<std::size_t> FindSkippedGapGroupIndexesByMissingFaces(
+    const std::vector<GapFaceGroup>& groups,
+    const std::vector<tag_t>& selectedGapFaces)
+{
+    std::set<std::size_t> skipped;
+    for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+    {
+        bool hasMissingFace = false;
+        for (std::size_t faceIndex = 0; faceIndex < groups[groupIndex].faces.size(); ++faceIndex)
+        {
+            if (!ContainsTag(selectedGapFaces, groups[groupIndex].faces[faceIndex]))
+            {
+                hasMissingFace = true;
+                break;
+            }
+        }
+
+        if (hasMissingFace)
+        {
+            skipped.insert(groupIndex);
+            DebugLog("Skip gap group by unselected gap face: group=" +
+                FormatTag(static_cast<tag_t>(groupIndex + 1)) +
+                ", selectedGapFaces=" + FormatTag(static_cast<tag_t>(selectedGapFaces.size())) +
+                ", groupFaces=" + FormatTag(static_cast<tag_t>(groups[groupIndex].faces.size())));
+        }
+    }
+
+    return skipped;
+}
+
+std::vector<GapFaceGroup> RemoveSkippedGapGroups(
+    const std::vector<GapFaceGroup>& groups,
+    const std::set<std::size_t>& skippedGroupIndexes)
+{
+    std::vector<GapFaceGroup> result;
+    for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+    {
+        if (skippedGroupIndexes.find(groupIndex) == skippedGroupIndexes.end())
+        {
+            result.push_back(groups[groupIndex]);
+        }
+    }
+
+    return result;
+}
+
+bool ContainsTag(const std::vector<tag_t>& tags, tag_t tag)
+{
+    return tag != NULL_TAG && std::find(tags.begin(), tags.end(), tag) != tags.end();
+}
+
+bool IsSelectedEdgeLike(NXOpen::TaggedObject* object)
+{
+    if (object == NULL)
+    {
+        return false;
+    }
+
+    if (dynamic_cast<NXOpen::Edge*>(object) != NULL)
+    {
+        return true;
+    }
+
+    int type = 0;
+    int subtype = 0;
+    return UF_OBJ_ask_type_and_subtype(object->Tag(), &type, &subtype) == 0 &&
+        type == UF_solid_type &&
+        subtype == UF_solid_edge_subtype;
+}
+
+NXOpen::Face* FindBaseSelectedFace(
+    const std::vector<NXOpen::TaggedObject*>& selectedObjects,
+    tag_t previousBaseFace,
+    const std::vector<tag_t>& autoGapFaces)
+{
+    for (std::size_t index = 0; index < selectedObjects.size(); ++index)
+    {
+        NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(selectedObjects[index]);
+        if (face != NULL && !ContainsTag(autoGapFaces, face->Tag()))
+        {
+            return face;
+        }
+    }
+
+    if (previousBaseFace != NULL_TAG)
+    {
+        NXOpen::Face* previousFace =
+            dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(previousBaseFace));
+        if (previousFace != NULL)
+        {
+            return previousFace;
+        }
+    }
+
+    for (std::size_t index = 0; index < selectedObjects.size(); ++index)
+    {
+        NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(selectedObjects[index]);
+        if (face != NULL)
+        {
+            return face;
+        }
+    }
+
+    return NULL;
+}
+
+std::vector<tag_t> FindUserSelectedCurveTags(
+    const std::vector<NXOpen::TaggedObject*>& selectedObjects)
+{
+    std::vector<tag_t> curveTags;
+    std::set<tag_t> visited;
+    for (std::size_t index = 0; index < selectedObjects.size(); ++index)
+    {
+        if (!IsSelectedEdgeLike(selectedObjects[index]))
+        {
+            continue;
+        }
+
+        const tag_t objectTag = selectedObjects[index]->Tag();
+        if (objectTag != NULL_TAG && visited.insert(objectTag).second)
+        {
+            curveTags.push_back(objectTag);
+        }
+    }
+
+    return curveTags;
+}
+
+std::vector<NXOpen::TaggedObject*> BuildSelectionObjectsWithGapFaces(
+    const std::vector<tag_t>& gapFaces)
+{
+    std::vector<NXOpen::TaggedObject*> objects;
+    std::set<tag_t> added;
+
+    for (std::size_t index = 0; index < gapFaces.size(); ++index)
+    {
+        const tag_t faceTag = gapFaces[index];
+        if (faceTag == NULL_TAG || !added.insert(faceTag).second)
+        {
+            continue;
+        }
+
+        NXOpen::TaggedObject* face = NXOpen::NXObjectManager::Get(faceTag);
+        if (face != NULL)
+        {
+            objects.push_back(face);
+        }
+    }
+
+    return objects;
+}
+
+std::vector<tag_t> FindSelectedAutoGapFaces(
+    const std::vector<NXOpen::TaggedObject*>& selectedObjects,
+    const std::vector<tag_t>& autoGapFaces)
+{
+    std::vector<tag_t> selectedGapFaces;
+    std::set<tag_t> visited;
+    for (std::size_t index = 0; index < selectedObjects.size(); ++index)
+    {
+        NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(selectedObjects[index]);
+        if (face == NULL)
+        {
+            continue;
+        }
+
+        const tag_t faceTag = face->Tag();
+        if (ContainsTag(autoGapFaces, faceTag) && visited.insert(faceTag).second)
+        {
+            selectedGapFaces.push_back(faceTag);
+        }
+    }
+
+    return selectedGapFaces;
+}
+
+double ReadPositiveStringValue(NXOpen::BlockStyler::StringBlock* block, double fallback)
+{
+    if (block == NULL)
+    {
+        return fallback;
+    }
+
+    const std::string text = block->Value().GetText();
+    char* end = NULL;
+    const double value = std::strtod(text.c_str(), &end);
+    if (end == text.c_str() || value <= 0.0)
+    {
+        return fallback;
+    }
+
+    return value;
+}
+
+std::string ReadIniString(const wchar_t* section, const wchar_t* key, const wchar_t* defaultValue)
+{
+    wchar_t buffer[256] = {0};
+    GetPrivateProfileStringW(section, key, defaultValue, buffer, static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0])), kSettingsPath);
+    int required = WideCharToMultiByte(CP_UTF8, 0, buffer, -1, NULL, 0, NULL, NULL);
+    if (required <= 0)
+    {
+        return std::string();
+    }
+
+    std::string text(static_cast<std::size_t>(required - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, buffer, -1, &text[0], required, NULL, NULL);
+    return text;
+}
+
+void EnsureSettingsDirectory()
+{
+    CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
+}
+
+bool AskLongestFaceEdgeDirection(tag_t faceTag, double direction[3], double& length)
+{
+    direction[0] = 0.0;
+    direction[1] = 0.0;
+    direction[2] = 0.0;
+    length = 0.0;
+
+    std::vector<EdgeEndpointPair> endpointPairs;
+    if (!AskFaceEdgeEndpointPairs(faceTag, endpointPairs))
+    {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < endpointPairs.size(); ++index)
+    {
+        const double edgeLength = Distance3(endpointPairs[index].first, endpointPairs[index].second);
+        if (edgeLength <= length)
+        {
+            continue;
+        }
+
+        length = edgeLength;
+        direction[0] = endpointPairs[index].second[0] - endpointPairs[index].first[0];
+        direction[1] = endpointPairs[index].second[1] - endpointPairs[index].first[1];
+        direction[2] = endpointPairs[index].second[2] - endpointPairs[index].first[2];
+    }
+
+    return length > 1.0e-6 && Normalize3(direction);
+}
+
+bool AskSortedFaceEdgeLengths(tag_t faceTag, std::vector<double>& lengths)
+{
+    lengths.clear();
+    const std::vector<tag_t> edges = AskFaceEdges(faceTag);
+    for (std::size_t index = 0; index < edges.size(); ++index)
+    {
+        const double length = AskEdgeLength(edges[index]);
+        if (length > 1.0e-6)
+        {
+            lengths.push_back(length);
+        }
+    }
+
+    std::sort(lengths.begin(), lengths.end());
+    return !lengths.empty();
+}
+
+bool FaceEdgeLengthsMatch(const std::vector<double>& first, const std::vector<double>& second)
+{
+    if (first.size() != second.size())
+    {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < first.size(); ++index)
+    {
+        if (std::fabs(first[index] - second[index]) > kSameFaceLengthTolerance)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool AreSameFacesWithParallelLongEdges(tag_t firstFace, tag_t secondFace, double& distance)
+{
+    distance = DBL_MAX;
+
+    double firstPoint[3] = {0.0, 0.0, 0.0};
+    double firstNormal[3] = {0.0, 0.0, 0.0};
+    double secondPoint[3] = {0.0, 0.0, 0.0};
+    double secondNormal[3] = {0.0, 0.0, 0.0};
+    if (!AskPlanarFacePlane(firstFace, firstPoint, firstNormal) ||
+        !AskPlanarFacePlane(secondFace, secondPoint, secondNormal))
+    {
+        DebugLog("  middle plane pair rejected: non-planar face, face1=" +
+            FormatTag(firstFace) +
+            ", face2=" + FormatTag(secondFace));
+        return false;
+    }
+
+    std::vector<double> firstLengths;
+    std::vector<double> secondLengths;
+    if (!AskSortedFaceEdgeLengths(firstFace, firstLengths) ||
+        !AskSortedFaceEdgeLengths(secondFace, secondLengths) ||
+        !FaceEdgeLengthsMatch(firstLengths, secondLengths))
+    {
+        DebugLog("  middle plane pair rejected: edge lengths mismatch, face1=" +
+            FormatTag(firstFace) +
+            ", face2=" + FormatTag(secondFace) +
+            ", edges1=" + FormatTag(static_cast<tag_t>(firstLengths.size())) +
+            ", edges2=" + FormatTag(static_cast<tag_t>(secondLengths.size())));
+        return false;
+    }
+
+    double firstLongDirection[3] = {0.0, 0.0, 0.0};
+    double secondLongDirection[3] = {0.0, 0.0, 0.0};
+    double firstLongLength = 0.0;
+    double secondLongLength = 0.0;
+    if (!AskLongestFaceEdgeDirection(firstFace, firstLongDirection, firstLongLength) ||
+        !AskLongestFaceEdgeDirection(secondFace, secondLongDirection, secondLongLength))
+    {
+        return false;
+    }
+
+    const double longEdgeCos = std::fabs(Dot3(firstLongDirection, secondLongDirection));
+    if (longEdgeCos < kLongEdgeParallelCosTolerance)
+    {
+        DebugLog("  middle plane pair rejected: long edges not parallel, face1=" +
+            FormatTag(firstFace) +
+            ", face2=" + FormatTag(secondFace) +
+            ", longEdgeCos=" + FormatDouble(longEdgeCos));
+        return false;
+    }
+
+    distance = Distance3(firstPoint, secondPoint);
+    DebugLog("  middle plane pair matched: face1=" +
+        FormatTag(firstFace) +
+        ", face2=" + FormatTag(secondFace) +
+        ", distance=" + FormatDouble(distance) +
+        ", longEdgeCos=" + FormatDouble(longEdgeCos) +
+        ", longest1=" + FormatDouble(firstLongLength) +
+        ", longest2=" + FormatDouble(secondLongLength));
+    return true;
+}
+
+std::vector<FacePair> FindSameFacePairsInGapGroup(const GapFaceGroup& group)
+{
+    std::vector<FacePair> candidates;
+    for (std::size_t firstIndex = 0; firstIndex < group.faces.size(); ++firstIndex)
+    {
+        for (std::size_t secondIndex = firstIndex + 1; secondIndex < group.faces.size(); ++secondIndex)
+        {
+            double distance = 0.0;
+            if (!AreSameFacesWithParallelLongEdges(group.faces[firstIndex], group.faces[secondIndex], distance))
+            {
+                continue;
+            }
+
+            FacePair pair = {};
+            pair.firstFace = group.faces[firstIndex];
+            pair.secondFace = group.faces[secondIndex];
+            pair.distance = distance;
+            candidates.push_back(pair);
+        }
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const FacePair& lhs, const FacePair& rhs) {
+        return lhs.distance < rhs.distance;
+    });
+
+    std::vector<FacePair> pairs;
+    std::set<tag_t> usedFaces;
+    for (std::size_t index = 0; index < candidates.size(); ++index)
+    {
+        if (usedFaces.find(candidates[index].firstFace) != usedFaces.end() ||
+            usedFaces.find(candidates[index].secondFace) != usedFaces.end())
+        {
+            continue;
+        }
+
+        usedFaces.insert(candidates[index].firstFace);
+        usedFaces.insert(candidates[index].secondFace);
+        pairs.push_back(candidates[index]);
+    }
+
+    return pairs;
+}
+
+NXOpen::Plane* CreateMiddlePlaneForFacePair(const FacePair& pair)
+{
+    double firstPoint[3] = {0.0, 0.0, 0.0};
+    double firstNormal[3] = {0.0, 0.0, 0.0};
+    double secondPoint[3] = {0.0, 0.0, 0.0};
+    double secondNormal[3] = {0.0, 0.0, 0.0};
+    if (!AskPlanarFacePlane(pair.firstFace, firstPoint, firstNormal) ||
+        !AskPlanarFacePlane(pair.secondFace, secondPoint, secondNormal))
+    {
+        return NULL;
+    }
+
+    double longEdgeDirection[3] = {0.0, 0.0, 0.0};
+    double longEdgeLength = 0.0;
+    if (!AskLongestFaceEdgeDirection(pair.firstFace, longEdgeDirection, longEdgeLength))
+    {
+        return NULL;
+    }
+
+    double planePoint[3] =
+    {
+        (firstPoint[0] + secondPoint[0]) * 0.5,
+        (firstPoint[1] + secondPoint[1]) * 0.5,
+        (firstPoint[2] + secondPoint[2]) * 0.5
+    };
+
+    double centerDelta[3] =
+    {
+        secondPoint[0] - firstPoint[0],
+        secondPoint[1] - firstPoint[1],
+        secondPoint[2] - firstPoint[2]
+    };
+    const double deltaAlongLongEdge = Dot3(centerDelta, longEdgeDirection);
+    double planeNormal[3] =
+    {
+        centerDelta[0] - longEdgeDirection[0] * deltaAlongLongEdge,
+        centerDelta[1] - longEdgeDirection[1] * deltaAlongLongEdge,
+        centerDelta[2] - longEdgeDirection[2] * deltaAlongLongEdge
+    };
+    if (!Normalize3(planeNormal))
+    {
+        if (Dot3(firstNormal, secondNormal) < 0.0)
+        {
+            secondNormal[0] = -secondNormal[0];
+            secondNormal[1] = -secondNormal[1];
+            secondNormal[2] = -secondNormal[2];
+        }
+
+        planeNormal[0] = firstNormal[0] + secondNormal[0];
+        planeNormal[1] = firstNormal[1] + secondNormal[1];
+        planeNormal[2] = firstNormal[2] + secondNormal[2];
+        if (!Normalize3(planeNormal))
+        {
+            planeNormal[0] = firstNormal[0];
+            planeNormal[1] = firstNormal[1];
+            planeNormal[2] = firstNormal[2];
+        }
+    }
+
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    NXOpen::Part* workPart = session != NULL && session->Parts() != NULL ? session->Parts()->Work() : NULL;
+    if (workPart == NULL || workPart->Planes() == NULL)
+    {
+        return NULL;
+    }
+
+    NXOpen::Plane* plane = workPart->Planes()->CreatePlane(
+        NXOpen::Point3d(planePoint[0], planePoint[1], planePoint[2]),
+        NXOpen::Vector3d(planeNormal[0], planeNormal[1], planeNormal[2]),
+        NXOpen::SmartObject::UpdateOptionWithinModeling);
+    if (plane != NULL)
+    {
+        UF_OBJ_set_color(plane->Tag(), 186);
+        RedisplayObject(plane->Tag());
+    }
+
+    return plane;
+}
+
+std::vector<NXOpen::Face*> ResolveFaces(const std::vector<tag_t>& faceTags)
+{
+    std::vector<NXOpen::Face*> faces;
+    for (std::size_t index = 0; index < faceTags.size(); ++index)
+    {
+        NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(faceTags[index]));
+        if (face != NULL)
+        {
+            faces.push_back(face);
+        }
+    }
+
+    return faces;
+}
+
+bool DeleteGapGroupFacesWithCapPlane(const GapFaceGroup& group, NXOpen::Plane* capPlane)
+{
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    NXOpen::Part* workPart = session != NULL && session->Parts() != NULL ? session->Parts()->Work() : NULL;
+    if (workPart == NULL || capPlane == NULL || group.faces.empty())
+    {
+        return false;
+    }
+
+    std::vector<NXOpen::Face*> faces = ResolveFaces(group.faces);
+    if (faces.empty())
+    {
+        return false;
+    }
+
+    NXOpen::Features::DeleteFaceBuilder* deleteFaceBuilder =
+        workPart->Features()->CreateDeleteFaceBuilder(NULL);
+    if (deleteFaceBuilder == NULL)
+    {
+        return false;
+    }
+
+    bool committed = false;
+    try
+    {
+        deleteFaceBuilder->SetType(NXOpen::Features::DeleteFaceBuilder::SelectTypesFace);
+        deleteFaceBuilder->SetHeal(true);
+        deleteFaceBuilder->SetCapOption(NXOpen::Features::DeleteFaceBuilder::CapOptionValuesNewPlane);
+        deleteFaceBuilder->SetCapPlane(capPlane);
+
+        NXOpen::SelectionIntentRuleOptions* ruleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+        ruleOptions->SetSelectedFromInactive(false);
+        NXOpen::FaceDumbRule* faceRule = workPart->ScRuleFactory()->CreateRuleFaceDumb(faces, ruleOptions);
+        std::vector<NXOpen::SelectionIntentRule*> rules(1, faceRule);
+        deleteFaceBuilder->FaceCollector()->ReplaceRules(rules, false);
+        delete ruleOptions;
+
+        NXOpen::Features::Feature* feature = deleteFaceBuilder->CommitFeature();
+        committed = feature != NULL;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        DebugLog("  delete gap group faces failed: NXException=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        DebugLog("  delete gap group faces failed: unknown exception");
+    }
+
+    deleteFaceBuilder->Destroy();
+    return committed;
+}
+
+bool DeleteFacesWithHealBuilder(const std::vector<tag_t>& faceTags)
+{
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    NXOpen::Part* workPart = session != NULL && session->Parts() != NULL ? session->Parts()->Work() : NULL;
+    if (workPart == NULL || faceTags.empty())
+    {
+        return false;
+    }
+
+    std::vector<NXOpen::Face*> faces = ResolveFaces(faceTags);
+    if (faces.empty())
+    {
+        return false;
+    }
+
+    NXOpen::Features::DeleteFaceBuilder* deleteFaceBuilder =
+        workPart->Features()->CreateDeleteFaceBuilder(NULL);
+    if (deleteFaceBuilder == NULL)
+    {
+        return false;
+    }
+
+    bool committed = false;
+    try
+    {
+        deleteFaceBuilder->SetType(NXOpen::Features::DeleteFaceBuilder::SelectTypesFace);
+        deleteFaceBuilder->SetHeal(true);
+
+        NXOpen::SelectionIntentRuleOptions* ruleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+        ruleOptions->SetSelectedFromInactive(false);
+        NXOpen::FaceDumbRule* faceRule = workPart->ScRuleFactory()->CreateRuleFaceDumb(faces, ruleOptions);
+        std::vector<NXOpen::SelectionIntentRule*> rules(1, faceRule);
+        deleteFaceBuilder->FaceCollector()->ReplaceRules(rules, false);
+        delete ruleOptions;
+
+        NXOpen::Features::Feature* feature = deleteFaceBuilder->CommitFeature();
+        committed = feature != NULL;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        DebugLog("Delete faces with heal failed: NXException=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        DebugLog("Delete faces with heal failed: unknown exception");
+    }
+
+    deleteFaceBuilder->Destroy();
+    return committed;
+}
+
+double AskCylinderAxisLengthApprox(tag_t faceTag)
+{
+    double axisPoint[3] = {0.0, 0.0, 0.0};
+    double axisDirection[3] = {0.0, 0.0, 0.0};
+    double radius = 0.0;
+    if (!AskCylinderFaceData(faceTag, axisPoint, axisDirection, radius))
+    {
+        return 0.0;
+    }
+
+    std::vector<EdgeEndpointPair> endpointPairs;
+    if (!AskFaceEdgeEndpointPairs(faceTag, endpointPairs))
+    {
+        return 0.0;
+    }
+
+    double minProjection = DBL_MAX;
+    double maxProjection = -DBL_MAX;
+    for (std::size_t index = 0; index < endpointPairs.size(); ++index)
+    {
+        const double* points[2] = {endpointPairs[index].first, endpointPairs[index].second};
+        for (int pointIndex = 0; pointIndex < 2; ++pointIndex)
+        {
+            double delta[3] =
+            {
+                points[pointIndex][0] - axisPoint[0],
+                points[pointIndex][1] - axisPoint[1],
+                points[pointIndex][2] - axisPoint[2]
+            };
+            const double projection = Dot3(delta, axisDirection);
+            minProjection = std::min(minProjection, projection);
+            maxProjection = std::max(maxProjection, projection);
+        }
+    }
+
+    if (minProjection == DBL_MAX || maxProjection == -DBL_MAX)
+    {
+        return 0.0;
+    }
+
+    return std::fabs(maxProjection - minProjection);
+}
+
+bool AskArcCenter(tag_t edgeTag, double center[3])
+{
+    UF_CURVE_arc_t arcData = {};
+    if (edgeTag == NULL_TAG || UF_CURVE_ask_arc_data(edgeTag, &arcData) != 0)
+    {
+        return false;
+    }
+
+    center[0] = arcData.arc_center[0];
+    center[1] = arcData.arc_center[1];
+    center[2] = arcData.arc_center[2];
+    return true;
+}
+
+bool IsArcEdge(tag_t edgeTag)
+{
+    double center[3] = {0.0, 0.0, 0.0};
+    return AskArcCenter(edgeTag, center);
+}
+
+bool CylinderFaceHasArcEdgeDistanceEqualThickness(
+    tag_t faceTag,
+    double thickness,
+    double& matchedDistance)
+{
+    matchedDistance = 0.0;
+    if (faceTag == NULL_TAG || thickness <= kMinThickness)
+    {
+        return false;
+    }
+
+    const std::vector<tag_t> edges = AskFaceEdges(faceTag);
+    std::vector<tag_t> arcEdges;
+    for (std::size_t index = 0; index < edges.size(); ++index)
+    {
+        if (IsArcEdge(edges[index]))
+        {
+            arcEdges.push_back(edges[index]);
+        }
+    }
+
+    for (std::size_t firstIndex = 0; firstIndex < arcEdges.size(); ++firstIndex)
+    {
+        for (std::size_t secondIndex = firstIndex + 1; secondIndex < arcEdges.size(); ++secondIndex)
+        {
+            double distance = 0.0;
+            double guess1[3] = {0.0, 0.0, 0.0};
+            double guess2[3] = {0.0, 0.0, 0.0};
+            EdgeEndpointPair firstEndpoints = {};
+            EdgeEndpointPair secondEndpoints = {};
+            if (AskEdgeEndpointPair(arcEdges[firstIndex], firstEndpoints))
+            {
+                guess1[0] = firstEndpoints.first[0];
+                guess1[1] = firstEndpoints.first[1];
+                guess1[2] = firstEndpoints.first[2];
+            }
+            if (AskEdgeEndpointPair(arcEdges[secondIndex], secondEndpoints))
+            {
+                guess2[0] = secondEndpoints.first[0];
+                guess2[1] = secondEndpoints.first[1];
+                guess2[2] = secondEndpoints.first[2];
+            }
+
+            if (!AskMinimumDistance(arcEdges[firstIndex], arcEdges[secondIndex], guess1, guess2, distance))
+            {
+                DebugLog("  arc edge distance failed: edge1=" +
+                    FormatTag(arcEdges[firstIndex]) +
+                    ", edge2=" + FormatTag(arcEdges[secondIndex]));
+                continue;
+            }
+
+            DebugLog("  arc edge distance check: edge1=" +
+                FormatTag(arcEdges[firstIndex]) +
+                ", edge2=" + FormatTag(arcEdges[secondIndex]) +
+                ", distance=" + FormatDouble(distance) +
+                ", thickness=" + FormatDouble(thickness));
+            if (std::fabs(distance - thickness) <= kThicknessTolerance)
+            {
+                matchedDistance = distance;
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool AskCylinderAxisLengthFromCircleCenters(
+    tag_t faceTag,
+    const double axisPoint[3],
+    const double axisDirection[3],
+    double& axisLength)
+{
+    axisLength = 0.0;
+    const std::vector<tag_t> edges = AskFaceEdges(faceTag);
+    if (edges.empty())
+    {
+        return false;
+    }
+
+    double minProjection = DBL_MAX;
+    double maxProjection = -DBL_MAX;
+    int centerCount = 0;
+    for (std::size_t index = 0; index < edges.size(); ++index)
+    {
+        double center[3] = {0.0, 0.0, 0.0};
+        if (!AskArcCenter(edges[index], center))
+        {
+            continue;
+        }
+
+        double delta[3] =
+        {
+            center[0] - axisPoint[0],
+            center[1] - axisPoint[1],
+            center[2] - axisPoint[2]
+        };
+        const double projection = Dot3(delta, axisDirection);
+        minProjection = std::min(minProjection, projection);
+        maxProjection = std::max(maxProjection, projection);
+        ++centerCount;
+    }
+
+    if (centerCount < 2 || minProjection == DBL_MAX || maxProjection == -DBL_MAX)
+    {
+        return false;
+    }
+
+    axisLength = std::fabs(maxProjection - minProjection);
+    return axisLength > 1.0e-6;
+}
+
+bool CylinderFaceHasStraightThicknessEdge(
+    tag_t faceTag,
+    const double axisDirection[3],
+    double thickness,
+    double& matchedLength)
+{
+    matchedLength = 0.0;
+    if (faceTag == NULL_TAG || thickness <= kMinThickness)
+    {
+        return false;
+    }
+
+    std::vector<EdgeEndpointPair> endpointPairs;
+    if (!AskFaceEdgeEndpointPairs(faceTag, endpointPairs))
+    {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < endpointPairs.size(); ++index)
+    {
+        double direction[3] =
+        {
+            endpointPairs[index].second[0] - endpointPairs[index].first[0],
+            endpointPairs[index].second[1] - endpointPairs[index].first[1],
+            endpointPairs[index].second[2] - endpointPairs[index].first[2]
+        };
+        const double length = std::sqrt(Dot3(direction, direction));
+        if (length <= 1.0e-6 || std::fabs(length - thickness) > kThicknessTolerance)
+        {
+            continue;
+        }
+
+        direction[0] /= length;
+        direction[1] /= length;
+        direction[2] /= length;
+        const double axisCos = std::fabs(Dot3(direction, axisDirection));
+        if (axisCos >= kParallelCosTolerance)
+        {
+            matchedLength = length;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::vector<tag_t> FindSmallRadiusCylinderFaces(
+    tag_t bodyTag,
+    double maxRadius,
+    double thickness)
+{
+    std::vector<tag_t> facesToDelete;
+    if (bodyTag == NULL_TAG || maxRadius <= 1.0e-6)
+    {
+        return facesToDelete;
+    }
+
+    const std::vector<tag_t> bodyFaces = AskBodyFaces(bodyTag);
+    for (std::size_t index = 0; index < bodyFaces.size(); ++index)
+    {
+        double axisPoint[3] = {0.0, 0.0, 0.0};
+        double axisDirection[3] = {0.0, 0.0, 0.0};
+        double radius = 0.0;
+        if (!AskCylinderFaceData(bodyFaces[index], axisPoint, axisDirection, radius))
+        {
+            continue;
+        }
+
+        if (radius >= maxRadius)
+        {
+            continue;
+        }
+
+        double arcEdgeDistance = 0.0;
+        if (CylinderFaceHasArcEdgeDistanceEqualThickness(
+            bodyFaces[index],
+            thickness,
+            arcEdgeDistance))
+        {
+            DebugLog("  small R face excluded by arc edge distance: face=" +
+                FormatTag(bodyFaces[index]) +
+                ", radius=" + FormatDouble(radius) +
+                ", arcEdgeDistance=" + FormatDouble(arcEdgeDistance) +
+                ", thickness=" + FormatDouble(thickness));
+            continue;
+        }
+
+        double centerAxisLength = 0.0;
+        if (AskCylinderAxisLengthFromCircleCenters(
+            bodyFaces[index],
+            axisPoint,
+            axisDirection,
+            centerAxisLength))
+        {
+            DebugLog("  small R face circle-center axis length: face=" +
+                FormatTag(bodyFaces[index]) +
+                ", radius=" + FormatDouble(radius) +
+                ", centerAxisLength=" + FormatDouble(centerAxisLength) +
+                ", thickness=" + FormatDouble(thickness));
+            if (thickness > kMinThickness &&
+                std::fabs(centerAxisLength - thickness) <= kThicknessTolerance)
+            {
+                DebugLog("  small R face excluded by circle-center axis length: face=" +
+                    FormatTag(bodyFaces[index]) +
+                    ", radius=" + FormatDouble(radius) +
+                    ", centerAxisLength=" + FormatDouble(centerAxisLength) +
+                    ", thickness=" + FormatDouble(thickness));
+                continue;
+            }
+        }
+
+        double straightThicknessEdgeLength = 0.0;
+        if (CylinderFaceHasStraightThicknessEdge(
+            bodyFaces[index],
+            axisDirection,
+            thickness,
+            straightThicknessEdgeLength))
+        {
+            DebugLog("  small R face excluded by straight thickness edge: face=" +
+                FormatTag(bodyFaces[index]) +
+                ", radius=" + FormatDouble(radius) +
+                ", edgeLength=" + FormatDouble(straightThicknessEdgeLength) +
+                ", thickness=" + FormatDouble(thickness));
+            continue;
+        }
+
+        const double axisLength = AskCylinderAxisLengthApprox(bodyFaces[index]);
+        if (thickness > kMinThickness && std::fabs(axisLength - thickness) <= kThicknessTolerance)
+        {
+            DebugLog("  small R face excluded by thickness axis length: face=" +
+                FormatTag(bodyFaces[index]) +
+                ", radius=" + FormatDouble(radius) +
+                ", axisLength=" + FormatDouble(axisLength) +
+                ", thickness=" + FormatDouble(thickness));
+            continue;
+        }
+
+        DebugLog("  small R face add: face=" +
+            FormatTag(bodyFaces[index]) +
+            ", radius=" + FormatDouble(radius) +
+            ", axisLength=" + FormatDouble(axisLength));
+        facesToDelete.push_back(bodyFaces[index]);
+    }
+
+    return facesToDelete;
+}
+
+void DeleteSmallRadiusFacesIfRequested(tag_t bodyTag, double thickness, bool enabled, double maxRadius)
+{
+    if (!enabled)
+    {
+        DebugLog("Delete small R skipped: toggle off");
+        return;
+    }
+
+    const std::vector<tag_t> facesToDelete = FindSmallRadiusCylinderFaces(bodyTag, maxRadius, thickness);
+    DebugLog("Delete small R start: maxRadius=" +
+        FormatDouble(maxRadius) +
+        ", candidateFaces=" + FormatTag(static_cast<tag_t>(facesToDelete.size())));
+    if (facesToDelete.empty())
+    {
+        return;
+    }
+
+    const bool ok = DeleteFacesWithHealBuilder(facesToDelete);
+    DebugLog("Delete small R result: committed=" +
+        FormatTag(static_cast<tag_t>(ok ? 1 : 0)) +
+        ", faces=" + FormatTag(static_cast<tag_t>(facesToDelete.size())));
+}
+
+void DeleteGapGroupsWithMiddlePlanes(const std::vector<GapFaceGroup>& groups)
+{
+    int createdCount = 0;
+    int deletedCount = 0;
+    DebugLog("Delete gap groups with middle planes start: groups=" +
+        FormatTag(static_cast<tag_t>(groups.size())));
+    for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+    {
+        const std::vector<FacePair> pairs = FindSameFacePairsInGapGroup(groups[groupIndex]);
+        DebugLog("Delete gap group pair search: group=" +
+            FormatTag(static_cast<tag_t>(groupIndex + 1)) +
+            ", faces=" + FormatTag(static_cast<tag_t>(groups[groupIndex].faces.size())) +
+            ", pairs=" + FormatTag(static_cast<tag_t>(pairs.size())));
+        if (pairs.empty())
+        {
+            continue;
+        }
+
+        NXOpen::Plane* capPlane = CreateMiddlePlaneForFacePair(pairs.front());
+        const tag_t planeTag = capPlane == NULL ? NULL_TAG : capPlane->Tag();
+        const bool created = capPlane != NULL;
+        if (created)
+        {
+            ++createdCount;
+        }
+
+        const bool deleted = created && DeleteGapGroupFacesWithCapPlane(groups[groupIndex], capPlane);
+        if (deleted)
+        {
+            ++deletedCount;
+        }
+
+        DebugLog("  delete gap group with middle plane: group=" +
+            FormatTag(static_cast<tag_t>(groupIndex + 1)) +
+            ", selectedPair=1" +
+            ", face1=" + FormatTag(pairs.front().firstFace) +
+            ", face2=" + FormatTag(pairs.front().secondFace) +
+            ", plane=" + FormatTag(planeTag) +
+            ", planeCreated=" + FormatTag(static_cast<tag_t>(created ? 1 : 0)) +
+            ", deleteCommitted=" + FormatTag(static_cast<tag_t>(deleted ? 1 : 0)));
+    }
+
+    DebugLog("Delete gap groups with middle planes result: planes=" +
+        FormatTag(static_cast<tag_t>(createdCount)) +
+        ", deleteFeatures=" + FormatTag(static_cast<tag_t>(deletedCount)));
 }
 
 void RefreshDisplay()
@@ -1512,6 +2989,8 @@ TianFenXI::TianFenXI()
             throw std::runtime_error("TianFenXI dialog resource is missing.");
         }
         theDlxFileName = NULL;
+        previewSelectedFaceTag = NULL_TAG;
+        updatingSelectionProgrammatically = false;
         hasPreviewThickness = false;
         previewThickness = 0.0;
         previewInwardNormal[0] = 0.0;
@@ -1673,6 +3152,7 @@ void TianFenXI::initialize_cb()
         
         //------------------------------------------------------------------------------
         ConfigureFaceSelectionBlock();
+        LoadUiSettings();
         UpdateDeleteRVisibility();
     }
     catch(exception& ex)
@@ -1709,8 +3189,8 @@ int TianFenXI::apply_cb()
     try
     {
         DebugLog("Apply clicked");
-        PreviewSelectedFaceChain();
-        DebugLog("Apply preview only: extract/thicken disabled");
+        PreviewSelectedFaceChain(true);
+        DebugLog("Apply preview and middle plane creation done");
     }
     catch(exception& ex)
     {
@@ -1730,7 +3210,14 @@ int TianFenXI::update_cb(NXOpen::BlockStyler::UIBlock* block)
     {
         if(block == selection0)
         {
-            PreviewSelectedFaceChain();
+            if (updatingSelectionProgrammatically)
+            {
+                DebugLog("Selection update ignored: programmatic rewrite");
+            }
+            else
+            {
+                PreviewSelectedFaceChain();
+            }
         }
         else if(block == string0)
         {
@@ -1739,10 +3226,11 @@ int TianFenXI::update_cb(NXOpen::BlockStyler::UIBlock* block)
         else if(block == toggle0)
         {
             UpdateDeleteRVisibility();
+            SaveUiSettings();
         }
         else if(block == string01)
         {
-        //---------Enter your code here-----------
+            SaveUiSettings();
         }
     }
     catch(exception& ex)
@@ -1799,14 +3287,20 @@ void TianFenXI::ConfigureFaceSelectionBlock()
     std::vector<NXOpen::Selection::MaskTriple> masks;
     NXOpen::Selection::MaskTriple faceMask;
     faceMask.Type = UF_solid_type;
-    faceMask.Subtype = UF_all_subtype;
+    faceMask.Subtype = UF_solid_body_subtype;
     faceMask.SolidBodySubtype = UF_UI_SEL_FEATURE_ANY_FACE;
     masks.push_back(faceMask);
 
+    NXOpen::Selection::MaskTriple edgeMask;
+    edgeMask.Type = UF_solid_type;
+    edgeMask.Subtype = UF_solid_body_subtype;
+    edgeMask.SolidBodySubtype = UF_UI_SEL_FEATURE_ANY_EDGE;
+    masks.push_back(edgeMask);
+
     selection0->SetSelectionFilter(NXOpen::Selection::SelectionActionClearAndEnableSpecific, masks);
-    selection0->SetSelectModeAsString("Single");
-    selection0->SetLabelString("选择面");
-    selection0->SetCue("请选择一个面");
+    selection0->SetSelectModeAsString("Multiple");
+    selection0->SetLabelString("选择面/排除边");
+    selection0->SetCue("请选择基准面，可按 Shift 选边排除区域");
 }
 
 void TianFenXI::UpdateDeleteRVisibility()
@@ -1819,8 +3313,76 @@ void TianFenXI::UpdateDeleteRVisibility()
     string01->SetShow(toggle0->Value());
 }
 
+void TianFenXI::LoadUiSettings()
+{
+    EnsureSettingsDirectory();
+
+    if (toggle0 != NULL)
+    {
+        const int deleteR = GetPrivateProfileIntW(L"UI", L"DeleteR", toggle0->Value() ? 1 : 0, kSettingsPath);
+        toggle0->SetValue(deleteR != 0);
+    }
+
+    if (string01 != NULL)
+    {
+        const std::string radiusText = ReadIniString(L"UI", L"DeleteRValue", L"5");
+        if (!radiusText.empty())
+        {
+            string01->SetValue(radiusText.c_str());
+        }
+    }
+
+    DebugLog("UI settings loaded: deleteR=" +
+        FormatTag(static_cast<tag_t>(toggle0 != NULL && toggle0->Value() ? 1 : 0)) +
+        ", rValue=" + FormatDouble(ReadPositiveStringValue(string01, 5.0)));
+}
+
+void TianFenXI::SaveUiSettings()
+{
+    EnsureSettingsDirectory();
+
+    WritePrivateProfileStringW(
+        L"UI",
+        L"DeleteR",
+        (toggle0 != NULL && toggle0->Value()) ? L"1" : L"0",
+        kSettingsPath);
+
+    std::string radiusText = string01 != NULL ? string01->Value().GetText() : "5";
+    int required = MultiByteToWideChar(CP_UTF8, 0, radiusText.c_str(), -1, NULL, 0);
+    std::wstring radiusWide;
+    if (required > 0)
+    {
+        radiusWide.assign(static_cast<std::size_t>(required - 1), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, radiusText.c_str(), -1, &radiusWide[0], required);
+    }
+    if (radiusWide.empty())
+    {
+        radiusWide = L"5";
+    }
+
+    WritePrivateProfileStringW(L"UI", L"DeleteRValue", radiusWide.c_str(), kSettingsPath);
+    DebugLog("UI settings saved: deleteR=" +
+        FormatTag(static_cast<tag_t>(toggle0 != NULL && toggle0->Value() ? 1 : 0)) +
+        ", rValue=" + radiusText);
+}
+
 void TianFenXI::ClearPreviewHighlight(bool refresh)
 {
+    RestorePreviewFaceColors(previewColoredFaces, previewOriginalFaceColors);
+
+    if (!highlightedGapFaces.empty())
+    {
+        DebugLog("Clear preview gap face highlight count=" +
+            FormatTag(static_cast<tag_t>(highlightedGapFaces.size())));
+    }
+    for (std::size_t index = 0; index < highlightedGapFaces.size(); ++index)
+    {
+        if (highlightedGapFaces[index] != NULL_TAG)
+        {
+            UF_DISP_set_highlight(highlightedGapFaces[index], 0);
+        }
+    }
+
     if (!highlightedBoundaryEdges.empty())
     {
         DebugLog("Clear preview boundary edge highlight count=" +
@@ -1834,7 +3396,9 @@ void TianFenXI::ClearPreviewHighlight(bool refresh)
         }
     }
     highlightedBoundaryEdges.clear();
+    highlightedGapFaces.clear();
     highlightedFaceChain.clear();
+    skippedGapFaces.clear();
     hasPreviewThickness = false;
     previewThickness = 0.0;
     previewInwardNormal[0] = 0.0;
@@ -1847,9 +3411,9 @@ void TianFenXI::ClearPreviewHighlight(bool refresh)
     }
 }
 
-void TianFenXI::PreviewSelectedFaceChain()
+void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
 {
-    DebugLog("Preview selected face chain begin");
+    DebugLog(std::string(createMiddlePlanes ? "Apply" : "Preview") + " selected face chain begin");
     ClearPreviewHighlight(false);
 
     if (selection0 == NULL)
@@ -1866,20 +3430,30 @@ void TianFenXI::PreviewSelectedFaceChain()
     if (selectedObjects.empty())
     {
         DebugLog("Preview abort: no selected objects");
+        previewSelectedFaceTag = NULL_TAG;
+        autoSelectedGapFaces.clear();
         RefreshDisplay();
         return;
     }
 
-    NXOpen::Face* selectedFace = dynamic_cast<NXOpen::Face*>(selectedObjects.front());
+    NXOpen::Face* selectedFace = FindBaseSelectedFace(
+        selectedObjects,
+        previewSelectedFaceTag,
+        autoSelectedGapFaces);
     if (selectedFace == NULL)
     {
-        DebugLog("Preview abort: selected object is not a face");
+        DebugLog("Preview abort: no selected base face");
         RefreshDisplay();
         return;
     }
 
     const tag_t selectedFaceTag = selectedFace->Tag();
-    DebugLog("Preview selected face=" + FormatTag(selectedFaceTag));
+    previewSelectedFaceTag = selectedFaceTag;
+    const std::vector<tag_t> selectedCurveTags = FindUserSelectedCurveTags(selectedObjects);
+    const std::vector<tag_t> selectedAutoGapFaces = FindSelectedAutoGapFaces(selectedObjects, autoSelectedGapFaces);
+    DebugLog("Preview selected face=" + FormatTag(selectedFaceTag) +
+        ", selected curves=" + FormatTag(static_cast<tag_t>(selectedCurveTags.size())) +
+        ", selected auto gap faces=" + FormatTag(static_cast<tag_t>(selectedAutoGapFaces.size())));
     tag_t bodyTag = NULL_TAG;
     if (UF_MODL_ask_face_body(selectedFaceTag, &bodyTag) != 0 || bodyTag == NULL_TAG)
     {
@@ -1913,15 +3487,53 @@ void TianFenXI::PreviewSelectedFaceChain()
             return;
         }
 
-        highlightedBoundaryEdges = FindFaceChainBoundaryEdges(highlightedFaceChain);
-        for (std::size_t index = 0; index < highlightedBoundaryEdges.size(); ++index)
+        const std::vector<GapEdgePair> gapEdgePairs = FindFaceChainGapEdgePairs(highlightedFaceChain);
+        const std::vector<GapFaceGroup> gapFaceGroups =
+            FindGapFaceGroupsFromGapEdgePairs(gapEdgePairs, thickness);
+        highlightedBoundaryEdges = FlattenGapEdgePairs(gapEdgePairs);
+        highlightedGapFaces = FlattenGapFaceGroups(gapFaceGroups);
+        const std::set<std::size_t> skippedGroupIndexes = createMiddlePlanes ?
+            FindSkippedGapGroupIndexesByMissingFaces(gapFaceGroups, selectedAutoGapFaces) :
+            std::set<std::size_t>();
+        skippedGapFaces = FlattenSkippedGapFaces(gapFaceGroups, skippedGroupIndexes);
+        if (createMiddlePlanes)
         {
-            UF_DISP_set_highlight(highlightedBoundaryEdges[index], 1);
+            const std::vector<GapFaceGroup> groupsToDelete =
+                RemoveSkippedGapGroups(gapFaceGroups, skippedGroupIndexes);
+            DeleteGapGroupsWithMiddlePlanes(groupsToDelete);
+            DeleteSmallRadiusFacesIfRequested(
+                bodyTag,
+                thickness,
+                toggle0 != NULL && toggle0->Value(),
+                ReadPositiveStringValue(string01, 5.0));
+        }
+        else
+        {
+            autoSelectedGapFaces = highlightedGapFaces;
+            std::vector<NXOpen::TaggedObject*> rewriteObjects =
+                BuildSelectionObjectsWithGapFaces(autoSelectedGapFaces);
+            NXOpen::BlockStyler::PropertyList* rewriteProperties = selection0->GetProperties();
+            try
+            {
+                updatingSelectionProgrammatically = true;
+                rewriteProperties->SetTaggedObjectVector("SelectedObjects", rewriteObjects);
+            }
+            catch (...)
+            {
+                updatingSelectionProgrammatically = false;
+                delete rewriteProperties;
+                throw;
+            }
+            updatingSelectionProgrammatically = false;
+            delete rewriteProperties;
         }
         DebugLog("Preview fallback face chain count=" +
             FormatTag(static_cast<tag_t>(highlightedFaceChain.size())) +
-            ", highlighted outer boundary edge count=" +
-            FormatTag(static_cast<tag_t>(highlightedBoundaryEdges.size())));
+            ", gapPairs=" + FormatTag(static_cast<tag_t>(gapEdgePairs.size())) +
+            ", gapFaceGroups=" + FormatTag(static_cast<tag_t>(gapFaceGroups.size())) +
+            ", skippedGapGroups=" + FormatTag(static_cast<tag_t>(skippedGroupIndexes.size())) +
+            ", colored gap face count=" +
+            FormatTag(static_cast<tag_t>(highlightedGapFaces.size())));
         RefreshDisplay();
         return;
     }
@@ -1939,13 +3551,51 @@ void TianFenXI::PreviewSelectedFaceChain()
         return;
     }
 
-    highlightedBoundaryEdges = FindFaceChainBoundaryEdges(highlightedFaceChain);
-    for (std::size_t index = 0; index < highlightedBoundaryEdges.size(); ++index)
+    const std::vector<GapEdgePair> gapEdgePairs = FindFaceChainGapEdgePairs(highlightedFaceChain);
+    const std::vector<GapFaceGroup> gapFaceGroups =
+        FindGapFaceGroupsFromGapEdgePairs(gapEdgePairs, thickness);
+    highlightedBoundaryEdges = FlattenGapEdgePairs(gapEdgePairs);
+    highlightedGapFaces = FlattenGapFaceGroups(gapFaceGroups);
+    const std::set<std::size_t> skippedGroupIndexes = createMiddlePlanes ?
+        FindSkippedGapGroupIndexesByMissingFaces(gapFaceGroups, selectedAutoGapFaces) :
+        std::set<std::size_t>();
+    skippedGapFaces = FlattenSkippedGapFaces(gapFaceGroups, skippedGroupIndexes);
+    if (createMiddlePlanes)
     {
-        UF_DISP_set_highlight(highlightedBoundaryEdges[index], 1);
+        const std::vector<GapFaceGroup> groupsToDelete =
+            RemoveSkippedGapGroups(gapFaceGroups, skippedGroupIndexes);
+        DeleteGapGroupsWithMiddlePlanes(groupsToDelete);
+        DeleteSmallRadiusFacesIfRequested(
+            bodyTag,
+            thickness,
+            toggle0 != NULL && toggle0->Value(),
+            ReadPositiveStringValue(string01, 5.0));
+    }
+    else
+    {
+        autoSelectedGapFaces = highlightedGapFaces;
+        std::vector<NXOpen::TaggedObject*> rewriteObjects =
+            BuildSelectionObjectsWithGapFaces(autoSelectedGapFaces);
+        NXOpen::BlockStyler::PropertyList* rewriteProperties = selection0->GetProperties();
+        try
+        {
+            updatingSelectionProgrammatically = true;
+            rewriteProperties->SetTaggedObjectVector("SelectedObjects", rewriteObjects);
+        }
+        catch (...)
+        {
+            updatingSelectionProgrammatically = false;
+            delete rewriteProperties;
+            throw;
+        }
+        updatingSelectionProgrammatically = false;
+        delete rewriteProperties;
     }
     DebugLog("Preview face chain count=" + FormatTag(static_cast<tag_t>(highlightedFaceChain.size())) +
-        ", highlighted boundary edge count=" +
-        FormatTag(static_cast<tag_t>(highlightedBoundaryEdges.size())));
+        ", gapPairs=" + FormatTag(static_cast<tag_t>(gapEdgePairs.size())) +
+        ", gapFaceGroups=" + FormatTag(static_cast<tag_t>(gapFaceGroups.size())) +
+        ", skippedGapGroups=" + FormatTag(static_cast<tag_t>(skippedGroupIndexes.size())) +
+        ", colored gap face count=" +
+        FormatTag(static_cast<tag_t>(highlightedGapFaces.size())));
     RefreshDisplay();
 }
