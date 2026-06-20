@@ -109,7 +109,6 @@ private:
     void UpdateDeleteRVisibility();
     void PreviewSelectedFaceChain();
     void ClearPreviewHighlight(bool refresh = true);
-    int ExtractHighlightedFaceChain();
 
     const char* theDlxFileName;
     NXOpen::BlockStyler::BlockDialog* theDialog;
@@ -119,6 +118,7 @@ private:
     NXOpen::BlockStyler::Toggle* toggle0;// Block type: Toggle
     NXOpen::BlockStyler::StringBlock* string01;// Block type: String
     std::vector<tag_t> highlightedFaceChain;
+    std::vector<tag_t> highlightedBoundaryEdges;
     bool hasPreviewThickness;
     double previewThickness;
     double previewInwardNormal[3];

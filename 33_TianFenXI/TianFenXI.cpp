@@ -50,16 +50,6 @@
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
 #include <NXOpen/DisplayableObject.hxx>
-#include <NXOpen/Features_ExtractFaceBuilder.hxx>
-#include <NXOpen/Features_Feature.hxx>
-#include <NXOpen/Features_FeatureCollection.hxx>
-#include <NXOpen/Features_ThickenBuilder.hxx>
-#include <NXOpen/FaceDumbRule.hxx>
-#include <NXOpen/GeometricUtilities_BooleanOperation.hxx>
-#include <NXOpen/ScCollector.hxx>
-#include <NXOpen/ScRuleFactory.hxx>
-#include <NXOpen/SelectDisplayableObjectList.hxx>
-#include <NXOpen/SelectionIntentRule.hxx>
 #include <uf_modl.h>
 #include <uf_disp.h>
 #include <uf_ui.h>
@@ -68,6 +58,7 @@
 #include <cmath>
 #include <deque>
 #include <iomanip>
+#include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -165,6 +156,7 @@ const double kParallelCosTolerance = 0.98;
 const double kCoplanarDistanceTolerance = 0.25;
 const double kThicknessTolerance = 0.2;
 const double kMinThickness = 0.05;
+const double kNarrowBoundaryDistance = 5.0;
 const wchar_t* kDebugLogPath = L"D:\\UG智辉钣金插件\\logs\\TianFenXI_debug.log";
 
 struct EdgeEndpointPair
@@ -173,6 +165,16 @@ struct EdgeEndpointPair
     double first[3];
     double second[3];
 };
+
+struct BoundaryLoop
+{
+    std::vector<tag_t> edges;
+    std::set<tag_t> ownerFaces;
+    double length;
+    double boxDiagonal;
+};
+
+bool AskEdgeEndpointPair(tag_t edgeTag, EdgeEndpointPair& endpoints);
 
 std::string FormatDouble(double value)
 {
@@ -278,6 +280,132 @@ double DistancePointToLine3(const double point[3], const double lineStart[3], co
     return Distance3(point, closest);
 }
 
+double DistancePointToSegment3(const double point[3], const double lineStart[3], const double lineEnd[3])
+{
+    double direction[3] =
+    {
+        lineEnd[0] - lineStart[0],
+        lineEnd[1] - lineStart[1],
+        lineEnd[2] - lineStart[2]
+    };
+    const double lengthSquared = Dot3(direction, direction);
+    if (lengthSquared < 1.0e-9)
+    {
+        return Distance3(point, lineStart);
+    }
+
+    double startToPoint[3] =
+    {
+        point[0] - lineStart[0],
+        point[1] - lineStart[1],
+        point[2] - lineStart[2]
+    };
+    double parameter = Dot3(startToPoint, direction) / lengthSquared;
+    parameter = std::max(0.0, std::min(1.0, parameter));
+    double closest[3] =
+    {
+        lineStart[0] + direction[0] * parameter,
+        lineStart[1] + direction[1] * parameter,
+        lineStart[2] + direction[2] * parameter
+    };
+    return Distance3(point, closest);
+}
+
+double DistanceSegmentToSegment3(const EdgeEndpointPair& first, const EdgeEndpointPair& second)
+{
+    return std::min(
+        std::min(
+            DistancePointToSegment3(first.first, second.first, second.second),
+            DistancePointToSegment3(first.second, second.first, second.second)),
+        std::min(
+            DistancePointToSegment3(second.first, first.first, first.second),
+            DistancePointToSegment3(second.second, first.first, first.second)));
+}
+
+bool AskMinimumDistance(tag_t object1, tag_t object2, const double guess1[3], const double guess2[3], double& distance)
+{
+    double mutableGuess1[3] = {guess1[0], guess1[1], guess1[2]};
+    double mutableGuess2[3] = {guess2[0], guess2[1], guess2[2]};
+    double point1[3] = {0.0, 0.0, 0.0};
+    double point2[3] = {0.0, 0.0, 0.0};
+    double accuracy = 0.0;
+    distance = DBL_MAX;
+    return UF_MODL_ask_minimum_dist_3(
+        2,
+        object1,
+        object2,
+        1,
+        mutableGuess1,
+        1,
+        mutableGuess2,
+        &distance,
+        point1,
+        point2,
+        &accuracy) == 0;
+}
+
+bool AskPointToEdgeDistance(const double point[3], tag_t edgeTag, double& distance)
+{
+    double edgePoint[3] = {0.0, 0.0, 0.0};
+    EdgeEndpointPair endpoints = {};
+    if (AskEdgeEndpointPair(edgeTag, endpoints))
+    {
+        edgePoint[0] = endpoints.first[0];
+        edgePoint[1] = endpoints.first[1];
+        edgePoint[2] = endpoints.first[2];
+    }
+
+    return AskMinimumDistance(NULL_TAG, edgeTag, point, edgePoint, distance);
+}
+
+bool AreBoundaryCurvesWithinNarrowDistance(const EdgeEndpointPair& first, const EdgeEndpointPair& second)
+{
+    double edgeDistance = 0.0;
+    if (!AskMinimumDistance(first.edgeTag, second.edgeTag, first.first, second.first, edgeDistance))
+    {
+        DebugLog("  narrow boundary distance failed: edge1=" +
+            FormatTag(first.edgeTag) +
+            ", edge2=" + FormatTag(second.edgeTag));
+        return false;
+    }
+
+    if (edgeDistance >= kNarrowBoundaryDistance)
+    {
+        return false;
+    }
+
+    double firstStartToSecond = DBL_MAX;
+    double firstEndToSecond = DBL_MAX;
+    double secondStartToFirst = DBL_MAX;
+    double secondEndToFirst = DBL_MAX;
+    if (!AskPointToEdgeDistance(first.first, second.edgeTag, firstStartToSecond) ||
+        !AskPointToEdgeDistance(first.second, second.edgeTag, firstEndToSecond) ||
+        !AskPointToEdgeDistance(second.first, first.edgeTag, secondStartToFirst) ||
+        !AskPointToEdgeDistance(second.second, first.edgeTag, secondEndToFirst))
+    {
+        DebugLog("  narrow boundary endpoint distance failed: edge1=" +
+            FormatTag(first.edgeTag) +
+            ", edge2=" + FormatTag(second.edgeTag));
+        return false;
+    }
+
+    const bool matched =
+        firstStartToSecond < kNarrowBoundaryDistance &&
+        firstEndToSecond < kNarrowBoundaryDistance &&
+        secondStartToFirst < kNarrowBoundaryDistance &&
+        secondEndToFirst < kNarrowBoundaryDistance;
+    DebugLog("  narrow boundary check: edge1=" +
+        FormatTag(first.edgeTag) +
+        ", edge2=" + FormatTag(second.edgeTag) +
+        ", curveDistance=" + FormatDouble(edgeDistance) +
+        ", firstStartToSecond=" + FormatDouble(firstStartToSecond) +
+        ", firstEndToSecond=" + FormatDouble(firstEndToSecond) +
+        ", secondStartToFirst=" + FormatDouble(secondStartToFirst) +
+        ", secondEndToFirst=" + FormatDouble(secondEndToFirst) +
+        ", matched=" + FormatTag(static_cast<tag_t>(matched ? 1 : 0)));
+    return matched;
+}
+
 void Cross3(const double lhs[3], const double rhs[3], double result[3])
 {
     result[0] = lhs[1] * rhs[2] - lhs[2] * rhs[1];
@@ -353,6 +481,28 @@ bool AskFaceEdgeEndpointPairs(tag_t faceTag, std::vector<EdgeEndpointPair>& endp
     }
 
     return !endpointPairs.empty();
+}
+
+bool AskEdgeEndpointPair(tag_t edgeTag, EdgeEndpointPair& endpoints)
+{
+    double point1[3] = {0.0, 0.0, 0.0};
+    double point2[3] = {0.0, 0.0, 0.0};
+    int vertexCount = 0;
+    if (edgeTag == NULL_TAG ||
+        UF_MODL_ask_edge_verts(edgeTag, point1, point2, &vertexCount) != 0 ||
+        vertexCount != 2)
+    {
+        return false;
+    }
+
+    endpoints = {};
+    endpoints.edgeTag = edgeTag;
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        endpoints.first[axis] = point1[axis];
+        endpoints.second[axis] = point2[axis];
+    }
+    return true;
 }
 
 bool ComputeFaceCenterFromEndpoints(const std::vector<EdgeEndpointPair>& endpointPairs, double center[3])
@@ -962,128 +1112,6 @@ bool AskSheetThickness(tag_t bodyTag, tag_t selectedFaceTag, const double select
     return AskSheetThickness(bodyTag, selectedFaceTag, selectedPoint, selectedNormal, thickness, inwardNormal);
 }
 
-std::vector<NXOpen::Face*> CollectFeatureFaces(NXOpen::Features::Feature* feature)
-{
-    std::vector<NXOpen::Face*> faces;
-    if (feature == NULL)
-    {
-        return faces;
-    }
-
-    faces = feature->GetFaces();
-    if (!faces.empty())
-    {
-        return faces;
-    }
-
-    const std::vector<NXOpen::Body*> bodies = feature->GetBodies();
-    for (std::size_t bodyIndex = 0; bodyIndex < bodies.size(); ++bodyIndex)
-    {
-        if (bodies[bodyIndex] == NULL)
-        {
-            continue;
-        }
-
-        const std::vector<NXOpen::Face*> bodyFaces = bodies[bodyIndex]->GetFaces();
-        faces.insert(faces.end(), bodyFaces.begin(), bodyFaces.end());
-    }
-
-    return faces;
-}
-
-bool AskReferenceNormal(NXOpen::Face* face, double normal[3])
-{
-    if (face == NULL)
-    {
-        return false;
-    }
-
-    double point[3] = {0.0, 0.0, 0.0};
-    return AskPlanarFacePlane(face->Tag(), point, normal);
-}
-
-NXOpen::Features::Feature* ThickenFacesAlongInwardNormal(
-    NXOpen::Part* workPart,
-    const std::vector<NXOpen::Face*>& faces,
-    double thickness,
-    const double inwardNormal[3])
-{
-    if (workPart == NULL || faces.empty() || thickness <= kMinThickness)
-    {
-        DebugLog("  thicken skipped: invalid input, faces=" +
-            FormatTag(static_cast<tag_t>(faces.size())) +
-            ", thickness=" + FormatDouble(thickness));
-        return NULL;
-    }
-
-    NXOpen::Features::ThickenBuilder* builder =
-        workPart->Features()->CreateThickenBuilder(NULL);
-    if (builder == NULL)
-    {
-        DebugLog("  thicken failed: null builder");
-        return NULL;
-    }
-
-    try
-    {
-        std::vector<NXOpen::SelectionIntentRule*> rules;
-        rules.push_back(workPart->ScRuleFactory()->CreateRuleFaceDumb(faces));
-        builder->FaceCollector()->ReplaceRules(rules, false);
-        builder->FirstOffset()->SetFormula(FormatDouble(thickness).c_str());
-        builder->SecondOffset()->SetFormula("0");
-        builder->BooleanOperation()->SetType(
-            NXOpen::GeometricUtilities::BooleanOperation::BooleanTypeCreate);
-        builder->SetTolerance(0.01);
-
-        double extractedNormal[3] = {0.0, 0.0, 0.0};
-        bool reverseDirection = false;
-        bool hasDirectionReference = false;
-        for (std::size_t index = 0; index < faces.size(); ++index)
-        {
-            if (AskReferenceNormal(faces[index], extractedNormal) &&
-                std::fabs(Dot3(extractedNormal, inwardNormal)) > kParallelCosTolerance)
-            {
-                hasDirectionReference = true;
-                break;
-            }
-        }
-
-        if (hasDirectionReference)
-        {
-            reverseDirection = Dot3(extractedNormal, inwardNormal) < 0.0;
-            DebugLog("  thicken direction check: extractedNormal=" +
-                FormatVector3(extractedNormal) +
-                ", inwardNormal=" + FormatVector3(inwardNormal) +
-                ", reverse=" + FormatTag(static_cast<tag_t>(reverseDirection ? 1 : 0)));
-        }
-        else
-        {
-            DebugLog("  thicken direction check skipped: cannot find parallel extracted face normal");
-        }
-        builder->SetReverseDirection(reverseDirection);
-
-        NXOpen::Features::Feature* feature = builder->CommitFeature();
-        if (feature != NULL)
-        {
-            DebugLog("  thicken feature ok: feature=" + FormatTag(feature->Tag()) +
-                ", faces=" + FormatTag(static_cast<tag_t>(faces.size())) +
-                ", thickness=" + FormatDouble(thickness));
-        }
-        else
-        {
-            DebugLog("  thicken feature returned null");
-        }
-        builder->Destroy();
-        return feature;
-    }
-    catch (...)
-    {
-        builder->Destroy();
-        DebugLog("  thicken feature exception");
-        throw;
-    }
-}
-
 std::vector<tag_t> BuildSelectedFaceChain(tag_t bodyTag, tag_t selectedFaceTag, double thickness)
 {
     std::vector<tag_t> chain;
@@ -1176,6 +1204,290 @@ std::vector<tag_t> BuildSelectedFaceChain(tag_t bodyTag, tag_t selectedFaceTag, 
 
     DebugLog("Face chain result count=" + FormatTag(static_cast<tag_t>(chain.size())));
     return chain;
+}
+
+std::vector<tag_t> CollectFaceChainBoundaryEdges(const std::vector<tag_t>& faceChain)
+{
+    std::vector<tag_t> boundaryEdges;
+    std::set<tag_t> chainFaces(faceChain.begin(), faceChain.end());
+    std::set<tag_t> visitedEdges;
+
+    DebugLog("Boundary edge search start: face count=" +
+        FormatTag(static_cast<tag_t>(faceChain.size())));
+
+    for (std::size_t faceIndex = 0; faceIndex < faceChain.size(); ++faceIndex)
+    {
+        const tag_t faceTag = faceChain[faceIndex];
+        if (faceTag == NULL_TAG)
+        {
+            continue;
+        }
+
+        const std::vector<tag_t> edges = AskFaceEdges(faceTag);
+        for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex)
+        {
+            const tag_t edgeTag = edges[edgeIndex];
+            if (edgeTag == NULL_TAG || !visitedEdges.insert(edgeTag).second)
+            {
+                continue;
+            }
+
+            const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(edgeTag);
+            int chainAdjacentCount = 0;
+            for (std::size_t adjacentIndex = 0; adjacentIndex < adjacentFaces.size(); ++adjacentIndex)
+            {
+                if (chainFaces.find(adjacentFaces[adjacentIndex]) != chainFaces.end())
+                {
+                    ++chainAdjacentCount;
+                }
+            }
+
+            DebugLog("  boundary edge candidate edge=" + FormatTag(edgeTag) +
+                ", chainAdjacentCount=" + FormatTag(static_cast<tag_t>(chainAdjacentCount)) +
+                ", adjacentFaces=" + FormatTag(static_cast<tag_t>(adjacentFaces.size())));
+            if (chainAdjacentCount == 1)
+            {
+                boundaryEdges.push_back(edgeTag);
+            }
+        }
+    }
+
+    DebugLog("Boundary edge search result count=" +
+        FormatTag(static_cast<tag_t>(boundaryEdges.size())));
+    return boundaryEdges;
+}
+
+BoundaryLoop BuildBoundaryLoop(
+    const std::vector<EdgeEndpointPair>& boundaryEdges,
+    const std::map<tag_t, tag_t>& edgeOwnerFaces,
+    std::size_t startIndex,
+    std::set<tag_t>& visited)
+{
+    BoundaryLoop loop = {};
+    loop.length = 0.0;
+    loop.boxDiagonal = 0.0;
+
+    std::deque<std::size_t> pending;
+    pending.push_back(startIndex);
+    visited.insert(boundaryEdges[startIndex].edgeTag);
+
+    double minPoint[3] =
+    {
+        boundaryEdges[startIndex].first[0],
+        boundaryEdges[startIndex].first[1],
+        boundaryEdges[startIndex].first[2]
+    };
+    double maxPoint[3] =
+    {
+        boundaryEdges[startIndex].first[0],
+        boundaryEdges[startIndex].first[1],
+        boundaryEdges[startIndex].first[2]
+    };
+
+    while (!pending.empty())
+    {
+        const std::size_t currentIndex = pending.front();
+        pending.pop_front();
+        const EdgeEndpointPair& current = boundaryEdges[currentIndex];
+        loop.edges.push_back(current.edgeTag);
+        loop.length += Distance3(current.first, current.second);
+        std::map<tag_t, tag_t>::const_iterator owner = edgeOwnerFaces.find(current.edgeTag);
+        if (owner != edgeOwnerFaces.end() && owner->second != NULL_TAG)
+        {
+            loop.ownerFaces.insert(owner->second);
+        }
+
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            minPoint[axis] = std::min(minPoint[axis], std::min(current.first[axis], current.second[axis]));
+            maxPoint[axis] = std::max(maxPoint[axis], std::max(current.first[axis], current.second[axis]));
+        }
+
+        for (std::size_t candidateIndex = 0; candidateIndex < boundaryEdges.size(); ++candidateIndex)
+        {
+            const EdgeEndpointPair& candidate = boundaryEdges[candidateIndex];
+            if (visited.find(candidate.edgeTag) != visited.end())
+            {
+                continue;
+            }
+
+            const bool connected =
+                PointsCoincident(current.first, candidate.first) ||
+                PointsCoincident(current.first, candidate.second) ||
+                PointsCoincident(current.second, candidate.first) ||
+                PointsCoincident(current.second, candidate.second);
+            if (!connected)
+            {
+                continue;
+            }
+
+            visited.insert(candidate.edgeTag);
+            pending.push_back(candidateIndex);
+        }
+    }
+
+    loop.boxDiagonal = Distance3(minPoint, maxPoint);
+    return loop;
+}
+
+tag_t AskBoundaryEdgeOwnerFace(tag_t edgeTag, const std::set<tag_t>& chainFaces)
+{
+    const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(edgeTag);
+    for (std::size_t index = 0; index < adjacentFaces.size(); ++index)
+    {
+        if (chainFaces.find(adjacentFaces[index]) != chainFaces.end())
+        {
+            return adjacentFaces[index];
+        }
+    }
+
+    return NULL_TAG;
+}
+
+std::vector<tag_t> PickOuterAndMultiFaceInnerBoundaryLoops(
+    const std::vector<tag_t>& boundaryEdgeTags,
+    const std::vector<tag_t>& faceChain)
+{
+    std::vector<EdgeEndpointPair> boundaryEdges;
+    std::set<tag_t> chainFaces(faceChain.begin(), faceChain.end());
+    std::map<tag_t, tag_t> edgeOwnerFaces;
+    for (std::size_t index = 0; index < boundaryEdgeTags.size(); ++index)
+    {
+        EdgeEndpointPair endpoints = {};
+        if (AskEdgeEndpointPair(boundaryEdgeTags[index], endpoints))
+        {
+            boundaryEdges.push_back(endpoints);
+            edgeOwnerFaces[boundaryEdgeTags[index]] =
+                AskBoundaryEdgeOwnerFace(boundaryEdgeTags[index], chainFaces);
+        }
+        else
+        {
+            DebugLog("  outer boundary skip edge without endpoints: edge=" +
+                FormatTag(boundaryEdgeTags[index]));
+        }
+    }
+
+    if (boundaryEdges.empty())
+    {
+        return boundaryEdgeTags;
+    }
+
+    std::vector<BoundaryLoop> loops;
+    std::set<tag_t> visited;
+    for (std::size_t index = 0; index < boundaryEdges.size(); ++index)
+    {
+        if (visited.find(boundaryEdges[index].edgeTag) != visited.end())
+        {
+            continue;
+        }
+
+        BoundaryLoop loop = BuildBoundaryLoop(boundaryEdges, edgeOwnerFaces, index, visited);
+        DebugLog("  boundary loop found: edges=" +
+            FormatTag(static_cast<tag_t>(loop.edges.size())) +
+            ", ownerFaces=" + FormatTag(static_cast<tag_t>(loop.ownerFaces.size())) +
+            ", length=" + FormatDouble(loop.length) +
+            ", boxDiagonal=" + FormatDouble(loop.boxDiagonal));
+        loops.push_back(loop);
+    }
+
+    if (loops.empty())
+    {
+        return boundaryEdgeTags;
+    }
+
+    std::size_t bestIndex = 0;
+    for (std::size_t index = 1; index < loops.size(); ++index)
+    {
+        if (loops[index].boxDiagonal > loops[bestIndex].boxDiagonal + 1.0e-4 ||
+            (std::fabs(loops[index].boxDiagonal - loops[bestIndex].boxDiagonal) <= 1.0e-4 &&
+                loops[index].length > loops[bestIndex].length))
+        {
+            bestIndex = index;
+        }
+    }
+
+    DebugLog("Outer boundary selected: loopIndex=" +
+        FormatTag(static_cast<tag_t>(bestIndex)) +
+        ", edges=" + FormatTag(static_cast<tag_t>(loops[bestIndex].edges.size())) +
+        ", ownerFaces=" + FormatTag(static_cast<tag_t>(loops[bestIndex].ownerFaces.size())) +
+        ", length=" + FormatDouble(loops[bestIndex].length) +
+        ", boxDiagonal=" + FormatDouble(loops[bestIndex].boxDiagonal));
+
+    std::vector<tag_t> ringEdgesToCheck = loops[bestIndex].edges;
+    for (std::size_t index = 0; index < loops.size(); ++index)
+    {
+        if (index == bestIndex)
+        {
+            continue;
+        }
+
+        if (loops[index].ownerFaces.size() <= 1)
+        {
+            DebugLog("  inner boundary loop excluded: single-face closed loop, edges=" +
+                FormatTag(static_cast<tag_t>(loops[index].edges.size())) +
+                ", ownerFaces=" + FormatTag(static_cast<tag_t>(loops[index].ownerFaces.size())));
+            continue;
+        }
+
+        DebugLog("  inner boundary loop included: multi-face loop, edges=" +
+            FormatTag(static_cast<tag_t>(loops[index].edges.size())) +
+            ", ownerFaces=" + FormatTag(static_cast<tag_t>(loops[index].ownerFaces.size())));
+        ringEdgesToCheck.insert(ringEdgesToCheck.end(), loops[index].edges.begin(), loops[index].edges.end());
+    }
+
+    std::map<tag_t, EdgeEndpointPair> endpointByEdge;
+    for (std::size_t index = 0; index < boundaryEdges.size(); ++index)
+    {
+        endpointByEdge[boundaryEdges[index].edgeTag] = boundaryEdges[index];
+    }
+
+    std::set<tag_t> narrowEdges;
+    for (std::size_t firstIndex = 0; firstIndex < ringEdgesToCheck.size(); ++firstIndex)
+    {
+        std::map<tag_t, EdgeEndpointPair>::const_iterator firstIt =
+            endpointByEdge.find(ringEdgesToCheck[firstIndex]);
+        if (firstIt == endpointByEdge.end())
+        {
+            continue;
+        }
+
+        for (std::size_t secondIndex = firstIndex + 1; secondIndex < ringEdgesToCheck.size(); ++secondIndex)
+        {
+            std::map<tag_t, EdgeEndpointPair>::const_iterator secondIt =
+                endpointByEdge.find(ringEdgesToCheck[secondIndex]);
+            if (secondIt == endpointByEdge.end())
+            {
+                continue;
+            }
+
+            if (AreBoundaryCurvesWithinNarrowDistance(firstIt->second, secondIt->second))
+            {
+                DebugLog("  narrow boundary edges found: edge1=" +
+                    FormatTag(firstIt->first) +
+                    ", edge2=" + FormatTag(secondIt->first));
+                narrowEdges.insert(firstIt->first);
+                narrowEdges.insert(secondIt->first);
+            }
+        }
+    }
+
+    std::vector<tag_t> selectedEdges(narrowEdges.begin(), narrowEdges.end());
+    DebugLog("Narrow boundary edge selected count=" +
+        FormatTag(static_cast<tag_t>(selectedEdges.size())) +
+        ", checkedRingEdges=" + FormatTag(static_cast<tag_t>(ringEdgesToCheck.size())) +
+        ", curveAndEndpointDistanceThreshold=" + FormatDouble(kNarrowBoundaryDistance));
+    return selectedEdges;
+}
+
+std::vector<tag_t> FindFaceChainBoundaryEdges(const std::vector<tag_t>& faceChain)
+{
+    const std::vector<tag_t> allBoundaryEdges = CollectFaceChainBoundaryEdges(faceChain);
+    const std::vector<tag_t> selectedBoundaryEdges =
+        PickOuterAndMultiFaceInnerBoundaryLoops(allBoundaryEdges, faceChain);
+    DebugLog("Selected boundary edge result count=" +
+        FormatTag(static_cast<tag_t>(selectedBoundaryEdges.size())) +
+        ", allBoundaryEdges=" + FormatTag(static_cast<tag_t>(allBoundaryEdges.size())));
+    return selectedBoundaryEdges;
 }
 
 void RefreshDisplay()
@@ -1398,8 +1710,7 @@ int TianFenXI::apply_cb()
     {
         DebugLog("Apply clicked");
         PreviewSelectedFaceChain();
-        const int extractedCount = ExtractHighlightedFaceChain();
-        DebugLog("Apply extract result count=" + FormatTag(static_cast<tag_t>(extractedCount)));
+        DebugLog("Apply preview only: extract/thicken disabled");
     }
     catch(exception& ex)
     {
@@ -1510,17 +1821,19 @@ void TianFenXI::UpdateDeleteRVisibility()
 
 void TianFenXI::ClearPreviewHighlight(bool refresh)
 {
-    if (!highlightedFaceChain.empty())
+    if (!highlightedBoundaryEdges.empty())
     {
-        DebugLog("Clear preview highlight count=" + FormatTag(static_cast<tag_t>(highlightedFaceChain.size())));
+        DebugLog("Clear preview boundary edge highlight count=" +
+            FormatTag(static_cast<tag_t>(highlightedBoundaryEdges.size())));
     }
-    for (std::size_t index = 0; index < highlightedFaceChain.size(); ++index)
+    for (std::size_t index = 0; index < highlightedBoundaryEdges.size(); ++index)
     {
-        if (highlightedFaceChain[index] != NULL_TAG)
+        if (highlightedBoundaryEdges[index] != NULL_TAG)
         {
-            UF_DISP_set_highlight(highlightedFaceChain[index], 0);
+            UF_DISP_set_highlight(highlightedBoundaryEdges[index], 0);
         }
     }
+    highlightedBoundaryEdges.clear();
     highlightedFaceChain.clear();
     hasPreviewThickness = false;
     previewThickness = 0.0;
@@ -1591,9 +1904,24 @@ void TianFenXI::PreviewSelectedFaceChain()
     double inwardNormal[3] = {0.0, 0.0, 0.0};
     if (!AskSheetThickness(bodyTag, selectedFaceTag, selectedPoint, selectedNormal, thickness, inwardNormal))
     {
-        DebugLog("Preview fallback: thickness not found, highlight selected face only");
-        UF_DISP_set_highlight(selectedFaceTag, 1);
-        highlightedFaceChain.push_back(selectedFaceTag);
+        DebugLog("Preview fallback: thickness not found, build connected face chain without thickness exclusion");
+        highlightedFaceChain = BuildSelectedFaceChain(bodyTag, selectedFaceTag, 0.0);
+        if (highlightedFaceChain.size() <= 1)
+        {
+            DebugLog("Preview abort: connected face chain not found, no selected-face boundary fallback");
+            RefreshDisplay();
+            return;
+        }
+
+        highlightedBoundaryEdges = FindFaceChainBoundaryEdges(highlightedFaceChain);
+        for (std::size_t index = 0; index < highlightedBoundaryEdges.size(); ++index)
+        {
+            UF_DISP_set_highlight(highlightedBoundaryEdges[index], 1);
+        }
+        DebugLog("Preview fallback face chain count=" +
+            FormatTag(static_cast<tag_t>(highlightedFaceChain.size())) +
+            ", highlighted outer boundary edge count=" +
+            FormatTag(static_cast<tag_t>(highlightedBoundaryEdges.size())));
         RefreshDisplay();
         return;
     }
@@ -1606,150 +1934,18 @@ void TianFenXI::PreviewSelectedFaceChain()
     highlightedFaceChain = BuildSelectedFaceChain(bodyTag, selectedFaceTag, thickness);
     if (highlightedFaceChain.empty())
     {
-        DebugLog("Preview fallback: face chain empty, highlight selected face only");
-        highlightedFaceChain.push_back(selectedFaceTag);
+        DebugLog("Preview abort: face chain empty, no selected-face boundary fallback");
+        RefreshDisplay();
+        return;
     }
 
-    for (std::size_t index = 0; index < highlightedFaceChain.size(); ++index)
+    highlightedBoundaryEdges = FindFaceChainBoundaryEdges(highlightedFaceChain);
+    for (std::size_t index = 0; index < highlightedBoundaryEdges.size(); ++index)
     {
-        UF_DISP_set_highlight(highlightedFaceChain[index], 1);
+        UF_DISP_set_highlight(highlightedBoundaryEdges[index], 1);
     }
-    DebugLog("Preview highlighted count=" + FormatTag(static_cast<tag_t>(highlightedFaceChain.size())));
+    DebugLog("Preview face chain count=" + FormatTag(static_cast<tag_t>(highlightedFaceChain.size())) +
+        ", highlighted boundary edge count=" +
+        FormatTag(static_cast<tag_t>(highlightedBoundaryEdges.size())));
     RefreshDisplay();
-}
-
-int TianFenXI::ExtractHighlightedFaceChain()
-{
-    if (highlightedFaceChain.empty())
-    {
-        DebugLog("Extract skipped: highlighted face chain is empty");
-        return 0;
-    }
-
-    std::set<tag_t> uniqueFaces;
-    std::vector<NXOpen::Face*> facesToExtract;
-    DebugLog("Extract begin: source face count=" + FormatTag(static_cast<tag_t>(highlightedFaceChain.size())));
-
-    for (std::size_t index = 0; index < highlightedFaceChain.size(); ++index)
-    {
-        const tag_t faceTag = highlightedFaceChain[index];
-        if (faceTag == NULL_TAG || !uniqueFaces.insert(faceTag).second)
-        {
-            DebugLog("  extract skip face=" + FormatTag(faceTag) + ": null/duplicate");
-            continue;
-        }
-
-        NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(faceTag));
-        if (face == NULL)
-        {
-            DebugLog("  extract skip face=" + FormatTag(faceTag) + ": cannot convert to NXOpen::Face");
-            continue;
-        }
-
-        facesToExtract.push_back(face);
-    }
-
-    if (facesToExtract.empty())
-    {
-        DebugLog("Extract skipped: no valid NXOpen faces");
-        return 0;
-    }
-
-    NXOpen::Part* workPart =
-        TianFenXI::theSession != NULL && TianFenXI::theSession->Parts() != NULL
-            ? TianFenXI::theSession->Parts()->Work()
-            : NULL;
-    if (workPart == NULL)
-    {
-        DebugLog("Extract failed: work part is null");
-        return 0;
-    }
-
-    if (!hasPreviewThickness || previewThickness <= kMinThickness)
-    {
-        DebugLog("Extract failed: preview thickness/inward normal is not available");
-        return 0;
-    }
-
-    int extractedFeatureCount = 0;
-    NXOpen::Features::Feature* holedExtractFeature = NULL;
-    for (int pass = 0; pass < 2; ++pass)
-    {
-        const bool deleteHoles = (pass == 1);
-        NXOpen::Features::ExtractFaceBuilder* builder =
-            workPart->Features()->CreateExtractFaceBuilder(NULL);
-        if (builder == NULL)
-        {
-            DebugLog("  extract builder failed: null builder, deleteHoles=" +
-                FormatTag(static_cast<tag_t>(deleteHoles ? 1 : 0)));
-            continue;
-        }
-
-        try
-        {
-            builder->SetType(NXOpen::Features::ExtractFaceBuilder::ExtractTypeFace);
-            builder->SetParentPart(NXOpen::Features::ExtractFaceBuilder::ParentPartTypeWorkPart);
-            builder->SetFaceOption(NXOpen::Features::ExtractFaceBuilder::FaceOptionTypeFaceChain);
-            builder->SetAssociative(false);
-            builder->SetHideOriginal(false);
-            builder->SetDeleteHoles(deleteHoles);
-            builder->SetInheritDisplayProperties(true);
-            builder->SetInheritMaterial(true);
-            std::vector<NXOpen::SelectionIntentRule*> rules;
-            rules.push_back(workPart->ScRuleFactory()->CreateRuleFaceDumb(facesToExtract));
-            builder->FaceChain()->ReplaceRules(rules, false);
-
-            NXOpen::Features::Feature* feature = builder->CommitFeature();
-            if (feature != NULL)
-            {
-                ++extractedFeatureCount;
-                if (!deleteHoles)
-                {
-                    holedExtractFeature = feature;
-                }
-                DebugLog("  extract feature ok: deleteHoles=" +
-                    FormatTag(static_cast<tag_t>(deleteHoles ? 1 : 0)) +
-                    ", feature=" + FormatTag(feature->Tag()) +
-                    ", faces=" + FormatTag(static_cast<tag_t>(facesToExtract.size())));
-            }
-            else
-            {
-                DebugLog("  extract feature returned null: deleteHoles=" +
-                    FormatTag(static_cast<tag_t>(deleteHoles ? 1 : 0)));
-            }
-        }
-        catch (...)
-        {
-            builder->Destroy();
-            DebugLog("  extract feature exception: deleteHoles=" +
-                FormatTag(static_cast<tag_t>(deleteHoles ? 1 : 0)));
-            throw;
-        }
-
-        builder->Destroy();
-    }
-
-    if (holedExtractFeature != NULL)
-    {
-        const std::vector<NXOpen::Face*> holedFaces = CollectFeatureFaces(holedExtractFeature);
-        DebugLog("Thicken begin from holed extract: feature=" +
-            FormatTag(holedExtractFeature->Tag()) +
-            ", faces=" + FormatTag(static_cast<tag_t>(holedFaces.size())) +
-            ", thickness=" + FormatDouble(previewThickness) +
-            ", inwardNormal=" + FormatVector3(previewInwardNormal));
-        NXOpen::Features::Feature* thickenFeature =
-            ThickenFacesAlongInwardNormal(workPart, holedFaces, previewThickness, previewInwardNormal);
-        if (thickenFeature != NULL)
-        {
-            ++extractedFeatureCount;
-        }
-    }
-    else
-    {
-        DebugLog("Thicken skipped: holed extract feature is null");
-    }
-
-    DebugLog("Extract end: extractedFeatureCount=" + FormatTag(static_cast<tag_t>(extractedFeatureCount)));
-    RefreshDisplay();
-    return extractedFeatureCount;
 }
