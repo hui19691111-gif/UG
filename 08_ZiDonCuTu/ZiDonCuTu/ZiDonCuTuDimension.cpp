@@ -5228,50 +5228,68 @@ bool TryMeasureBendAngleDegrees(NXOpen::Face* bendFace, double& degrees)
 		return false;
 	}
 
-	const std::vector<NXOpen::Edge*> edges = bendFace->GetEdges();
-	double bestDegrees = 0.0;
-	for (size_t i = 0; i < edges.size(); ++i)
+	int faceType = 0;
+	double facePoint[3] = { 0.0, 0.0, 0.0 };
+	double faceDirection[3] = { 0.0, 0.0, 0.0 };
+	double faceBox[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+	double faceRadius = 0.0;
+	double faceRadData = 0.0;
+	int faceNormDir = 0;
+	double uvMinMax[4] = { 0.0, 0.0, 0.0, 0.0 };
+	if (UF_MODL_ask_face_data(
+		bendFace->Tag(),
+		&faceType,
+		facePoint,
+		faceDirection,
+		faceBox,
+		&faceRadius,
+		&faceRadData,
+		&faceNormDir) == 0 &&
+		faceType == UF_MODL_CYLINDRICAL_FACE &&
+		UF_MODL_ask_face_uv_minmax(bendFace->Tag(), uvMinMax) == 0)
 	{
-		if (edges[i] == NULL)
+		double span = std::fabs(uvMinMax[1] - uvMinMax[0]);
+		while (span > (2.0 * PI))
 		{
-			continue;
+			span -= 2.0 * PI;
 		}
-		double edgeDegrees = 0.0;
-		if (!TryMeasureArcSpanDegrees(edges[i]->Tag(), edgeDegrees))
+		const double faceDegrees = span * 180.0 / PI;
+		if (faceDegrees > 1.0e-3 && faceDegrees < 359.0)
 		{
-			continue;
-		}
-		if (edgeDegrees > bestDegrees && edgeDegrees < 359.0)
-		{
-			bestDegrees = edgeDegrees;
+			degrees = faceDegrees;
+			std::ostringstream log;
+			log << "[BendNote] angleSource=face"
+				<< " faceTag=" << bendFace->Tag()
+				<< " span=" << degrees
+				<< " radius=" << faceRadius
+				<< " u=(" << uvMinMax[0] << "," << uvMinMax[1] << ")"
+				<< " v=(" << uvMinMax[2] << "," << uvMinMax[3] << ")";
+			BendNoteDebugLog(log.str());
+			return true;
 		}
 	}
 
-	if (bestDegrees <= 1.0e-3)
-	{
-		return false;
-	}
-	degrees = bestDegrees;
-	return true;
+	std::ostringstream log;
+	log << "[BendNote] angleSource=none"
+		<< " faceTag=" << bendFace->Tag();
+	BendNoteDebugLog(log.str());
+	return false;
 }
 
-std::string FormatBendNoteText(const char* directionUtf8, double angleDegrees, bool hasAngle)
+std::string FormatBendNoteText(const char* directionUtf8, double angleDegrees)
 {
 	std::ostringstream text;
 	text << directionUtf8;
-	if (hasAngle)
+	const double rounded = std::round(angleDegrees * 10.0) / 10.0;
+	if (std::fabs(rounded - std::round(rounded)) < 1.0e-6)
 	{
-		const double rounded = std::round(angleDegrees * 10.0) / 10.0;
-		if (std::fabs(rounded - std::round(rounded)) < 1.0e-6)
-		{
-			text << static_cast<int>(std::round(rounded));
-		}
-		else
-		{
-			text << std::fixed << std::setprecision(1) << rounded;
-		}
-		text << "\xC2\xB0";
+		text << static_cast<int>(std::round(rounded));
 	}
+	else
+	{
+		text << std::fixed << std::setprecision(1) << rounded;
+	}
+	text << "\xC2\xB0";
 	return text.str();
 }
 
@@ -5395,18 +5413,19 @@ bool CreateFlatPatternBendNotesForObjects(
 		}
 
 		double angleDegrees = 0.0;
-		bool hasAngle = TryMeasureBendAngleDegrees(objects[i].FormedBodyObject, angleDegrees);
-		if (!hasAngle)
+		bool angleMeasured = TryMeasureBendAngleDegrees(objects[i].FormedBodyObject, angleDegrees);
+		if (!angleMeasured)
 		{
-			hasAngle = TryMeasureBendAngleDegrees(objects[i].FlatSolidObject, angleDegrees);
+			std::ostringstream log;
+			log << "[BendNote] skip no cylindrical angle"
+				<< " flatCurveTag=" << flatPatternCurve->Tag();
+			BendNoteDebugLog(log.str());
+			continue;
 		}
-		if (hasAngle)
+		angleDegrees = 180.0 - angleDegrees;
+		if (angleDegrees < 0.0)
 		{
-			angleDegrees = 180.0 - angleDegrees;
-			if (angleDegrees < 0.0)
-			{
-				angleDegrees = -angleDegrees;
-			}
+			angleDegrees = -angleDegrees;
 		}
 
 		const NXOpen::Point3d drawingPoint(
@@ -5421,7 +5440,7 @@ bool CreateFlatPatternBendNotesForObjects(
 				<< " mid=(" << drawingPoint.X << "," << drawingPoint.Y << ")";
 			BendNoteDebugLog(log.str());
 		}
-		const std::string noteText = FormatBendNoteText(directionUtf8, angleDegrees, hasAngle);
+		const std::string noteText = FormatBendNoteText(directionUtf8, angleDegrees);
 		createdAny = CreateFlatPatternBendNote(baseView, draftingCurve, drawingPoint, noteText, textHeight) || createdAny;
 	}
 	return createdAny;

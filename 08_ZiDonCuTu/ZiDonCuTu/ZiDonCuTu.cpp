@@ -1615,6 +1615,9 @@ double MeasureMinimumDistance(NXOpen::Part* part, NXOpen::NXObject* first, NXOpe
 		return 0.0;
 	}
 	const double value = measureDistance->Value();
+	delete measureDistance;
+	measureDistance = NULL;
+	part->MeasureManager()->ClearPartTransientModification();
 	g_minDistanceCache[cacheKey] = value;
 	return value;
 }
@@ -1911,6 +1914,7 @@ std::vector<NXOpen::Annotations::IntersectionSymbol*> CreateNot90IntersectionSym
 				UF_EVAL_is_line(evaluator1, &boolIsline1);
 				if (!boolIsline1)
 				{
+					UF_EVAL_free(evaluator1);
 					continue;
 				}
 
@@ -1923,6 +1927,7 @@ std::vector<NXOpen::Annotations::IntersectionSymbol*> CreateNot90IntersectionSym
 				double AA[2], BB[2];
 				if (!MapModelPointToDrawing(baseView, aa, AA) || !MapModelPointToDrawing(baseView, bb, BB))
 				{
+					UF_EVAL_free(evaluator1);
 					continue;
 				}
 				if (fabs(AA[0] - BB[0]) > 0.01 || fabs(AA[1] - BB[1]) > 0.01)
@@ -1932,8 +1937,10 @@ std::vector<NXOpen::Annotations::IntersectionSymbol*> CreateNot90IntersectionSym
 					firstLineEnd[0] = BB[0];
 					firstLineEnd[1] = BB[1];
 					foundReferenceLine = true;
+					UF_EVAL_free(evaluator1);
 					break;
 				}
+				UF_EVAL_free(evaluator1);
 			}
 			if (!foundReferenceLine)
 			{
@@ -1948,6 +1955,7 @@ std::vector<NXOpen::Annotations::IntersectionSymbol*> CreateNot90IntersectionSym
 				UF_EVAL_is_line(evaluator1, &boolIsline1);
 				if (!boolIsline1)
 				{
+					UF_EVAL_free(evaluator1);
 					continue;
 				}
 
@@ -1958,6 +1966,7 @@ std::vector<NXOpen::Annotations::IntersectionSymbol*> CreateNot90IntersectionSym
 				if (!MapModelPointToDrawing(baseView, line_coords.start_point, pointa1) ||
 					!MapModelPointToDrawing(baseView, line_coords.end_point, pointa2))
 				{
+					UF_EVAL_free(evaluator1);
 					continue;
 				}
 				const bool sameDirection =
@@ -1973,8 +1982,10 @@ std::vector<NXOpen::Annotations::IntersectionSymbol*> CreateNot90IntersectionSym
 				if (sameDirection || oppositeDirection)
 				{
 					intersectionCurves.push_back(draftingCurves[b]);
+					UF_EVAL_free(evaluator1);
 					break;
 				}
+				UF_EVAL_free(evaluator1);
 			}
 		}
 
@@ -3071,13 +3082,7 @@ static std::string ReadPartFileNameText(NXOpen::Part* part)
 
 static std::string ReadPartFileNameReferenceText(NXOpen::Annotations::TextWithSymbolsBuilder* textBlock, NXOpen::Part* part)
 {
-	const char* nameTitle = "\xE5\x90\x8D\xE7\xA7\xB0";
-	const std::string nameReference = DraftAttributeReferenceText(textBlock, part, nameTitle);
-	if (!nameReference.empty())
-	{
-		return nameReference;
-	}
-	return ReadPartFileNameText(part);
+	return DraftAttributeReferenceText(textBlock, part, "\xE5\x90\x8D\xE7\xA7\xB0");
 }
 
 static std::string ReadBodyTotalQuantityDraftText(
@@ -3235,20 +3240,7 @@ static bool ReadPartFileNameDraftNxString(
 	NXOpen::Part* part,
 	NXOpen::NXString& value)
 {
-	const char* nameTitle = "\xE5\x90\x8D\xE7\xA7\xB0";
-	if (DraftAttributeReferenceNxString(textBlock, part, nameTitle, value))
-	{
-		return true;
-	}
-
-	const std::string fileName = ReadPartFileNameText(part);
-	if (fileName.empty())
-	{
-		return false;
-	}
-
-	value = NXOpen::NXString(fileName.c_str(), NXOpen::NXString::UTF8);
-	return true;
+	return DraftAttributeReferenceNxString(textBlock, part, "\xE5\x90\x8D\xE7\xA7\xB0", value);
 }
 
 static bool ReadMaterialDraftNxString(
@@ -3670,22 +3662,13 @@ static bool PrepareDraftNoteReferenceForToken(
 
 	if (token == "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}")
 	{
-		const char* nameTitle = "\xE5\x90\x8D\xE7\xA7\xB0";
-		if (HasAnyUserAttribute(part, nameTitle))
+		if (HasAnyUserAttribute(part, "\xE5\x90\x8D\xE7\xA7\xB0"))
 		{
 			insert.kind = DraftNoteReferenceInsert::KindAttribute;
 			insert.owner = part;
-			insert.title = nameTitle;
+			insert.title = "\xE5\x90\x8D\xE7\xA7\xB0";
 			return true;
 		}
-		if (HasAnyUserAttribute(body, nameTitle))
-		{
-			insert.kind = DraftNoteReferenceInsert::KindAttribute;
-			insert.owner = body;
-			insert.title = nameTitle;
-			return true;
-		}
-		fallbackText = ReadPartFileNameText(part);
 		return false;
 	}
 
@@ -5959,8 +5942,8 @@ static bool FindOverallDimensionCurvePair(
 		return true;
 	}
 
-	double firstFallbackMetric = horizontalDimension ? 1.0e99 : -1.0e99;
-	double secondFallbackMetric = horizontalDimension ? 1.0e99 : -1.0e99;
+	double firstFallbackMetric = horizontalDimension ? -1.0e99 : 1.0e99;
+	double secondFallbackMetric = horizontalDimension ? -1.0e99 : 1.0e99;
 	bool firstArcFound = false;
 	bool secondArcFound = false;
 
@@ -5987,10 +5970,13 @@ static bool FindOverallDimensionCurvePair(
 				double center2d[2] = { 0.0, 0.0 };
 				UF_VIEW_map_model_to_drawing(baseView->Tag(), arcData.center, center2d);
 				const double radius2d = arcData.radius;
-				const double aMaxX = center2d[0] + radius2d;
-				const double aMinX = center2d[0] - radius2d;
-				const double aMaxY = center2d[1] + radius2d;
-				const double aMinY = center2d[1] - radius2d;
+				LayoutRect arcRect{};
+				bool arcRectInitialized = false;
+				ExpandRectWithCurveInDrawing(baseView->Tag(), curve->Tag(), arcRect, arcRectInitialized);
+				const double aMaxX = arcRectInitialized ? arcRect.maxX : center2d[0] + radius2d;
+				const double aMinX = arcRectInitialized ? arcRect.minX : center2d[0] - radius2d;
+				const double aMaxY = arcRectInitialized ? arcRect.maxY : center2d[1] + radius2d;
+				const double aMinY = arcRectInitialized ? arcRect.minY : center2d[1] - radius2d;
 
 				double limits[2] = { 0.0, 0.0 };
 				double p1[3] = { 0.0, 0.0, 0.0 };
@@ -6393,7 +6379,7 @@ static bool TryCreateOuterCircleDiameterForView(
 	}
 	catch (...)
 	{
-		return true;
+		return false;
 	}
 }
 
@@ -12519,6 +12505,7 @@ int ZiDonCuTu::aaaa_cb()
 									{
 										v0 = 0;
 									}
+									UF_EVAL_free(evaluator);
 								}
 							}
 						}
@@ -12640,6 +12627,7 @@ int ZiDonCuTu::aaaa_cb()
 										}
 									}
 								}
+								UF_EVAL_free(evaluator1);
 							}
 						}
 					}
@@ -12726,6 +12714,7 @@ int ZiDonCuTu::aaaa_cb()
 							Min_Y = dVertices2[1];
 						}
 					}
+					UF_EVAL_free(evaluator);
 				}
 
 				VMax_X.push_back(Max_X);
@@ -13898,6 +13887,7 @@ int ZiDonCuTu::aaaa_cb()
 								}
 							}
 						}
+						UF_EVAL_free(evaluator1);
 					}
 
 					NXOpen::View* nullNXOpen_View(NULL);
@@ -13958,6 +13948,7 @@ int ZiDonCuTu::aaaa_cb()
 									rapidDimensionBuilder1->SecondAssociativity()->SetValue(NXOpen::InferSnapType::SnapTypeDrfTangent, DraftingCurveH2a, BaseView1A, pointa2H, NULL, nullNXOpen_View, point1a);
 								}
 							}
+							UF_EVAL_free(evaluator11);
 						}
 
 					}
@@ -14055,6 +14046,7 @@ int ZiDonCuTu::aaaa_cb()
 									}
 								}
 							}
+							UF_EVAL_free(evaluator1);
 						}
 
 						NXOpen::View* nullNXOpen_View(NULL);
@@ -14109,10 +14101,11 @@ int ZiDonCuTu::aaaa_cb()
 										pointa1X1 = arcCEN[0];
 										DraftingCurveV2a = DraftingCurvevector[bb];
 										pointa2V = { arcCEN[0],-999999,0 };
-										rapidDimensionBuilder1->SecondAssociativity()->SetValue(NXOpen::InferSnapType::SnapTypeDrfTangent, DraftingCurveV2a, BaseView1A, pointa2V, NULL, nullNXOpen_View, point1a);
-									}
+									rapidDimensionBuilder1->SecondAssociativity()->SetValue(NXOpen::InferSnapType::SnapTypeDrfTangent, DraftingCurveV2a, BaseView1A, pointa2V, NULL, nullNXOpen_View, point1a);
 								}
 							}
+							UF_EVAL_free(evaluator11);
+						}
 						}
 
 						ApplyDefaultRapidDimensionStyle(rapidDimensionBuilder1);
@@ -14676,6 +14669,7 @@ int ZiDonCuTu::aabb_cb()
 								}
 							}
 						}
+						UF_EVAL_free(evaluator1);
 					}
 
 
@@ -14737,6 +14731,7 @@ int ZiDonCuTu::aabb_cb()
 									rapidDimensionBuilder1->SecondAssociativity()->SetValue(NXOpen::InferSnapType::SnapTypeDrfTangent, DraftingCurveH2a, BaseView1A, pointa2H, NULL, nullNXOpen_View, point1a);
 								}
 							}
+							UF_EVAL_free(evaluator11);
 						}
 					}
 
@@ -14835,6 +14830,7 @@ int ZiDonCuTu::aabb_cb()
 									}
 								}
 							}
+							UF_EVAL_free(evaluator1);
 						}
 
 						NXOpen::View* nullNXOpen_View(NULL);
@@ -14889,10 +14885,11 @@ int ZiDonCuTu::aabb_cb()
 										pointa1X1 = arcCEN[0];
 										DraftingCurveV2a = DraftingCurvevector[bb];
 										pointa2V = { arcCEN[0],-999999,0 };
-										rapidDimensionBuilder1->SecondAssociativity()->SetValue(NXOpen::InferSnapType::SnapTypeDrfTangent, DraftingCurveV2a, baseView3C, pointa2V, NULL, nullNXOpen_View, point1a);
-									}
+									rapidDimensionBuilder1->SecondAssociativity()->SetValue(NXOpen::InferSnapType::SnapTypeDrfTangent, DraftingCurveV2a, baseView3C, pointa2V, NULL, nullNXOpen_View, point1a);
 								}
 							}
+							UF_EVAL_free(evaluator11);
+						}
 						}
 
 						ApplyDefaultRapidDimensionStyle(rapidDimensionBuilder1);

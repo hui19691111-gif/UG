@@ -1062,7 +1062,7 @@ static std::string BuildBodyNoteText(NXOpen::Part* part, NXOpen::Body* body, int
     const std::string number = ReadAttributeText(body, "bianhao");
 
     std::string note = CachedBodyNoteFormat();
-    ReplaceAllText(note, "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}", ReadPartFileName(part));
+    ReplaceAllText(note, "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}", "");
     ReplaceAllText(note, "{\xE7\xBC\x96\xE5\x8F\xB7=}", number.empty() ? "" : number + "=");
     ReplaceAllText(note, "{\xE7\xBC\x96\xE5\x8F\xB7}", number);
     ReplaceAllText(note, "{\xE6\x9D\x90\xE6\x96\x99}", material);
@@ -1072,7 +1072,7 @@ static std::string BuildBodyNoteText(NXOpen::Part* part, NXOpen::Body* body, int
     note = Trim(note);
     if (note.empty())
     {
-        note = ReadPartFileName(part);
+        note.clear();
     }
     note = note.empty() ? "FLAT PATTERN" : note;
     LogLine("[BuildBodyNoteText] part=" + LocaleText(part != NULL ? part->Name() : NXOpen::NXString(""))
@@ -1108,7 +1108,7 @@ static std::string BodyNoteTokenValueForUf(
 {
     if (token == "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}")
     {
-        return ReadPartFileName(part);
+        return "";
     }
     if (token == "{\xE7\xBC\x96\xE5\x8F\xB7=}")
     {
@@ -1317,13 +1317,12 @@ static bool PrepareBodyNoteReference(
 
     if (token == "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}")
     {
-        const char* titles[] = { "DB_PART_NAME", "part_name", "\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D" };
+        const char* titles[] = { "\xE5\x90\x8D\xE7\xA7\xB0" };
         if (FindAttributeOwner(part, NULL, titles, sizeof(titles) / sizeof(titles[0]), insert.owner, insert.title))
         {
             insert.kind = DraftNoteReferenceInsert::KindAttribute;
             return true;
         }
-        fallback = ReadPartFileName(part);
         return false;
     }
 
@@ -2988,6 +2987,7 @@ static void CreateBodyNote(NXOpen::Part* workPart, const FlatPatternItem& item, 
                     }
                     builderStyleMs = ElapsedMilliseconds(stepStart);
                     stepStart = std::chrono::steady_clock::now();
+                    linkedText = SetLinkedBodyNoteText(editBuilder->Text()->TextBlock(), item.part, item.body, item.quantity);
                     NXOpen::NXObject* edited = editBuilder->Commit();
                     builderCommitMs = ElapsedMilliseconds(stepStart);
                     editStatus = edited != NULL ? 0 : 1;

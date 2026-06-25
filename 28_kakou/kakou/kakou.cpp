@@ -40,6 +40,8 @@
 #include "custom_function.cpp"
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include "../../../common/ZhihuiEmbeddedDialog.hpp"
 #include "../../../common/ZhihuiDialogMemory.hpp"
@@ -50,6 +52,42 @@ using namespace NXOpen::BlockStyler;
 
 namespace
 {
+void LogKaKouDebug(const std::string& message)
+{
+    (void)message;
+}
+
+std::string FeatureDebugText(const char* name, NXOpen::Features::Feature* feature)
+{
+    std::ostringstream stream;
+    stream << name << "=";
+    if (feature == NULL)
+    {
+        stream << "NULL";
+        return stream.str();
+    }
+
+    stream << "tag:" << feature->Tag();
+    try
+    {
+        std::vector<NXOpen::Body*> bodies = feature->GetBodies();
+        stream << ",bodies:" << bodies.size();
+        if (!bodies.empty() && bodies[0] != NULL)
+        {
+            stream << ",body0:" << bodies[0]->Tag();
+        }
+    }
+    catch (const std::exception& ex)
+    {
+        stream << ",GetBodiesException:" << ex.what();
+    }
+    catch (...)
+    {
+        stream << ",GetBodiesException:unknown";
+    }
+    return stream.str();
+}
+
 void LoadKaKouDialogMemory(
     NXOpen::BlockStyler::Enumeration* enum0,
     NXOpen::BlockStyler::UIBlock* linearDim03,
@@ -271,6 +309,16 @@ void kakou::initialize_cb()
 }
 
 std::vector<NXOpen::TaggedObject*> edge1_TAG;
+tag_t g_selectedFaceTag = NULL_TAG;
+NXOpen::Point3d g_selectedPickPoint;
+bool g_hasSelectionForRebuild = false;
+NXOpen::Point3d g_draggedPreviewOrigin;
+bool g_hasDraggedPreviewOrigin = false;
+NXOpen::Point3d g_previewBaseOrigin;
+bool g_hasPreviewBaseOrigin = false;
+double g_previewDragOffset[3] = { 0.0, 0.0, 0.0 };
+bool g_hasPreviewDragOffset = false;
+bool g_geometryReadyForRebuild = false;
 NXOpen::Edge* edge1;
 NXOpen::Point3d Point3d1;
 NXOpen::Point3d Point3d2;
@@ -302,9 +350,83 @@ double mtx[9];
 double HouDu1 = 100;
 Body* Body1;
 Body* Bodytool;
+std::vector<NXOpen::Body*> g_toolBodyCandidates;
+NXOpen::Face* g_sideFaceForToolBody = NULL;
 bool g_previewCommitted = false;
 
 NXOpen::Point* point_Zon;
+
+static bool StoreCurrentSelectionForRebuild(NXOpen::BlockStyler::SelectObject* selectionBlock)
+{
+    if (selectionBlock == NULL)
+    {
+        return false;
+    }
+
+    try
+    {
+        PropertyList* selectionProps = selectionBlock->GetProperties();
+        std::vector<NXOpen::TaggedObject*> selectedObjects = selectionProps->GetTaggedObjectVector("SelectedObjects");
+        NXOpen::Point3d pickedPoint = selectionProps->GetPoint("PickPoint");
+        delete selectionProps;
+        selectionProps = NULL;
+
+        if (selectedObjects.empty() || selectedObjects[0] == NULL)
+        {
+            edge1_TAG.clear();
+            g_selectedFaceTag = NULL_TAG;
+            g_hasSelectionForRebuild = false;
+            LogKaKouDebug("[Selection] empty");
+            return false;
+        }
+
+        edge1_TAG = selectedObjects;
+        g_selectedFaceTag = selectedObjects[0]->Tag();
+        g_selectedPickPoint = pickedPoint;
+        g_hasSelectionForRebuild = true;
+        {
+            std::ostringstream stream;
+            stream << "[Selection] stored face=" << g_selectedFaceTag
+                << " pick=(" << g_selectedPickPoint.X << ","
+                << g_selectedPickPoint.Y << "," << g_selectedPickPoint.Z << ")";
+            LogKaKouDebug(stream.str());
+        }
+        return true;
+    }
+    catch (const std::exception& ex)
+    {
+        LogKaKouDebug(std::string("[Selection] exception ") + ex.what());
+    }
+    catch (...)
+    {
+        LogKaKouDebug("[Selection] exception unknown");
+    }
+
+    return false;
+}
+
+static NXOpen::Face* StoredSelectedFaceForRebuild()
+{
+    if (!g_hasSelectionForRebuild || g_selectedFaceTag == NULL_TAG)
+    {
+        return NULL;
+    }
+
+    try
+    {
+        return dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(g_selectedFaceTag));
+    }
+    catch (const std::exception& ex)
+    {
+        LogKaKouDebug(std::string("[Selection] get stored face exception ") + ex.what());
+    }
+    catch (...)
+    {
+        LogKaKouDebug("[Selection] get stored face exception unknown");
+    }
+
+    return NULL;
+}
 
 static double VectorLength(const NXOpen::Vector3d& vector)
 {
@@ -489,10 +611,90 @@ static NXOpen::Body* ResolveToolBodyByCutIntersection(
     return bestBody;
 }
 
+static NXOpen::Body* ResolveToolBodyForCurrentCutPosition()
+{
+    if (Body1 == NULL || vFeature1.empty())
+    {
+        return Bodytool;
+    }
+
+    std::vector<NXOpen::Features::Feature*> cutFeatures;
+    std::vector<NXOpen::Body*> cutBodies;
+    for (size_t featureIndex = 1; featureIndex < vFeature1.size(); featureIndex += 2)
+    {
+        if (vFeature1[featureIndex] != NULL)
+        {
+            cutFeatures.push_back(vFeature1[featureIndex]);
+            std::vector<NXOpen::Body*> featureBodies = vFeature1[featureIndex]->GetBodies();
+            cutBodies.insert(cutBodies.end(), featureBodies.begin(), featureBodies.end());
+        }
+    }
+    if (cutFeatures.empty())
+    {
+        return Bodytool;
+    }
+
+    NXOpen::Body* bestBody = NULL;
+    double bestDistance = 1.0e100;
+    NXOpen::BodyCollection* bodyCollector = workPart->Bodies();
+    for (NXOpen::BodyCollection::iterator it = bodyCollector->begin(); it != bodyCollector->end(); ++it)
+    {
+        NXOpen::Body* candidateBody = *it;
+        if (candidateBody == NULL || candidateBody->Tag() == Body1->Tag())
+        {
+            continue;
+        }
+        bool isCutBody = false;
+        for (size_t cutBodyIndex = 0; cutBodyIndex < cutBodies.size(); ++cutBodyIndex)
+        {
+            if (cutBodies[cutBodyIndex] != NULL && cutBodies[cutBodyIndex]->Tag() == candidateBody->Tag())
+            {
+                isCutBody = true;
+                break;
+            }
+        }
+        if (isCutBody)
+        {
+            continue;
+        }
+
+        double candidateDistance = 1.0e100;
+        for (size_t featureIndex = 0; featureIndex < cutFeatures.size(); ++featureIndex)
+        {
+            std::vector<NXOpen::Body*> featureBodies = cutFeatures[featureIndex]->GetBodies();
+            for (size_t bodyIndex = 0; bodyIndex < featureBodies.size(); ++bodyIndex)
+            {
+                candidateDistance = std::min(candidateDistance, MinimumDistance(candidateBody, featureBodies[bodyIndex]));
+            }
+        }
+
+        if (candidateDistance < 0.01)
+        {
+            return candidateBody;
+        }
+        if (candidateDistance < bestDistance)
+        {
+            bestDistance = candidateDistance;
+            bestBody = candidateBody;
+        }
+    }
+
+    return bestBody != NULL ? bestBody : Bodytool;
+}
+
 static void ClearPreviewFeaturesIfNeeded()
 {
+    {
+        std::ostringstream stream;
+        stream << "[ClearPreview] begin committed=" << g_previewCommitted
+            << " size=" << vFeature1.size() << " "
+            << FeatureDebugText("Feature1", Feature1) << " "
+            << FeatureDebugText("Feature2", Feature2);
+        LogKaKouDebug(stream.str());
+    }
     if (vFeature1.empty())
     {
+        LogKaKouDebug("[ClearPreview] skip empty");
         return;
     }
 
@@ -509,22 +711,39 @@ static void ClearPreviewFeaturesIfNeeded()
         }
         if (!objects.empty())
         {
+            std::ostringstream stream;
+            stream << "[ClearPreview] delete count=" << objects.size();
+            for (size_t i = 0; i < objects.size(); ++i)
+            {
+                stream << " obj" << i << ":" << (objects[i] != NULL ? objects[i]->Tag() : 0);
+            }
+            LogKaKouDebug(stream.str());
             custom_del(objects);
+            LogKaKouDebug("[ClearPreview] delete done");
         }
     }
 
     vFeature1.clear();
+    LogKaKouDebug("[ClearPreview] end");
 }
 
 static void MarkPreviewCommitted()
 {
+    LogKaKouDebug("[Preview] committed");
     vFeature1.clear();
     edge1_TAG.clear();
+    g_selectedFaceTag = NULL_TAG;
+    g_hasSelectionForRebuild = false;
+    g_hasDraggedPreviewOrigin = false;
+    g_hasPreviewBaseOrigin = false;
+    g_hasPreviewDragOffset = false;
+    g_geometryReadyForRebuild = false;
     g_previewCommitted = true;
 }
 
 static void MarkPreviewCreated()
 {
+    LogKaKouDebug("[Preview] created");
     g_previewCommitted = false;
 }
 //------------------------------------------------------------------------------
@@ -564,6 +783,13 @@ int kakou::apply_cb()
 
         int num_result=0;
         tag_t* resulting_bodies=NULL;
+        Bodytool = ResolveToolBodyForCurrentCutPosition();
+        if (Bodytool == NULL)
+        {
+            kakou::theUI->NXMessageBox()->Show("卡口", NXOpen::NXMessageBox::DialogTypeError, "未能根据当前位置确定母口求差体。");
+            UF_terminate();
+            return 1;
+        }
         if (enum0->GetProperties()->GetEnum("Value") ==0)
         {
             vector<Body*>Vbody11;
@@ -626,6 +852,7 @@ int kakou::apply_cb()
 //------------------------------------------------------------------------------
 int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
+    bool rebuildSelectionGeometry = false;
     try
     {
         if(block == drawingArea0)
@@ -637,6 +864,8 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
             if (vFeature1.size()>0)
             {
+                LogKaKouDebug("[Update] enum0 changed with preview");
+                UF_initialize();
                 ClearPreviewFeaturesIfNeeded();
                 goto abcde;
             }
@@ -646,6 +875,8 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
         {
             if (vFeature1.size() > 0)
             {
+                LogKaKouDebug("[Update] linear_dim03 changed with preview");
+                UF_initialize();
                 ClearPreviewFeaturesIfNeeded();
                 goto abcde;
             }
@@ -654,6 +885,8 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
         {
             if (vFeature1.size() > 0)
             {
+                LogKaKouDebug("[Update] linear_dim0 changed with preview");
+                UF_initialize();
                 ClearPreviewFeaturesIfNeeded();
                 goto abcde;
             }
@@ -662,6 +895,8 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
         {
             if (vFeature1.size() > 0)
             {
+                LogKaKouDebug("[Update] linear_dim01/B changed with preview");
+                UF_initialize();
                 ClearPreviewFeaturesIfNeeded();
                 goto abcde;
             }
@@ -670,14 +905,28 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
         {
             if (vFeature1.size() > 0)
             {
+                LogKaKouDebug("[Update] linear_dim02/C changed with preview");
+                UF_initialize();
                 ClearPreviewFeaturesIfNeeded();
                 goto abcde;
             }
         }
         else if(block == selection0)
         {
+            LogKaKouDebug("[Update] selection0 begin");
             UF_initialize();
+            if (!StoreCurrentSelectionForRebuild(selection0))
+            {
+                UF_terminate();
+                return 0;
+            }
+            g_hasDraggedPreviewOrigin = false;
+            g_hasPreviewBaseOrigin = false;
+            g_hasPreviewDragOffset = false;
+            g_geometryReadyForRebuild = false;
+            rebuildSelectionGeometry = true;
         abcde:
+            LogKaKouDebug("[Update] rebuild begin");
             if (vFeature1.size() > 0)
             {
                 ClearPreviewFeaturesIfNeeded();
@@ -712,33 +961,34 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
             sprintf(Thardim0, "%.2f", Thedim0);
             sprintf(Thardim0a, "%.2f", Thedim0 + Thedim02 * 2);
-            sprintf(Thardim01, "%.2f", Thedim01);
-            sprintf(Thardim01a, "%.2f", Thedim01 + Thedim02 * 2);
+            sprintf(Thardim01, "%.2f", Thedim01 + 1.0);
+            sprintf(Thardim01a, "%.2f", Thedim01 + 1.0 + Thedim02 * 2);
             sprintf(Thardim02, "%.2f", Thedim02);
-
-            if (edge1_TAG.size()>0)
             {
-                ClearPreviewFeaturesIfNeeded();
- 
-                edge1_TAG.clear();
+                std::ostringstream stream;
+                stream << "[Update] dims A=" << Thedim0
+                    << " B=" << Thedim01
+                    << " C=" << Thedim02
+                    << " Thardim01=" << Thardim01
+                    << " Thardim01a=" << Thardim01a;
+                LogKaKouDebug(stream.str());
             }
-            PropertyList* selection0Props = selection0->GetProperties();
-            edge1_TAG = selection0Props->GetTaggedObjectVector("SelectedObjects");
-            NXOpen::Point3d pickedPoint = selection0Props->GetPoint("PickPoint");
-            delete selection0Props;
-            selection0Props = NULL;
-            if (edge1_TAG.empty())
+
+            if (!g_hasSelectionForRebuild || g_selectedFaceTag == NULL_TAG)
             {
                 UF_terminate();
                 return 0;
             }
+            NXOpen::Point3d pickedPoint = g_selectedPickPoint;
             MarkPreviewCreated();
-            HouDu1 = 100;
 
-            NXOpen::Face* selectedFace = dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(edge1_TAG[0]->Tag()));
+            if (rebuildSelectionGeometry || !g_geometryReadyForRebuild)
+            {
+            HouDu1 = 100;
+            NXOpen::Face* selectedFace = StoredSelectedFaceForRebuild();
             if (selectedFace == NULL)
             {
-                kakou::theUI->NXMessageBox()->Show("卡口", NXOpen::NXMessageBox::DialogTypeError, "请选择面。");
+                kakou::theUI->NXMessageBox()->Show("卡口", NXOpen::NXMessageBox::DialogTypeError, "所选面已失效，请重新选择面。");
                 UF_terminate();
                 return 0;
             }
@@ -782,7 +1032,7 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
             Body1 = edge1->GetBody();
             vector< Edge*>Vedge1= Body1->GetEdges();
             vector< Face*>VFace1 = edge1->GetFaces();
-            NXOpen::Face* sideFaceForToolBody = OtherFaceOnEdge(edge1, selectedFace);
+            g_sideFaceForToolBody = OtherFaceOnEdge(edge1, selectedFace);
 
             std::vector<double> area1;
 
@@ -861,15 +1111,15 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 return 0;
             }
 
-            std::vector<NXOpen::Body*> toolBodyCandidates = FindParallelTouchingBodies(Body1, sideFaceForToolBody, 0.5);
-            if (toolBodyCandidates.empty())
+            g_toolBodyCandidates = FindParallelTouchingBodies(Body1, g_sideFaceForToolBody, 0.5);
+            if (g_toolBodyCandidates.empty())
             {
                 workPart->Points()->DeletePoint(point1);
                 kakou::theUI->NXMessageBox()->Show("卡口", NXOpen::NXMessageBox::DialogTypeError, "未找到与靠近点击边的侧面相贴并平行的母口体。");
                 UF_terminate();
                 return 0;
             }
-            Bodytool = toolBodyCandidates[0];
+            Bodytool = g_toolBodyCandidates[0];
 
             workPart->Points()->DeletePoint(point1);
             for (size_t c = 0; c < VFace1.size(); c++)
@@ -902,6 +1152,13 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
             }
 
             custom_manip_getMatrix(manip0, matrix1);//输出Matrix3x3    
+            g_geometryReadyForRebuild = true;
+            LogKaKouDebug("[Update] geometry ready");
+            }
+            else
+            {
+                LogKaKouDebug("[Update] reuse geometry");
+            }
             double ufPoint3d1[3];
             ufPoint3d1[0] = Point3d1.X; ufPoint3d1[1] = Point3d1.Y; ufPoint3d1[2] = Point3d1.Z;
 
@@ -911,20 +1168,49 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
             Y_vec[0] = manip0->YAxis().X; Y_vec[1] = manip0->YAxis().Y; Y_vec[2] = manip0->YAxis().Z;
 
             UF_VEC3_affine_comb(ufPoint3d1, -HouDu1/2, X_vec, newx);
-            UF_VEC3_affine_comb(newx, Thedim01/2, Y_vec, newy);
+            UF_VEC3_affine_comb(newx, Thedim01 / 2.0 - 0.5, Y_vec, newy);
             sprintf(Z, "%.2f", HouDu1);
             sprintf(Za, "%.2f", HouDu1 + Thedim02 * 2);
             if (enum0->GetProperties()->GetEnum("Value")==0)
             {
-                point_Zon = workPart->Points()->CreatePoint({ newy[0] ,newy[1] ,newy[2] });
+                NXOpen::Point3d previewBaseOrigin;
+                previewBaseOrigin.X = newy[0];
+                previewBaseOrigin.Y = newy[1];
+                previewBaseOrigin.Z = newy[2];
+                g_previewBaseOrigin = previewBaseOrigin;
+                g_hasPreviewBaseOrigin = true;
 
-                manip0->SetOrigin({ newy[0] ,newy[1] ,newy[2] });
+                NXOpen::Point3d previewOrigin = previewBaseOrigin;
+                if (g_hasPreviewDragOffset)
+                {
+                    previewOrigin.X += g_previewDragOffset[0];
+                    previewOrigin.Y += g_previewDragOffset[1];
+                    previewOrigin.Z += g_previewDragOffset[2];
+                    LogKaKouDebug("[Update] use drag offset");
+                }
+                {
+                    std::ostringstream stream;
+                    stream << "[Update] preview origin=(" << previewOrigin.X << ","
+                        << previewOrigin.Y << "," << previewOrigin.Z << ")"
+                        << " base=(" << previewBaseOrigin.X << ","
+                        << previewBaseOrigin.Y << "," << previewBaseOrigin.Z << ")";
+                    LogKaKouDebug(stream.str());
+                }
 
+                point_Zon = workPart->Points()->CreatePoint(previewOrigin);
+
+                manip0->SetOrigin(previewOrigin);
+
+                LogKaKouDebug("[Update] custom_box Feature1 begin");
                 custom_box(manip0->Origin(), matrix1, Z, Thardim01, Thardim0, Feature1);
+                LogKaKouDebug("[Update] custom_box Feature1 end");
+                LogKaKouDebug("[Update] custom_box Feature2 begin");
                 custom_box(manip0->Origin(), matrix1, Za, Thardim01a, Thardim0a, Feature2);
+                LogKaKouDebug("[Update] custom_box Feature2 end");
                 UF_OBJ_set_blank_status(Feature2->GetBodies()[0]->Tag(), UF_OBJ_BLANKED);
                 vFeature1.push_back(Feature1);
                 vFeature1.push_back(Feature2);
+                LogKaKouDebug(std::string("[Update] preview count1 ") + FeatureDebugText("Feature1", Feature1) + " " + FeatureDebugText("Feature2", Feature2));
             }
             else
             {
@@ -958,6 +1244,7 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     vFeature1.push_back(Feature2);
                     vFeature1.push_back(Feature3);
                     vFeature1.push_back(Feature4);
+                    LogKaKouDebug("[Update] preview count2 built");
                 }
                 else
                 {
@@ -999,6 +1286,7 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
                         vFeature1.push_back(Feature4);
                         vFeature1.push_back(Feature5);
                         vFeature1.push_back(Feature6);
+                        LogKaKouDebug("[Update] preview count3 built");
                     }
                     else
                     {
@@ -1046,6 +1334,7 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
                             vFeature1.push_back(Feature6);
                             vFeature1.push_back(Feature7);
                             vFeature1.push_back(Feature8);
+                            LogKaKouDebug("[Update] preview count4 built");
                         }
                     }
                 }
@@ -1057,7 +1346,7 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     cutFeatures.push_back(vFeature1[featureIndex]);
                 }
 
-                NXOpen::Body* resolvedToolBody = ResolveToolBodyByCutIntersection(toolBodyCandidates, cutFeatures, sideFaceForToolBody);
+                NXOpen::Body* resolvedToolBody = ResolveToolBodyByCutIntersection(g_toolBodyCandidates, cutFeatures, g_sideFaceForToolBody);
                 if (resolvedToolBody == NULL)
                 {
                     kakou::theUI->NXMessageBox()->Show("卡口", NXOpen::NXMessageBox::DialogTypeError, "未能从相贴平行体中确定母口求差体。");
@@ -1067,18 +1356,49 @@ int kakou::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 Bodytool = resolvedToolBody;
             }
             UF_terminate();
+            LogKaKouDebug("[Update] rebuild end");
         }
         else if (block == manip0)
         {
+            LogKaKouDebug(std::string("[Manip] begin ") + FeatureDebugText("Feature1", Feature1) + " " + FeatureDebugText("Feature2", Feature2));
             custom_manip_getMatrix(manip0,matrix1);//输出Matrix3x3     
             custom_rebox(manip0->Origin(), matrix1, Z, Thardim01, Thardim0, Feature1);
+            LogKaKouDebug(std::string("[Manip] after rebox Feature1 ") + FeatureDebugText("Feature1", Feature1));
             custom_rebox(manip0->Origin(), matrix1, Za, Thardim01a, Thardim0a, Feature2);
+            LogKaKouDebug(std::string("[Manip] after rebox Feature2 ") + FeatureDebugText("Feature2", Feature2));
+            if (vFeature1.size() > 0)
+            {
+                vFeature1[0] = Feature1;
+            }
+            if (vFeature1.size() > 1)
+            {
+                vFeature1[1] = Feature2;
+            }
+            g_draggedPreviewOrigin = manip0->Origin();
+            g_hasDraggedPreviewOrigin = true;
+            if (g_hasPreviewBaseOrigin)
+            {
+                g_previewDragOffset[0] = g_draggedPreviewOrigin.X - g_previewBaseOrigin.X;
+                g_previewDragOffset[1] = g_draggedPreviewOrigin.Y - g_previewBaseOrigin.Y;
+                g_previewDragOffset[2] = g_draggedPreviewOrigin.Z - g_previewBaseOrigin.Z;
+                g_hasPreviewDragOffset = true;
+            }
+            {
+                std::ostringstream stream;
+                stream << "[Manip] stored origin=(" << g_draggedPreviewOrigin.X << ","
+                    << g_draggedPreviewOrigin.Y << "," << g_draggedPreviewOrigin.Z << ")"
+                    << " offset=(" << g_previewDragOffset[0] << ","
+                    << g_previewDragOffset[1] << "," << g_previewDragOffset[2] << ")";
+                LogKaKouDebug(stream.str());
+            }
+            LogKaKouDebug("[Manip] end");
 
         }
     }
     catch(exception& ex)
     {
         //---- Enter your exception handling code here -----
+        LogKaKouDebug(std::string("[Update] exception ") + ex.what());
         kakou::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
     return 0;

@@ -129,6 +129,7 @@ void custom_reBaoLonTi(Features::ToolingBox* toolingBox1, const char* aa)
 
     NXOpen::NXObject* nXObject1;
     nXObject1 = toolingBoxBuilder1->Commit();
+
     toolingBoxBuilder1->Destroy();
     editWithRollbackManager1->UpdateFeature(false);
     editWithRollbackManager1->Stop();
@@ -376,6 +377,11 @@ void custom_rebox(NXOpen::Point3d Point3d2, NXOpen::Matrix3x3& matrix1, const ch
 
     NXOpen::NXObject* nXObject1;
     nXObject1 = toolingBoxBuilder1->Commit();
+    NXOpen::Features::Feature* redefinedFeature = dynamic_cast<NXOpen::Features::Feature*>(nXObject1);
+    if (redefinedFeature != NULL)
+    {
+        Feature1 = redefinedFeature;
+    }
     toolingBoxBuilder1->Destroy();
 
     editWithRollbackManager1->UpdateFeature(false);

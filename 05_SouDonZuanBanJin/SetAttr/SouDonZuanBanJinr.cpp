@@ -775,6 +775,52 @@ namespace
         }
     }
 
+    bool HasNonEmptyStringUserAttribute(NXOpen::NXObject* object, const char* title)
+    {
+        return !ReadStringUserAttribute(object, title).empty();
+    }
+
+    bool HasPositiveIntegerUserAttribute(NXOpen::NXObject* object, const char* title)
+    {
+        if (object == NULL || title == NULL || title[0] == '\0')
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!object->HasUserAttribute(title, NXOpen::NXObject::AttributeType::AttributeTypeInteger, -1))
+            {
+                return false;
+            }
+
+            return object->GetIntegerAttribute(title) > 0;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool HasPartMaterialAttribute(NXOpen::Part* part)
+    {
+        return HasNonEmptyStringUserAttribute(part, "cailiao") ||
+            HasNonEmptyStringUserAttribute(part, "\xE6\x9D\x90\xE6\x96\x99") ||
+            HasNonEmptyStringUserAttribute(part, "\xE6\x9D\x90\xE8\xB4\xA8");
+    }
+
+    bool HasRequiredPartAttributes(NXOpen::Part* part)
+    {
+        return HasNonEmptyStringUserAttribute(part, "\xE6\x95\xB0\xE9\x87\x8F") &&
+            HasPartMaterialAttribute(part);
+    }
+
+    bool HasRequiredBodyAttributes(NXOpen::Body* body)
+    {
+        return HasNonEmptyStringUserAttribute(body, "cailiao") &&
+            HasPositiveIntegerUserAttribute(body, "sulian");
+    }
+
     std::string ReadBodyMaterialText(NXOpen::Part* part, NXOpen::Body* body)
     {
         std::string material = ReadStringUserAttribute(body, "cailiao");
@@ -3111,8 +3157,14 @@ int SouDonZuanBanJin::Show()
     {
         RefreshNxContext();
         UfSessionGuard ufSession;
-        logical is_exp_in_part;
-        UF_MODL_is_exp_in_part(workPart->Tag(), "数量", &is_exp_in_part);
+        if (!HasRequiredPartAttributes(workPart))
+        {
+            SouDonZuanBanJin::theUI->NXMessageBox()->Show(
+                "\xE6\xB7\xBB\xE5\x8A\xA0\xE9\x9B\xB6\xE4\xBB\xB6\xE5\xB1\x9E\xE6\x80\xA7",
+                NXOpen::NXMessageBox::DialogTypeInformation,
+                "\xE8\xAF\xB7\xE5\x85\x88\xE5\x86\x99\xE5\x85\xA5\xE9\x83\xA8\xE4\xBB\xB6\xE5\xB1\x9E\xE6\x80\xA7\xE3\x80\x82");
+            return 0;
+        }
 
         theDialog->Show();
     }
@@ -3285,7 +3337,6 @@ int SouDonZuanBanJin::apply_cb()
         char ExName1XX[256];
         char ExName2[256];
         char SuLian[256];
-        char ZSuLian[256];
         
         if (Body1->HasUserAttribute("BodyID", NXObject::AttributeType::AttributeTypeInteger, -1))
         {
@@ -3296,7 +3347,6 @@ int SouDonZuanBanJin::apply_cb()
             sprintf(ExName1X, "X_%d", Body1ID);
             sprintf(ExName1XX, "XX_%d", Body1ID);
             sprintf(SuLian, "SuLian_%d", Body1ID);
-            sprintf(ZSuLian, "ZSuLian_%d", Body1ID);
 
         }
 
@@ -3308,7 +3358,6 @@ int SouDonZuanBanJin::apply_cb()
         NXOpen::Expression* expression1X;
         NXOpen::Expression* expression1XX;
         NXOpen::Expression* expsuLian;
-        NXOpen::Expression* expZsuLian;
         NXOpen::Unit* nullNXOpen_Unit(NULL);
 
         sprintf(ExName1Y, "Y_%d", Body1ID);
@@ -3330,8 +3379,6 @@ int SouDonZuanBanJin::apply_cb()
         expsuLian = workPart->Expressions()->GetAttributeExpression(Body1, "sulian", NXOpen::NXObject::AttributeTypeInteger, -1);
 
         expsuLian->SetName(SuLian);
-        sprintf(ZSuLian, "ZSuLian_%d=数量*%s", Body1ID, SuLian);
-        expZsuLian = workPart->Expressions()->CreateExpressionWithUnit("Integer", ZSuLian, nullNXOpen_Unit);
 
     }
     catch(exception& ex)
@@ -3423,9 +3470,13 @@ int SouDonZuanBanJin::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 facetag = face2->Tag();
             }
 
-            if (Body1->HasUserAttribute("数量",NXObject::AttributeType::AttributeTypeInteger,-1)==false)
+            if (!HasRequiredBodyAttributes(Body1))
             {
-                Body1->SetUserAttribute("数量", -1, intVal[2], Update::OptionNow);
+                SouDonZuanBanJin::theUI->NXMessageBox()->Show(
+                    "\xE6\xB7\xBB\xE5\x8A\xA0\xE9\x9B\xB6\xE4\xBB\xB6\xE5\xB1\x9E\xE6\x80\xA7",
+                    NXOpen::NXMessageBox::DialogTypeInformation,
+                    "\xE8\xAF\xB7\xE5\x85\x88\xE7\xBB\x9F\xE8\xAE\xA1\xE7\x84\x8A\xE4\xBB\xB6\xE6\x95\xB0\xE9\x87\x8F\xE3\x80\x82");
+                return 0;
             }
 
             int layer1=Body1->Layer();

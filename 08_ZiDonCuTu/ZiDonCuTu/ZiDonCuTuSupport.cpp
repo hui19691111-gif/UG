@@ -109,6 +109,9 @@ double MeasureMinimumDistance(NXOpen::Part* part, NXOpen::NXObject* first, NXOpe
 		return 0.0;
 	}
 	const double value = measureDistance->Value();
+	delete measureDistance;
+	measureDistance = NULL;
+	part->MeasureManager()->ClearPartTransientModification();
 	g_supportMinDistanceCache[cacheKey] = value;
 	return value;
 }
