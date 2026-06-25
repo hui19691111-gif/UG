@@ -14955,10 +14955,25 @@ int ZiDonCuTu::Create_Draft_Not(NXOpen::Body* body1, Point3d notPoint3d, Drawing
 		toggle0Props = NULL;
 
 		NXOpen::Annotations::Annotation::AssociativeOriginData assocOrigin1;
+		NXOpen::Point* nullNXOpen_Point(NULL);
+		NXOpen::Annotations::Annotation* nullNXOpen_Annotations_Annotation(NULL);
 		assocOrigin1.OriginType = NXOpen::Annotations::AssociativeOriginTypeRelativeToView;
 		assocOrigin1.View = BaseView1A;
+		assocOrigin1.ViewOfGeometry = BaseView1A;
+		assocOrigin1.PointOnGeometry = nullNXOpen_Point;
+		assocOrigin1.VertAnnotation = nullNXOpen_Annotations_Annotation;
+		assocOrigin1.VertAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+		assocOrigin1.HorizAnnotation = nullNXOpen_Annotations_Annotation;
+		assocOrigin1.HorizAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+		assocOrigin1.AlignedAnnotation = nullNXOpen_Annotations_Annotation;
+		assocOrigin1.DimensionLine = 0;
+		assocOrigin1.AssociatedView = BaseView1A;
+		assocOrigin1.AssociatedPoint = nullNXOpen_Point;
+		assocOrigin1.OffsetAnnotation = nullNXOpen_Annotations_Annotation;
+		assocOrigin1.OffsetAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+		assocOrigin1.XOffsetFactor = 0.0;
+		assocOrigin1.YOffsetFactor = 0.0;
 		assocOrigin1.StackAlignmentPosition = NXOpen::Annotations::StackAlignmentPositionAbove;
-		NXOpen::View* nullNXOpen_View(NULL);
 		draftingNoteBuilder1->Origin()->SetAssociativeOrigin(assocOrigin1);
 		bool hasBottomView = false;
 		try
@@ -14977,7 +14992,7 @@ int ZiDonCuTu::Create_Draft_Not(NXOpen::Body* body1, Point3d notPoint3d, Drawing
 		{
 		}
 		const NXOpen::Point3d adjustedNotePoint = AdjustBodyNotePointForLineCount(notPoint3d, hasBottomView);
-		draftingNoteBuilder1->Origin()->Origin()->SetValue(NULL, nullNXOpen_View, adjustedNotePoint);
+		draftingNoteBuilder1->Origin()->SetOriginPoint(adjustedNotePoint);
 
 		NXOpen::NXObject* nXObject1;
 		nXObject1 = draftingNoteBuilder1->Commit();
