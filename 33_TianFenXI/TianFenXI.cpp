@@ -61,6 +61,7 @@
 #include <NXOpen/FaceDumbRule.hxx>
 #include <NXOpen/Edge.hxx>
 #include <uf_modl.h>
+#include <uf_modl_curves.h>
 #include <uf_obj.h>
 #include <uf_disp.h>
 #include <uf_ui.h>
@@ -168,6 +169,8 @@ namespace
 const double kParallelCosTolerance = 0.98;
 const double kCoplanarDistanceTolerance = 0.25;
 const double kThicknessTolerance = 0.2;
+const double kThicknessEdgeTolerance = 0.05;
+const double kParallelThicknessOverlapRatio = 0.95;
 const double kMinThickness = 0.05;
 const double kNarrowBoundaryDistance = 5.0;
 const double kSameFaceLengthTolerance = 0.2;
@@ -211,6 +214,11 @@ struct FacePair
 
 bool AskEdgeEndpointPair(tag_t edgeTag, EdgeEndpointPair& endpoints);
 bool ContainsTag(const std::vector<tag_t>& tags, tag_t tag);
+bool AskArcCenter(tag_t edgeTag, double center[3]);
+bool IsArcEdge(tag_t edgeTag);
+bool IsLineEdge(tag_t edgeTag);
+bool IsCurveLikeEdge(tag_t edgeTag);
+void ResetDebugLogForRun();
 
 std::string FormatDouble(double value)
 {
@@ -239,6 +247,12 @@ std::string FormatVector3(const double value[3])
 void DebugLog(const std::string& message)
 {
     CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
+    static bool resetForThisRun = false;
+    if (!resetForThisRun)
+    {
+        ResetDebugLogForRun();
+        resetForThisRun = true;
+    }
 
     SYSTEMTIME now = {};
     GetLocalTime(&now);
@@ -271,6 +285,12 @@ void DebugLog(const std::string& message)
     DWORD written = 0;
     WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, NULL);
     CloseHandle(file);
+}
+
+void ResetDebugLogForRun()
+{
+    CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
+    DeleteFileW(kDebugLogPath);
 }
 
 double Dot3(const double lhs[3], const double rhs[3])
@@ -809,6 +829,36 @@ double DistanceBetweenParallelLines(const double firstPoint[3], const double sec
     return std::sqrt(Dot3(perpendicular, perpendicular));
 }
 
+double ParallelSegmentOverlapRatio(
+    const double firstStart[3],
+    const double firstEnd[3],
+    const double secondStart[3],
+    const double secondEnd[3],
+    const double axis[3],
+    double& overlapLength,
+    double& shortLength)
+{
+    const double first0 = Dot3(firstStart, axis);
+    const double first1 = Dot3(firstEnd, axis);
+    const double second0 = Dot3(secondStart, axis);
+    const double second1 = Dot3(secondEnd, axis);
+    const double firstMin = std::min(first0, first1);
+    const double firstMax = std::max(first0, first1);
+    const double secondMin = std::min(second0, second1);
+    const double secondMax = std::max(second0, second1);
+
+    overlapLength = std::max(0.0, std::min(firstMax, secondMax) - std::max(firstMin, secondMin));
+    const double firstLength = std::max(0.0, firstMax - firstMin);
+    const double secondLength = std::max(0.0, secondMax - secondMin);
+    shortLength = std::min(firstLength, secondLength);
+    if (shortLength <= 1.0e-6)
+    {
+        return 0.0;
+    }
+
+    return overlapLength / shortLength;
+}
+
 bool IsFaceTangentToCylinder(tag_t cylinderFace, tag_t candidateFace)
 {
     if (cylinderFace == NULL_TAG || candidateFace == NULL_TAG || cylinderFace == candidateFace)
@@ -1015,7 +1065,7 @@ bool IsThicknessFaceByParallelEdgeDistance(tag_t faceTag, tag_t sharedEdgeTag, d
             DebugLog("  connected edge " + FormatTag(edges[index]) +
                 ": length=" + FormatDouble(connectedLength) +
                 ", delta=" + FormatDouble(std::fabs(connectedLength - thickness)));
-            if (std::fabs(connectedLength - thickness) <= kThicknessTolerance)
+            if (std::fabs(connectedLength - thickness) <= kThicknessEdgeTolerance)
             {
                 ++connectedThicknessEdges;
             }
@@ -1037,10 +1087,24 @@ bool IsThicknessFaceByParallelEdgeDistance(tag_t faceTag, tag_t sharedEdgeTag, d
         const double distance = std::min(
             DistancePointToLine3(point1, sharedPoint1, sharedPoint2),
             DistancePointToLine3(point2, sharedPoint1, sharedPoint2));
+        double overlapLength = 0.0;
+        double shortLength = 0.0;
+        const double overlapRatio = ParallelSegmentOverlapRatio(
+            sharedPoint1,
+            sharedPoint2,
+            point1,
+            point2,
+            sharedDirection,
+            overlapLength,
+            shortLength);
         DebugLog("  parallel edge " + FormatTag(edges[index]) +
             ": distance=" + FormatDouble(distance) +
-            ", delta=" + FormatDouble(std::fabs(distance - thickness)));
-        if (std::fabs(distance - thickness) <= kThicknessTolerance)
+            ", delta=" + FormatDouble(std::fabs(distance - thickness)) +
+            ", overlap=" + FormatDouble(overlapLength) +
+            ", shortLength=" + FormatDouble(shortLength) +
+            ", overlapRatio=" + FormatDouble(overlapRatio));
+        if (std::fabs(distance - thickness) <= kThicknessEdgeTolerance &&
+            overlapRatio >= kParallelThicknessOverlapRatio)
         {
             DebugLog("  face " + FormatTag(faceTag) + " is thickness/end face");
             return true;
@@ -1540,6 +1604,140 @@ std::vector<GapEdgePair> FindFaceChainGapEdgePairs(const std::vector<tag_t>& fac
     return gapEdgePairs;
 }
 
+bool IsStraightThicknessEdge(tag_t edgeTag, double thickness)
+{
+    if (edgeTag == NULL_TAG || !IsLineEdge(edgeTag))
+    {
+        return false;
+    }
+
+    const double length = AskEdgeLength(edgeTag);
+    return length > 1.0e-6 && std::fabs(length - thickness) <= kThicknessEdgeTolerance;
+}
+
+bool TwoArcEdgesAreConcentricAndThicknessApart(
+    tag_t firstEdge,
+    tag_t secondEdge,
+    double thickness,
+    double& arcDistance)
+{
+    arcDistance = 0.0;
+    double firstCenter[3] = {0.0, 0.0, 0.0};
+    double secondCenter[3] = {0.0, 0.0, 0.0};
+    if (!AskArcCenter(firstEdge, firstCenter) || !AskArcCenter(secondEdge, secondCenter))
+    {
+        return false;
+    }
+
+    const double centerDistance = Distance3(firstCenter, secondCenter);
+    if (centerDistance > kThicknessEdgeTolerance)
+    {
+        return false;
+    }
+
+    double guess1[3] = {firstCenter[0], firstCenter[1], firstCenter[2]};
+    double guess2[3] = {secondCenter[0], secondCenter[1], secondCenter[2]};
+    if (!AskMinimumDistance(firstEdge, secondEdge, guess1, guess2, arcDistance))
+    {
+        return false;
+    }
+
+    return std::fabs(arcDistance - thickness) <= kThicknessEdgeTolerance;
+}
+
+bool FaceHasTwoThicknessEdgesWithCurves(
+    tag_t faceTag,
+    const std::vector<tag_t>& edges,
+    double thickness)
+{
+    std::vector<tag_t> straightThicknessEdges;
+    std::vector<tag_t> curveEdges;
+    std::vector<tag_t> otherEdges;
+    DebugLog("  gap face curved thickness fallback scan: face=" +
+        FormatTag(faceTag) +
+        ", edgeCount=" + FormatTag(static_cast<tag_t>(edges.size())) +
+        ", thickness=" + FormatDouble(thickness));
+
+    for (std::size_t index = 0; index < edges.size(); ++index)
+    {
+        const tag_t edgeTag = edges[index];
+        const bool isLine = IsLineEdge(edgeTag);
+        const bool isArc = IsArcEdge(edgeTag);
+        const bool isCurveLike = IsCurveLikeEdge(edgeTag);
+        const double length = AskEdgeLength(edgeTag);
+        const bool isThicknessEdge =
+            isLine &&
+            length > 1.0e-6 &&
+            std::fabs(length - thickness) <= kThicknessEdgeTolerance;
+
+        DebugLog("    edge classify: face=" +
+            FormatTag(faceTag) +
+            ", edge=" + FormatTag(edgeTag) +
+            ", length=" + FormatDouble(length) +
+            ", line=" + FormatTag(static_cast<tag_t>(isLine ? 1 : 0)) +
+            ", arc=" + FormatTag(static_cast<tag_t>(isArc ? 1 : 0)) +
+            ", curveLike=" + FormatTag(static_cast<tag_t>(isCurveLike ? 1 : 0)) +
+            ", thicknessEdge=" + FormatTag(static_cast<tag_t>(isThicknessEdge ? 1 : 0)));
+
+        if (isThicknessEdge)
+        {
+            straightThicknessEdges.push_back(edgeTag);
+        }
+        else if (isCurveLike)
+        {
+            curveEdges.push_back(edgeTag);
+        }
+        else
+        {
+            otherEdges.push_back(edgeTag);
+        }
+    }
+
+    if (straightThicknessEdges.size() >= 2 && curveEdges.size() == 2)
+    {
+        for (std::size_t firstIndex = 0; firstIndex < curveEdges.size(); ++firstIndex)
+        {
+            for (std::size_t secondIndex = firstIndex + 1; secondIndex < curveEdges.size(); ++secondIndex)
+            {
+                double arcDistance = 0.0;
+                if (TwoArcEdgesAreConcentricAndThicknessApart(
+                    curveEdges[firstIndex],
+                    curveEdges[secondIndex],
+                    thickness,
+                    arcDistance))
+                {
+                    DebugLog("  gap face has thickness edges and concentric arcs: face=" +
+                        FormatTag(faceTag) +
+                        ", thicknessEdges=" + FormatTag(static_cast<tag_t>(straightThicknessEdges.size())) +
+                        ", arc1=" + FormatTag(curveEdges[firstIndex]) +
+                        ", arc2=" + FormatTag(curveEdges[secondIndex]) +
+                        ", arcDistance=" + FormatDouble(arcDistance));
+                    return true;
+                }
+            }
+        }
+    }
+
+    if (straightThicknessEdges.size() >= 2 &&
+        curveEdges.size() >= 1 &&
+        otherEdges.empty() &&
+        straightThicknessEdges.size() + curveEdges.size() == edges.size())
+    {
+        DebugLog("  gap face has two thickness straight edges and curve edges: face=" +
+            FormatTag(faceTag) +
+            ", thicknessEdges=" + FormatTag(static_cast<tag_t>(straightThicknessEdges.size())) +
+            ", curveEdges=" + FormatTag(static_cast<tag_t>(curveEdges.size())));
+        return true;
+    }
+
+    DebugLog("  gap face curved thickness fallback rejected: face=" +
+        FormatTag(faceTag) +
+        ", thicknessEdges=" + FormatTag(static_cast<tag_t>(straightThicknessEdges.size())) +
+        ", curveEdges=" + FormatTag(static_cast<tag_t>(curveEdges.size())) +
+        ", otherEdges=" + FormatTag(static_cast<tag_t>(otherEdges.size())));
+    return false;
+}
+
 bool FaceHasThicknessEdge(tag_t faceTag, double thickness)
 {
     if (faceTag == NULL_TAG || thickness <= kMinThickness)
@@ -1548,18 +1746,90 @@ bool FaceHasThicknessEdge(tag_t faceTag, double thickness)
     }
 
     const std::vector<tag_t> edges = AskFaceEdges(faceTag);
+    std::vector<EdgeEndpointPair> endpointPairs;
     for (std::size_t index = 0; index < edges.size(); ++index)
     {
-        const double length = AskEdgeLength(edges[index]);
-        if (std::fabs(length - thickness) <= kThicknessTolerance)
+        EdgeEndpointPair endpoints = {};
+        if (AskEdgeEndpointPair(edges[index], endpoints))
         {
-            DebugLog("  gap face has thickness edge: face=" +
-                FormatTag(faceTag) +
-                ", edge=" + FormatTag(edges[index]) +
-                ", edgeLength=" + FormatDouble(length) +
-                ", thickness=" + FormatDouble(thickness));
-            return true;
+            endpointPairs.push_back(endpoints);
         }
+    }
+
+    for (std::size_t firstIndex = 0; firstIndex < endpointPairs.size(); ++firstIndex)
+    {
+        double firstDirection[3] =
+        {
+            endpointPairs[firstIndex].second[0] - endpointPairs[firstIndex].first[0],
+            endpointPairs[firstIndex].second[1] - endpointPairs[firstIndex].first[1],
+            endpointPairs[firstIndex].second[2] - endpointPairs[firstIndex].first[2]
+        };
+        if (!Normalize3(firstDirection))
+        {
+            continue;
+        }
+
+        for (std::size_t secondIndex = firstIndex + 1; secondIndex < endpointPairs.size(); ++secondIndex)
+        {
+            double secondDirection[3] =
+            {
+                endpointPairs[secondIndex].second[0] - endpointPairs[secondIndex].first[0],
+                endpointPairs[secondIndex].second[1] - endpointPairs[secondIndex].first[1],
+                endpointPairs[secondIndex].second[2] - endpointPairs[secondIndex].first[2]
+            };
+            if (!Normalize3(secondDirection))
+            {
+                continue;
+            }
+
+            const double parallelCos = std::fabs(Dot3(firstDirection, secondDirection));
+            if (parallelCos < kParallelCosTolerance)
+            {
+                continue;
+            }
+
+            const double distance = std::min(
+                DistancePointToLine3(endpointPairs[secondIndex].first, endpointPairs[firstIndex].first, endpointPairs[firstIndex].second),
+                DistancePointToLine3(endpointPairs[secondIndex].second, endpointPairs[firstIndex].first, endpointPairs[firstIndex].second));
+            double overlapLength = 0.0;
+            double shortLength = 0.0;
+            const double overlapRatio = ParallelSegmentOverlapRatio(
+                endpointPairs[firstIndex].first,
+                endpointPairs[firstIndex].second,
+                endpointPairs[secondIndex].first,
+                endpointPairs[secondIndex].second,
+                firstDirection,
+                overlapLength,
+                shortLength);
+
+            DebugLog("  gap face parallel thickness check: face=" +
+                FormatTag(faceTag) +
+                ", edge1=" + FormatTag(endpointPairs[firstIndex].edgeTag) +
+                ", edge2=" + FormatTag(endpointPairs[secondIndex].edgeTag) +
+                ", distance=" + FormatDouble(distance) +
+                ", delta=" + FormatDouble(std::fabs(distance - thickness)) +
+                ", overlap=" + FormatDouble(overlapLength) +
+                ", shortLength=" + FormatDouble(shortLength) +
+                ", overlapRatio=" + FormatDouble(overlapRatio) +
+                ", thickness=" + FormatDouble(thickness));
+
+            if (std::fabs(distance - thickness) <= kThicknessEdgeTolerance &&
+                overlapRatio >= kParallelThicknessOverlapRatio)
+            {
+                DebugLog("  gap face has valid parallel thickness edges: face=" +
+                    FormatTag(faceTag) +
+                    ", edge1=" + FormatTag(endpointPairs[firstIndex].edgeTag) +
+                    ", edge2=" + FormatTag(endpointPairs[secondIndex].edgeTag) +
+                    ", distance=" + FormatDouble(distance) +
+                    ", overlapRatio=" + FormatDouble(overlapRatio));
+                return true;
+            }
+        }
+    }
+
+    if (FaceHasTwoThicknessEdgesWithCurves(faceTag, edges, thickness))
+    {
+        return true;
     }
 
     DebugLog("  gap face rejected: no thickness edge, face=" +
@@ -2636,6 +2906,75 @@ bool IsArcEdge(tag_t edgeTag)
 {
     double center[3] = {0.0, 0.0, 0.0};
     return AskArcCenter(edgeTag, center);
+}
+
+bool IsLineEdge(tag_t edgeTag)
+{
+    if (edgeTag == NULL_TAG)
+    {
+        return false;
+    }
+
+    UF_CURVE_line_t lineData = {};
+    if (UF_CURVE_ask_line_data(edgeTag, &lineData) == 0)
+    {
+        return true;
+    }
+
+    double point[3] = {0.0, 0.0, 0.0};
+    double tangent[3] = {0.0, 0.0, 0.0};
+    double principalNormal[3] = {0.0, 0.0, 0.0};
+    double binormal[3] = {0.0, 0.0, 0.0};
+    double torsion = 0.0;
+    double radiusOfCurvature = 0.0;
+    if (UF_MODL_ask_curve_props(
+        edgeTag,
+        0.5,
+        point,
+        tangent,
+        principalNormal,
+        binormal,
+        &torsion,
+        &radiusOfCurvature) != 0)
+    {
+        return false;
+    }
+
+    return std::fabs(radiusOfCurvature) > 1.0e6 || !std::isfinite(radiusOfCurvature);
+}
+
+bool IsCurveLikeEdge(tag_t edgeTag)
+{
+    if (edgeTag == NULL_TAG)
+    {
+        return false;
+    }
+
+    if (IsArcEdge(edgeTag))
+    {
+        return true;
+    }
+
+    double point[3] = {0.0, 0.0, 0.0};
+    double tangent[3] = {0.0, 0.0, 0.0};
+    double principalNormal[3] = {0.0, 0.0, 0.0};
+    double binormal[3] = {0.0, 0.0, 0.0};
+    double torsion = 0.0;
+    double radiusOfCurvature = 0.0;
+    if (UF_MODL_ask_curve_props(
+        edgeTag,
+        0.5,
+        point,
+        tangent,
+        principalNormal,
+        binormal,
+        &torsion,
+        &radiusOfCurvature) != 0)
+    {
+        return false;
+    }
+
+    return std::isfinite(radiusOfCurvature) && std::fabs(radiusOfCurvature) <= 1.0e6;
 }
 
 bool CylinderFaceHasArcEdgeDistanceEqualThickness(
