@@ -2527,6 +2527,20 @@ void ColorFacesAsSkipped(
     }
 }
 
+void HighlightFaces(const std::vector<tag_t>& faces)
+{
+    DebugLog("Highlight gap faces count=" +
+        FormatTag(static_cast<tag_t>(faces.size())));
+    for (std::size_t index = 0; index < faces.size(); ++index)
+    {
+        const tag_t faceTag = faces[index];
+        if (faceTag != NULL_TAG && UF_DISP_set_highlight(faceTag, 1) == 0)
+        {
+            RedisplayObject(faceTag);
+        }
+    }
+}
+
 void RestorePreviewFaceColors(
     std::vector<tag_t>& coloredFaces,
     std::vector<int>& originalColors)
@@ -2776,6 +2790,61 @@ std::vector<NXOpen::TaggedObject*> BuildSelectionObjectsWithGapFaces(
     }
 
     return objects;
+}
+
+std::vector<tag_t> FindSelectedFaceTags(const std::vector<NXOpen::TaggedObject*>& selectedObjects)
+{
+    std::vector<tag_t> faceTags;
+    std::set<tag_t> visited;
+    for (std::size_t index = 0; index < selectedObjects.size(); ++index)
+    {
+        NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(selectedObjects[index]);
+        if (face == NULL)
+        {
+            continue;
+        }
+
+        const tag_t faceTag = face->Tag();
+        if (faceTag != NULL_TAG && visited.insert(faceTag).second)
+        {
+            faceTags.push_back(faceTag);
+        }
+    }
+
+    return faceTags;
+}
+
+void RememberDeselectedAutoGapFaces(
+    const std::vector<tag_t>& previousAutoGapFaces,
+    const std::vector<tag_t>& selectedFaceTags,
+    std::vector<tag_t>& userDeselectedGapFaces)
+{
+    for (std::size_t index = 0; index < previousAutoGapFaces.size(); ++index)
+    {
+        const tag_t faceTag = previousAutoGapFaces[index];
+        if (faceTag == NULL_TAG || ContainsTag(selectedFaceTags, faceTag))
+        {
+            continue;
+        }
+
+        AddUniqueTag(userDeselectedGapFaces, faceTag);
+    }
+}
+
+std::vector<tag_t> FilterUserDeselectedGapFaces(
+    const std::vector<tag_t>& gapFaces,
+    const std::vector<tag_t>& userDeselectedGapFaces)
+{
+    std::vector<tag_t> filtered;
+    for (std::size_t index = 0; index < gapFaces.size(); ++index)
+    {
+        if (!ContainsTag(userDeselectedGapFaces, gapFaces[index]))
+        {
+            AddUniqueTag(filtered, gapFaces[index]);
+        }
+    }
+
+    return filtered;
 }
 
 std::vector<tag_t> FindSelectedAutoGapFaces(
@@ -4794,6 +4863,7 @@ void TianFenXI::dialogShown_cb()
 {
     try
     {
+        LoadUiSettings();
         UpdateDeleteRVisibility();
     }
     catch(exception& ex)
@@ -4813,6 +4883,7 @@ int TianFenXI::apply_cb()
     {
         ResetDebugLogForRun();
         DebugLog("Apply clicked");
+        SaveUiSettings();
         PreviewSelectedFaceChain(true);
         DebugLog("Apply preview and middle plane creation done");
     }
@@ -4845,7 +4916,9 @@ int TianFenXI::update_cb(NXOpen::BlockStyler::UIBlock* block)
         }
         else if(block == string0)
         {
-        //---------Enter your code here-----------
+            SaveUiSettings();
+            userDeselectedGapFaces.clear();
+            PreviewSelectedFaceChain();
         }
         else if(block == toggle0)
         {
@@ -5075,12 +5148,15 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
     NXOpen::BlockStyler::PropertyList* properties = selection0->GetProperties();
     std::vector<NXOpen::TaggedObject*> selectedObjects = properties->GetTaggedObjectVector("SelectedObjects");
     delete properties;
+    const std::vector<tag_t> selectedFaceTags = FindSelectedFaceTags(selectedObjects);
+    if (!createMiddlePlanes && !autoSelectedGapFaces.empty())
+    {
+        RememberDeselectedAutoGapFaces(autoSelectedGapFaces, selectedFaceTags, userDeselectedGapFaces);
+    }
 
     if (selectedObjects.empty())
     {
-        DebugLog("Preview abort: no selected objects");
-        previewSelectedFaceTag = NULL_TAG;
-        autoSelectedGapFaces.clear();
+        DebugLog("Preview abort: no selected objects, keep user deselected gap faces for Shift box deselect");
         RefreshDisplay();
         return;
     }
@@ -5097,6 +5173,13 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
     }
 
     tag_t selectedFaceTag = selectedFace->Tag();
+    if (previewSelectedFaceTag != NULL_TAG && previewSelectedFaceTag != selectedFaceTag)
+    {
+        DebugLog("Preview base face changed: clear user deselected gap faces, old=" +
+            FormatTag(previewSelectedFaceTag) +
+            ", new=" + FormatTag(selectedFaceTag));
+        userDeselectedGapFaces.clear();
+    }
     previewSelectedFaceTag = selectedFaceTag;
     const std::vector<tag_t> selectedCurveTags = FindUserSelectedCurveTags(selectedObjects);
     const std::vector<tag_t> selectedAutoGapFaces = FindSelectedAutoGapFaces(selectedObjects, autoSelectedGapFaces);
@@ -5180,7 +5263,9 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
         }
         else
         {
-            autoSelectedGapFaces = highlightedGapFaces;
+            autoSelectedGapFaces = FilterUserDeselectedGapFaces(highlightedGapFaces, userDeselectedGapFaces);
+            highlightedGapFaces = autoSelectedGapFaces;
+            HighlightFaces(highlightedGapFaces);
             std::vector<NXOpen::TaggedObject*> rewriteObjects =
                 BuildSelectionObjectsWithGapFaces(autoSelectedGapFaces);
             NXOpen::BlockStyler::PropertyList* rewriteProperties = selection0->GetProperties();
@@ -5203,6 +5288,7 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
             ", gapPairs=" + FormatTag(static_cast<tag_t>(gapEdgePairs.size())) +
             ", gapFaceGroups=" + FormatTag(static_cast<tag_t>(gapFaceGroups.size())) +
             ", gapDistance=" + FormatDouble(gapDistance) +
+            ", userDeselectedGapFaces=" + FormatTag(static_cast<tag_t>(userDeselectedGapFaces.size())) +
             ", skippedGapGroups=" + FormatTag(static_cast<tag_t>(skippedGroupIndexes.size())) +
             ", colored gap face count=" +
             FormatTag(static_cast<tag_t>(highlightedGapFaces.size())));
@@ -5246,7 +5332,9 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
     }
     else
     {
-        autoSelectedGapFaces = highlightedGapFaces;
+        autoSelectedGapFaces = FilterUserDeselectedGapFaces(highlightedGapFaces, userDeselectedGapFaces);
+        highlightedGapFaces = autoSelectedGapFaces;
+        HighlightFaces(highlightedGapFaces);
         std::vector<NXOpen::TaggedObject*> rewriteObjects =
             BuildSelectionObjectsWithGapFaces(autoSelectedGapFaces);
         NXOpen::BlockStyler::PropertyList* rewriteProperties = selection0->GetProperties();
@@ -5268,6 +5356,7 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
         ", gapPairs=" + FormatTag(static_cast<tag_t>(gapEdgePairs.size())) +
         ", gapFaceGroups=" + FormatTag(static_cast<tag_t>(gapFaceGroups.size())) +
         ", gapDistance=" + FormatDouble(gapDistance) +
+        ", userDeselectedGapFaces=" + FormatTag(static_cast<tag_t>(userDeselectedGapFaces.size())) +
         ", skippedGapGroups=" + FormatTag(static_cast<tag_t>(skippedGroupIndexes.size())) +
         ", colored gap face count=" +
         FormatTag(static_cast<tag_t>(highlightedGapFaces.size())));
