@@ -214,12 +214,18 @@ struct GapEdgePair
     tag_t secondOwnerFace;
     tag_t firstGapFace;
     tag_t secondGapFace;
+    int firstEdgeSide;
+    int secondEdgeSide;
+    double length;
+    bool firstEdgeIsLine;
+    bool secondEdgeIsLine;
 };
 
 struct GapFaceGroup
 {
     std::vector<GapEdgePair> gapEdgePairs;
     std::vector<tag_t> faces;
+    bool touchesTangentCylinder;
 };
 
 struct FacePair
@@ -227,6 +233,21 @@ struct FacePair
     tag_t firstFace;
     tag_t secondFace;
     double distance;
+};
+
+struct CandidateGapEdgePair
+{
+    tag_t firstEdge;
+    tag_t secondEdge;
+    double length;
+};
+
+struct ReplaceGapPlan
+{
+    std::vector<tag_t> firstSideFaces;
+    std::vector<tag_t> secondSideFaces;
+    tag_t firstReplacementFace;
+    tag_t secondReplacementFace;
 };
 
 bool AskEdgeEndpointPair(tag_t edgeTag, EdgeEndpointPair& endpoints);
@@ -241,8 +262,12 @@ bool BuildBoundingBoxCoordinateFromGapGroup(
     NXOpen::Matrix3x3& matrix,
     NXOpen::Point3d& origin);
 bool TryReplaceGapGroupFaces(const GapFaceGroup& group);
+bool TryBuildReplaceGapPlan(const GapFaceGroup& group, ReplaceGapPlan& plan);
+bool ExecuteReplaceGapPlan(const ReplaceGapPlan& plan, const GapFaceGroup& group);
+bool GapGroupTouchesTangentCylinderFace(const GapFaceGroup& group);
 void DeleteSmallRadiusFacesIfRequested(tag_t bodyTag, double thickness, bool enabled, double maxRadius);
 std::vector<std::vector<tag_t>> GroupConnectedFaces(const std::vector<tag_t>& faceTags);
+bool AskCylinderFaceData(tag_t faceTag, double axisPoint[3], double axisDirection[3], double& radius);
 void ResetDebugLogForRun();
 
 std::map<tag_t, tag_t> replacedFaceTagMap;
@@ -271,6 +296,25 @@ std::string FormatTagList(const std::vector<tag_t>& tags)
             stream << ",";
         }
         stream << static_cast<unsigned long long>(tags[index]);
+    }
+    return stream.str();
+}
+
+std::string FormatSideMap(const std::map<tag_t, int>& sideByFace)
+{
+    std::ostringstream stream;
+    bool first = true;
+    for (std::map<tag_t, int>::const_iterator sideIt = sideByFace.begin();
+        sideIt != sideByFace.end();
+        ++sideIt)
+    {
+        if (!first)
+        {
+            stream << ",";
+        }
+        first = false;
+        stream << static_cast<unsigned long long>(sideIt->first)
+            << ":" << sideIt->second;
     }
     return stream.str();
 }
@@ -1151,6 +1195,48 @@ bool IsFaceTangentToCylinder(tag_t cylinderFace, tag_t candidateFace)
     return false;
 }
 
+bool FacesShareEdgeTag(tag_t firstFace, tag_t secondFace, tag_t& sharedEdge)
+{
+    sharedEdge = NULL_TAG;
+    if (firstFace == NULL_TAG || secondFace == NULL_TAG || firstFace == secondFace)
+    {
+        return false;
+    }
+
+    const std::vector<tag_t> firstEdges = AskFaceEdges(firstFace);
+    for (std::size_t edgeIndex = 0; edgeIndex < firstEdges.size(); ++edgeIndex)
+    {
+        const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(firstEdges[edgeIndex]);
+        if (ContainsTag(adjacentFaces, secondFace))
+        {
+            sharedEdge = firstEdges[edgeIndex];
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool IsFaceTangentOrEdgeConnectedToCylinder(tag_t cylinderFace, tag_t candidateFace)
+{
+    if (IsFaceTangentToCylinder(cylinderFace, candidateFace))
+    {
+        return true;
+    }
+
+    tag_t sharedEdge = NULL_TAG;
+    if (FacesShareEdgeTag(cylinderFace, candidateFace, sharedEdge))
+    {
+        DebugLog("    cylinder tangent accepted by shared edge: cylinder=" +
+            FormatTag(cylinderFace) +
+            ", candidate=" + FormatTag(candidateFace) +
+            ", edge=" + FormatTag(sharedEdge));
+        return true;
+    }
+
+    return false;
+}
+
 bool MustRespectCylinderTangency(
     const std::vector<tag_t>& adjacentFaces,
     tag_t currentFace,
@@ -1754,7 +1840,7 @@ std::vector<GapEdgePair> PickOuterAndMultiFaceInnerBoundaryLoops(
         endpointByEdge[boundaryEdges[index].edgeTag] = boundaryEdges[index];
     }
 
-    std::vector<GapEdgePair> gapEdgePairs;
+    std::vector<CandidateGapEdgePair> candidatePairs;
     std::set<std::pair<tag_t, tag_t> > visitedPairs;
     for (std::size_t firstIndex = 0; firstIndex < ringEdgesToCheck.size(); ++firstIndex)
     {
@@ -1788,18 +1874,117 @@ std::vector<GapEdgePair> PickOuterAndMultiFaceInnerBoundaryLoops(
                     continue;
                 }
 
-                DebugLog("  narrow boundary edges found: edge1=" +
-                    FormatTag(firstIt->first) +
-                    ", edge2=" + FormatTag(secondIt->first));
-                GapEdgePair pair = {};
+                CandidateGapEdgePair pair = {};
                 pair.firstEdge = firstIt->first;
                 pair.secondEdge = secondIt->first;
-                pair.firstOwnerFace = edgeOwnerFaces[firstIt->first];
-                pair.secondOwnerFace = edgeOwnerFaces[secondIt->first];
-                pair.firstGapFace = NULL_TAG;
-                pair.secondGapFace = NULL_TAG;
-                gapEdgePairs.push_back(pair);
+                pair.length = std::min(
+                    AskEdgeLength(firstIt->first),
+                    AskEdgeLength(secondIt->first));
+                DebugLog("  narrow boundary candidate edges found: edge1=" +
+                    FormatTag(firstIt->first) +
+                    ", edge2=" + FormatTag(secondIt->first) +
+                    ", length=" + FormatDouble(pair.length));
+                candidatePairs.push_back(pair);
             }
+        }
+    }
+
+    std::vector<GapEdgePair> gapEdgePairs;
+    std::set<std::size_t> usedCandidateIndexes;
+    std::vector<std::size_t> seedOrder;
+    for (std::size_t candidateIndex = 0; candidateIndex < candidatePairs.size(); ++candidateIndex)
+    {
+        seedOrder.push_back(candidateIndex);
+    }
+    std::sort(seedOrder.begin(), seedOrder.end(),
+        [&candidatePairs](std::size_t lhs, std::size_t rhs)
+        {
+            return candidatePairs[lhs].length > candidatePairs[rhs].length;
+        });
+    for (std::size_t seedOrderIndex = 0; seedOrderIndex < seedOrder.size(); ++seedOrderIndex)
+    {
+        const std::size_t seedIndex = seedOrder[seedOrderIndex];
+        if (usedCandidateIndexes.find(seedIndex) != usedCandidateIndexes.end())
+        {
+            continue;
+        }
+
+        DebugLog("  narrow boundary chain seed: edge1=" +
+            FormatTag(candidatePairs[seedIndex].firstEdge) +
+            ", edge2=" + FormatTag(candidatePairs[seedIndex].secondEdge) +
+            ", length=" + FormatDouble(candidatePairs[seedIndex].length));
+
+        std::map<tag_t, int> edgeSide;
+        std::deque<tag_t> pendingEdges;
+        edgeSide[candidatePairs[seedIndex].firstEdge] = 0;
+        edgeSide[candidatePairs[seedIndex].secondEdge] = 1;
+        pendingEdges.push_back(candidatePairs[seedIndex].firstEdge);
+        pendingEdges.push_back(candidatePairs[seedIndex].secondEdge);
+
+        std::vector<std::size_t> chainCandidateIndexes;
+        while (!pendingEdges.empty())
+        {
+            const tag_t currentEdge = pendingEdges.front();
+            pendingEdges.pop_front();
+            const int currentSide = edgeSide[currentEdge];
+
+            for (std::size_t candidateIndex = 0; candidateIndex < candidatePairs.size(); ++candidateIndex)
+            {
+                const CandidateGapEdgePair& candidate = candidatePairs[candidateIndex];
+                if (candidate.firstEdge != currentEdge && candidate.secondEdge != currentEdge)
+                {
+                    continue;
+                }
+
+                const tag_t pairedEdge =
+                    candidate.firstEdge == currentEdge ? candidate.secondEdge : candidate.firstEdge;
+                const int pairedSide = 1 - currentSide;
+                std::map<tag_t, int>::const_iterator pairedSideIt = edgeSide.find(pairedEdge);
+                if (pairedSideIt != edgeSide.end() && pairedSideIt->second != pairedSide)
+                {
+                    DebugLog("  narrow boundary chain side conflict: edge=" +
+                        FormatTag(currentEdge) +
+                        ", pairedEdge=" + FormatTag(pairedEdge) +
+                        ", discardedCandidate=" + FormatTag(static_cast<tag_t>(candidateIndex + 1)));
+                    usedCandidateIndexes.insert(candidateIndex);
+                    continue;
+                }
+
+                if (usedCandidateIndexes.insert(candidateIndex).second)
+                {
+                    chainCandidateIndexes.push_back(candidateIndex);
+                }
+
+                if (pairedSideIt == edgeSide.end())
+                {
+                    edgeSide[pairedEdge] = pairedSide;
+                    pendingEdges.push_back(pairedEdge);
+                }
+            }
+        }
+
+        for (std::size_t chainIndex = 0; chainIndex < chainCandidateIndexes.size(); ++chainIndex)
+        {
+            const CandidateGapEdgePair& candidate = candidatePairs[chainCandidateIndexes[chainIndex]];
+            GapEdgePair pair = {};
+            pair.firstEdge = candidate.firstEdge;
+            pair.secondEdge = candidate.secondEdge;
+            pair.firstOwnerFace = edgeOwnerFaces[candidate.firstEdge];
+            pair.secondOwnerFace = edgeOwnerFaces[candidate.secondEdge];
+            pair.firstGapFace = NULL_TAG;
+            pair.secondGapFace = NULL_TAG;
+            pair.firstEdgeSide = edgeSide[candidate.firstEdge];
+            pair.secondEdgeSide = edgeSide[candidate.secondEdge];
+            pair.length = candidate.length;
+            pair.firstEdgeIsLine = IsLineEdge(candidate.firstEdge);
+            pair.secondEdgeIsLine = IsLineEdge(candidate.secondEdge);
+            gapEdgePairs.push_back(pair);
+            DebugLog("  narrow boundary chain pair selected: chain=" +
+                FormatTag(static_cast<tag_t>(seedIndex + 1)) +
+                ", edge1=" + FormatTag(pair.firstEdge) +
+                ", side1=" + FormatTag(static_cast<tag_t>(pair.firstEdgeSide)) +
+                ", edge2=" + FormatTag(pair.secondEdge) +
+                ", side2=" + FormatTag(static_cast<tag_t>(pair.secondEdgeSide)));
         }
     }
 
@@ -2148,26 +2333,97 @@ bool TryAssignGapSide(
     return sideByFace[firstFace] != sideByFace[secondFace];
 }
 
-bool GapFaceGroupHasValidSidePartition(const GapFaceGroup& group)
+bool TryAssignGapFaceSideByEdge(
+    std::map<tag_t, int>& sideByFace,
+    tag_t face,
+    int side,
+    bool& changed)
 {
-    std::map<tag_t, int> sideByFace;
+    if (face == NULL_TAG)
+    {
+        return true;
+    }
+
+    std::map<tag_t, int>::const_iterator sideIt = sideByFace.find(face);
+    if (sideIt == sideByFace.end())
+    {
+        sideByFace[face] = side;
+        changed = true;
+        return true;
+    }
+
+    return sideIt->second == side;
+}
+
+bool GapEdgePairHasTwoLineEdges(const GapEdgePair& pair)
+{
+    return pair.firstEdgeIsLine && pair.secondEdgeIsLine;
+}
+
+void PropagateUnassignedGapFaceSides(
+    const GapFaceGroup& group,
+    std::map<tag_t, int>& sideByFace)
+{
     bool changed = true;
     while (changed)
     {
         changed = false;
-        for (std::size_t pairIndex = 0; pairIndex < group.gapEdgePairs.size(); ++pairIndex)
+        for (std::size_t faceIndex = 0; faceIndex < group.faces.size(); ++faceIndex)
         {
-            if (!TryAssignGapSide(
-                sideByFace,
-                group.gapEdgePairs[pairIndex].firstGapFace,
-                group.gapEdgePairs[pairIndex].secondGapFace,
-                changed))
+            const tag_t face = group.faces[faceIndex];
+            if (face == NULL_TAG || sideByFace.find(face) != sideByFace.end())
             {
-                DebugLog("  gap face group side conflict: firstGapFace=" +
-                    FormatTag(group.gapEdgePairs[pairIndex].firstGapFace) +
-                    ", secondGapFace=" + FormatTag(group.gapEdgePairs[pairIndex].secondGapFace));
-                return false;
+                continue;
             }
+
+            for (std::map<tag_t, int>::const_iterator sideIt = sideByFace.begin();
+                sideIt != sideByFace.end();
+                ++sideIt)
+            {
+                if (FacesShareEdge(face, sideIt->first))
+                {
+                    sideByFace[face] = sideIt->second;
+                    changed = true;
+                    DebugLog("  gap face side propagated by shared edge: face=" +
+                        FormatTag(face) +
+                        ", fromFace=" + FormatTag(sideIt->first) +
+                        ", side=" + FormatTag(static_cast<tag_t>(sideIt->second)));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+bool GapFaceGroupHasValidSidePartition(const GapFaceGroup& group)
+{
+    std::map<tag_t, int> sideByFace;
+    std::vector<std::size_t> pairOrder;
+    for (std::size_t pairIndex = 0; pairIndex < group.gapEdgePairs.size(); ++pairIndex)
+    {
+        pairOrder.push_back(pairIndex);
+    }
+    std::sort(pairOrder.begin(), pairOrder.end(),
+        [&group](std::size_t lhs, std::size_t rhs)
+        {
+            return group.gapEdgePairs[lhs].length > group.gapEdgePairs[rhs].length;
+        });
+
+    for (std::size_t orderIndex = 0; orderIndex < pairOrder.size(); ++orderIndex)
+    {
+        const GapEdgePair& pair = group.gapEdgePairs[pairOrder[orderIndex]];
+        if (!GapEdgePairHasTwoLineEdges(pair))
+        {
+            continue;
+        }
+
+        bool changed = false;
+        if (!TryAssignGapSide(sideByFace, pair.firstGapFace, pair.secondGapFace, changed))
+        {
+            DebugLog("  gap face group side conflict ignored by shorter pair: firstGapFace=" +
+                FormatTag(pair.firstGapFace) +
+                ", secondGapFace=" + FormatTag(pair.secondGapFace) +
+                ", length=" + FormatDouble(pair.length));
         }
     }
 
@@ -2183,6 +2439,8 @@ bool GapFaceGroupsCanMergeBySide(const GapFaceGroup& first, const GapFaceGroup& 
 
 void MergeGapFaceGroup(GapFaceGroup& target, const GapFaceGroup& source)
 {
+    target.touchesTangentCylinder =
+        target.touchesTangentCylinder || source.touchesTangentCylinder;
     target.gapEdgePairs.insert(
         target.gapEdgePairs.end(),
         source.gapEdgePairs.begin(),
@@ -2352,7 +2610,9 @@ std::vector<GapFaceGroup> FindGapFaceGroupsFromGapEdgePairs(const std::vector<Ga
             FormatTag(static_cast<tag_t>(pairIndex + 1)) +
             ", faces=" + FormatTag(static_cast<tag_t>(group.faces.size())) +
             ", firstGapFace=" + FormatTag(pair.firstGapFace) +
-            ", secondGapFace=" + FormatTag(pair.secondGapFace));
+            ", firstEdgeSide=" + FormatTag(static_cast<tag_t>(pair.firstEdgeSide)) +
+            ", secondGapFace=" + FormatTag(pair.secondGapFace) +
+            ", secondEdgeSide=" + FormatTag(static_cast<tag_t>(pair.secondEdgeSide)));
         if (!group.faces.empty())
         {
             groups.push_back(group);
@@ -2365,10 +2625,14 @@ std::vector<GapFaceGroup> FindGapFaceGroupsFromGapEdgePairs(const std::vector<Ga
     groups = RemoveContainedGapFaceGroups(groups);
     for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
     {
+        groups[groupIndex].touchesTangentCylinder =
+            GapGroupTouchesTangentCylinderFace(groups[groupIndex]);
         DebugLog("Gap face connected group: group=" +
             FormatTag(static_cast<tag_t>(groupIndex + 1)) +
             ", gapPairs=" + FormatTag(static_cast<tag_t>(groups[groupIndex].gapEdgePairs.size())) +
-            ", faces=" + FormatTag(static_cast<tag_t>(groups[groupIndex].faces.size())));
+            ", faces=" + FormatTag(static_cast<tag_t>(groups[groupIndex].faces.size())) +
+            ", touchesTangentCylinder=" +
+            FormatTag(static_cast<tag_t>(groups[groupIndex].touchesTangentCylinder ? 1 : 0)));
     }
 
     DebugLog("Gap face connected group search result count=" +
@@ -3680,11 +3944,172 @@ bool DeleteGapGroupWithBoundingToolOrReplace(
     }
 
     DebugLog("  gap bounding fallback failed, start replace face fallback");
+    ReplaceGapPlan plan = {};
+    const bool planned = TryBuildReplaceGapPlan(group, plan);
+    DebugLog("  gap replace fallback plan before prepare: planned=" +
+        FormatTag(static_cast<tag_t>(planned ? 1 : 0)));
+    if (!planned)
+    {
+        return false;
+    }
+
     PrepareBodyBeforeReplaceFallback(bodyTag, thickness, deleteREnabled, maxRadius);
-    const bool replaced = TryReplaceGapGroupFaces(group);
+    const bool replaced = ExecuteReplaceGapPlan(plan, group);
     DebugLog("  gap replace fallback after bounding result: committed=" +
         FormatTag(static_cast<tag_t>(replaced ? 1 : 0)));
     return replaced;
+}
+
+bool GapGroupTouchesTangentCylinderFace(const GapFaceGroup& group)
+{
+    for (std::size_t faceIndex = 0; faceIndex < group.faces.size(); ++faceIndex)
+    {
+        const tag_t gapFace = group.faces[faceIndex];
+        std::deque<std::pair<tag_t, int> > pendingFaces;
+        std::set<tag_t> checkedFaces;
+        checkedFaces.insert(gapFace);
+
+        const std::vector<tag_t> seedEdges = AskFaceEdges(gapFace);
+        for (std::size_t edgeIndex = 0; edgeIndex < seedEdges.size(); ++edgeIndex)
+        {
+            const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(seedEdges[edgeIndex]);
+            for (std::size_t adjacentIndex = 0; adjacentIndex < adjacentFaces.size(); ++adjacentIndex)
+            {
+                const tag_t adjacentFace = adjacentFaces[adjacentIndex];
+                if (adjacentFace == NULL_TAG ||
+                    !checkedFaces.insert(adjacentFace).second)
+                {
+                    continue;
+                }
+
+                pendingFaces.push_back(std::make_pair(adjacentFace, 0));
+            }
+        }
+
+        while (!pendingFaces.empty())
+        {
+            const tag_t currentFace = pendingFaces.front().first;
+            const int depth = pendingFaces.front().second;
+            pendingFaces.pop_front();
+
+            double axisPoint[3] = {0.0, 0.0, 0.0};
+            double axisDirection[3] = {0.0, 0.0, 0.0};
+            double radius = 0.0;
+            if (AskCylinderFaceData(currentFace, axisPoint, axisDirection, radius))
+            {
+                const bool tangent = IsFaceTangentOrEdgeConnectedToCylinder(currentFace, gapFace);
+                DebugLog("  gap group touches cylinder: gapFace=" +
+                    FormatTag(gapFace) +
+                    ", cylinderFace=" + FormatTag(currentFace) +
+                    ", radius=" + FormatDouble(radius) +
+                    ", depth=" + FormatTag(static_cast<tag_t>(depth)) +
+                    ", tangent=" + FormatTag(static_cast<tag_t>(tangent ? 1 : 0)));
+                if (tangent)
+                {
+                    return true;
+                }
+            }
+
+            if (depth >= 2)
+            {
+                continue;
+            }
+
+            const std::vector<tag_t> edges = AskFaceEdges(currentFace);
+            for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex)
+            {
+                const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(edges[edgeIndex]);
+                for (std::size_t adjacentIndex = 0; adjacentIndex < adjacentFaces.size(); ++adjacentIndex)
+                {
+                    const tag_t adjacentFace = adjacentFaces[adjacentIndex];
+                    if (adjacentFace == NULL_TAG ||
+                        !checkedFaces.insert(adjacentFace).second)
+                    {
+                        continue;
+                    }
+
+                    pendingFaces.push_back(std::make_pair(adjacentFace, depth + 1));
+                }
+            }
+        }
+    }
+
+    DebugLog("  gap group touches tangent cylinder: no, faces=" +
+        FormatTag(static_cast<tag_t>(group.faces.size())));
+    return false;
+}
+
+bool DeleteCylinderGapGroupWithReplaceFirst(
+    tag_t bodyTag,
+    const GapFaceGroup& group,
+    double thickness,
+    bool deleteREnabled,
+    double maxRadius)
+{
+    DebugLog("  cylinder-connected gap group fallback: replace first");
+    ReplaceGapPlan plan = {};
+    const bool planned = TryBuildReplaceGapPlan(group, plan);
+    DebugLog("  cylinder-connected replace plan before prepare: planned=" +
+        FormatTag(static_cast<tag_t>(planned ? 1 : 0)));
+    if (!planned)
+    {
+        DebugLog("  cylinder-connected replace plan failed, start bounding fallback");
+        const bool bounded = DeleteGapGroupWithBoundingTool(bodyTag, group, thickness);
+        DebugLog("  cylinder-connected bounding after plan failed result: committed=" +
+            FormatTag(static_cast<tag_t>(bounded ? 1 : 0)));
+        return bounded;
+    }
+
+    PrepareBodyBeforeReplaceFallback(bodyTag, thickness, deleteREnabled, maxRadius);
+    const bool replaced = ExecuteReplaceGapPlan(plan, group);
+    DebugLog("  cylinder-connected replace first result: committed=" +
+        FormatTag(static_cast<tag_t>(replaced ? 1 : 0)));
+    if (replaced)
+    {
+        return true;
+    }
+
+    DebugLog("  cylinder-connected replace failed, start bounding fallback");
+    const bool bounded = DeleteGapGroupWithBoundingTool(bodyTag, group, thickness);
+    DebugLog("  cylinder-connected bounding after replace result: committed=" +
+        FormatTag(static_cast<tag_t>(bounded ? 1 : 0)));
+    return bounded;
+}
+
+bool DeleteGapGroupAfterMiddlePlaneFailed(
+    tag_t bodyTag,
+    const GapFaceGroup& group,
+    double thickness,
+    bool deleteREnabled,
+    double maxRadius)
+{
+    if (group.touchesTangentCylinder)
+    {
+        DebugLog("  gap group uses cached tangent cylinder: yes");
+        return DeleteCylinderGapGroupWithReplaceFirst(
+            bodyTag,
+            group,
+            thickness,
+            deleteREnabled,
+            maxRadius);
+    }
+
+    if (GapGroupTouchesTangentCylinderFace(group))
+    {
+        return DeleteCylinderGapGroupWithReplaceFirst(
+            bodyTag,
+            group,
+            thickness,
+            deleteREnabled,
+            maxRadius);
+    }
+
+    return DeleteGapGroupWithBoundingToolOrReplace(
+        bodyTag,
+        group,
+        thickness,
+        deleteREnabled,
+        maxRadius);
 }
 
 tag_t ResolveCurrentFaceTag(tag_t faceTag)
@@ -3765,6 +4190,23 @@ std::vector<NXOpen::Face*> ResolveCurrentFaces(const std::vector<tag_t>& faceTag
     return faces;
 }
 
+std::vector<tag_t> ResolveCurrentFaceTags(const std::vector<tag_t>& faceTags)
+{
+    std::vector<tag_t> currentTags;
+    for (std::size_t index = 0; index < faceTags.size(); ++index)
+    {
+        const tag_t currentTag = ResolveCurrentFaceTag(faceTags[index]);
+        NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(
+            NXOpen::NXObjectManager::Get(currentTag));
+        if (face != NULL)
+        {
+            AddUniqueTag(currentTags, currentTag);
+        }
+    }
+
+    return currentTags;
+}
+
 bool ReplaceFaceByFace(
     const std::vector<tag_t>& faceToReplaceTags,
     tag_t replacementFaceTag,
@@ -3772,8 +4214,35 @@ bool ReplaceFaceByFace(
 {
     NXOpen::Session* session = NXOpen::Session::GetSession();
     NXOpen::Part* workPart = session != NULL && session->Parts() != NULL ? session->Parts()->Work() : NULL;
-    std::vector<NXOpen::Face*> facesToReplace = ResolveCurrentFaces(faceToReplaceTags);
     const tag_t currentReplacementFaceTag = ResolveCurrentFaceTag(replacementFaceTag);
+    const std::vector<tag_t> currentFaceTags = ResolveCurrentFaceTags(faceToReplaceTags);
+    std::vector<tag_t> activeFaceTags;
+    bool hasResolvedOriginal = false;
+    bool hasAlreadyReplacedOriginal = false;
+    for (std::size_t faceIndex = 0; faceIndex < currentFaceTags.size(); ++faceIndex)
+    {
+        hasResolvedOriginal = true;
+        if (currentFaceTags[faceIndex] == currentReplacementFaceTag)
+        {
+            hasAlreadyReplacedOriginal = true;
+            continue;
+        }
+        AddUniqueTag(activeFaceTags, currentFaceTags[faceIndex]);
+    }
+
+    if (activeFaceTags.empty() && hasResolvedOriginal && hasAlreadyReplacedOriginal)
+    {
+        DebugLog("  replace face skipped as already same face: original=" +
+            FormatTag(faceToReplaceTags.front()) +
+            ", originalCount=" + FormatTag(static_cast<tag_t>(faceToReplaceTags.size())) +
+            ", originals=[" + FormatTagList(faceToReplaceTags) + "]" +
+            ", currentOriginals=[" + FormatTagList(currentFaceTags) + "]" +
+            ", replacement=" + FormatTag(replacementFaceTag) +
+            ", currentReplacement=" + FormatTag(currentReplacementFaceTag));
+        return true;
+    }
+
+    std::vector<NXOpen::Face*> facesToReplace = ResolveCurrentFaces(activeFaceTags);
     NXOpen::Face* replacementFace =
         dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(currentReplacementFaceTag));
     if (workPart == NULL ||
@@ -3784,6 +4253,9 @@ bool ReplaceFaceByFace(
         DebugLog("  replace face skipped: original=" +
             FormatTag(faceToReplaceTags.empty() ? NULL_TAG : faceToReplaceTags.front()) +
             ", originalCount=" + FormatTag(static_cast<tag_t>(faceToReplaceTags.size())) +
+            ", originals=[" + FormatTagList(faceToReplaceTags) + "]" +
+            ", currentOriginals=[" + FormatTagList(currentFaceTags) + "]" +
+            ", activeOriginals=[" + FormatTagList(activeFaceTags) + "]" +
             ", replacement=" + FormatTag(replacementFaceTag) +
             ", currentReplacement=" + FormatTag(currentReplacementFaceTag));
         return false;
@@ -3848,6 +4320,8 @@ bool ReplaceFaceByFace(
             FormatTag(faceToReplaceTags.empty() ? NULL_TAG : faceToReplaceTags.front()) +
             ", originalCount=" + FormatTag(static_cast<tag_t>(faceToReplaceTags.size())) +
             ", originals=[" + FormatTagList(faceToReplaceTags) + "]" +
+            ", currentOriginals=[" + FormatTagList(currentFaceTags) + "]" +
+            ", activeOriginals=[" + FormatTagList(activeFaceTags) + "]" +
             ", replacement=" + FormatTag(replacementFaceTag) +
             ", currentReplacement=" + FormatTag(currentReplacementFaceTag) +
             ", mappedReplacement=" + FormatTag(ResolveCurrentFaceTag(replacementFaceTag)) +
@@ -3860,6 +4334,9 @@ bool ReplaceFaceByFace(
         DebugLog("  replace face failed: NXException=" + std::string(ex.Message()) +
             ", original=" + FormatTag(faceToReplaceTags.empty() ? NULL_TAG : faceToReplaceTags.front()) +
             ", originalCount=" + FormatTag(static_cast<tag_t>(faceToReplaceTags.size())) +
+            ", originals=[" + FormatTagList(faceToReplaceTags) + "]" +
+            ", currentOriginals=[" + FormatTagList(currentFaceTags) + "]" +
+            ", activeOriginals=[" + FormatTagList(activeFaceTags) + "]" +
             ", replacement=" + FormatTag(replacementFaceTag) +
             ", currentReplacement=" + FormatTag(currentReplacementFaceTag) +
             ", reverse=" + FormatTag(static_cast<tag_t>(reverseDirection ? 1 : 0)));
@@ -3869,6 +4346,9 @@ bool ReplaceFaceByFace(
         DebugLog("  replace face failed: unknown exception, original=" +
             FormatTag(faceToReplaceTags.empty() ? NULL_TAG : faceToReplaceTags.front()) +
             ", originalCount=" + FormatTag(static_cast<tag_t>(faceToReplaceTags.size())) +
+            ", originals=[" + FormatTagList(faceToReplaceTags) + "]" +
+            ", currentOriginals=[" + FormatTagList(currentFaceTags) + "]" +
+            ", activeOriginals=[" + FormatTagList(activeFaceTags) + "]" +
             ", replacement=" + FormatTag(replacementFaceTag) +
             ", currentReplacement=" + FormatTag(currentReplacementFaceTag) +
             ", reverse=" + FormatTag(static_cast<tag_t>(reverseDirection ? 1 : 0)));
@@ -3891,46 +4371,187 @@ bool ReplaceFaceByFace(const std::vector<tag_t>& faceToReplaceTags, tag_t replac
     return ReplaceFaceByFace(faceToReplaceTags, replacementFaceTag, true);
 }
 
+bool ReplaceGapSideFaces(
+    const std::vector<tag_t>& sideFaces,
+    tag_t replacementFaceTag,
+    const std::string& sideName,
+    std::set<tag_t>& replacedFaces)
+{
+    if (sideFaces.empty())
+    {
+        return false;
+    }
+
+    if (ReplaceFaceByFace(sideFaces, replacementFaceTag))
+    {
+        for (std::size_t faceIndex = 0; faceIndex < sideFaces.size(); ++faceIndex)
+        {
+            replacedFaces.insert(sideFaces[faceIndex]);
+        }
+        return true;
+    }
+
+    if (sideFaces.size() <= 1)
+    {
+        return false;
+    }
+
+    DebugLog("    replace gap side batch failed, retry per face: side=" +
+        sideName +
+        ", faces=[" + FormatTagList(sideFaces) +
+        "], replacement=" + FormatTag(replacementFaceTag));
+
+    bool allCommitted = true;
+    for (std::size_t faceIndex = 0; faceIndex < sideFaces.size(); ++faceIndex)
+    {
+        std::vector<tag_t> singleFace(1, sideFaces[faceIndex]);
+        const bool committed = ReplaceFaceByFace(singleFace, replacementFaceTag);
+        DebugLog("    replace gap side per-face result: side=" +
+            sideName +
+            ", face=" + FormatTag(sideFaces[faceIndex]) +
+            ", replacement=" + FormatTag(replacementFaceTag) +
+            ", committed=" + FormatTag(static_cast<tag_t>(committed ? 1 : 0)));
+        if (committed)
+        {
+            replacedFaces.insert(sideFaces[faceIndex]);
+        }
+        else
+        {
+            allCommitted = false;
+        }
+    }
+
+    return allCommitted;
+}
+
 std::vector<tag_t> BuildSideGapFaceChain(const GapFaceGroup& group, bool firstSide)
 {
     std::vector<tag_t> faces;
+    const int targetSide = firstSide ? 0 : 1;
     for (std::size_t pairIndex = 0; pairIndex < group.gapEdgePairs.size(); ++pairIndex)
     {
-        AddUniqueTag(
-            faces,
-            firstSide ? group.gapEdgePairs[pairIndex].firstGapFace : group.gapEdgePairs[pairIndex].secondGapFace);
+        if (group.gapEdgePairs[pairIndex].firstEdgeSide == targetSide)
+        {
+            AddUniqueTag(faces, group.gapEdgePairs[pairIndex].firstGapFace);
+        }
+        if (group.gapEdgePairs[pairIndex].secondEdgeSide == targetSide)
+        {
+            AddUniqueTag(faces, group.gapEdgePairs[pairIndex].secondGapFace);
+        }
     }
     return faces;
 }
 
 bool BuildBipartiteGapSideFaceChains(
     const GapFaceGroup& group,
+    std::map<tag_t, int>& sideByFace,
     std::vector<tag_t>& firstSideFaces,
     std::vector<tag_t>& secondSideFaces)
 {
     firstSideFaces.clear();
     secondSideFaces.clear();
+    sideByFace.clear();
 
-    std::map<tag_t, int> sideByFace;
-    bool changed = true;
-    while (changed)
+    std::vector<std::size_t> pairOrder;
+    for (std::size_t pairIndex = 0; pairIndex < group.gapEdgePairs.size(); ++pairIndex)
     {
-        changed = false;
-        for (std::size_t pairIndex = 0; pairIndex < group.gapEdgePairs.size(); ++pairIndex)
+        pairOrder.push_back(pairIndex);
+    }
+    std::sort(pairOrder.begin(), pairOrder.end(),
+        [&group](std::size_t lhs, std::size_t rhs)
         {
-            if (!TryAssignGapSide(
-                sideByFace,
-                group.gapEdgePairs[pairIndex].firstGapFace,
-                group.gapEdgePairs[pairIndex].secondGapFace,
-                changed))
+            return group.gapEdgePairs[lhs].length > group.gapEdgePairs[rhs].length;
+        });
+
+    for (std::size_t orderIndex = 0; orderIndex < pairOrder.size(); ++orderIndex)
+    {
+        const GapEdgePair& pair = group.gapEdgePairs[pairOrder[orderIndex]];
+        DebugLog("  replace side pair scan: firstEdge=" +
+            FormatTag(pair.firstEdge) +
+            ", secondEdge=" + FormatTag(pair.secondEdge) +
+            ", firstGapFace=" + FormatTag(pair.firstGapFace) +
+            ", secondGapFace=" + FormatTag(pair.secondGapFace) +
+            ", firstLine=" + FormatTag(static_cast<tag_t>(pair.firstEdgeIsLine ? 1 : 0)) +
+            ", secondLine=" + FormatTag(static_cast<tag_t>(pair.secondEdgeIsLine ? 1 : 0)) +
+            ", length=" + FormatDouble(pair.length));
+
+        if (!GapEdgePairHasTwoLineEdges(pair))
+        {
+            DebugLog("  replace side partition skip non-line gap pair: firstEdge=" +
+                FormatTag(pair.firstEdge) +
+                ", secondEdge=" + FormatTag(pair.secondEdge) +
+                ", firstGapFace=" + FormatTag(pair.firstGapFace) +
+                ", secondGapFace=" + FormatTag(pair.secondGapFace) +
+                ", length=" + FormatDouble(pair.length));
+            continue;
+        }
+
+        bool changed = false;
+        if (!TryAssignGapSide(sideByFace, pair.firstGapFace, pair.secondGapFace, changed))
+        {
+            DebugLog("  replace side partition conflict ignored by shorter pair: firstGapFace=" +
+                FormatTag(pair.firstGapFace) +
+                ", secondGapFace=" + FormatTag(pair.secondGapFace) +
+                ", length=" + FormatDouble(pair.length));
+        }
+    }
+
+    bool changedBySkippedPair = true;
+    while (changedBySkippedPair)
+    {
+        changedBySkippedPair = false;
+        for (std::size_t orderIndex = 0; orderIndex < pairOrder.size(); ++orderIndex)
+        {
+            const GapEdgePair& pair = group.gapEdgePairs[pairOrder[orderIndex]];
+            if (GapEdgePairHasTwoLineEdges(pair) ||
+                pair.firstGapFace == NULL_TAG ||
+                pair.secondGapFace == NULL_TAG)
             {
-                DebugLog("  replace side partition conflict: firstGapFace=" +
-                    FormatTag(group.gapEdgePairs[pairIndex].firstGapFace) +
-                    ", secondGapFace=" + FormatTag(group.gapEdgePairs[pairIndex].secondGapFace));
-                return false;
+                continue;
+            }
+
+            const std::map<tag_t, int>::const_iterator firstSideIt = sideByFace.find(pair.firstGapFace);
+            const std::map<tag_t, int>::const_iterator secondSideIt = sideByFace.find(pair.secondGapFace);
+            const bool hasFirstSide = firstSideIt != sideByFace.end();
+            const bool hasSecondSide = secondSideIt != sideByFace.end();
+            if (hasFirstSide == hasSecondSide)
+            {
+                if (hasFirstSide && firstSideIt->second != secondSideIt->second)
+                {
+                    DebugLog("  gap face side skipped-pair conflict kept: firstGapFace=" +
+                        FormatTag(pair.firstGapFace) +
+                        ", firstSide=" + FormatTag(static_cast<tag_t>(firstSideIt->second)) +
+                        ", secondGapFace=" + FormatTag(pair.secondGapFace) +
+                        ", secondSide=" + FormatTag(static_cast<tag_t>(secondSideIt->second)) +
+                        ", length=" + FormatDouble(pair.length));
+                }
+                continue;
+            }
+
+            if (hasFirstSide)
+            {
+                sideByFace[pair.secondGapFace] = firstSideIt->second;
+                changedBySkippedPair = true;
+                DebugLog("  gap face side propagated by skipped/corner pair: face=" +
+                    FormatTag(pair.secondGapFace) +
+                    ", fromFace=" + FormatTag(pair.firstGapFace) +
+                    ", side=" + FormatTag(static_cast<tag_t>(firstSideIt->second)) +
+                    ", length=" + FormatDouble(pair.length));
+            }
+            else
+            {
+                sideByFace[pair.firstGapFace] = secondSideIt->second;
+                changedBySkippedPair = true;
+                DebugLog("  gap face side propagated by skipped/corner pair: face=" +
+                    FormatTag(pair.firstGapFace) +
+                    ", fromFace=" + FormatTag(pair.secondGapFace) +
+                    ", side=" + FormatTag(static_cast<tag_t>(secondSideIt->second)) +
+                    ", length=" + FormatDouble(pair.length));
             }
         }
     }
+
+    PropagateUnassignedGapFaceSides(group, sideByFace);
 
     for (std::size_t faceIndex = 0; faceIndex < group.faces.size(); ++faceIndex)
     {
@@ -3951,124 +4572,225 @@ bool BuildBipartiteGapSideFaceChains(
         }
     }
 
+    DebugLog("  replace side map final: " + FormatSideMap(sideByFace));
     return !firstSideFaces.empty() && !secondSideFaces.empty();
 }
 
-tag_t FindLargeSideFaceByLongestStraightEdge(
-    const std::vector<tag_t>& gapFaces,
+tag_t FindAdjacentLargeFaceForGapEdge(
+    tag_t edgeTag,
+    tag_t ownerFace,
+    const std::set<tag_t>& excludedFaces)
+{
+    if (ownerFace != NULL_TAG && excludedFaces.find(ownerFace) == excludedFaces.end())
+    {
+        return ownerFace;
+    }
+
+    const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(edgeTag);
+    for (std::size_t adjacentIndex = 0; adjacentIndex < adjacentFaces.size(); ++adjacentIndex)
+    {
+        const tag_t adjacentFace = adjacentFaces[adjacentIndex];
+        if (adjacentFace == NULL_TAG ||
+            excludedFaces.find(adjacentFace) != excludedFaces.end())
+        {
+            continue;
+        }
+
+        DebugLog("  replace gap edge large face resolved from same edge adjacency: edge=" +
+            FormatTag(edgeTag) +
+            ", ownerFace=" + FormatTag(ownerFace) +
+            ", adjacentFace=" + FormatTag(adjacentFace));
+        return adjacentFace;
+    }
+
+    DebugLog("  replace gap edge large face skipped: edge=" +
+        FormatTag(edgeTag) +
+        ", ownerFace=" + FormatTag(ownerFace) +
+        ", adjacentFaces=" + FormatTag(static_cast<tag_t>(adjacentFaces.size())));
+    return NULL_TAG;
+}
+
+tag_t FindLargeSideFaceByLongestGapEdge(
+    const GapFaceGroup& group,
+    int side,
+    const std::map<tag_t, int>& sideByFace,
     const std::set<tag_t>& excludedFaces)
 {
     tag_t bestAdjacentFace = NULL_TAG;
     tag_t bestEdge = NULL_TAG;
     double bestLength = 0.0;
-    for (std::size_t faceIndex = 0; faceIndex < gapFaces.size(); ++faceIndex)
+    for (std::size_t pairIndex = 0; pairIndex < group.gapEdgePairs.size(); ++pairIndex)
     {
-        const std::vector<tag_t> edges = AskFaceEdges(gapFaces[faceIndex]);
-        for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex)
+        const GapEdgePair& pair = group.gapEdgePairs[pairIndex];
+        const tag_t edges[2] = {pair.firstEdge, pair.secondEdge};
+        const tag_t ownerFaces[2] = {pair.firstOwnerFace, pair.secondOwnerFace};
+        const tag_t gapFaces[2] = {pair.firstGapFace, pair.secondGapFace};
+        const bool edgeIsLine[2] = {pair.firstEdgeIsLine, pair.secondEdgeIsLine};
+        for (int edgeIndex = 0; edgeIndex < 2; ++edgeIndex)
         {
-            if (!IsLineEdge(edges[edgeIndex]))
+            if (!edgeIsLine[edgeIndex])
             {
                 continue;
             }
 
-            const double length = AskEdgeLength(edges[edgeIndex]);
+            std::map<tag_t, int>::const_iterator sideIt = sideByFace.find(gapFaces[edgeIndex]);
+            if (sideIt == sideByFace.end() || sideIt->second != side)
+            {
+                continue;
+            }
+
+            double length = AskEdgeLength(edges[edgeIndex]);
+            if (length <= 1.0e-6)
+            {
+                length = pair.length;
+                DebugLog("  replace side edge length fallback to stored pair length: edge=" +
+                    FormatTag(edges[edgeIndex]) +
+                    ", side=" + FormatTag(static_cast<tag_t>(side)) +
+                    ", storedLength=" + FormatDouble(length) +
+                    ", gapFace=" + FormatTag(gapFaces[edgeIndex]) +
+                    ", ownerFace=" + FormatTag(ownerFaces[edgeIndex]));
+            }
             if (length <= bestLength)
             {
                 continue;
             }
 
-            const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(edges[edgeIndex]);
-            for (std::size_t adjacentIndex = 0; adjacentIndex < adjacentFaces.size(); ++adjacentIndex)
+            const tag_t adjacentFace =
+                FindAdjacentLargeFaceForGapEdge(edges[edgeIndex], ownerFaces[edgeIndex], excludedFaces);
+            if (adjacentFace == NULL_TAG)
             {
-                const tag_t adjacentFace = adjacentFaces[adjacentIndex];
-                if (adjacentFace == NULL_TAG ||
-                    excludedFaces.find(adjacentFace) != excludedFaces.end())
-                {
-                    continue;
-                }
-
-                bestLength = length;
-                bestEdge = edges[edgeIndex];
-                bestAdjacentFace = adjacentFace;
+                continue;
             }
+
+            bestLength = length;
+            bestEdge = edges[edgeIndex];
+            bestAdjacentFace = adjacentFace;
         }
     }
 
-    DebugLog("  replace side large face by longest edge: gapFaces=" +
-        FormatTag(static_cast<tag_t>(gapFaces.size())) +
+    DebugLog("  replace side large face by longest gap edge: side=" +
+        FormatTag(static_cast<tag_t>(side)) +
         ", edge=" + FormatTag(bestEdge) +
         ", length=" + FormatDouble(bestLength) +
         ", largeFace=" + FormatTag(bestAdjacentFace));
     return bestAdjacentFace;
 }
 
-bool TryReplaceGapGroupFaces(const GapFaceGroup& group)
+bool TryBuildReplaceGapPlan(const GapFaceGroup& group, ReplaceGapPlan& plan)
 {
     DebugLog("  replace face fallback start: faces=" +
         FormatTag(static_cast<tag_t>(group.faces.size())) +
         ", gapPairs=" + FormatTag(static_cast<tag_t>(group.gapEdgePairs.size())));
 
-    std::set<tag_t> replacedFaces;
-    std::vector<tag_t> firstSideFaces;
-    std::vector<tag_t> secondSideFaces;
-    if (!BuildBipartiteGapSideFaceChains(group, firstSideFaces, secondSideFaces))
+    plan = ReplaceGapPlan();
+    std::map<tag_t, int> sideByFace;
+    if (!BuildBipartiteGapSideFaceChains(group, sideByFace, plan.firstSideFaces, plan.secondSideFaces))
     {
-        firstSideFaces = BuildSideGapFaceChain(group, true);
-        secondSideFaces = BuildSideGapFaceChain(group, false);
+        plan.firstSideFaces = BuildSideGapFaceChain(group, true);
+        plan.secondSideFaces = BuildSideGapFaceChain(group, false);
+        sideByFace.clear();
+        for (std::size_t faceIndex = 0; faceIndex < plan.firstSideFaces.size(); ++faceIndex)
+        {
+            sideByFace[plan.firstSideFaces[faceIndex]] = 0;
+        }
+        for (std::size_t faceIndex = 0; faceIndex < plan.secondSideFaces.size(); ++faceIndex)
+        {
+            sideByFace[plan.secondSideFaces[faceIndex]] = 1;
+        }
         DebugLog("  replace side partition fallback: firstOriginals=[" +
-            FormatTagList(firstSideFaces) +
-            "], secondOriginals=[" + FormatTagList(secondSideFaces) + "]");
+            FormatTagList(plan.firstSideFaces) +
+            "], secondOriginals=[" + FormatTagList(plan.secondSideFaces) +
+            "], sideMap=" + FormatSideMap(sideByFace));
     }
     else
     {
         DebugLog("  replace side partition result: firstOriginals=[" +
-            FormatTagList(firstSideFaces) +
-            "], secondOriginals=[" + FormatTagList(secondSideFaces) + "]");
+            FormatTagList(plan.firstSideFaces) +
+            "], secondOriginals=[" + FormatTagList(plan.secondSideFaces) + "]");
     }
 
     const std::set<tag_t> allGapFaces(group.faces.begin(), group.faces.end());
-    const tag_t firstReplacementFace =
-        FindLargeSideFaceByLongestStraightEdge(secondSideFaces, allGapFaces);
-    const tag_t secondReplacementFace =
-        FindLargeSideFaceByLongestStraightEdge(firstSideFaces, allGapFaces);
+    plan.firstReplacementFace =
+        FindLargeSideFaceByLongestGapEdge(group, 1, sideByFace, allGapFaces);
+    plan.secondReplacementFace =
+        FindLargeSideFaceByLongestGapEdge(group, 0, sideByFace, allGapFaces);
 
-    DebugLog("  replace gap side plan: firstOriginals=[" + FormatTagList(firstSideFaces) +
-        "], firstReplacementFromSecondLargeFace=" + FormatTag(firstReplacementFace) +
-        ", resolvedFirstReplacement=" + FormatTag(ResolveCurrentFaceTag(firstReplacementFace)) +
-        ", secondOriginals=[" + FormatTagList(secondSideFaces) +
-        "], secondReplacementFromFirstLargeFace=" + FormatTag(secondReplacementFace) +
-        ", resolvedSecondReplacement=" + FormatTag(ResolveCurrentFaceTag(secondReplacementFace)));
+    DebugLog("  replace gap side plan: firstOriginals=[" + FormatTagList(plan.firstSideFaces) +
+        "], firstReplacementFromSecondLargeFace=" + FormatTag(plan.firstReplacementFace) +
+        ", resolvedFirstReplacement=" + FormatTag(ResolveCurrentFaceTag(plan.firstReplacementFace)) +
+        ", secondOriginals=[" + FormatTagList(plan.secondSideFaces) +
+        "], secondReplacementFromFirstLargeFace=" + FormatTag(plan.secondReplacementFace) +
+        ", resolvedSecondReplacement=" + FormatTag(ResolveCurrentFaceTag(plan.secondReplacementFace)));
+    return !plan.firstSideFaces.empty() &&
+        !plan.secondSideFaces.empty() &&
+        plan.firstReplacementFace != NULL_TAG &&
+        plan.secondReplacementFace != NULL_TAG;
+}
 
-    const bool firstCommitted = ReplaceFaceByFace(firstSideFaces, firstReplacementFace);
-    if (firstCommitted)
+bool ExecuteReplaceGapPlan(const ReplaceGapPlan& plan, const GapFaceGroup& group)
+{
+    std::set<tag_t> replacedFaces;
+
+    bool firstCommitted = false;
+    bool secondCommitted = false;
+    const bool replaceSecondSideFirst =
+        plan.secondSideFaces.size() > plan.firstSideFaces.size();
+
+    if (replaceSecondSideFirst)
     {
-        for (std::size_t faceIndex = 0; faceIndex < firstSideFaces.size(); ++faceIndex)
-        {
-            replacedFaces.insert(firstSideFaces[faceIndex]);
-        }
+        DebugLog("    replace gap side execution order: second side first");
+        secondCommitted = ReplaceGapSideFaces(
+            plan.secondSideFaces,
+            plan.secondReplacementFace,
+            "second",
+            replacedFaces);
+        firstCommitted = ReplaceGapSideFaces(
+            plan.firstSideFaces,
+            plan.firstReplacementFace,
+            "first",
+            replacedFaces);
+    }
+    else
+    {
+        DebugLog("    replace gap side execution order: first side first");
+        firstCommitted = ReplaceGapSideFaces(
+            plan.firstSideFaces,
+            plan.firstReplacementFace,
+            "first",
+            replacedFaces);
     }
 
-    const bool secondCommitted = ReplaceFaceByFace(secondSideFaces, secondReplacementFace);
-    if (secondCommitted)
+    if (!replaceSecondSideFirst)
     {
-        for (std::size_t faceIndex = 0; faceIndex < secondSideFaces.size(); ++faceIndex)
-        {
-            replacedFaces.insert(secondSideFaces[faceIndex]);
-        }
+        secondCommitted = ReplaceGapSideFaces(
+            plan.secondSideFaces,
+            plan.secondReplacementFace,
+            "second",
+            replacedFaces);
     }
 
     DebugLog("    replace gap side result: firstSideFaces=" +
-        FormatTag(static_cast<tag_t>(firstSideFaces.size())) +
-        ", firstReplacement=" + FormatTag(firstReplacementFace) +
+        FormatTag(static_cast<tag_t>(plan.firstSideFaces.size())) +
+        ", firstReplacement=" + FormatTag(plan.firstReplacementFace) +
         ", firstCommitted=" + FormatTag(static_cast<tag_t>(firstCommitted ? 1 : 0)) +
-        ", secondSideFaces=" + FormatTag(static_cast<tag_t>(secondSideFaces.size())) +
-        ", secondReplacement=" + FormatTag(secondReplacementFace) +
+        ", secondSideFaces=" + FormatTag(static_cast<tag_t>(plan.secondSideFaces.size())) +
+        ", secondReplacement=" + FormatTag(plan.secondReplacementFace) +
         ", secondCommitted=" + FormatTag(static_cast<tag_t>(secondCommitted ? 1 : 0)));
 
-    bool allReplaced = !group.faces.empty();
-    for (std::size_t faceIndex = 0; faceIndex < group.faces.size(); ++faceIndex)
+    std::vector<tag_t> targetFaces;
+    for (std::size_t faceIndex = 0; faceIndex < plan.firstSideFaces.size(); ++faceIndex)
     {
-        if (replacedFaces.find(group.faces[faceIndex]) == replacedFaces.end())
+        AddUniqueTag(targetFaces, plan.firstSideFaces[faceIndex]);
+    }
+    for (std::size_t faceIndex = 0; faceIndex < plan.secondSideFaces.size(); ++faceIndex)
+    {
+        AddUniqueTag(targetFaces, plan.secondSideFaces[faceIndex]);
+    }
+
+    bool allReplaced = !targetFaces.empty();
+    for (std::size_t faceIndex = 0; faceIndex < targetFaces.size(); ++faceIndex)
+    {
+        if (replacedFaces.find(targetFaces[faceIndex]) == replacedFaces.end())
         {
             allReplaced = false;
             break;
@@ -4078,8 +4800,21 @@ bool TryReplaceGapGroupFaces(const GapFaceGroup& group)
     DebugLog("  replace face fallback result: committed=" +
         FormatTag(static_cast<tag_t>(allReplaced ? 1 : 0)) +
         ", replacedFaces=" + FormatTag(static_cast<tag_t>(replacedFaces.size())) +
-        ", targetFaces=" + FormatTag(static_cast<tag_t>(group.faces.size())));
+        ", targetFaces=" + FormatTag(static_cast<tag_t>(targetFaces.size())) +
+        ", groupFaces=" + FormatTag(static_cast<tag_t>(group.faces.size())));
     return allReplaced;
+}
+
+bool TryReplaceGapGroupFaces(const GapFaceGroup& group)
+{
+    ReplaceGapPlan plan = {};
+    if (!TryBuildReplaceGapPlan(group, plan))
+    {
+        DebugLog("  replace face fallback result: committed=0, plan=0");
+        return false;
+    }
+
+    return ExecuteReplaceGapPlan(plan, group);
 }
 
 bool DeleteFacesWithHealBuilder(const std::vector<tag_t>& faceTags)
@@ -4738,7 +5473,7 @@ void DeleteGapGroupsWithMiddlePlanes(
             ", pairs=" + FormatTag(static_cast<tag_t>(pairs.size())));
         if (pairs.empty())
         {
-            const bool bounded = DeleteGapGroupWithBoundingToolOrReplace(
+            const bool bounded = DeleteGapGroupAfterMiddlePlaneFailed(
                 bodyTag,
                 groups[groupIndex],
                 thickness,
@@ -4769,7 +5504,7 @@ void DeleteGapGroupsWithMiddlePlanes(
         }
         else
         {
-            const bool bounded = DeleteGapGroupWithBoundingToolOrReplace(
+            const bool bounded = DeleteGapGroupAfterMiddlePlaneFailed(
                 bodyTag,
                 groups[groupIndex],
                 thickness,
