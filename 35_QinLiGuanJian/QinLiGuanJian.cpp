@@ -688,6 +688,88 @@ bool IsBSurfaceFace(tag_t faceTag)
     return GetFaceData(faceTag, data) && data.type == UF_MODL_PARAMETRIC_FACE;
 }
 
+struct EndPlaneInfo
+{
+    double normal[3];
+    double offset;
+    std::vector<tag_t> sourceFaces;
+    std::set<tag_t> finalFaces;
+
+    EndPlaneInfo() : offset(0.0)
+    {
+        normal[0] = 0.0;
+        normal[1] = 0.0;
+        normal[2] = 0.0;
+    }
+};
+
+void CanonicalizePlane(double normal[3], double& offset)
+{
+    int majorAxis = 0;
+    if (std::fabs(normal[1]) > std::fabs(normal[majorAxis]))
+    {
+        majorAxis = 1;
+    }
+    if (std::fabs(normal[2]) > std::fabs(normal[majorAxis]))
+    {
+        majorAxis = 2;
+    }
+
+    if (normal[majorAxis] < 0.0)
+    {
+        normal[0] = -normal[0];
+        normal[1] = -normal[1];
+        normal[2] = -normal[2];
+        offset = -offset;
+    }
+}
+
+bool FaceTouchesPlane(tag_t faceTag, const double planeNormal[3], double planeOffset, double tolerance)
+{
+    const std::vector<tag_t> edgeTags = AskFaceEdges(faceTag);
+    for (std::size_t edgeIndex = 0; edgeIndex < edgeTags.size(); ++edgeIndex)
+    {
+        double startPoint[3] = { 0.0, 0.0, 0.0 };
+        double endPoint[3] = { 0.0, 0.0, 0.0 };
+        if (!AskEdgeEndpoints(edgeTags[edgeIndex], startPoint, endPoint))
+        {
+            continue;
+        }
+
+        const double startDistance = std::fabs(Dot3(startPoint, planeNormal) - planeOffset);
+        const double endDistance = std::fabs(Dot3(endPoint, planeNormal) - planeOffset);
+        if (startDistance <= tolerance || endDistance <= tolerance)
+        {
+            return true;
+        }
+    }
+
+    FaceData data;
+    if (GetFaceData(faceTag, data))
+    {
+        const double boxCorners[8][3] =
+        {
+            { data.box[0], data.box[1], data.box[2] },
+            { data.box[0], data.box[1], data.box[5] },
+            { data.box[0], data.box[4], data.box[2] },
+            { data.box[0], data.box[4], data.box[5] },
+            { data.box[3], data.box[1], data.box[2] },
+            { data.box[3], data.box[1], data.box[5] },
+            { data.box[3], data.box[4], data.box[2] },
+            { data.box[3], data.box[4], data.box[5] }
+        };
+        for (int index = 0; index < 8; ++index)
+        {
+            if (std::fabs(Dot3(boxCorners[index], planeNormal) - planeOffset) <= tolerance)
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 tag_t AskFeatureBodyTag(tag_t featureTag)
 {
     tag_t bodyTag = NULL_TAG;
@@ -2974,8 +3056,8 @@ tag_t QinLiGuanJian::ApplySharpCornerBoundingSubtract(
     boxMatrix.Zz = referenceNormal[2];
     NXOpen::Point3d boxOrigin(referencePoint[0], referencePoint[1], referencePoint[2]);
 
-    std::set<tag_t> finalEndFaceSet;
-    const std::vector<tag_t> finalBodyFaces = AskBodyFaces(finalBodyTag);
+    std::vector<EndPlaneInfo> endPlanes;
+    const double endPlaneTolerance = 0.05;
     for (std::size_t sourceIndex = 0; sourceIndex < originalEndFaces.size(); ++sourceIndex)
     {
         double endPoint[3] = { 0.0, 0.0, 0.0 };
@@ -2987,10 +3069,38 @@ tag_t QinLiGuanJian::ApplySharpCornerBoundingSubtract(
             continue;
         }
 
-        const double endOffset = Dot3(endPoint, endNormal);
-        tag_t bestFace = NULL_TAG;
-        double bestOffset = std::numeric_limits<double>::max();
-        double bestScore = -1.0;
+        double endOffset = Dot3(endPoint, endNormal);
+        CanonicalizePlane(endNormal, endOffset);
+        bool merged = false;
+        for (std::size_t planeIndex = 0; planeIndex < endPlanes.size(); ++planeIndex)
+        {
+            if (std::fabs(Dot3(endPlanes[planeIndex].normal, endNormal)) >= kParallelFaceCosTolerance &&
+                std::fabs(endPlanes[planeIndex].offset - endOffset) <= endPlaneTolerance)
+            {
+                endPlanes[planeIndex].sourceFaces.push_back(originalEndFaces[sourceIndex]);
+                merged = true;
+                break;
+            }
+        }
+
+        if (!merged)
+        {
+            EndPlaneInfo planeInfo;
+            planeInfo.normal[0] = endNormal[0];
+            planeInfo.normal[1] = endNormal[1];
+            planeInfo.normal[2] = endNormal[2];
+            planeInfo.offset = endOffset;
+            planeInfo.sourceFaces.push_back(originalEndFaces[sourceIndex]);
+            endPlanes.push_back(planeInfo);
+        }
+    }
+
+    DebugLog("sharp corner end plane groups count=" +
+        TagToString(static_cast<tag_t>(endPlanes.size())));
+
+    const std::vector<tag_t> finalBodyFaces = AskBodyFaces(finalBodyTag);
+    for (std::size_t planeIndex = 0; planeIndex < endPlanes.size(); ++planeIndex)
+    {
         for (std::size_t faceIndex = 0; faceIndex < finalBodyFaces.size(); ++faceIndex)
         {
             FaceData candidateData;
@@ -3007,66 +3117,68 @@ tag_t QinLiGuanJian::ApplySharpCornerBoundingSubtract(
                 candidateData.dir[2]
             };
             if (!Normalize3(candidateNormal) ||
-                std::fabs(Dot3(candidateNormal, endNormal)) < kParallelFaceCosTolerance)
+                std::fabs(Dot3(candidateNormal, endPlanes[planeIndex].normal)) < kParallelFaceCosTolerance)
             {
                 continue;
             }
 
             const double offsetDifference =
-                std::fabs(Dot3(candidateData.point, endNormal) - endOffset);
-            if (offsetDifference > 0.05)
+                std::fabs(Dot3(candidateData.point, endPlanes[planeIndex].normal) -
+                    endPlanes[planeIndex].offset);
+            if (offsetDifference > endPlaneTolerance)
             {
                 continue;
             }
 
-            const double dx = std::max(0.0, candidateData.box[3] - candidateData.box[0]);
-            const double dy = std::max(0.0, candidateData.box[4] - candidateData.box[1]);
-            const double dz = std::max(0.0, candidateData.box[5] - candidateData.box[2]);
-            const double score = dx * dx + dy * dy + dz * dz;
-            if (offsetDifference < bestOffset - 1.0e-6 ||
-                (std::fabs(offsetDifference - bestOffset) <= 1.0e-6 && score > bestScore))
-            {
-                bestOffset = offsetDifference;
-                bestScore = score;
-                bestFace = finalBodyFaces[faceIndex];
-            }
+            endPlanes[planeIndex].finalFaces.insert(finalBodyFaces[faceIndex]);
         }
 
-        if (bestFace != NULL_TAG)
-        {
-            finalEndFaceSet.insert(bestFace);
-            DebugLog("sharp corner rematch end face source=" + TagToString(originalEndFaces[sourceIndex]) +
-                " final=" + TagToString(bestFace) +
-                " offsetDiff=" + DoubleToString(bestOffset));
-        }
-        else
-        {
-            DebugLog("sharp corner rematch end face failed source=" +
-                TagToString(originalEndFaces[sourceIndex]));
-        }
+        DebugLog("sharp corner rematch end plane index=" +
+            TagToString(static_cast<tag_t>(planeIndex)) +
+            " sourceFaces=" + TagsToString(endPlanes[planeIndex].sourceFaces) +
+            " finalFaces=" + TagsToString(std::vector<tag_t>(
+                endPlanes[planeIndex].finalFaces.begin(), endPlanes[planeIndex].finalFaces.end())) +
+            " offset=" + DoubleToString(endPlanes[planeIndex].offset));
     }
 
     std::set<tag_t> bSurfaceSet;
-    for (std::set<tag_t>::const_iterator endIt = finalEndFaceSet.begin();
-        endIt != finalEndFaceSet.end();
-        ++endIt)
+    for (std::size_t planeIndex = 0; planeIndex < endPlanes.size(); ++planeIndex)
     {
-        std::set<tag_t> endBSurfaces;
-        const std::vector<tag_t> adjacentFaces = AskAdjacentFaces(*endIt);
-        for (std::size_t index = 0; index < adjacentFaces.size(); ++index)
+        std::set<tag_t> planeBSurfaces;
+        for (std::set<tag_t>::const_iterator endIt = endPlanes[planeIndex].finalFaces.begin();
+            endIt != endPlanes[planeIndex].finalFaces.end();
+            ++endIt)
         {
-            const tag_t adjacentFace = adjacentFaces[index];
-            if (adjacentFace != NULL_TAG && IsBSurfaceFace(adjacentFace))
+            const std::vector<tag_t> adjacentFaces = AskAdjacentFaces(*endIt);
+            for (std::size_t index = 0; index < adjacentFaces.size(); ++index)
             {
-                bSurfaceSet.insert(adjacentFace);
-                endBSurfaces.insert(adjacentFace);
+                const tag_t adjacentFace = adjacentFaces[index];
+                if (adjacentFace != NULL_TAG && IsBSurfaceFace(adjacentFace))
+                {
+                    bSurfaceSet.insert(adjacentFace);
+                    planeBSurfaces.insert(adjacentFace);
+                }
             }
         }
 
-        DebugLog("sharp corner end face B-surfaces endFace=" + TagToString(*endIt) +
-            " count=" + TagToString(static_cast<tag_t>(endBSurfaces.size())) +
+        for (std::size_t faceIndex = 0; faceIndex < finalBodyFaces.size(); ++faceIndex)
+        {
+            const tag_t candidateFace = finalBodyFaces[faceIndex];
+            if (candidateFace != NULL_TAG &&
+                IsBSurfaceFace(candidateFace) &&
+                FaceTouchesPlane(candidateFace, endPlanes[planeIndex].normal,
+                    endPlanes[planeIndex].offset, endPlaneTolerance))
+            {
+                bSurfaceSet.insert(candidateFace);
+                planeBSurfaces.insert(candidateFace);
+            }
+        }
+
+        DebugLog("sharp corner end plane B-surfaces index=" +
+            TagToString(static_cast<tag_t>(planeIndex)) +
+            " count=" + TagToString(static_cast<tag_t>(planeBSurfaces.size())) +
             " tags=" + TagsToString(std::vector<tag_t>(
-                endBSurfaces.begin(), endBSurfaces.end())));
+                planeBSurfaces.begin(), planeBSurfaces.end())));
     }
 
     if (bSurfaceSet.empty())
