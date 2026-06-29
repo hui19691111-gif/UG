@@ -4998,8 +4998,14 @@ namespace
     FaceInfo SelectMarkerLineFaceFromPlanarChains(
         const std::vector<FaceCandidate>& allCandidates,
         const std::vector<std::map<tag_t, bool> >& chains,
-        double markerGapTolerance)
+        double markerGapTolerance,
+        std::map<tag_t, bool>* markedChainTags)
     {
+        if (markedChainTags != NULL)
+        {
+            markedChainTags->clear();
+        }
+
         FaceInfo best;
         for (size_t i = 0; i < chains.size(); ++i)
         {
@@ -5009,6 +5015,17 @@ namespace
             if (!hasMarker)
             {
                 continue;
+            }
+
+            if (markedChainTags != NULL)
+            {
+                for (std::map<tag_t, bool>::const_iterator it = chains[i].begin(); it != chains[i].end(); ++it)
+                {
+                    if (it->second)
+                    {
+                        (*markedChainTags)[it->first] = true;
+                    }
+                }
             }
 
             std::vector<FaceCandidate> chainCandidates = FilterCandidatesByTags(allCandidates, chains[i]);
@@ -5048,6 +5065,19 @@ namespace
         }
 
         return best;
+    }
+
+    bool TagsIntersect(const std::map<tag_t, bool>& a, const std::map<tag_t, bool>& b)
+    {
+        for (std::map<tag_t, bool>::const_iterator it = a.begin(); it != a.end(); ++it)
+        {
+            if (it->second && b.count(it->first))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     FaceInfo SelectSheetmetalBaseFaceByBendDirection(
@@ -5096,6 +5126,7 @@ namespace
         }
 
         const double markerGapTolerance = 0.05;
+        std::map<tag_t, bool> markedPlanarChainTags;
         if (options.markerLineFaceUp)
         {
             std::vector<std::map<tag_t, bool> > planarChains = BuildBendAdjacentPlanarChains(manager, body);
@@ -5106,10 +5137,14 @@ namespace
             }
 
             FaceInfo markedPlanarChainFace =
-                SelectMarkerLineFaceFromPlanarChains(allCandidates, planarChains, markerGapTolerance);
-            if (markedPlanarChainFace.face != NULL)
+                SelectMarkerLineFaceFromPlanarChains(allCandidates, planarChains, markerGapTolerance, &markedPlanarChainTags);
             {
-                return markedPlanarChainFace;
+                std::ostringstream log;
+                log << "base select marker side chain scan resultFace="
+                    << (markedPlanarChainFace.face == NULL ? 0 : markedPlanarChainFace.face->Tag())
+                    << " markedChainFaces=" << markedPlanarChainTags.size()
+                    << " note=marker-selects-side-only";
+                AppendMarkerLineDebugLog(log.str());
             }
         }
 
@@ -5117,20 +5152,24 @@ namespace
         std::map<tag_t, bool> outerSideTags;
         if (BuildBendSidePlanarTagSets(manager, body, &innerSideTags, &outerSideTags))
         {
-            const bool innerHasMarker = false;
-            const bool outerHasMarker = false;
+            const bool innerHasMarker = options.markerLineFaceUp &&
+                !markedPlanarChainTags.empty() &&
+                TagsIntersect(markedPlanarChainTags, innerSideTags);
+            const bool outerHasMarker = options.markerLineFaceUp &&
+                !markedPlanarChainTags.empty() &&
+                TagsIntersect(markedPlanarChainTags, outerSideTags);
 
             std::map<tag_t, bool> selectedSideTags;
             std::string selectedSideReason;
             if (innerHasMarker != outerHasMarker)
             {
                 selectedSideTags = innerHasMarker ? innerSideTags : outerSideTags;
-                selectedSideReason = innerHasMarker ? "only-inner-has-marker" : "only-outer-has-marker";
+                selectedSideReason = innerHasMarker ? "marker-side-inner" : "marker-side-outer";
             }
             else if (innerHasMarker && outerHasMarker)
             {
                 selectedSideTags = options.preferUpBends ? innerSideTags : outerSideTags;
-                selectedSideReason = options.preferUpBends ? "both-have-marker-prefer-inner" : "both-have-marker-prefer-outer";
+                selectedSideReason = options.preferUpBends ? "marker-both-sides-prefer-inner" : "marker-both-sides-prefer-outer";
             }
             else
             {
@@ -5146,6 +5185,7 @@ namespace
                     << " outerFaces=" << outerSideTags.size()
                     << " innerHasMarker=" << (innerHasMarker ? 1 : 0)
                     << " outerHasMarker=" << (outerHasMarker ? 1 : 0)
+                    << " markedChainFaces=" << markedPlanarChainTags.size()
                     << " selectedReason=" << selectedSideReason
                     << " selectedFaces=" << selectedSideTags.size()
                     << " candidateCount=" << sideCandidates.size()
@@ -9221,33 +9261,36 @@ namespace
     }
 
 
-    std::vector<DisplayableObject*> ResolveDisplayOccurrences(Body* body)
+    std::vector<DisplayableObject*> ResolveDisplayOccurrences(Body* body, bool useAssemblyOccurrences)
     {
         std::vector<DisplayableObject*> objects;
         if (body == NULL) return objects;
         std::set<tag_t> seen;
-        tag_t* occurrences = NULL;
-        const int occurrenceCount = UF_ASSEM_ask_occs_of_entity(body->Tag(), &occurrences);
-        if (occurrenceCount > 0 && occurrences != NULL)
+        if (useAssemblyOccurrences)
         {
-            for (int i = 0; i < occurrenceCount; ++i)
+            tag_t* occurrences = NULL;
+            const int occurrenceCount = UF_ASSEM_ask_occs_of_entity(body->Tag(), &occurrences);
+            if (occurrenceCount > 0 && occurrences != NULL)
             {
-                tag_t occurrenceTag = occurrences[i];
-                if (occurrenceTag != NULL_TAG && seen.insert(occurrenceTag).second)
+                for (int i = 0; i < occurrenceCount; ++i)
                 {
-                    try
+                    tag_t occurrenceTag = occurrences[i];
+                    if (occurrenceTag != NULL_TAG && seen.insert(occurrenceTag).second)
                     {
-                        DisplayableObject* occurrenceObject =
-                            dynamic_cast<DisplayableObject*>(NXObjectManager::Get(occurrenceTag));
-                        if (occurrenceObject != NULL)
+                        try
                         {
-                            objects.push_back(occurrenceObject);
+                            DisplayableObject* occurrenceObject =
+                                dynamic_cast<DisplayableObject*>(NXObjectManager::Get(occurrenceTag));
+                            if (occurrenceObject != NULL)
+                            {
+                                objects.push_back(occurrenceObject);
+                            }
                         }
+                        catch (...) {}
                     }
-                    catch (...) {}
                 }
+                UF_free(occurrences);
             }
-            UF_free(occurrences);
         }
         if (objects.empty() && seen.insert(body->Tag()).second)
         {
@@ -9256,10 +9299,16 @@ namespace
         return objects;
     }
 
-    void ApplyBodyColor(Session* session, Body* body, int color)
+    void ApplyBodyColor(Session* session, Body* body, int color, bool useAssemblyOccurrences)
     {
         if (session == NULL || body == NULL || color <= 0)
         {
+            std::ostringstream log;
+            log << "failure action apply color skipped session=" << (session == NULL ? 0 : 1)
+                << " body=" << (body == NULL ? 0 : body->Tag())
+                << " color=" << color
+                << " useAssemblyOccurrences=" << (useAssemblyOccurrences ? 1 : 0);
+            AppendMarkerLineDebugLog(log.str());
             return;
         }
 
@@ -9267,14 +9316,37 @@ namespace
         modification->SetApplyToAllFaces(true);
         modification->SetApplyToOwningParts(false);
         modification->SetNewColor(color);
-        std::vector<DisplayableObject*> objects = ResolveDisplayOccurrences(body);
+        std::vector<DisplayableObject*> objects = ResolveDisplayOccurrences(body, useAssemblyOccurrences);
+        {
+            std::ostringstream log;
+            log << "failure action apply color body=" << body->Tag()
+                << " color=" << color
+                << " useAssemblyOccurrences=" << (useAssemblyOccurrences ? 1 : 0)
+                << " objectCount=" << objects.size();
+            for (size_t i = 0; i < objects.size(); ++i)
+            {
+                log << " object" << i << "=" << (objects[i] == NULL ? 0 : objects[i]->Tag());
+            }
+            AppendMarkerLineDebugLog(log.str());
+        }
         modification->Apply(objects);
         delete modification;
     }
 
-    void HideDisplayBody(Body* body)
+    void HideDisplayBody(Body* body, bool useAssemblyOccurrences)
     {
-        std::vector<DisplayableObject*> objects = ResolveDisplayOccurrences(body);
+        std::vector<DisplayableObject*> objects = ResolveDisplayOccurrences(body, useAssemblyOccurrences);
+        {
+            std::ostringstream log;
+            log << "failure action hide body=" << (body == NULL ? 0 : body->Tag())
+                << " useAssemblyOccurrences=" << (useAssemblyOccurrences ? 1 : 0)
+                << " objectCount=" << objects.size();
+            for (size_t i = 0; i < objects.size(); ++i)
+            {
+                log << " object" << i << "=" << (objects[i] == NULL ? 0 : objects[i]->Tag());
+            }
+            AppendMarkerLineDebugLog(log.str());
+        }
         for (size_t i = 0; i < objects.size(); ++i)
         {
             if (objects[i] != NULL)
@@ -9284,9 +9356,20 @@ namespace
         }
     }
 
-    void HighlightDisplayBody(Body* body)
+    void HighlightDisplayBody(Body* body, bool useAssemblyOccurrences)
     {
-        std::vector<DisplayableObject*> objects = ResolveDisplayOccurrences(body);
+        std::vector<DisplayableObject*> objects = ResolveDisplayOccurrences(body, useAssemblyOccurrences);
+        {
+            std::ostringstream log;
+            log << "failure action highlight body=" << (body == NULL ? 0 : body->Tag())
+                << " useAssemblyOccurrences=" << (useAssemblyOccurrences ? 1 : 0)
+                << " objectCount=" << objects.size();
+            for (size_t i = 0; i < objects.size(); ++i)
+            {
+                log << " object" << i << "=" << (objects[i] == NULL ? 0 : objects[i]->Tag());
+            }
+            AppendMarkerLineDebugLog(log.str());
+        }
         for (size_t i = 0; i < objects.size(); ++i)
         {
             if (objects[i] != NULL)
@@ -9353,6 +9436,35 @@ namespace
 
         std::vector<int> values = picker->GetValue();
         return values.empty() ? defaultValue : values[0];
+    }
+
+    int GetEnumerationValue(Enumeration* enumeration, int defaultValue)
+    {
+        if (enumeration == NULL)
+        {
+            return defaultValue;
+        }
+
+        PropertyList* props = NULL;
+        try
+        {
+            props = enumeration->GetProperties();
+            if (props == NULL)
+            {
+                return defaultValue;
+            }
+            int value = props->GetEnum("Value");
+            delete props;
+            return value;
+        }
+        catch (...)
+        {
+            if (props != NULL)
+            {
+                delete props;
+            }
+            return defaultValue;
+        }
     }
 
     std::string BuildResultMessage(const std::vector<BodyResult>& results)
@@ -9734,18 +9846,34 @@ AutoConvertOptions PiLianZuanBanJinDialog::CollectOptions() const
     options.largestBodyOnlyPerLayer = GetLogicalValue(largestBodyOnlyToggle, false);
     if (failureActionEnum != NULL)
     {
-        std::string failureActionText = ToUtf8(failureActionEnum->ValueAsString());
-        if (ContainsTextNoCase(failureActionText, "Red") || failureActionText.find("\xE7\xBA\xA2") != std::string::npos)
+        int failureActionIndex = GetEnumerationValue(failureActionEnum, -1);
+        if (failureActionIndex == 1)
         {
             options.failureAction = 2;
         }
-        else if (ContainsTextNoCase(failureActionText, "Highlight") || failureActionText.find("\xE9\xAB\x98\xE4\xBA\xAE") != std::string::npos)
+        else if (failureActionIndex == 2)
         {
             options.failureAction = 3;
         }
-        else
+        else if (failureActionIndex == 0)
         {
             options.failureAction = 1;
+        }
+        else
+        {
+            std::string failureActionText = ToUtf8(failureActionEnum->ValueAsString());
+            if (ContainsTextNoCase(failureActionText, "Red") || failureActionText.find("\xE7\xBA\xA2") != std::string::npos)
+            {
+                options.failureAction = 2;
+            }
+            else if (ContainsTextNoCase(failureActionText, "Highlight") || failureActionText.find("\xE9\xAB\x98\xE4\xBA\xAE") != std::string::npos)
+            {
+                options.failureAction = 3;
+            }
+            else
+            {
+                options.failureAction = 1;
+            }
         }
     }
     return options;
@@ -9899,8 +10027,7 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 if (fixedFaceInfo.face == NULL)
                 {
                     result.error = "未找到可用固定面";
-                    results.push_back(result);
-                    continue;
+                    throw std::runtime_error(result.error);
                 }
 
                 Face* fixedFace = fixedFaceInfo.face;
@@ -9993,17 +10120,30 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 result.error = NormalizeUtf8Message(ex.what());
             }
 
+            {
+                std::ostringstream log;
+                log << "failure action decision body=" << (body == NULL ? 0 : body->Tag())
+                    << " displayBody=" << (displayResultBody == NULL ? 0 : displayResultBody->Tag())
+                    << " failureAction=" << options.failureAction
+                    << " useAssemblyOccurrences=" << (assemblyMode ? 1 : 0)
+                    << " hasError=" << (result.error.empty() ? 0 : 1)
+                    << " convertOk=" << (result.convertOk ? 1 : 0)
+                    << " flatOk=" << (result.flatOk ? 1 : 0)
+                    << " error=" << result.error;
+                AppendMarkerLineDebugLog(log.str());
+            }
+
             if (options.failureAction == 1 && result.error.empty())
             {
-                HideDisplayBody(displayResultBody);
+                HideDisplayBody(displayResultBody, assemblyMode);
             }
             else if (options.failureAction == 2 && !result.error.empty())
             {
-                ApplyBodyColor(session, displayResultBody, 186);
+                ApplyBodyColor(session, displayResultBody, 186, assemblyMode);
             }
             else if (options.failureAction == 3 && !result.error.empty())
             {
-                HighlightDisplayBody(displayResultBody);
+                HighlightDisplayBody(displayResultBody, assemblyMode);
             }
 
             results.push_back(result);
