@@ -243,6 +243,8 @@ struct FlatPatternDraftingInfo
 	NXOpen::Features::FlatPattern* flatPattern;
 	NXOpen::Face* upwardFace;
 	NXOpen::Edge* xAxisEdge;
+	NXOpen::Point3d xAxisReferenceVertex;
+	bool hasXAxisReferenceVertex;
 	NXOpen::Body* upwardBody;
 	double minimumX;
 	double minimumY;
@@ -4386,6 +4388,17 @@ static const std::vector<FlatPatternDraftingInfo>& GetFlatPatternDraftingInfos(N
 				info.upwardFace = flatPatternBuilder->UpwardFace()->Value();
 				info.upwardBody = info.upwardFace != NULL ? info.upwardFace->GetBody() : NULL;
 				info.xAxisEdge = flatPatternBuilder->XAxisEdge() != NULL ? flatPatternBuilder->XAxisEdge()->Value() : NULL;
+				info.xAxisReferenceVertex = NXOpen::Point3d(0.0, 0.0, 0.0);
+				info.hasXAxisReferenceVertex = false;
+				try
+				{
+					info.xAxisReferenceVertex = flatPatternBuilder->ReferenceVertex();
+					info.hasXAxisReferenceVertex = true;
+				}
+				catch (...)
+				{
+					info.hasXAxisReferenceVertex = false;
+				}
 				if (info.xAxisEdge != NULL && info.xAxisEdge->Tag() == NULL_TAG)
 				{
 					info.xAxisEdge = NULL;
@@ -6432,6 +6445,28 @@ static std::string RectToString(const LayoutRect& rect)
 {
 	std::ostringstream oss;
 	oss << "(" << rect.minX << "," << rect.minY << ")-(" << rect.maxX << "," << rect.maxY << ")";
+	return oss.str();
+}
+
+static std::string PointToString(const NXOpen::Point3d& point)
+{
+	std::ostringstream oss;
+	oss << "(" << point.X << "," << point.Y << "," << point.Z << ")";
+	return oss.str();
+}
+
+static double PointDistanceSquared(const NXOpen::Point3d& first, const NXOpen::Point3d& second)
+{
+	const double dx = first.X - second.X;
+	const double dy = first.Y - second.Y;
+	const double dz = first.Z - second.Z;
+	return dx * dx + dy * dy + dz * dz;
+}
+
+static std::string VectorToString(const NXOpen::Vector3d& vector)
+{
+	std::ostringstream oss;
+	oss << "(" << vector.X << "," << vector.Y << "," << vector.Z << ")";
 	return oss.str();
 }
 
@@ -10337,6 +10372,8 @@ static bool PrepareBodyDraftingContext(NXOpen::Body* targetBody, NXOpen::BlockSt
 				<< " flatPatternTag=" << ObjectTagOrNull(flatInfo.flatPattern)
 				<< " featureTag=" << ObjectTagOrNull(flatInfo.feature)
 				<< " xAxisEdgeTag=" << ObjectTagOrNull(flatInfo.xAxisEdge)
+				<< " hasXAxisReferenceVertex=" << (flatInfo.hasXAxisReferenceVertex ? 1 : 0)
+				<< " xAxisReferenceVertex=" << PointToString(flatInfo.xAxisReferenceVertex)
 				<< " viewName=" << flatInfo.flatPatternViewName.GetLocaleText()
 				<< " minimum=(" << flatInfo.minimumX << "," << flatInfo.minimumY << ")";
 			SideDimensionDebugLog(oss.str());
@@ -10420,6 +10457,17 @@ static bool PrepareBodyDraftingContext(NXOpen::Body* targetBody, NXOpen::BlockSt
 				Point3d P3d1, P3d2;
 				Edge1->GetVertices(&P3d1, &P3d2);
 				NXOpen::Vector3d edgeVector(P3d2.X - P3d1.X, P3d2.Y - P3d1.Y, P3d2.Z - P3d1.Z);
+				{
+					std::ostringstream oss;
+					oss << "[side.orientation.edge]"
+						<< " bodyTag=" << ObjectTagOrNull(Body1)
+						<< " edgeTag=" << ObjectTagOrNull(Edge1)
+						<< " p1=" << PointToString(P3d1)
+						<< " p2=" << PointToString(P3d2)
+						<< " vector=" << VectorToString(edgeVector)
+						<< " length=" << VectorLength(edgeVector);
+					SideDimensionDebugLog(oss.str());
+				}
 				if (VectorLength(edgeVector) <= 1.0e-6)
 				{
 					Edge1 = NULL;
@@ -10435,8 +10483,35 @@ static bool PrepareBodyDraftingContext(NXOpen::Body* targetBody, NXOpen::BlockSt
 				NXOpen::Point* Po1 = workPart->Points()->CreatePoint(P3d1);
 				NXOpen::Point* Po2 = workPart->Points()->CreatePoint(P3d2);
 
-				direction1 = workPart->Directions()->CreateDirection(Po2, Po1, SmartObject::UpdateOptionAfterModeling);
+				bool useP1ToP2 = false;
+				std::string directionBy = "legacyP2ToP1";
+				double referenceDistanceToP1 = 0.0;
+				double referenceDistanceToP2 = 0.0;
+				if (flatInfo.hasXAxisReferenceVertex)
+				{
+					referenceDistanceToP1 = PointDistanceSquared(flatInfo.xAxisReferenceVertex, P3d1);
+					referenceDistanceToP2 = PointDistanceSquared(flatInfo.xAxisReferenceVertex, P3d2);
+					useP1ToP2 = referenceDistanceToP1 <= referenceDistanceToP2;
+					directionBy = "referenceVertex";
+				}
+				direction1 = useP1ToP2
+					? workPart->Directions()->CreateDirection(Po1, Po2, SmartObject::UpdateOptionAfterModeling)
+					: workPart->Directions()->CreateDirection(Po2, Po1, SmartObject::UpdateOptionAfterModeling);
 				hasSideViewDirection = (direction1 != NULL);
+				{
+					std::ostringstream oss;
+					oss << "[side.orientation.direction]"
+						<< " source=edge"
+						<< " bodyTag=" << ObjectTagOrNull(Body1)
+						<< " directionBy=" << directionBy
+						<< " useP1ToP2=" << (useP1ToP2 ? 1 : 0)
+						<< " referenceVertex=" << PointToString(flatInfo.xAxisReferenceVertex)
+						<< " referenceDistanceToP1=" << referenceDistanceToP1
+						<< " referenceDistanceToP2=" << referenceDistanceToP2
+						<< " origin=" << PointToString(direction1 != NULL ? direction1->Origin() : NXOpen::Point3d{ 0.0, 0.0, 0.0 })
+						<< " vector=" << (direction1 != NULL ? VectorToString(direction1->Vector()) : "(null)");
+					SideDimensionDebugLog(oss.str());
+				}
 			}
 			else
 			{
@@ -10448,11 +10523,20 @@ static bool PrepareBodyDraftingContext(NXOpen::Body* targetBody, NXOpen::BlockSt
 					preparePhase = "CreateSideDirectionFromUv";
 					direction1 = workPart->Directions()->CreateDirection(origin5Local, faceUvDirection, NXOpen::SmartObject::UpdateOptionAfterModeling);
 					hasSideViewDirection = (direction1 != NULL);
+					std::ostringstream oss;
+					oss << "[side.orientation.direction]"
+						<< " source=faceUv"
+						<< " bodyTag=" << ObjectTagOrNull(Body1)
+						<< " origin=" << PointToString(origin5Local)
+						<< " vector=" << VectorToString(faceUvDirection)
+						<< " createdVector=" << (direction1 != NULL ? VectorToString(direction1->Vector()) : "(null)");
+					SideDimensionDebugLog(oss.str());
 				}
 				else
 				{
 					g_skipSideViewsForCurrentBody = true;
 					direction1 = NULL;
+					SideDimensionDebugLog(std::string("[side.orientation.direction] source=none bodyTag=") + std::to_string(ObjectTagOrNull(Body1)) + " skipSide=true");
 				}
 			}
 
@@ -10521,6 +10605,14 @@ static bool PrepareBodyDraftingContext(NXOpen::Body* targetBody, NXOpen::BlockSt
 					origin5 = CoordinateSystem1->Origin();
 					NXMatrix1 = CoordinateSystem1->Orientation();
 					CoordinateSystem1->GetDirections(&XDir, &YDir);
+					std::ostringstream oss;
+					oss << "[side.orientation.wcs]"
+						<< " bodyTag=" << ObjectTagOrNull(Body1)
+						<< " origin=" << PointToString(origin5)
+						<< " XDir=" << VectorToString(XDir)
+						<< " YDir=" << VectorToString(YDir)
+						<< " normal=" << VectorToString(normal5);
+					SideDimensionDebugLog(oss.str());
 				}
 				else
 				{
@@ -10544,6 +10636,17 @@ static bool PrepareBodyDraftingContext(NXOpen::Body* targetBody, NXOpen::BlockSt
 					if (type == 16 && aadd == 0)
 					{
 						double dot = dir[0] * XDir.X + dir[1] * XDir.Y + dir[2] * XDir.Z;
+						{
+							std::ostringstream oss;
+							oss << "[side.orientation.bendDot]"
+								<< " bodyTag=" << ObjectTagOrNull(Body1)
+								<< " faceIndex=" << C
+								<< " faceTag=" << ObjectTagOrNull(vFaces[C])
+								<< " dir=(" << dir[0] << "," << dir[1] << "," << dir[2] << ")"
+								<< " XDir=" << VectorToString(XDir)
+								<< " dot=" << dot;
+							SideDimensionDebugLog(oss.str());
+						}
 						if (fabs(fabs(dot) - 1.0) < 0.0001)
 						{
 							aabb = 1;
@@ -10559,22 +10662,35 @@ static bool PrepareBodyDraftingContext(NXOpen::Body* targetBody, NXOpen::BlockSt
 			{
 				preparePhase = "autoLayoutEnum";
 				logPreparePhase(preparePhase);
+				std::string autoLayoutDecision;
 				if (aabb == 1 && aacc == 0)
 				{
 					enum0Block->SetValueAsString("左");
+					autoLayoutDecision = "左";
 				}
 				if (aabb == 0 && aacc == 1)
 				{
 					enum0Block->SetValueAsString("下");
+					autoLayoutDecision = "下";
 				}
 				if (aabb == 1 && aacc == 1)
 				{
 					enum0Block->SetValueAsString("左下");
+					autoLayoutDecision = "左下";
 				}
 				if (aadd1 == 1)
 				{
 					enum0Block->SetValueAsString("左");
+					autoLayoutDecision = "左";
 				}
+				std::ostringstream oss;
+				oss << "[side.orientation.autoLayout]"
+					<< " bodyTag=" << ObjectTagOrNull(Body1)
+					<< " aabb=" << aabb
+					<< " aacc=" << aacc
+					<< " noBend=" << aadd1
+					<< " decision=" << autoLayoutDecision;
+				SideDimensionDebugLog(oss.str());
 			}
 			if (hasValidFlatPatternFace)
 			{
@@ -11652,6 +11768,28 @@ int ZiDonCuTu::aaaa_cb()
 				<< " sideViewCount=" << BaseViewvector.size();
 			SideDimensionDebugLog(viewLog.str());
 		};
+		auto logSideViewOrientation = [&](
+			const char* viewName,
+			const char* branch,
+			const NXOpen::Vector3d& normalVector,
+			const NXOpen::Vector3d& xVector)
+		{
+			std::ostringstream oss;
+			oss << "[side.orientation.view]"
+				<< " name=" << (viewName != NULL ? viewName : "<null>")
+				<< " branch=" << (branch != NULL ? branch : "<null>")
+				<< " bodyTag=" << ObjectTagOrNull(Body1)
+				<< " layout=" << (CharWeiZi != NULL ? CharWeiZi : "<null>")
+				<< " projection=" << (CharProjection != NULL ? CharProjection : "<null>")
+				<< " third=" << (isThirdAngleProjection ? 1 : 0)
+				<< " direction1=" << (direction1 != NULL ? VectorToString(direction1->Vector()) : "(null)")
+				<< " normal=" << VectorToString(normalVector)
+				<< " x=" << VectorToString(xVector)
+				<< " unit_norm=(" << unit_norm[0] << "," << unit_norm[1] << "," << unit_norm[2] << ")"
+				<< " XDir=" << VectorToString(XDir)
+				<< " YDir=" << VectorToString(YDir);
+			SideDimensionDebugLog(oss.str());
+		};
 
 		if (!annotationOnly)
 		{
@@ -11702,6 +11840,7 @@ int ZiDonCuTu::aaaa_cb()
 					NXOpen::Direction* direction2;
 					direction2 = workPart->Directions()->CreateDirection(origin2, vector2, NXOpen::SmartObject::UpdateOptionAfterModeling);
 					baseViewBuilder2->Style()->ViewStyleOrientation()->Ovt()->SetXDirection(direction2);
+					logSideViewOrientation("left", "third", direction1 != NULL ? direction1->Vector() : NXOpen::Vector3d{ 0.0, 0.0, 0.0 }, vector2);
 					baseViewBuilder2->Placement()->Placement()->SetValue(NULL, workPart->Views()->WorkView(), initialViewPlacementPoint);
 					phase = "aaaa_cb.views.left.commit";
 					logViewCommitState("left", modelingView1);
@@ -11720,6 +11859,7 @@ int ZiDonCuTu::aaaa_cb()
 					NXOpen::Direction* direction2;
 					direction2 = workPart->Directions()->CreateDirection(origin2, vector2, NXOpen::SmartObject::UpdateOptionAfterModeling);
 					baseViewBuilder2->Style()->ViewStyleOrientation()->Ovt()->SetXDirection(direction2);
+					logSideViewOrientation("left", "first", direction1 != NULL ? direction1->Vector() : NXOpen::Vector3d{ 0.0, 0.0, 0.0 }, vector2);
 					baseViewBuilder2->Placement()->Placement()->SetValue(NULL, workPart->Views()->WorkView(), initialViewPlacementPoint);
 					phase = "aaaa_cb.views.left.commit";
 					logViewCommitState("left", modelingView1);
@@ -11763,6 +11903,7 @@ int ZiDonCuTu::aaaa_cb()
 					NXOpen::Direction* direction2;
 					direction2 = workPart->Directions()->CreateDirection(origin2, { -YDir.X, -YDir.Y, -YDir.Z }, NXOpen::SmartObject::UpdateOptionAfterModeling);
 					baseViewBuilder2->Style()->ViewStyleOrientation()->Ovt()->SetNormalDirection(direction2);
+					logSideViewOrientation("bottom", "third", NXOpen::Vector3d{ -YDir.X, -YDir.Y, -YDir.Z }, direction1 != NULL ? direction1->Vector() : NXOpen::Vector3d{ 0.0, 0.0, 0.0 });
 				}
 				else
 				{
@@ -11771,6 +11912,7 @@ int ZiDonCuTu::aaaa_cb()
 					NXOpen::Direction* direction2;
 					direction2 = workPart->Directions()->CreateDirection(origin2, { YDir.X, YDir.Y, YDir.Z }, NXOpen::SmartObject::UpdateOptionAfterModeling);
 					baseViewBuilder2->Style()->ViewStyleOrientation()->Ovt()->SetNormalDirection(direction2);
+					logSideViewOrientation("bottom", "first", NXOpen::Vector3d{ YDir.X, YDir.Y, YDir.Z }, direction1 != NULL ? direction1->Vector() : NXOpen::Vector3d{ 0.0, 0.0, 0.0 });
 				}
 
 				baseViewBuilder2->Placement()->Placement()->SetValue(NULL, workPart->Views()->WorkView(), initialViewPlacementPoint);
@@ -13550,6 +13692,27 @@ int ZiDonCuTu::aaaa_cb()
 
 			if (!annotationOnly)
 			{
+				auto logPlacedView = [&](const char* name, NXOpen::Drawings::BaseView* view, const NXOpen::Point3d& target)
+				{
+					LayoutRect rect{};
+					bool hasRect = false;
+					if (view != NULL)
+					{
+						hasRect = AskDisplayedCurveRectForLayout(view, Body1, rect);
+					}
+					NXOpen::Point3d ref = view != NULL ? GetViewReferencePoint(view) : NXOpen::Point3d{ 0.0, 0.0, 0.0 };
+					std::ostringstream oss;
+					oss << "[side.orientation.placed]"
+						<< " name=" << (name != NULL ? name : "<null>")
+						<< " bodyTag=" << ObjectTagOrNull(Body1)
+						<< " viewTag=" << (view != NULL ? view->Tag() : NULL_TAG)
+						<< " target=" << PointToString(target)
+						<< " ref=" << PointToString(ref)
+						<< " hasRect=" << (hasRect ? "true" : "false")
+						<< " rect=" << (hasRect ? RectToString(rect) : "(none)")
+						<< " layout=" << (CharWeiZi != NULL ? CharWeiZi : "<null>");
+					SideDimensionDebugLog(oss.str());
+				};
 				if (useSheetAutoCenter)
 				{
 					const double mainWidth = doubleX / Scale1A;
@@ -13583,18 +13746,21 @@ int ZiDonCuTu::aaaa_cb()
 						if (BaseViewvector.size() > 1 && BaseViewvector[1] != NULL)
 						{
 							ObjXiaView = TryRepositionBaseView(workPart, BaseViewvector[1], View1CPoint3d);
+							logPlacedView("bottom", BaseViewvector[1], View1CPoint3d);
 						}
 					}
 					{
 						if (BaseView1A != NULL)
 						{
 							ObZanKaiView = TryRepositionBaseView(workPart, BaseView1A, View1BPoint3d);
+							logPlacedView("main", BaseView1A, View1BPoint3d);
 						}
 					}
 					{
 						if (!BaseViewvector.empty() && BaseViewvector[0] != NULL)
 						{
 							ObjZuoView = TryRepositionBaseView(workPart, BaseViewvector[0], View1Point3d);
+							logPlacedView("left", BaseViewvector[0], View1Point3d);
 						}
 					}
 					{
@@ -13602,6 +13768,7 @@ int ZiDonCuTu::aaaa_cb()
 						if (BaseView1B != NULL)
 						{
 							ObjZuoView = TryRepositionBaseView(workPart, BaseView1B, View1DPoint3d, false, 1.0, 1.0, true, 1.0, Scale1A * 1.2);
+							logPlacedView("iso", BaseView1B, View1DPoint3d);
 						}
 					}
 				}
@@ -13662,18 +13829,21 @@ int ZiDonCuTu::aaaa_cb()
 						if (BaseViewvector.size() > 1 && BaseViewvector[1] != NULL)
 						{
 							ObjXiaView = TryRepositionBaseView(workPart, BaseViewvector[1], View1CPoint3d, true, numerator, SheelScale1);
+							logPlacedView("bottom", BaseViewvector[1], View1CPoint3d);
 						}
 					}
 					{
 						if (BaseView1A != NULL)
 						{
 							ObZanKaiView = TryRepositionBaseView(workPart, BaseView1A, originPoint, true, numerator, SheelScale1);
+							logPlacedView("main", BaseView1A, originPoint);
 						}
 					}
 					{
 						if (!BaseViewvector.empty() && BaseViewvector[0] != NULL)
 						{
 							ObjZuoView = TryRepositionBaseView(workPart, BaseViewvector[0], View1Point3d, true, numerator, SheelScale1);
+							logPlacedView("left", BaseViewvector[0], View1Point3d);
 						}
 					}
 				}
