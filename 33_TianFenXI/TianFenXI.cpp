@@ -49,11 +49,13 @@
 #include <NXOpen/PartCollection.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
+#include <NXOpen/DisplayManager.hxx>
 #include <NXOpen/DisplayableObject.hxx>
 #include <NXOpen/Features_DeleteFaceBuilder.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
 #include <NXOpen/Features_BooleanBuilder.hxx>
 #include <NXOpen/Features_BooleanFeature.hxx>
+#include <NXOpen/Features_RemoveParametersBuilder.hxx>
 #include <NXOpen/Features_ToolingBox.hxx>
 #include <NXOpen/Features_ToolingBoxBuilder.hxx>
 #include <NXOpen/Features_ToolingFeatureCollection.hxx>
@@ -68,6 +70,7 @@
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
 #include <NXOpen/SelectNXObjectList.hxx>
 #include <NXOpen/Tooling_ToolingSession.hxx>
+#include <NXOpen/Update.hxx>
 #include <NXOpen/WCS.hxx>
 #include <NXOpen/FaceDumbRule.hxx>
 #include <NXOpen/Edge.hxx>
@@ -191,6 +194,7 @@ const double kGapOverlapRatio = 0.60;
 const double kSameFaceLengthTolerance = 0.2;
 const double kLongEdgeParallelCosTolerance = 0.98;
 const double kPi = 3.14159265358979323846;
+const bool kDebugLogEnabled = false;
 const wchar_t* kDebugLogPath = L"D:\\UG智辉钣金插件\\logs\\TianFenXI_debug.log";
 const wchar_t* kSettingsPath = L"D:\\UG智辉钣金插件\\config\\TianFenXI.ini";
 
@@ -258,6 +262,7 @@ struct PendingSubtractCleanup
     tag_t subtractFeatureTag;
     GapFaceGroup group;
     NXOpen::Session::UndoMarkId undoMark;
+    tag_t groupIndex;
 };
 
 bool AskEdgeEndpointPair(tag_t edgeTag, EdgeEndpointPair& endpoints);
@@ -281,6 +286,10 @@ bool AskCylinderFaceData(tag_t faceTag, double axisPoint[3], double axisDirectio
 void ResetDebugLogForRun();
 
 std::map<tag_t, tag_t> replacedFaceTagMap;
+bool gSilentDisplayUpdateActive = false;
+int gLastGapDeleteFailedGroups = 0;
+int gLastGapDeleteSucceededGroups = 0;
+std::vector<tag_t> gLastGapDeleteFailedGroupIndexes;
 
 std::string FormatDouble(double value)
 {
@@ -341,6 +350,11 @@ std::string FormatVector3(const double value[3])
 
 void DebugLog(const std::string& message)
 {
+    if (!kDebugLogEnabled)
+    {
+        return;
+    }
+
     CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
     static bool resetForThisRun = false;
     if (!resetForThisRun)
@@ -384,6 +398,11 @@ void DebugLog(const std::string& message)
 
 void ResetDebugLogForRun()
 {
+    if (!kDebugLogEnabled)
+    {
+        return;
+    }
+
     CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
     DeleteFileW(kDebugLogPath);
     replacedFaceTagMap.clear();
@@ -4341,6 +4360,7 @@ bool TryReplaceGapGroupAfterBoundingFailed(
 bool DeleteGapGroupAfterMiddlePlaneFailed(
     tag_t bodyTag,
     const GapFaceGroup& group,
+    tag_t groupIndex,
     double thickness,
     bool deleteREnabled,
     double maxRadius,
@@ -4360,10 +4380,12 @@ bool DeleteGapGroupAfterMiddlePlaneFailed(
         cleanup.subtractFeatureTag = subtractFeatureTag;
         cleanup.group = group;
         cleanup.undoMark = undoMark;
+        cleanup.groupIndex = groupIndex;
         pendingSubtractCleanups.push_back(cleanup);
         DebugLog("  gap bounding pending cleanup add: subtractFeature=" +
             FormatTag(subtractFeatureTag) +
             ", undoMark=" + FormatTag(static_cast<tag_t>(undoMark)) +
+            ", group=" + FormatTag(groupIndex) +
             ", groupFaces=[" + FormatTagList(group.faces) + "]");
         return true;
     }
@@ -5722,6 +5744,7 @@ void DeleteGapGroupsWithMiddlePlanes(
     int createdCount = 0;
     int deletedCount = 0;
     std::vector<PendingSubtractCleanup> pendingSubtractCleanups;
+    std::vector<tag_t> failedGroupIndexes;
     DebugLog("Delete gap groups with middle planes start: groups=" +
         FormatTag(static_cast<tag_t>(groups.size())));
     for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
@@ -5736,6 +5759,7 @@ void DeleteGapGroupsWithMiddlePlanes(
             const bool bounded = DeleteGapGroupAfterMiddlePlaneFailed(
                 bodyTag,
                 groups[groupIndex],
+                static_cast<tag_t>(groupIndex + 1),
                 thickness,
                 deleteREnabled,
                 maxRadius,
@@ -5747,6 +5771,10 @@ void DeleteGapGroupsWithMiddlePlanes(
             DebugLog("  delete gap group bounding fallback after no middle pair: group=" +
                 FormatTag(static_cast<tag_t>(groupIndex + 1)) +
                 ", committed=" + FormatTag(static_cast<tag_t>(bounded ? 1 : 0)));
+            if (!bounded)
+            {
+                AddUniqueTag(failedGroupIndexes, static_cast<tag_t>(groupIndex + 1));
+            }
             continue;
         }
 
@@ -5768,6 +5796,7 @@ void DeleteGapGroupsWithMiddlePlanes(
             const bool bounded = DeleteGapGroupAfterMiddlePlaneFailed(
                 bodyTag,
                 groups[groupIndex],
+                static_cast<tag_t>(groupIndex + 1),
                 thickness,
                 deleteREnabled,
                 maxRadius,
@@ -5779,6 +5808,10 @@ void DeleteGapGroupsWithMiddlePlanes(
             DebugLog("  delete gap group bounding fallback after delete failed: group=" +
                 FormatTag(static_cast<tag_t>(groupIndex + 1)) +
                 ", committed=" + FormatTag(static_cast<tag_t>(bounded ? 1 : 0)));
+            if (!bounded)
+            {
+                AddUniqueTag(failedGroupIndexes, static_cast<tag_t>(groupIndex + 1));
+            }
         }
 
         DebugLog("  delete gap group with middle plane: group=" +
@@ -5801,9 +5834,10 @@ void DeleteGapGroupsWithMiddlePlanes(
         FormatTag(static_cast<tag_t>(pendingSubtractFeatureTags.size())) +
         ", featureTags=[" + FormatTagList(pendingSubtractFeatureTags) + "]" +
         ", pendingCleanups=" + FormatTag(static_cast<tag_t>(pendingSubtractCleanups.size())));
+    DebugLog("Delete small R after all gap groups before deferred cleanup");
+    DeleteSmallRadiusFacesIfRequested(bodyTag, thickness, deleteREnabled, maxRadius);
     if (!pendingSubtractCleanups.empty())
     {
-        DeleteSmallRadiusFacesIfRequested(bodyTag, thickness, deleteREnabled, maxRadius);
         const bool deletedSubtractFaces = DeleteFeatureFacesByFeatures(pendingSubtractFeatureTags);
         DebugLog("Delete deferred subtract feature faces after R result: committed=" +
             FormatTag(static_cast<tag_t>(deletedSubtractFaces ? 1 : 0)) +
@@ -5830,7 +5864,8 @@ void DeleteGapGroupsWithMiddlePlanes(
                 if (session != NULL && cleanup.undoMark != 0)
                 {
                     DebugLog("  rollback bounding fallback: cleanup=" +
-                        FormatTag(static_cast<tag_t>(reverseIndex)) +
+                    FormatTag(static_cast<tag_t>(reverseIndex)) +
+                        ", group=" + FormatTag(cleanup.groupIndex) +
                         ", subtractFeature=" + FormatTag(cleanup.subtractFeatureTag) +
                         ", undoMark=" + FormatTag(static_cast<tag_t>(cleanup.undoMark)) +
                         ", groupFaces=[" + FormatTagList(cleanup.group.faces) + "]");
@@ -5852,7 +5887,7 @@ void DeleteGapGroupsWithMiddlePlanes(
                     pendingSubtractCleanups[cleanupIndex].group,
                     plan);
                 DebugLog("  replace after subtract cleanup failed plan: group=" +
-                    FormatTag(static_cast<tag_t>(cleanupIndex + 1)) +
+                    FormatTag(pendingSubtractCleanups[cleanupIndex].groupIndex) +
                     ", subtractFeature=" + FormatTag(pendingSubtractCleanups[cleanupIndex].subtractFeatureTag) +
                     ", planned=" + FormatTag(static_cast<tag_t>(planned ? 1 : 0)) +
                     ", groupFaces=[" + FormatTagList(pendingSubtractCleanups[cleanupIndex].group.faces) + "]");
@@ -5862,8 +5897,12 @@ void DeleteGapGroupsWithMiddlePlanes(
                 {
                     ++replaceCount;
                 }
+                else
+                {
+                    AddUniqueTag(failedGroupIndexes, pendingSubtractCleanups[cleanupIndex].groupIndex);
+                }
                 DebugLog("  replace after subtract cleanup failed result: group=" +
-                    FormatTag(static_cast<tag_t>(cleanupIndex + 1)) +
+                    FormatTag(pendingSubtractCleanups[cleanupIndex].groupIndex) +
                     ", committed=" + FormatTag(static_cast<tag_t>(replaced ? 1 : 0)));
             }
             DebugLog("Replace fallback after subtract cleanup failed summary: committedGroups=" +
@@ -5874,13 +5913,181 @@ void DeleteGapGroupsWithMiddlePlanes(
 
     DebugLog("Delete gap groups with middle planes result: planes=" +
         FormatTag(static_cast<tag_t>(createdCount)) +
-        ", deleteFeatures=" + FormatTag(static_cast<tag_t>(deletedCount)));
+        ", deleteFeatures=" + FormatTag(static_cast<tag_t>(deletedCount)) +
+        ", failedGroups=" + FormatTag(static_cast<tag_t>(failedGroupIndexes.size())) +
+        ", failedGroupIndexes=[" + FormatTagList(failedGroupIndexes) + "]");
+    gLastGapDeleteFailedGroups += static_cast<int>(failedGroupIndexes.size());
+    gLastGapDeleteSucceededGroups +=
+        static_cast<int>(groups.size() > failedGroupIndexes.size()
+            ? groups.size() - failedGroupIndexes.size()
+            : 0);
+    for (std::size_t index = 0; index < failedGroupIndexes.size(); ++index)
+    {
+        AddUniqueTag(gLastGapDeleteFailedGroupIndexes, failedGroupIndexes[index]);
+    }
+}
+
+bool RemoveParametersFromBody(tag_t bodyTag)
+{
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    NXOpen::Part* workPart = session != NULL && session->Parts() != NULL ? session->Parts()->Work() : NULL;
+    NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(bodyTag));
+    if (workPart == NULL || body == NULL)
+    {
+        DebugLog("Remove parameters skipped: invalid body, body=" + FormatTag(bodyTag));
+        return false;
+    }
+
+    NXOpen::Features::RemoveParametersBuilder* removeParametersBuilder =
+        workPart->Features()->CreateRemoveParametersBuilder();
+    bool committed = false;
+    try
+    {
+        std::vector<NXOpen::NXObject*> objects(1, body);
+        (void)removeParametersBuilder->Objects()->Add(objects);
+        NXOpen::NXObject* committedObject = removeParametersBuilder->Commit();
+        committed = committedObject != NULL;
+        DebugLog("Remove parameters result: body=" +
+            FormatTag(bodyTag) +
+            ", committed=" + FormatTag(static_cast<tag_t>(committed ? 1 : 0)) +
+            ", result=" + FormatTag(committedObject != NULL ? committedObject->Tag() : NULL_TAG));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        DebugLog("Remove parameters failed: body=" +
+            FormatTag(bodyTag) +
+            ", NXException=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        DebugLog("Remove parameters failed: body=" +
+            FormatTag(bodyTag) +
+            ", unknown exception");
+    }
+
+    if (removeParametersBuilder != NULL)
+    {
+        removeParametersBuilder->Destroy();
+    }
+    return committed;
+}
+
+tag_t AskSelectedBaseBodyFromDialog(
+    NXOpen::BlockStyler::SelectObject* selectionBlock,
+    tag_t preferredBaseFace,
+    const std::vector<tag_t>& autoGapFaces)
+{
+    if (selectionBlock == NULL)
+    {
+        return NULL_TAG;
+    }
+
+    NXOpen::BlockStyler::PropertyList* properties = selectionBlock->GetProperties();
+    std::vector<NXOpen::TaggedObject*> selectedObjects =
+        properties->GetTaggedObjectVector("SelectedObjects");
+    delete properties;
+
+    NXOpen::Face* selectedFace =
+        FindBaseSelectedFace(selectedObjects, preferredBaseFace, autoGapFaces);
+    if (selectedFace == NULL)
+    {
+        for (std::size_t index = 0; index < selectedObjects.size(); ++index)
+        {
+            selectedFace = dynamic_cast<NXOpen::Face*>(selectedObjects[index]);
+            if (selectedFace != NULL)
+            {
+                break;
+            }
+        }
+    }
+    if (selectedFace == NULL)
+    {
+        DebugLog("Remove parameters skipped: no selected base face");
+        return NULL_TAG;
+    }
+
+    tag_t bodyTag = NULL_TAG;
+    if (UF_MODL_ask_face_body(selectedFace->Tag(), &bodyTag) != 0)
+    {
+        bodyTag = NULL_TAG;
+    }
+    DebugLog("Remove parameters selected body: face=" +
+        FormatTag(selectedFace->Tag()) +
+        ", body=" + FormatTag(bodyTag));
+    return bodyTag;
 }
 
 void RefreshDisplay()
 {
+    if (gSilentDisplayUpdateActive)
+    {
+        return;
+    }
     UF_DISP_refresh();
 }
+
+class SilentDisplayUpdateGuard
+{
+public:
+    SilentDisplayUpdateGuard()
+        : oldDisplayState_(UF_DISP_UNSUPPRESS_DISPLAY),
+          displayStateKnown_(UF_DISP_ask_display(&oldDisplayState_) == 0),
+          suppressed_(false)
+    {
+        gSilentDisplayUpdateActive = true;
+        suppressed_ = UF_DISP_set_display(UF_DISP_SUPPRESS_DISPLAY) == 0;
+        DebugLog("Silent display update begin: stateKnown=" +
+            FormatTag(static_cast<tag_t>(displayStateKnown_ ? 1 : 0)) +
+            ", oldState=" + FormatTag(static_cast<tag_t>(oldDisplayState_)) +
+            ", suppressed=" + FormatTag(static_cast<tag_t>(suppressed_ ? 1 : 0)));
+    }
+
+    ~SilentDisplayUpdateGuard()
+    {
+        gSilentDisplayUpdateActive = false;
+        if (displayStateKnown_)
+        {
+            UF_DISP_set_display(oldDisplayState_);
+        }
+        else if (suppressed_)
+        {
+            UF_DISP_set_display(UF_DISP_UNSUPPRESS_DISPLAY);
+        }
+
+        NXOpen::Session* session = NXOpen::Session::GetSession();
+        if (session != NULL && session->UpdateManager() != NULL)
+        {
+            NXOpen::Session::UndoMarkId mark = session->SetUndoMark(
+                NXOpen::Session::MarkVisibilityInvisible,
+                "TianFenXI Final Update");
+            try
+            {
+                session->UpdateManager()->DoUpdate(mark);
+            }
+            catch (...)
+            {
+                DebugLog("Silent display final DoUpdate failed or ignored");
+            }
+            session->DeleteUndoMark(mark, "TianFenXI Final Update");
+        }
+
+        UF_DISP_regenerate_display();
+        UF_DISP_make_display_up_to_date();
+        if (session != NULL && session->DisplayManager() != NULL)
+        {
+            session->DisplayManager()->MakeUpToDate();
+        }
+        UF_DISP_refresh();
+
+        DebugLog("Silent display update end: restored=" +
+            FormatTag(static_cast<tag_t>((displayStateKnown_ || suppressed_) ? 1 : 0)));
+    }
+
+private:
+    int oldDisplayState_;
+    bool displayStateKnown_;
+    bool suppressed_;
+};
 }
 
 //------------------------------------------------------------------------------
@@ -6101,8 +6308,28 @@ int TianFenXI::apply_cb()
     {
         ResetDebugLogForRun();
         DebugLog("Apply clicked");
+        gLastGapDeleteFailedGroups = 0;
+        gLastGapDeleteSucceededGroups = 0;
+        gLastGapDeleteFailedGroupIndexes.clear();
         SaveUiSettings();
-        PreviewSelectedFaceChain(true);
+        {
+            SilentDisplayUpdateGuard silentDisplayGuard;
+            const tag_t bodyTagForRemoveParameters =
+                AskSelectedBaseBodyFromDialog(selection0, previewSelectedFaceTag, autoSelectedGapFaces);
+            PreviewSelectedFaceChain(true);
+            RemoveParametersFromBody(bodyTagForRemoveParameters);
+        }
+        if (gLastGapDeleteFailedGroups > 0 && gLastGapDeleteSucceededGroups == 0)
+        {
+            const std::string message = "删除缝隙失败，失败组数=" +
+                FormatTag(static_cast<tag_t>(gLastGapDeleteFailedGroups)) +
+                "，组=[" + FormatTagList(gLastGapDeleteFailedGroupIndexes) + "]。";
+            DebugLog("Apply gap delete failed UI message: " + message);
+            TianFenXI::theUI->NXMessageBox()->Show(
+                "天缝隙",
+                NXOpen::NXMessageBox::DialogTypeWarning,
+                message.c_str());
+        }
         DebugLog("Apply preview and middle plane creation done");
     }
     catch(exception& ex)
