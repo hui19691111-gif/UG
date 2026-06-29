@@ -52,6 +52,8 @@
 #include <NXOpen/DisplayableObject.hxx>
 #include <NXOpen/Features_DeleteFaceBuilder.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_BooleanBuilder.hxx>
+#include <NXOpen/Features_BooleanFeature.hxx>
 #include <NXOpen/Features_ToolingBox.hxx>
 #include <NXOpen/Features_ToolingBoxBuilder.hxx>
 #include <NXOpen/Features_ToolingFeatureCollection.hxx>
@@ -60,6 +62,7 @@
 #include <NXOpen/Plane.hxx>
 #include <NXOpen/PlaneCollection.hxx>
 #include <NXOpen/ScCollector.hxx>
+#include <NXOpen/ScCollectorCollection.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
@@ -248,6 +251,13 @@ struct ReplaceGapPlan
     std::vector<tag_t> secondSideFaces;
     tag_t firstReplacementFace;
     tag_t secondReplacementFace;
+};
+
+struct PendingSubtractCleanup
+{
+    tag_t subtractFeatureTag;
+    GapFaceGroup group;
+    NXOpen::Session::UndoMarkId undoMark;
 };
 
 bool AskEdgeEndpointPair(tag_t edgeTag, EdgeEndpointPair& endpoints);
@@ -2907,30 +2917,30 @@ std::set<std::size_t> FindSkippedGapGroupIndexes(
     return skipped;
 }
 
-std::set<std::size_t> FindSkippedGapGroupIndexesByMissingFaces(
+std::set<std::size_t> FindSkippedGapGroupIndexesByUserDeselectedFaces(
     const std::vector<GapFaceGroup>& groups,
-    const std::vector<tag_t>& selectedGapFaces)
+    const std::vector<tag_t>& userDeselectedFaces)
 {
     std::set<std::size_t> skipped;
     for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
     {
-        bool hasMissingFace = false;
+        std::vector<tag_t> matchedFaces;
         for (std::size_t faceIndex = 0; faceIndex < groups[groupIndex].faces.size(); ++faceIndex)
         {
-            if (!ContainsTag(selectedGapFaces, groups[groupIndex].faces[faceIndex]))
+            if (ContainsTag(userDeselectedFaces, groups[groupIndex].faces[faceIndex]))
             {
-                hasMissingFace = true;
-                break;
+                matchedFaces.push_back(groups[groupIndex].faces[faceIndex]);
             }
         }
 
-        if (hasMissingFace)
+        if (!matchedFaces.empty())
         {
             skipped.insert(groupIndex);
-            DebugLog("Skip gap group by unselected gap face: group=" +
+            DebugLog("Skip gap group by user deselected gap face: group=" +
                 FormatTag(static_cast<tag_t>(groupIndex + 1)) +
-                ", selectedGapFaces=" + FormatTag(static_cast<tag_t>(selectedGapFaces.size())) +
-                ", groupFaces=" + FormatTag(static_cast<tag_t>(groups[groupIndex].faces.size())));
+                ", userDeselectedFaces=" + FormatTag(static_cast<tag_t>(userDeselectedFaces.size())) +
+                ", matchedFaces=[" + FormatTagList(matchedFaces) + "]" +
+                ", groupFaces=[" + FormatTagList(groups[groupIndex].faces) + "]");
         }
     }
 
@@ -2947,6 +2957,62 @@ std::vector<GapFaceGroup> RemoveSkippedGapGroups(
         if (skippedGroupIndexes.find(groupIndex) == skippedGroupIndexes.end())
         {
             result.push_back(groups[groupIndex]);
+        }
+    }
+
+    return result;
+}
+
+GapFaceGroup FilterGapGroupDeselectedFaces(
+    const GapFaceGroup& group,
+    const std::vector<tag_t>& userDeselectedFaces)
+{
+    GapFaceGroup filtered = group;
+    filtered.faces.clear();
+    for (std::size_t faceIndex = 0; faceIndex < group.faces.size(); ++faceIndex)
+    {
+        const tag_t faceTag = group.faces[faceIndex];
+        if (!ContainsTag(userDeselectedFaces, faceTag))
+        {
+            AddUniqueTag(filtered.faces, faceTag);
+        }
+    }
+
+    for (std::size_t pairIndex = 0; pairIndex < filtered.gapEdgePairs.size(); ++pairIndex)
+    {
+        if (ContainsTag(userDeselectedFaces, filtered.gapEdgePairs[pairIndex].firstGapFace))
+        {
+            filtered.gapEdgePairs[pairIndex].firstGapFace = NULL_TAG;
+        }
+        if (ContainsTag(userDeselectedFaces, filtered.gapEdgePairs[pairIndex].secondGapFace))
+        {
+            filtered.gapEdgePairs[pairIndex].secondGapFace = NULL_TAG;
+        }
+    }
+
+    return filtered;
+}
+
+std::vector<GapFaceGroup> FilterGapGroupsDeselectedFaces(
+    const std::vector<GapFaceGroup>& groups,
+    const std::vector<tag_t>& userDeselectedFaces)
+{
+    std::vector<GapFaceGroup> result;
+    for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+    {
+        const GapFaceGroup filtered = FilterGapGroupDeselectedFaces(
+            groups[groupIndex],
+            userDeselectedFaces);
+        DebugLog("Filter gap group deselected faces: group=" +
+            FormatTag(static_cast<tag_t>(groupIndex + 1)) +
+            ", originalFaces=" + FormatTag(static_cast<tag_t>(groups[groupIndex].faces.size())) +
+            ", filteredFaces=" + FormatTag(static_cast<tag_t>(filtered.faces.size())) +
+            ", userDeselectedFaces=" + FormatTag(static_cast<tag_t>(userDeselectedFaces.size())) +
+            ", originalFaceTags=[" + FormatTagList(groups[groupIndex].faces) + "]" +
+            ", filteredFaceTags=[" + FormatTagList(filtered.faces) + "]");
+        if (!filtered.faces.empty())
+        {
+            result.push_back(filtered);
         }
     }
 
@@ -3772,6 +3838,107 @@ bool SubtractGapToolBodyByGroup(
     return true;
 }
 
+bool SubtractGapToolBodiesByGroup(
+    tag_t targetBody,
+    const std::vector<tag_t>& toolBodyTags,
+    tag_t& subtractFeatureTag)
+{
+    subtractFeatureTag = NULL_TAG;
+    if (targetBody == NULL_TAG || toolBodyTags.empty())
+    {
+        return false;
+    }
+
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    NXOpen::Part* workPart = session != NULL && session->Parts() != NULL ? session->Parts()->Work() : NULL;
+    NXOpen::Body* targetNxBody = dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(targetBody));
+    if (workPart == NULL || targetNxBody == NULL)
+    {
+        return false;
+    }
+
+    std::vector<NXOpen::Body*> toolBodies;
+    for (std::size_t index = 0; index < toolBodyTags.size(); ++index)
+    {
+        NXOpen::Body* toolBody = dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(toolBodyTags[index]));
+        if (toolBody != NULL && toolBody->Tag() != targetBody)
+        {
+            toolBodies.push_back(toolBody);
+        }
+    }
+    if (toolBodies.empty())
+    {
+        DebugLog("  gap bounding batch subtract failed: no resolved tool bodies, target=" +
+            FormatTag(targetBody) +
+            ", toolBodyTags=[" + FormatTagList(toolBodyTags) + "]");
+        return false;
+    }
+
+    NXOpen::Features::BooleanBuilder* booleanBuilder = NULL;
+    bool committed = false;
+    try
+    {
+        NXOpen::Features::BooleanFeature* nullBooleanFeature = NULL;
+        booleanBuilder = workPart->Features()->CreateBooleanBuilderUsingCollector(nullBooleanFeature);
+        booleanBuilder->SetTolerance(0.0001);
+        booleanBuilder->SetCopyTargets(false);
+        booleanBuilder->SetCopyTools(false);
+        booleanBuilder->SetOperation(NXOpen::Features::Feature::BooleanTypeSubtract);
+
+        NXOpen::ScCollector* targetCollector = workPart->ScCollectors()->CreateCollector();
+        NXOpen::SelectionIntentRuleOptions* targetRuleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+        targetRuleOptions->SetSelectedFromInactive(false);
+        std::vector<NXOpen::Body*> targetBodies(1, targetNxBody);
+        NXOpen::BodyDumbRule* targetRule =
+            workPart->ScRuleFactory()->CreateRuleBodyDumb(targetBodies, true, targetRuleOptions);
+        delete targetRuleOptions;
+        std::vector<NXOpen::SelectionIntentRule*> targetRules(1, targetRule);
+        targetCollector->ReplaceRules(targetRules, false);
+        booleanBuilder->SetTargetBodyCollector(targetCollector);
+
+        NXOpen::ScCollector* toolCollector = workPart->ScCollectors()->CreateCollector();
+        NXOpen::SelectionIntentRuleOptions* toolRuleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+        toolRuleOptions->SetSelectedFromInactive(false);
+        NXOpen::BodyDumbRule* toolRule =
+            workPart->ScRuleFactory()->CreateRuleBodyDumb(toolBodies, true, toolRuleOptions);
+        delete toolRuleOptions;
+        std::vector<NXOpen::SelectionIntentRule*> toolRules(1, toolRule);
+        toolCollector->ReplaceRules(toolRules, false);
+        booleanBuilder->SetToolBodyCollector(toolCollector);
+
+        NXOpen::Features::Feature* feature = booleanBuilder->CommitFeature();
+        subtractFeatureTag = feature != NULL ? feature->Tag() : NULL_TAG;
+        committed = subtractFeatureTag != NULL_TAG;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        DebugLog("  gap bounding batch subtract failed: NXException=" + std::string(ex.Message()) +
+            ", target=" + FormatTag(targetBody) +
+            ", toolBodies=[" + FormatTagList(toolBodyTags) + "]");
+    }
+    catch (...)
+    {
+        DebugLog("  gap bounding batch subtract failed: unknown exception, target=" +
+            FormatTag(targetBody) +
+            ", toolBodies=[" + FormatTagList(toolBodyTags) + "]");
+    }
+
+    if (booleanBuilder != NULL)
+    {
+        booleanBuilder->Destroy();
+    }
+
+    if (committed)
+    {
+        DebugLog("  gap bounding batch subtract committed: target=" +
+            FormatTag(targetBody) +
+            ", toolBodies=" + FormatTag(static_cast<tag_t>(toolBodies.size())) +
+            ", toolBodyTags=[" + FormatTagList(toolBodyTags) + "]" +
+            ", feature=" + FormatTag(subtractFeatureTag));
+    }
+    return committed;
+}
+
 bool DeleteFeatureFacesByGroup(tag_t featureTag)
 {
     const std::vector<tag_t> featureFaces = AskFeatureFaces(featureTag);
@@ -3791,11 +3958,82 @@ bool DeleteFeatureFacesByGroup(tag_t featureTag)
     return ok;
 }
 
+bool DeleteFeatureFacesByFeatures(const std::vector<tag_t>& featureTags)
+{
+    std::vector<tag_t> featureFaces;
+    for (std::size_t featureIndex = 0; featureIndex < featureTags.size(); ++featureIndex)
+    {
+        const std::vector<tag_t> faces = AskFeatureFaces(featureTags[featureIndex]);
+        DebugLog("  collect subtract feature faces: feature=" +
+            FormatTag(featureTags[featureIndex]) +
+            ", faces=" + FormatTag(static_cast<tag_t>(faces.size())));
+        for (std::size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex)
+        {
+            AddUniqueTag(featureFaces, faces[faceIndex]);
+        }
+    }
+
+    DebugLog("  delete all subtract feature faces start: features=" +
+        FormatTag(static_cast<tag_t>(featureTags.size())) +
+        ", faces=" + FormatTag(static_cast<tag_t>(featureFaces.size())) +
+        ", featureTags=[" + FormatTagList(featureTags) + "]" +
+        ", faceTags=[" + FormatTagList(featureFaces) + "]");
+    if (featureFaces.empty())
+    {
+        return false;
+    }
+
+    const bool ok = DeleteFacesWithHealBuilder(featureFaces);
+    DebugLog("  delete all subtract feature faces result: committed=" +
+        FormatTag(static_cast<tag_t>(ok ? 1 : 0)) +
+        ", features=" + FormatTag(static_cast<tag_t>(featureTags.size())) +
+        ", faces=" + FormatTag(static_cast<tag_t>(featureFaces.size())));
+    return ok;
+}
+
+std::vector<GapFaceGroup> SplitGapGroupByFace(const GapFaceGroup& group)
+{
+    std::vector<GapFaceGroup> faceGroups;
+    for (std::size_t faceIndex = 0; faceIndex < group.faces.size(); ++faceIndex)
+    {
+        const tag_t faceTag = group.faces[faceIndex];
+        if (faceTag == NULL_TAG)
+        {
+            continue;
+        }
+
+        GapFaceGroup faceGroup = group;
+        faceGroup.faces.clear();
+        faceGroup.faces.push_back(faceTag);
+        for (std::size_t pairIndex = 0; pairIndex < faceGroup.gapEdgePairs.size(); ++pairIndex)
+        {
+            if (faceGroup.gapEdgePairs[pairIndex].firstGapFace != faceTag)
+            {
+                faceGroup.gapEdgePairs[pairIndex].firstGapFace = NULL_TAG;
+            }
+            if (faceGroup.gapEdgePairs[pairIndex].secondGapFace != faceTag)
+            {
+                faceGroup.gapEdgePairs[pairIndex].secondGapFace = NULL_TAG;
+            }
+        }
+        faceGroups.push_back(faceGroup);
+    }
+
+    return faceGroups;
+}
+
 bool DeleteGapGroupWithBoundingTool(
     tag_t bodyTag,
     const GapFaceGroup& group,
-    double thickness)
+    double thickness,
+    tag_t& subtractFeatureTag,
+    NXOpen::Session::UndoMarkId* retainedUndoMark = NULL)
 {
+    subtractFeatureTag = NULL_TAG;
+    if (retainedUndoMark != NULL)
+    {
+        *retainedUndoMark = static_cast<NXOpen::Session::UndoMarkId>(0);
+    }
     NXOpen::Session* session = NXOpen::Session::GetSession();
     NXOpen::Session::UndoMarkId boundingStartMark =
         session != NULL
@@ -3804,9 +4042,32 @@ bool DeleteGapGroupWithBoundingTool(
                 "TianFenXI Bounding Fallback")
             : static_cast<NXOpen::Session::UndoMarkId>(0);
     const double offset = std::max(0.1, thickness + 0.5);
-    tag_t boxFeatureTag = NULL_TAG;
-    tag_t toolBodyTag = NULL_TAG;
-    if (!CreateGapGroupBoundingToolBody(group, offset, boxFeatureTag, toolBodyTag))
+    std::vector<tag_t> boxFeatureTags;
+    std::vector<tag_t> toolBodyTags;
+    const std::vector<GapFaceGroup> faceGroups = SplitGapGroupByFace(group);
+    for (std::size_t faceGroupIndex = 0; faceGroupIndex < faceGroups.size(); ++faceGroupIndex)
+    {
+        tag_t boxFeatureTag = NULL_TAG;
+        tag_t toolBodyTag = NULL_TAG;
+        const bool created = CreateGapGroupBoundingToolBody(
+            faceGroups[faceGroupIndex],
+            offset,
+            boxFeatureTag,
+            toolBodyTag);
+        DebugLog("  gap bounding tool per face result: index=" +
+            FormatTag(static_cast<tag_t>(faceGroupIndex + 1)) +
+            ", faceTags=[" + FormatTagList(faceGroups[faceGroupIndex].faces) + "]" +
+            ", boxFeature=" + FormatTag(boxFeatureTag) +
+            ", toolBody=" + FormatTag(toolBodyTag) +
+            ", committed=" + FormatTag(static_cast<tag_t>(created ? 1 : 0)));
+        if (created)
+        {
+            boxFeatureTags.push_back(boxFeatureTag);
+            toolBodyTags.push_back(toolBodyTag);
+        }
+    }
+
+    if (toolBodyTags.empty())
     {
         if (session != NULL && boundingStartMark != 0)
         {
@@ -3816,18 +4077,20 @@ bool DeleteGapGroupWithBoundingTool(
         return false;
     }
 
-    tag_t subtractFeatureTag = NULL_TAG;
-    const bool subtracted = SubtractGapToolBodyByGroup(bodyTag, toolBodyTag, subtractFeatureTag);
-    if (toolBodyTag != NULL_TAG)
+    const bool subtracted = SubtractGapToolBodiesByGroup(bodyTag, toolBodyTags, subtractFeatureTag);
+    for (std::size_t toolIndex = 0; toolIndex < toolBodyTags.size(); ++toolIndex)
     {
-        UF_OBJ_set_blank_status(toolBodyTag, UF_OBJ_BLANKED);
+        if (toolBodyTags[toolIndex] != NULL_TAG)
+        {
+            UF_OBJ_set_blank_status(toolBodyTags[toolIndex], UF_OBJ_BLANKED);
+        }
     }
 
     if (!subtracted)
     {
-        DebugLog("  gap bounding subtract failed, rollback to before tooling box: boxFeature=" +
-            FormatTag(boxFeatureTag) +
-            ", toolBody=" + FormatTag(toolBodyTag));
+        DebugLog("  gap bounding subtract failed, rollback to before tooling boxes: boxFeatures=[" +
+            FormatTagList(boxFeatureTags) +
+            "], toolBodies=[" + FormatTagList(toolBodyTags) + "]");
         if (session != NULL && boundingStartMark != 0)
         {
             session->UndoToMark(boundingStartMark, "TianFenXI Bounding Fallback");
@@ -3836,30 +4099,20 @@ bool DeleteGapGroupWithBoundingTool(
         return false;
     }
 
-    bool deletedFeatureFaces = false;
-    deletedFeatureFaces = DeleteFeatureFacesByGroup(subtractFeatureTag);
-
-    if (!deletedFeatureFaces)
-    {
-        DebugLog("  gap bounding delete feature faces failed, rollback to before tooling box: boxFeature=" +
-            FormatTag(boxFeatureTag) +
-            ", toolBody=" + FormatTag(toolBodyTag) +
-            ", subtractFeature=" + FormatTag(subtractFeatureTag));
-        if (session != NULL && boundingStartMark != 0)
-        {
-            session->UndoToMark(boundingStartMark, "TianFenXI Bounding Fallback");
-            session->DeleteUndoMark(boundingStartMark, "TianFenXI Bounding Fallback");
-        }
-        return false;
-    }
-
-    DebugLog("  gap bounding fallback result: boxFeature=" +
-        FormatTag(boxFeatureTag) +
-        ", toolBody=" + FormatTag(toolBodyTag) +
+    DebugLog("  gap bounding fallback result: boxFeatures=[" +
+        FormatTagList(boxFeatureTags) +
+        "], toolBodies=[" + FormatTagList(toolBodyTags) + "]" +
         ", subtractFeature=" + FormatTag(subtractFeatureTag) +
         ", subtracted=" + FormatTag(static_cast<tag_t>(subtracted ? 1 : 0)) +
-        ", deleteFeatureFaces=" + FormatTag(static_cast<tag_t>(deletedFeatureFaces ? 1 : 0)));
-    if (session != NULL && boundingStartMark != 0)
+        ", deleteFeatureFacesDeferred=1");
+    if (retainedUndoMark != NULL)
+    {
+        *retainedUndoMark = boundingStartMark;
+        DebugLog("  gap bounding undo mark retained: subtractFeature=" +
+            FormatTag(subtractFeatureTag) +
+            ", mark=" + FormatTag(static_cast<tag_t>(boundingStartMark)));
+    }
+    else if (session != NULL && boundingStartMark != 0)
     {
         session->DeleteUndoMark(boundingStartMark, "TianFenXI Bounding Fallback");
     }
@@ -3920,7 +4173,8 @@ void PrepareBodyBeforeReplaceFallback(
     DebugLog("Prepare before replace fallback start: body=" +
         FormatTag(bodyTag) +
         ", deleteR=" + FormatTag(static_cast<tag_t>(deleteREnabled ? 1 : 0)) +
-        ", maxR=" + FormatDouble(maxRadius));
+        ", maxR=" + FormatDouble(maxRadius) +
+        ", thickness=" + FormatDouble(thickness));
     DeleteSmallRadiusFacesIfRequested(
         bodyTag,
         thickness,
@@ -3935,11 +4189,14 @@ bool DeleteGapGroupWithBoundingToolOrReplace(
     const GapFaceGroup& group,
     double thickness,
     bool deleteREnabled,
-    double maxRadius)
+    double maxRadius,
+    std::vector<tag_t>& pendingSubtractFeatureTags)
 {
-    const bool bounded = DeleteGapGroupWithBoundingTool(bodyTag, group, thickness);
+    tag_t subtractFeatureTag = NULL_TAG;
+    const bool bounded = DeleteGapGroupWithBoundingTool(bodyTag, group, thickness, subtractFeatureTag);
     if (bounded)
     {
+        AddUniqueTag(pendingSubtractFeatureTags, subtractFeatureTag);
         return true;
     }
 
@@ -3962,6 +4219,7 @@ bool DeleteGapGroupWithBoundingToolOrReplace(
 
 bool GapGroupTouchesTangentCylinderFace(const GapFaceGroup& group)
 {
+    const double tangentFilletMinRadius = 1.9;
     for (std::size_t faceIndex = 0; faceIndex < group.faces.size(); ++faceIndex)
     {
         const tag_t gapFace = group.faces[faceIndex];
@@ -3997,6 +4255,17 @@ bool GapGroupTouchesTangentCylinderFace(const GapFaceGroup& group)
             double radius = 0.0;
             if (AskCylinderFaceData(currentFace, axisPoint, axisDirection, radius))
             {
+                if (radius <= tangentFilletMinRadius)
+                {
+                    DebugLog("  gap group tangent cylinder excluded by radius: gapFace=" +
+                        FormatTag(gapFace) +
+                        ", cylinderFace=" + FormatTag(currentFace) +
+                        ", radius=" + FormatDouble(radius) +
+                        ", minRadius=" + FormatDouble(tangentFilletMinRadius) +
+                        ", depth=" + FormatTag(static_cast<tag_t>(depth)));
+                    continue;
+                }
+
                 const bool tangent = IsFaceTangentOrEdgeConnectedToCylinder(currentFace, gapFace);
                 DebugLog("  gap group touches cylinder: gapFace=" +
                     FormatTag(gapFace) +
@@ -4039,41 +4308,34 @@ bool GapGroupTouchesTangentCylinderFace(const GapFaceGroup& group)
     return false;
 }
 
-bool DeleteCylinderGapGroupWithReplaceFirst(
+bool TryReplaceGapGroupAfterBoundingFailed(
     tag_t bodyTag,
     const GapFaceGroup& group,
     double thickness,
     bool deleteREnabled,
     double maxRadius)
 {
-    DebugLog("  cylinder-connected gap group fallback: replace first");
+    DebugLog("  gap bounding failed, check tangent cylinder before replace");
+    if (!GapGroupTouchesTangentCylinderFace(group))
+    {
+        DebugLog("  gap replace skipped: no tangent cylinder after bounding failed");
+        return false;
+    }
+
     ReplaceGapPlan plan = {};
     const bool planned = TryBuildReplaceGapPlan(group, plan);
-    DebugLog("  cylinder-connected replace plan before prepare: planned=" +
+    DebugLog("  gap replace fallback plan after bounding failed: planned=" +
         FormatTag(static_cast<tag_t>(planned ? 1 : 0)));
     if (!planned)
     {
-        DebugLog("  cylinder-connected replace plan failed, start bounding fallback");
-        const bool bounded = DeleteGapGroupWithBoundingTool(bodyTag, group, thickness);
-        DebugLog("  cylinder-connected bounding after plan failed result: committed=" +
-            FormatTag(static_cast<tag_t>(bounded ? 1 : 0)));
-        return bounded;
+        return false;
     }
 
     PrepareBodyBeforeReplaceFallback(bodyTag, thickness, deleteREnabled, maxRadius);
     const bool replaced = ExecuteReplaceGapPlan(plan, group);
-    DebugLog("  cylinder-connected replace first result: committed=" +
+    DebugLog("  gap replace fallback after bounding result: committed=" +
         FormatTag(static_cast<tag_t>(replaced ? 1 : 0)));
-    if (replaced)
-    {
-        return true;
-    }
-
-    DebugLog("  cylinder-connected replace failed, start bounding fallback");
-    const bool bounded = DeleteGapGroupWithBoundingTool(bodyTag, group, thickness);
-    DebugLog("  cylinder-connected bounding after replace result: committed=" +
-        FormatTag(static_cast<tag_t>(bounded ? 1 : 0)));
-    return bounded;
+    return replaced;
 }
 
 bool DeleteGapGroupAfterMiddlePlaneFailed(
@@ -4081,30 +4343,32 @@ bool DeleteGapGroupAfterMiddlePlaneFailed(
     const GapFaceGroup& group,
     double thickness,
     bool deleteREnabled,
-    double maxRadius)
+    double maxRadius,
+    std::vector<PendingSubtractCleanup>& pendingSubtractCleanups)
 {
-    if (group.touchesTangentCylinder)
+    tag_t subtractFeatureTag = NULL_TAG;
+    NXOpen::Session::UndoMarkId undoMark = static_cast<NXOpen::Session::UndoMarkId>(0);
+    const bool bounded = DeleteGapGroupWithBoundingTool(
+        bodyTag,
+        group,
+        thickness,
+        subtractFeatureTag,
+        &undoMark);
+    if (bounded)
     {
-        DebugLog("  gap group uses cached tangent cylinder: yes");
-        return DeleteCylinderGapGroupWithReplaceFirst(
-            bodyTag,
-            group,
-            thickness,
-            deleteREnabled,
-            maxRadius);
+        PendingSubtractCleanup cleanup = {};
+        cleanup.subtractFeatureTag = subtractFeatureTag;
+        cleanup.group = group;
+        cleanup.undoMark = undoMark;
+        pendingSubtractCleanups.push_back(cleanup);
+        DebugLog("  gap bounding pending cleanup add: subtractFeature=" +
+            FormatTag(subtractFeatureTag) +
+            ", undoMark=" + FormatTag(static_cast<tag_t>(undoMark)) +
+            ", groupFaces=[" + FormatTagList(group.faces) + "]");
+        return true;
     }
 
-    if (GapGroupTouchesTangentCylinderFace(group))
-    {
-        return DeleteCylinderGapGroupWithReplaceFirst(
-            bodyTag,
-            group,
-            thickness,
-            deleteREnabled,
-            maxRadius);
-    }
-
-    return DeleteGapGroupWithBoundingToolOrReplace(
+    return TryReplaceGapGroupAfterBoundingFailed(
         bodyTag,
         group,
         thickness,
@@ -5117,6 +5381,7 @@ bool CylinderFaceHasStraightThicknessEdge(
     double thickness,
     double& matchedLength)
 {
+    const double straightThicknessEdgeTolerance = 0.02;
     matchedLength = 0.0;
     if (faceTag == NULL_TAG || thickness <= kMinThickness)
     {
@@ -5138,7 +5403,7 @@ bool CylinderFaceHasStraightThicknessEdge(
             endpointPairs[index].second[2] - endpointPairs[index].first[2]
         };
         const double length = std::sqrt(Dot3(direction, direction));
-        if (length <= 1.0e-6 || std::fabs(length - thickness) > kThicknessTolerance)
+        if (length <= 1.0e-6 || std::fabs(length - thickness) > straightThicknessEdgeTolerance)
         {
             continue;
         }
@@ -5427,30 +5692,24 @@ void DeleteSmallRadiusFacesIfRequested(tag_t bodyTag, double thickness, bool ena
         return;
     }
 
-    const std::vector<std::vector<tag_t>> groups = GroupConnectedFaces(facesToDelete);
-    int committedGroups = 0;
     int committedFaces = 0;
-    DebugLog("Delete small R connected groups=" +
-        FormatTag(static_cast<tag_t>(groups.size())));
-    for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+    for (std::size_t faceIndex = 0; faceIndex < facesToDelete.size(); ++faceIndex)
     {
-        const bool ok = DeleteFacesWithHealBuilder(groups[groupIndex]);
-        if (ok)
+        std::vector<tag_t> singleFace(1, facesToDelete[faceIndex]);
+        const bool committed = DeleteFacesWithHealBuilder(singleFace);
+        if (committed)
         {
-            ++committedGroups;
-            committedFaces += static_cast<int>(groups[groupIndex].size());
+            ++committedFaces;
         }
-        DebugLog("  delete small R group: group=" +
-            FormatTag(static_cast<tag_t>(groupIndex + 1)) +
-            ", faces=" + FormatTag(static_cast<tag_t>(groups[groupIndex].size())) +
-            ", committed=" + FormatTag(static_cast<tag_t>(ok ? 1 : 0)) +
-            ", faceTags=[" + FormatTagList(groups[groupIndex]) + "]");
+        DebugLog("  delete small R per face result: face=" +
+            FormatTag(facesToDelete[faceIndex]) +
+            ", committed=" + FormatTag(static_cast<tag_t>(committed ? 1 : 0)));
     }
 
-    DebugLog("Delete small R result: committedGroups=" +
-        FormatTag(static_cast<tag_t>(committedGroups)) +
-        ", committedFaces=" + FormatTag(static_cast<tag_t>(committedFaces)) +
-        ", faces=" + FormatTag(static_cast<tag_t>(facesToDelete.size())));
+    DebugLog("Delete small R per face result: committedFaces=" +
+        FormatTag(static_cast<tag_t>(committedFaces)) +
+        ", faces=" + FormatTag(static_cast<tag_t>(facesToDelete.size())) +
+        ", faceTags=[" + FormatTagList(facesToDelete) + "]");
 }
 
 void DeleteGapGroupsWithMiddlePlanes(
@@ -5462,6 +5721,7 @@ void DeleteGapGroupsWithMiddlePlanes(
 {
     int createdCount = 0;
     int deletedCount = 0;
+    std::vector<PendingSubtractCleanup> pendingSubtractCleanups;
     DebugLog("Delete gap groups with middle planes start: groups=" +
         FormatTag(static_cast<tag_t>(groups.size())));
     for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
@@ -5478,7 +5738,8 @@ void DeleteGapGroupsWithMiddlePlanes(
                 groups[groupIndex],
                 thickness,
                 deleteREnabled,
-                maxRadius);
+                maxRadius,
+                pendingSubtractCleanups);
             if (bounded)
             {
                 ++deletedCount;
@@ -5509,7 +5770,8 @@ void DeleteGapGroupsWithMiddlePlanes(
                 groups[groupIndex],
                 thickness,
                 deleteREnabled,
-                maxRadius);
+                maxRadius,
+                pendingSubtractCleanups);
             if (bounded)
             {
                 ++deletedCount;
@@ -5527,6 +5789,87 @@ void DeleteGapGroupsWithMiddlePlanes(
             ", plane=" + FormatTag(planeTag) +
             ", planeCreated=" + FormatTag(static_cast<tag_t>(created ? 1 : 0)) +
             ", deleteCommitted=" + FormatTag(static_cast<tag_t>(deleted ? 1 : 0)));
+    }
+
+    std::vector<tag_t> pendingSubtractFeatureTags;
+    for (std::size_t cleanupIndex = 0; cleanupIndex < pendingSubtractCleanups.size(); ++cleanupIndex)
+    {
+        AddUniqueTag(pendingSubtractFeatureTags, pendingSubtractCleanups[cleanupIndex].subtractFeatureTag);
+    }
+
+    DebugLog("Delete gap groups with middle planes before deferred cleanup: pendingSubtractFeatures=" +
+        FormatTag(static_cast<tag_t>(pendingSubtractFeatureTags.size())) +
+        ", featureTags=[" + FormatTagList(pendingSubtractFeatureTags) + "]" +
+        ", pendingCleanups=" + FormatTag(static_cast<tag_t>(pendingSubtractCleanups.size())));
+    if (!pendingSubtractCleanups.empty())
+    {
+        DeleteSmallRadiusFacesIfRequested(bodyTag, thickness, deleteREnabled, maxRadius);
+        const bool deletedSubtractFaces = DeleteFeatureFacesByFeatures(pendingSubtractFeatureTags);
+        DebugLog("Delete deferred subtract feature faces after R result: committed=" +
+            FormatTag(static_cast<tag_t>(deletedSubtractFaces ? 1 : 0)) +
+            ", features=" + FormatTag(static_cast<tag_t>(pendingSubtractFeatureTags.size())));
+        NXOpen::Session* session = NXOpen::Session::GetSession();
+        if (deletedSubtractFaces)
+        {
+            for (std::size_t cleanupIndex = 0; cleanupIndex < pendingSubtractCleanups.size(); ++cleanupIndex)
+            {
+                if (session != NULL && pendingSubtractCleanups[cleanupIndex].undoMark != 0)
+                {
+                    session->DeleteUndoMark(
+                        pendingSubtractCleanups[cleanupIndex].undoMark,
+                        "TianFenXI Bounding Fallback");
+                }
+            }
+        }
+        else
+        {
+            DebugLog("Delete deferred subtract feature faces failed, rollback bounding fallbacks and start replace fallback");
+            for (std::size_t reverseIndex = pendingSubtractCleanups.size(); reverseIndex > 0; --reverseIndex)
+            {
+                const PendingSubtractCleanup& cleanup = pendingSubtractCleanups[reverseIndex - 1];
+                if (session != NULL && cleanup.undoMark != 0)
+                {
+                    DebugLog("  rollback bounding fallback: cleanup=" +
+                        FormatTag(static_cast<tag_t>(reverseIndex)) +
+                        ", subtractFeature=" + FormatTag(cleanup.subtractFeatureTag) +
+                        ", undoMark=" + FormatTag(static_cast<tag_t>(cleanup.undoMark)) +
+                        ", groupFaces=[" + FormatTagList(cleanup.group.faces) + "]");
+                    session->UndoToMark(
+                        cleanup.undoMark,
+                        "TianFenXI Bounding Fallback");
+                    session->DeleteUndoMark(
+                        cleanup.undoMark,
+                        "TianFenXI Bounding Fallback");
+                }
+            }
+
+            PrepareBodyBeforeReplaceFallback(bodyTag, thickness, deleteREnabled, maxRadius);
+            int replaceCount = 0;
+            for (std::size_t cleanupIndex = 0; cleanupIndex < pendingSubtractCleanups.size(); ++cleanupIndex)
+            {
+                ReplaceGapPlan plan = {};
+                const bool planned = TryBuildReplaceGapPlan(
+                    pendingSubtractCleanups[cleanupIndex].group,
+                    plan);
+                DebugLog("  replace after subtract cleanup failed plan: group=" +
+                    FormatTag(static_cast<tag_t>(cleanupIndex + 1)) +
+                    ", subtractFeature=" + FormatTag(pendingSubtractCleanups[cleanupIndex].subtractFeatureTag) +
+                    ", planned=" + FormatTag(static_cast<tag_t>(planned ? 1 : 0)) +
+                    ", groupFaces=[" + FormatTagList(pendingSubtractCleanups[cleanupIndex].group.faces) + "]");
+                const bool replaced = planned &&
+                    ExecuteReplaceGapPlan(plan, pendingSubtractCleanups[cleanupIndex].group);
+                if (replaced)
+                {
+                    ++replaceCount;
+                }
+                DebugLog("  replace after subtract cleanup failed result: group=" +
+                    FormatTag(static_cast<tag_t>(cleanupIndex + 1)) +
+                    ", committed=" + FormatTag(static_cast<tag_t>(replaced ? 1 : 0)));
+            }
+            DebugLog("Replace fallback after subtract cleanup failed summary: committedGroups=" +
+                FormatTag(static_cast<tag_t>(replaceCount)) +
+                ", groups=" + FormatTag(static_cast<tag_t>(pendingSubtractCleanups.size())));
+        }
     }
 
     DebugLog("Delete gap groups with middle planes result: planes=" +
@@ -6122,20 +6465,15 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
         highlightedBoundaryEdges = FlattenGapEdgePairs(gapEdgePairs);
         highlightedGapFaces = FlattenGapFaceGroups(gapFaceGroups);
         const std::set<std::size_t> skippedGroupIndexes = createMiddlePlanes ?
-            FindSkippedGapGroupIndexesByMissingFaces(gapFaceGroups, selectedAutoGapFaces) :
+            FindSkippedGapGroupIndexesByUserDeselectedFaces(gapFaceGroups, userDeselectedGapFaces) :
             std::set<std::size_t>();
         skippedGapFaces = FlattenSkippedGapFaces(gapFaceGroups, skippedGroupIndexes);
         if (createMiddlePlanes)
         {
             const std::vector<GapFaceGroup> groupsToDelete =
-                RemoveSkippedGapGroups(gapFaceGroups, skippedGroupIndexes);
+                FilterGapGroupsDeselectedFaces(gapFaceGroups, userDeselectedGapFaces);
             DeleteGapGroupsWithMiddlePlanes(
                 groupsToDelete,
-                bodyTag,
-                thickness,
-                toggle0 != NULL && toggle0->Value(),
-                ReadPositiveStringValue(string01, 5.0));
-            DeleteSmallRadiusFacesIfRequested(
                 bodyTag,
                 thickness,
                 toggle0 != NULL && toggle0->Value(),
@@ -6196,20 +6534,15 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
     highlightedBoundaryEdges = FlattenGapEdgePairs(gapEdgePairs);
     highlightedGapFaces = FlattenGapFaceGroups(gapFaceGroups);
     const std::set<std::size_t> skippedGroupIndexes = createMiddlePlanes ?
-        FindSkippedGapGroupIndexesByMissingFaces(gapFaceGroups, selectedAutoGapFaces) :
+        FindSkippedGapGroupIndexesByUserDeselectedFaces(gapFaceGroups, userDeselectedGapFaces) :
         std::set<std::size_t>();
     skippedGapFaces = FlattenSkippedGapFaces(gapFaceGroups, skippedGroupIndexes);
     if (createMiddlePlanes)
     {
         const std::vector<GapFaceGroup> groupsToDelete =
-            RemoveSkippedGapGroups(gapFaceGroups, skippedGroupIndexes);
+            FilterGapGroupsDeselectedFaces(gapFaceGroups, userDeselectedGapFaces);
         DeleteGapGroupsWithMiddlePlanes(
             groupsToDelete,
-            bodyTag,
-            thickness,
-            toggle0 != NULL && toggle0->Value(),
-            ReadPositiveStringValue(string01, 5.0));
-        DeleteSmallRadiusFacesIfRequested(
             bodyTag,
             thickness,
             toggle0 != NULL && toggle0->Value(),
