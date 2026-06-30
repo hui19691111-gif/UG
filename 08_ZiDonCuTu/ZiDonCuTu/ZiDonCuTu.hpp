@@ -264,6 +264,11 @@ private:
     NXOpen::BlockStyler::Toggle* toggleBendNote;// Block type: Toggle
     NXOpen::BlockStyler::DoubleBlock* doubleBendNoteTextHeight;// Block type: Double
     NXOpen::BlockStyler::Toggle* toggleBreakBendLine;// Block type: Toggle
+    NXOpen::BlockStyler::DoubleBlock* doubleBendLineEdgeDistance;// Block type: Double
+    NXOpen::BlockStyler::Toggle* toggleBendLineUpNotch;// Block type: Toggle
+    NXOpen::BlockStyler::DoubleBlock* doubleBendLineUpNotchDiameter;// Block type: Double
+    NXOpen::BlockStyler::Toggle* toggleBendLineDownNotch;// Block type: Toggle
+    NXOpen::BlockStyler::DoubleBlock* doubleBendLineDownNotchDiameter;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineUpKeepLength;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineDownKeepLength;// Block type: Double
     NXOpen::BlockStyler::Button* buttonNoteFormatConfig;// Block type: Button

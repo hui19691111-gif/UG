@@ -118,7 +118,15 @@ bool CreateFlatPatternBendNotes(
 bool BreakFlatPatternBendLines(
 	NXOpen::Drawings::BaseView* baseView,
 	NXOpen::Features::FlatPattern* flatPattern,
+	double edgeDistance,
 	double upKeepLength,
 	double downKeepLength);
+bool CreateFlatPatternBendLineNotches(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Features::FlatPattern* flatPattern,
+	bool upEnabled,
+	double upDiameter,
+	bool downEnabled,
+	double downDiameter);
 
 #endif // ZIDONCUTU_DIMENSION_H_INCLUDED

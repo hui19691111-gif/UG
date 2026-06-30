@@ -15,9 +15,12 @@
 #include <NXOpen/Annotations_SimpleDraftingAid.hxx>
 #include <NXOpen/Annotations_TextWithEditControlsBuilder.hxx>
 #include <NXOpen/Annotations_VerticalOrdinateMargin.hxx>
+#include <NXOpen/Arc.hxx>
 #include <NXOpen/CurveCollection.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
+#include <NXOpen/NXMatrix.hxx>
+#include <NXOpen/NXMatrixCollection.hxx>
 #include <NXOpen/Point.hxx>
 #include <NXOpen/PointCollection.hxx>
 #include <NXOpen/SelectDisplayableObjectList.hxx>
@@ -5450,11 +5453,12 @@ bool BreakFlatPatternBendLinesForObjects(
 	NXOpen::Drawings::BaseView* baseView,
 	const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
 	const std::vector<NXOpen::Features::FlatPattern::ObjectDataFace>& objects,
+	double edgeDistance,
 	double keepLength,
 	const char* directionName,
 	std::unordered_set<tag_t>& usedFlatPatternCurveTags)
 {
-	if (baseView == NULL || keepLength <= 0.0)
+	if (baseView == NULL || keepLength <= 0.0 || edgeDistance < 0.0)
 	{
 		return false;
 	}
@@ -5494,19 +5498,36 @@ bool BreakFlatPatternBendLinesForObjects(
 			continue;
 		}
 
-		if (curveLength <= keepLength * 2.0 + 1.0e-6)
+		const double visibleStartLength = edgeDistance + keepLength;
+		const double visibleEndStartLength = curveLength - edgeDistance - keepLength;
+		if (curveLength <= (edgeDistance + keepLength) * 2.0 + 1.0e-6)
 		{
 			std::ostringstream log;
 			log << "[BendLineBreak] skip short curve direction=" << directionName
 				<< " curveTag=" << draftingCurve->Tag()
 				<< " length=" << curveLength
+				<< " edgeDistance=" << edgeDistance
 				<< " keep=" << keepLength;
 			BendNoteDebugLog(log.str());
 			continue;
 		}
 
-		std::vector<double> segmentStart(1, keepLength / curveLength);
-		std::vector<double> segmentEnd(1, (curveLength - keepLength) / curveLength);
+		std::vector<double> segmentStart;
+		std::vector<double> segmentEnd;
+		segmentStart.reserve(3);
+		segmentEnd.reserve(3);
+		if (edgeDistance > 1.0e-6)
+		{
+			segmentStart.push_back(0.0);
+			segmentEnd.push_back(edgeDistance / curveLength);
+		}
+		segmentStart.push_back(visibleStartLength / curveLength);
+		segmentEnd.push_back(visibleEndStartLength / curveLength);
+		if (edgeDistance > 1.0e-6)
+		{
+			segmentStart.push_back((curveLength - edgeDistance) / curveLength);
+			segmentEnd.push_back(1.0);
+		}
 		try
 		{
 			baseView->DependentDisplay()->ApplySegmentEdit(
@@ -5521,8 +5542,13 @@ bool BreakFlatPatternBendLinesForObjects(
 			log << "[BendLineBreak] edited direction=" << directionName
 				<< " curveTag=" << draftingCurve->Tag()
 				<< " length=" << curveLength
+				<< " edgeDistance=" << edgeDistance
 				<< " keep=" << keepLength
-				<< " hide=(" << segmentStart[0] << "," << segmentEnd[0] << ")";
+				<< " hiddenSegments=" << segmentStart.size();
+			for (size_t segmentIndex = 0; segmentIndex < segmentStart.size(); ++segmentIndex)
+			{
+				log << " hide" << segmentIndex << "=(" << segmentStart[segmentIndex] << "," << segmentEnd[segmentIndex] << ")";
+			}
 			BendNoteDebugLog(log.str());
 		}
 		catch (const NXOpen::NXException& ex)
@@ -5531,6 +5557,1147 @@ bool BreakFlatPatternBendLinesForObjects(
 		}
 	}
 	return editedAny;
+}
+
+struct BendLineNotchEndpoint
+{
+	double x;
+	double y;
+	double z;
+};
+
+struct BendLineNotchGroup
+{
+	double dirX;
+	double dirY;
+	double normalOffset;
+	double minProjection;
+	double maxProjection;
+	BendLineNotchEndpoint minPoint;
+	BendLineNotchEndpoint maxPoint;
+	std::vector<tag_t> curveTags;
+};
+
+double Projection2d(double x, double y, double dirX, double dirY)
+{
+	return x * dirX + y * dirY;
+}
+
+double NormalOffset2d(double x, double y, double dirX, double dirY)
+{
+	return -dirY * x + dirX * y;
+}
+
+double PointToLineDistanceByNormal(double x, double y, double dirX, double dirY, double normalOffset)
+{
+	return std::fabs(NormalOffset2d(x, y, dirX, dirY) - normalOffset);
+}
+
+void GetVisibleArcAnglesForBendLineEnd(
+	double bendDirX,
+	double bendDirY,
+	bool isMinEndpoint,
+	double& startAngle,
+	double& endAngle)
+{
+	const double bendAngle = std::atan2(bendDirY, bendDirX);
+	if (isMinEndpoint)
+	{
+		startAngle = bendAngle - 0.5 * PI;
+		endAngle = bendAngle + 0.5 * PI;
+	}
+	else
+	{
+		startAngle = bendAngle + 0.5 * PI;
+		endAngle = bendAngle + 1.5 * PI;
+	}
+}
+
+bool HideBoundarySegmentForNotch(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingCurve* boundaryCurve,
+	double x,
+	double y,
+	double radius)
+{
+	if (baseView == NULL || boundaryCurve == NULL || radius <= 0.0)
+	{
+		return false;
+	}
+
+	UF_CURVE_line_t lineData;
+	if (UF_CURVE_ask_line_data(boundaryCurve->Tag(), &lineData) != 0)
+	{
+		return false;
+	}
+
+	const double dx = lineData.end_point[0] - lineData.start_point[0];
+	const double dy = lineData.end_point[1] - lineData.start_point[1];
+	const double length = std::sqrt(dx * dx + dy * dy);
+	if (length <= 1.0e-9)
+	{
+		return false;
+	}
+	const double projection = Clamp01(((x - lineData.start_point[0]) * dx + (y - lineData.start_point[1]) * dy) / (length * length));
+	const double halfSegment = radius / length;
+	std::vector<double> segmentStart(1);
+	std::vector<double> segmentEnd(1);
+	segmentStart[0] = Clamp01(projection - halfSegment);
+	segmentEnd[0] = Clamp01(projection + halfSegment);
+	if (segmentEnd[0] - segmentStart[0] <= 1.0e-6)
+	{
+		return false;
+	}
+
+	try
+	{
+		baseView->DependentDisplay()->ApplySegmentEdit(
+			boundaryCurve,
+			NXOpen::ViewDependentDisplayManager::FontInvisible,
+			NXOpen::ViewDependentDisplayManager::WidthObject,
+			segmentStart,
+			segmentEnd);
+		std::ostringstream log;
+		log << "[BendLineNotch] boundary break curveTag=" << boundaryCurve->Tag()
+			<< " point=(" << x << "," << y << ")"
+			<< " radius=" << radius
+			<< " segment=(" << segmentStart[0] << "," << segmentEnd[0] << ")";
+		BendNoteDebugLog(log.str());
+		return true;
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[BendLineNotch] boundary segment edit failed: ") + ex.Message());
+	}
+	return false;
+}
+
+bool HideBoundarySegmentBetweenNotchIntersections(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingCurve* boundaryCurve,
+	double firstX,
+	double firstY,
+	double secondX,
+	double secondY)
+{
+	if (baseView == NULL || boundaryCurve == NULL)
+	{
+		return false;
+	}
+
+	UF_CURVE_line_t lineData;
+	if (UF_CURVE_ask_line_data(boundaryCurve->Tag(), &lineData) != 0)
+	{
+		return false;
+	}
+
+	const double dx = lineData.end_point[0] - lineData.start_point[0];
+	const double dy = lineData.end_point[1] - lineData.start_point[1];
+	const double lengthSquared = dx * dx + dy * dy;
+	if (lengthSquared <= 1.0e-12)
+	{
+		return false;
+	}
+
+	const double firstProjection =
+		((firstX - lineData.start_point[0]) * dx + (firstY - lineData.start_point[1]) * dy) / lengthSquared;
+	const double secondProjection =
+		((secondX - lineData.start_point[0]) * dx + (secondY - lineData.start_point[1]) * dy) / lengthSquared;
+	std::vector<double> segmentStart(1);
+	std::vector<double> segmentEnd(1);
+	segmentStart[0] = Clamp01(std::min(firstProjection, secondProjection));
+	segmentEnd[0] = Clamp01(std::max(firstProjection, secondProjection));
+	if (segmentEnd[0] - segmentStart[0] <= 1.0e-6)
+	{
+		return false;
+	}
+
+	try
+	{
+		baseView->DependentDisplay()->ApplySegmentEdit(
+			boundaryCurve,
+			NXOpen::ViewDependentDisplayManager::FontInvisible,
+			NXOpen::ViewDependentDisplayManager::WidthObject,
+			segmentStart,
+			segmentEnd);
+		std::ostringstream log;
+		log << "[BendLineNotch] boundary break by arc intersection curveTag=" << boundaryCurve->Tag()
+			<< " first=(" << firstX << "," << firstY << ")"
+			<< " second=(" << secondX << "," << secondY << ")"
+			<< " segment=(" << segmentStart[0] << "," << segmentEnd[0] << ")";
+		BendNoteDebugLog(log.str());
+		return true;
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[BendLineNotch] boundary intersection segment edit failed: ") + ex.Message());
+	}
+	return false;
+}
+
+double DistancePointToRawLineSegment(
+	double pointX,
+	double pointY,
+	const UF_CURVE_line_t& lineData,
+	double& projection)
+{
+	const double dx = lineData.end_point[0] - lineData.start_point[0];
+	const double dy = lineData.end_point[1] - lineData.start_point[1];
+	const double lengthSquared = dx * dx + dy * dy;
+	if (lengthSquared <= 1.0e-12)
+	{
+		projection = 0.0;
+		const double ex = pointX - lineData.start_point[0];
+		const double ey = pointY - lineData.start_point[1];
+		return std::sqrt(ex * ex + ey * ey);
+	}
+	projection =
+		((pointX - lineData.start_point[0]) * dx + (pointY - lineData.start_point[1]) * dy) / lengthSquared;
+	const double clampedProjection = Clamp01(projection);
+	const double closestX = lineData.start_point[0] + dx * clampedProjection;
+	const double closestY = lineData.start_point[1] + dy * clampedProjection;
+	const double ex = pointX - closestX;
+	const double ey = pointY - closestY;
+	return std::sqrt(ex * ex + ey * ey);
+}
+
+NXOpen::Drawings::DraftingCurve* FindBoundaryCurveIntersectingNotchArc(
+	const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+	const std::vector<tag_t>& excludedCurveTags,
+	double firstX,
+	double firstY,
+	double secondX,
+	double secondY)
+{
+	NXOpen::Drawings::DraftingCurve* bestCurve = NULL;
+	double bestScore = 1.0e99;
+	const double intersectionTolerance = 0.08;
+	for (size_t i = 0; i < curves.size(); ++i)
+	{
+		if (curves[i] == NULL)
+		{
+			continue;
+		}
+		if (std::find(excludedCurveTags.begin(), excludedCurveTags.end(), curves[i]->Tag()) != excludedCurveTags.end())
+		{
+			continue;
+		}
+
+		UF_CURVE_line_t lineData;
+		if (UF_CURVE_ask_line_data(curves[i]->Tag(), &lineData) != 0)
+		{
+			continue;
+		}
+
+		double firstProjection = 0.0;
+		double secondProjection = 0.0;
+		const double firstDistance = DistancePointToRawLineSegment(firstX, firstY, lineData, firstProjection);
+		const double secondDistance = DistancePointToRawLineSegment(secondX, secondY, lineData, secondProjection);
+		if (firstDistance > intersectionTolerance || secondDistance > intersectionTolerance)
+		{
+			continue;
+		}
+		if (firstProjection < -0.02 || firstProjection > 1.02 || secondProjection < -0.02 || secondProjection > 1.02)
+		{
+			continue;
+		}
+
+		const double score = firstDistance + secondDistance;
+		if (score < bestScore)
+		{
+			bestScore = score;
+			bestCurve = curves[i];
+		}
+	}
+	return bestCurve;
+}
+
+struct BendLineNotchBoundaryCircleEdit
+{
+	NXOpen::Drawings::DraftingCurve* boundaryCurve;
+	std::vector<double> segmentStart;
+	std::vector<double> segmentEnd;
+	double centerX;
+	double centerY;
+	double radius;
+};
+
+struct BendLineNotchCircleEdit
+{
+	NXOpen::Arc* circle;
+	double centerX;
+	double centerY;
+	double radius;
+	double visibleAngle;
+	std::vector<double> intersectionAngles;
+};
+
+double NormalizeAngleDelta(double angle)
+{
+	while (angle <= -PI)
+	{
+		angle += 2.0 * PI;
+	}
+	while (angle > PI)
+	{
+		angle -= 2.0 * PI;
+	}
+	return angle;
+}
+
+double NormalizeAnglePositive(double angle)
+{
+	while (angle < 0.0)
+	{
+		angle += 2.0 * PI;
+	}
+	while (angle >= 2.0 * PI)
+	{
+		angle -= 2.0 * PI;
+	}
+	return angle;
+}
+
+void AddUniqueSortedParameter(std::vector<double>& values, double value)
+{
+	if (value < -1.0e-7 || value > 1.0 + 1.0e-7)
+	{
+		return;
+	}
+	value = Clamp01(value);
+	for (size_t i = 0; i < values.size(); ++i)
+	{
+		if (std::fabs(values[i] - value) <= 1.0e-6)
+		{
+			return;
+		}
+	}
+	values.push_back(value);
+	std::sort(values.begin(), values.end());
+}
+
+bool CollectBoundaryCircleEdit(
+	NXOpen::Drawings::DraftingCurve* curve,
+	double centerX,
+	double centerY,
+	double radius,
+	BendLineNotchBoundaryCircleEdit& edit,
+	std::vector<double>& intersectionAngles)
+{
+	if (curve == NULL || radius <= 0.0)
+	{
+		return false;
+	}
+
+	UF_CURVE_line_t lineData;
+	if (UF_CURVE_ask_line_data(curve->Tag(), &lineData) != 0)
+	{
+		return false;
+	}
+
+	const double dx = lineData.end_point[0] - lineData.start_point[0];
+	const double dy = lineData.end_point[1] - lineData.start_point[1];
+	const double lengthSquared = dx * dx + dy * dy;
+	if (lengthSquared <= 1.0e-12)
+	{
+		return false;
+	}
+
+	const double fx = lineData.start_point[0] - centerX;
+	const double fy = lineData.start_point[1] - centerY;
+	const double a = lengthSquared;
+	const double b = 2.0 * (fx * dx + fy * dy);
+	const double c = fx * fx + fy * fy - radius * radius;
+	const double discriminant = b * b - 4.0 * a * c;
+
+	std::vector<double> splitParameters;
+	splitParameters.push_back(0.0);
+	splitParameters.push_back(1.0);
+
+	if (discriminant >= -1.0e-7)
+	{
+		const double root = std::sqrt(std::max(0.0, discriminant));
+		const double t1 = (-b - root) / (2.0 * a);
+		const double t2 = (-b + root) / (2.0 * a);
+		const double roots[2] = { t1, t2 };
+		for (int rootIndex = 0; rootIndex < 2; ++rootIndex)
+		{
+			const double t = roots[rootIndex];
+			if (t < -1.0e-7 || t > 1.0 + 1.0e-7)
+			{
+				continue;
+			}
+			AddUniqueSortedParameter(splitParameters, t);
+			const double ix = lineData.start_point[0] + dx * Clamp01(t);
+			const double iy = lineData.start_point[1] + dy * Clamp01(t);
+			intersectionAngles.push_back(std::atan2(iy - centerY, ix - centerX));
+		}
+	}
+
+	edit.boundaryCurve = curve;
+	edit.centerX = centerX;
+	edit.centerY = centerY;
+	edit.radius = radius;
+	for (size_t i = 1; i < splitParameters.size(); ++i)
+	{
+		const double start = splitParameters[i - 1];
+		const double end = splitParameters[i];
+		if (end - start <= 1.0e-6)
+		{
+			continue;
+		}
+		const double mid = (start + end) * 0.5;
+		const double mx = lineData.start_point[0] + dx * mid - centerX;
+		const double my = lineData.start_point[1] + dy * mid - centerY;
+		if (mx * mx + my * my <= radius * radius + 1.0e-6)
+		{
+			edit.segmentStart.push_back(start);
+			edit.segmentEnd.push_back(end);
+		}
+	}
+
+	return !edit.segmentStart.empty();
+}
+
+bool HideBoundarySegmentsInsideNotchCircle(
+	NXOpen::Drawings::BaseView* baseView,
+	const BendLineNotchBoundaryCircleEdit& edit)
+{
+	if (baseView == NULL || edit.boundaryCurve == NULL || edit.segmentStart.empty())
+	{
+		return false;
+	}
+
+	try
+	{
+		baseView->DependentDisplay()->ApplySegmentEdit(
+			edit.boundaryCurve,
+			NXOpen::ViewDependentDisplayManager::FontInvisible,
+			NXOpen::ViewDependentDisplayManager::WidthObject,
+			edit.segmentStart,
+			edit.segmentEnd);
+		std::ostringstream log;
+		log << "[BendLineNotch] boundary break inside circle curveTag=" << edit.boundaryCurve->Tag()
+			<< " center=(" << edit.centerX << "," << edit.centerY << ")"
+			<< " radius=" << edit.radius
+			<< " hiddenSegments=" << edit.segmentStart.size();
+		for (size_t i = 0; i < edit.segmentStart.size(); ++i)
+		{
+			log << " hide" << i << "=(" << edit.segmentStart[i] << "," << edit.segmentEnd[i] << ")";
+		}
+		BendNoteDebugLog(log.str());
+		return true;
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[BendLineNotch] boundary circle segment edit failed: ") + ex.Message());
+	}
+	return false;
+}
+
+bool HideCircleSegmentsOutsideVisibleNotchArc(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Arc* circle,
+	const std::vector<double>& intersectionAngles,
+	double visibleAngle)
+{
+	if (baseView == NULL || circle == NULL)
+	{
+		return false;
+	}
+
+	std::vector<double> parameters;
+	for (size_t i = 0; i < intersectionAngles.size(); ++i)
+	{
+		const double parameter = NormalizeAnglePositive(intersectionAngles[i]) / (2.0 * PI);
+		AddUniqueSortedParameter(parameters, parameter >= 1.0 - 1.0e-7 ? 0.0 : parameter);
+	}
+	if (parameters.size() < 2)
+	{
+		return false;
+	}
+
+	int keepIndex = -1;
+	double bestVisibleScore = -1.0e99;
+	for (size_t i = 0; i < parameters.size(); ++i)
+	{
+		const double start = parameters[i];
+		const double end = parameters[(i + 1) % parameters.size()];
+		const double length = end > start ? end - start : end + 1.0 - start;
+		if (length <= 1.0e-6)
+		{
+			continue;
+		}
+		double midParameter = start + length * 0.5;
+		if (midParameter >= 1.0)
+		{
+			midParameter -= 1.0;
+		}
+		const double midAngle = midParameter * 2.0 * PI;
+		const double score = std::cos(NormalizeAngleDelta(midAngle - visibleAngle));
+		if (score > bestVisibleScore)
+		{
+			bestVisibleScore = score;
+			keepIndex = static_cast<int>(i);
+		}
+	}
+	if (keepIndex < 0)
+	{
+		return false;
+	}
+
+	const double keepStart = parameters[keepIndex];
+	const double keepEnd = parameters[(keepIndex + 1) % parameters.size()];
+	const bool keepWrapsZero = keepEnd < keepStart;
+	std::vector<double> segmentStart;
+	std::vector<double> segmentEnd;
+	if (keepWrapsZero)
+	{
+		if (keepStart - keepEnd > 1.0e-6)
+		{
+			segmentStart.push_back(keepEnd);
+			segmentEnd.push_back(keepStart);
+		}
+	}
+	else
+	{
+		if (keepStart > 1.0e-6)
+		{
+			segmentStart.push_back(0.0);
+			segmentEnd.push_back(keepStart);
+		}
+		if (1.0 - keepEnd > 1.0e-6)
+		{
+			segmentStart.push_back(keepEnd);
+			segmentEnd.push_back(1.0);
+		}
+	}
+	if (segmentStart.empty())
+	{
+		return false;
+	}
+
+	try
+	{
+		baseView->DependentDisplay()->ApplySegmentEdit(
+			circle,
+			NXOpen::ViewDependentDisplayManager::FontInvisible,
+			NXOpen::ViewDependentDisplayManager::WidthObject,
+			segmentStart,
+			segmentEnd);
+		std::ostringstream log;
+		log << "[BendLineNotch] circle break by intersections arcTag=" << circle->Tag()
+			<< " intersectionAngles=" << intersectionAngles.size()
+			<< " keep=(" << keepStart << "," << keepEnd << ")"
+			<< " wrap=" << (keepWrapsZero ? "true" : "false")
+			<< " hiddenSegments=" << segmentStart.size();
+		BendNoteDebugLog(log.str());
+		return true;
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[BendLineNotch] circle segment edit failed: ") + ex.Message());
+	}
+	return false;
+}
+
+void AddNotchCirclePairIntersectionAngles(
+	BendLineNotchCircleEdit& first,
+	BendLineNotchCircleEdit& second)
+{
+	if (first.circle == NULL || second.circle == NULL || first.radius <= 0.0 || second.radius <= 0.0)
+	{
+		return;
+	}
+
+	const double dx = second.centerX - first.centerX;
+	const double dy = second.centerY - first.centerY;
+	const double distanceSquared = dx * dx + dy * dy;
+	if (distanceSquared <= 1.0e-12)
+	{
+		return;
+	}
+
+	const double distance = std::sqrt(distanceSquared);
+	const double tolerance = 1.0e-6;
+	if (distance > first.radius + second.radius + tolerance ||
+		distance < std::fabs(first.radius - second.radius) - tolerance)
+	{
+		return;
+	}
+
+	const double a = (first.radius * first.radius - second.radius * second.radius + distanceSquared) / (2.0 * distance);
+	const double heightSquared = first.radius * first.radius - a * a;
+	if (heightSquared < -tolerance)
+	{
+		return;
+	}
+	const double height = std::sqrt(std::max(0.0, heightSquared));
+	const double ux = dx / distance;
+	const double uy = dy / distance;
+	const double baseX = first.centerX + a * ux;
+	const double baseY = first.centerY + a * uy;
+	const double px = -uy * height;
+	const double py = ux * height;
+
+	const double intersectionXs[2] = { baseX + px, baseX - px };
+	const double intersectionYs[2] = { baseY + py, baseY - py };
+	for (int i = 0; i < 2; ++i)
+	{
+		if (i == 1 && height <= tolerance)
+		{
+			continue;
+		}
+		first.intersectionAngles.push_back(
+			std::atan2(intersectionYs[i] - first.centerY, intersectionXs[i] - first.centerX));
+		second.intersectionAngles.push_back(
+			std::atan2(intersectionYs[i] - second.centerY, intersectionXs[i] - second.centerX));
+	}
+
+	std::ostringstream log;
+	log << "[BendLineNotch] circle-circle intersections"
+		<< " firstArcTag=" << first.circle->Tag()
+		<< " secondArcTag=" << second.circle->Tag()
+		<< " points=" << (height <= tolerance ? 1 : 2);
+	BendNoteDebugLog(log.str());
+}
+
+void HideNotchCircleSegmentsAfterIntersections(
+	NXOpen::Drawings::BaseView* baseView,
+	std::vector<BendLineNotchCircleEdit>& circleEdits)
+{
+	for (size_t i = 0; i < circleEdits.size(); ++i)
+	{
+		for (size_t j = i + 1; j < circleEdits.size(); ++j)
+		{
+			AddNotchCirclePairIntersectionAngles(circleEdits[i], circleEdits[j]);
+		}
+	}
+
+	for (size_t i = 0; i < circleEdits.size(); ++i)
+	{
+		HideCircleSegmentsOutsideVisibleNotchArc(
+			baseView,
+			circleEdits[i].circle,
+			circleEdits[i].intersectionAngles,
+			circleEdits[i].visibleAngle);
+	}
+}
+
+std::vector<BendLineNotchBoundaryCircleEdit> MergeBoundaryCircleEdits(
+	const std::vector<BendLineNotchBoundaryCircleEdit>& edits)
+{
+	std::vector<BendLineNotchBoundaryCircleEdit> merged;
+	for (size_t i = 0; i < edits.size(); ++i)
+	{
+		if (edits[i].boundaryCurve == NULL || edits[i].segmentStart.empty())
+		{
+			continue;
+		}
+
+		size_t targetIndex = merged.size();
+		for (size_t j = 0; j < merged.size(); ++j)
+		{
+			if (merged[j].boundaryCurve == edits[i].boundaryCurve)
+			{
+				targetIndex = j;
+				break;
+			}
+		}
+		if (targetIndex == merged.size())
+		{
+			merged.push_back(edits[i]);
+			continue;
+		}
+
+		for (size_t segmentIndex = 0; segmentIndex < edits[i].segmentStart.size(); ++segmentIndex)
+		{
+			merged[targetIndex].segmentStart.push_back(edits[i].segmentStart[segmentIndex]);
+			merged[targetIndex].segmentEnd.push_back(edits[i].segmentEnd[segmentIndex]);
+		}
+	}
+
+	for (size_t i = 0; i < merged.size(); ++i)
+	{
+		std::vector<std::pair<double, double> > segments;
+		for (size_t segmentIndex = 0; segmentIndex < merged[i].segmentStart.size(); ++segmentIndex)
+		{
+			const double start = Clamp01(std::min(merged[i].segmentStart[segmentIndex], merged[i].segmentEnd[segmentIndex]));
+			const double end = Clamp01(std::max(merged[i].segmentStart[segmentIndex], merged[i].segmentEnd[segmentIndex]));
+			if (end - start > 1.0e-6)
+			{
+				segments.push_back(std::make_pair(start, end));
+			}
+		}
+		std::sort(segments.begin(), segments.end());
+		merged[i].segmentStart.clear();
+		merged[i].segmentEnd.clear();
+		for (size_t segmentIndex = 0; segmentIndex < segments.size(); ++segmentIndex)
+		{
+			if (!merged[i].segmentStart.empty() && segments[segmentIndex].first <= merged[i].segmentEnd.back() + 1.0e-6)
+			{
+				merged[i].segmentEnd.back() = std::max(merged[i].segmentEnd.back(), segments[segmentIndex].second);
+			}
+			else
+			{
+				merged[i].segmentStart.push_back(segments[segmentIndex].first);
+				merged[i].segmentEnd.push_back(segments[segmentIndex].second);
+			}
+		}
+	}
+	return merged;
+}
+
+bool GetNotchArcAnglesFromBoundaryIntersections(
+	const std::vector<double>& intersectionAngles,
+	double visibleAngle,
+	double fallbackStartAngle,
+	double fallbackEndAngle,
+	double& startAngle,
+	double& endAngle)
+{
+	double negativeDelta = -1.0e99;
+	double positiveDelta = 1.0e99;
+	for (size_t i = 0; i < intersectionAngles.size(); ++i)
+	{
+		const double delta = NormalizeAngleDelta(intersectionAngles[i] - visibleAngle);
+		if (delta < -1.0e-5 && delta > negativeDelta)
+		{
+			negativeDelta = delta;
+		}
+		else if (delta > 1.0e-5 && delta < positiveDelta)
+		{
+			positiveDelta = delta;
+		}
+	}
+	if (negativeDelta < -1.0e90 || positiveDelta > 1.0e90)
+	{
+		startAngle = fallbackStartAngle;
+		endAngle = fallbackEndAngle;
+		return false;
+	}
+
+	startAngle = visibleAngle + negativeDelta;
+	endAngle = visibleAngle + positiveDelta;
+	if (endAngle <= startAngle)
+	{
+		endAngle += 2.0 * PI;
+	}
+	return true;
+}
+
+void AddBendLineNotchGroup(
+	std::vector<BendLineNotchGroup>& groups,
+	double startX,
+	double startY,
+	double startZ,
+	double endX,
+	double endY,
+	double endZ,
+	tag_t curveTag)
+{
+	double dirX = endX - startX;
+	double dirY = endY - startY;
+	const double length = std::sqrt(dirX * dirX + dirY * dirY);
+	if (length <= 1.0e-6)
+	{
+		return;
+	}
+	dirX /= length;
+	dirY /= length;
+	if (dirX < -1.0e-6 || (std::fabs(dirX) <= 1.0e-6 && dirY < 0.0))
+	{
+		dirX = -dirX;
+		dirY = -dirY;
+	}
+
+	const double lineTolerance = 0.05;
+	for (size_t i = 0; i < groups.size(); ++i)
+	{
+		const double dot = std::fabs(groups[i].dirX * dirX + groups[i].dirY * dirY);
+		const double startDistance = PointToLineDistanceByNormal(startX, startY, groups[i].dirX, groups[i].dirY, groups[i].normalOffset);
+		const double endDistance = PointToLineDistanceByNormal(endX, endY, groups[i].dirX, groups[i].dirY, groups[i].normalOffset);
+		if (dot < 0.9999 || startDistance > lineTolerance || endDistance > lineTolerance)
+		{
+			continue;
+		}
+
+		const double startProjection = Projection2d(startX, startY, groups[i].dirX, groups[i].dirY);
+		const double endProjection = Projection2d(endX, endY, groups[i].dirX, groups[i].dirY);
+		if (startProjection < groups[i].minProjection)
+		{
+			groups[i].minProjection = startProjection;
+			groups[i].minPoint.x = startX;
+			groups[i].minPoint.y = startY;
+			groups[i].minPoint.z = startZ;
+		}
+		if (startProjection > groups[i].maxProjection)
+		{
+			groups[i].maxProjection = startProjection;
+			groups[i].maxPoint.x = startX;
+			groups[i].maxPoint.y = startY;
+			groups[i].maxPoint.z = startZ;
+		}
+		if (endProjection < groups[i].minProjection)
+		{
+			groups[i].minProjection = endProjection;
+			groups[i].minPoint.x = endX;
+			groups[i].minPoint.y = endY;
+			groups[i].minPoint.z = endZ;
+		}
+		if (endProjection > groups[i].maxProjection)
+		{
+			groups[i].maxProjection = endProjection;
+			groups[i].maxPoint.x = endX;
+			groups[i].maxPoint.y = endY;
+			groups[i].maxPoint.z = endZ;
+		}
+		groups[i].curveTags.push_back(curveTag);
+		return;
+	}
+
+	BendLineNotchGroup group;
+	group.dirX = dirX;
+	group.dirY = dirY;
+	group.normalOffset = NormalOffset2d(startX, startY, dirX, dirY);
+	const double startProjection = Projection2d(startX, startY, dirX, dirY);
+	const double endProjection = Projection2d(endX, endY, dirX, dirY);
+	if (startProjection <= endProjection)
+	{
+		group.minProjection = startProjection;
+		group.maxProjection = endProjection;
+		group.minPoint.x = startX;
+		group.minPoint.y = startY;
+		group.minPoint.z = startZ;
+		group.maxPoint.x = endX;
+		group.maxPoint.y = endY;
+		group.maxPoint.z = endZ;
+	}
+	else
+	{
+		group.minProjection = endProjection;
+		group.maxProjection = startProjection;
+		group.minPoint.x = endX;
+		group.minPoint.y = endY;
+		group.minPoint.z = endZ;
+		group.maxPoint.x = startX;
+		group.maxPoint.y = startY;
+		group.maxPoint.z = startZ;
+	}
+	group.curveTags.push_back(curveTag);
+	groups.push_back(group);
+}
+
+std::vector<BendLineNotchGroup> BuildBendLineNotchGroups(
+	NXOpen::Drawings::BaseView* baseView,
+	const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+	const std::vector<NXOpen::Features::FlatPattern::ObjectDataFace>& objects,
+	const char* directionName)
+{
+	std::vector<BendLineNotchGroup> groups;
+	std::unordered_set<tag_t> usedFlatPatternCurveTags;
+	for (size_t i = 0; i < objects.size(); ++i)
+	{
+		NXOpen::Curve* flatPatternCurve = objects[i].FlatPatternObject;
+		if (flatPatternCurve == NULL || flatPatternCurve->Tag() == NULL_TAG)
+		{
+			continue;
+		}
+		if (!usedFlatPatternCurveTags.insert(flatPatternCurve->Tag()).second)
+		{
+			continue;
+		}
+
+		NXOpen::Drawings::DraftingCurve* draftingCurve =
+			FindDraftingCurveForFlatPatternCurve(curves, flatPatternCurve);
+		if (draftingCurve == NULL)
+		{
+			std::ostringstream log;
+			log << "[BendLineNotch] no drafting curve direction=" << directionName
+				<< " flatCurveTag=" << flatPatternCurve->Tag();
+			BendNoteDebugLog(log.str());
+			continue;
+		}
+
+		UF_CURVE_line_t lineData;
+		if (UF_CURVE_ask_line_data(draftingCurve->Tag(), &lineData) != 0)
+		{
+			std::ostringstream log;
+			log << "[BendLineNotch] cannot read line direction=" << directionName
+				<< " curveTag=" << draftingCurve->Tag();
+			BendNoteDebugLog(log.str());
+			continue;
+		}
+		AddBendLineNotchGroup(
+			groups,
+			lineData.start_point[0],
+			lineData.start_point[1],
+			lineData.start_point[2],
+			lineData.end_point[0],
+			lineData.end_point[1],
+			lineData.end_point[2],
+			draftingCurve->Tag());
+	}
+	return groups;
+}
+
+std::vector<NXOpen::Drawings::DraftingCurve*> CollectExteriorDraftingCurvesForFlatPattern(
+	NXOpen::Features::FlatPattern* flatPattern,
+	const std::vector<NXOpen::Drawings::DraftingCurve*>& curves)
+{
+	std::vector<NXOpen::Drawings::DraftingCurve*> exteriorDraftingCurves;
+	if (flatPattern == NULL || curves.empty())
+	{
+		return exteriorDraftingCurves;
+	}
+
+	std::vector<NXOpen::Features::FlatPattern::ObjectDataEdge> exteriorObjects;
+	try
+	{
+		flatPattern->GetExteriorCurves(exteriorObjects);
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[BendLineNotch] get exterior curves failed: ") + ex.Message());
+		return exteriorDraftingCurves;
+	}
+
+	size_t missingDraftingCurveCount = 0;
+	std::unordered_set<tag_t> usedDraftingCurveTags;
+	for (size_t i = 0; i < exteriorObjects.size(); ++i)
+	{
+		NXOpen::Curve* flatPatternCurve = exteriorObjects[i].FlatPatternObject;
+		if (flatPatternCurve == NULL || flatPatternCurve->Tag() == NULL_TAG)
+		{
+			++missingDraftingCurveCount;
+			continue;
+		}
+
+		NXOpen::Drawings::DraftingCurve* draftingCurve =
+			FindDraftingCurveForFlatPatternCurve(curves, flatPatternCurve);
+		if (draftingCurve == NULL || draftingCurve->Tag() == NULL_TAG)
+		{
+			++missingDraftingCurveCount;
+			continue;
+		}
+		if (!usedDraftingCurveTags.insert(draftingCurve->Tag()).second)
+		{
+			continue;
+		}
+		exteriorDraftingCurves.push_back(draftingCurve);
+	}
+
+	std::ostringstream log;
+	log << "[BendLineNotch] exteriorCurves objects=" << exteriorObjects.size()
+		<< " mapped=" << exteriorDraftingCurves.size()
+		<< " missing=" << missingDraftingCurveCount;
+	BendNoteDebugLog(log.str());
+	return exteriorDraftingCurves;
+}
+
+bool CreateNotchesForBendLineGroups(
+	NXOpen::Drawings::BaseView* baseView,
+	const std::vector<NXOpen::Drawings::DraftingCurve*>& exteriorDraftingCurves,
+	const std::vector<BendLineNotchGroup>& groups,
+	double diameter,
+	const char* directionName,
+	std::unordered_set<std::string>& usedEndpointKeys)
+{
+	if (baseView == NULL || workPart == NULL || diameter <= 0.0 || groups.empty())
+	{
+		return false;
+	}
+	if (exteriorDraftingCurves.empty())
+	{
+		BendNoteDebugLog("[BendLineNotch] no exterior drafting curves for notch boundary");
+		return false;
+	}
+
+	NXOpen::NXMatrix* wcsMatrix = NULL;
+	try
+	{
+		wcsMatrix = dynamic_cast<NXOpen::NXMatrix*>(workPart->NXMatrices()->FindObject("WCS"));
+	}
+	catch (...)
+	{
+		wcsMatrix = NULL;
+	}
+	if (wcsMatrix == NULL)
+	{
+		BendNoteDebugLog("[BendLineNotch] WCS matrix not found");
+		return false;
+	}
+
+	const double radius = std::max(0.05, diameter * 0.5);
+	std::vector<tag_t> allBendLineCurveTags;
+	for (size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+	{
+		allBendLineCurveTags.insert(
+			allBendLineCurveTags.end(),
+			groups[groupIndex].curveTags.begin(),
+			groups[groupIndex].curveTags.end());
+	}
+	bool createdAny = false;
+	std::vector<BendLineNotchBoundaryCircleEdit> boundaryEdits;
+	std::vector<BendLineNotchCircleEdit> circleEdits;
+
+	try
+	{
+		baseView->Expand();
+		for (size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+		{
+			const BendLineNotchEndpoint endpoints[2] = { groups[groupIndex].minPoint, groups[groupIndex].maxPoint };
+			for (int endpointIndex = 0; endpointIndex < 2; ++endpointIndex)
+			{
+				const double x = endpoints[endpointIndex].x;
+				const double y = endpoints[endpointIndex].y;
+				std::ostringstream keyStream;
+				keyStream << directionName << "|"
+					<< static_cast<long long>(std::llround(x * 1000.0)) << "|"
+					<< static_cast<long long>(std::llround(y * 1000.0));
+				if (!usedEndpointKeys.insert(keyStream.str()).second)
+				{
+					continue;
+				}
+
+				double startAngle = 0.0;
+				double endAngle = PI;
+				GetVisibleArcAnglesForBendLineEnd(
+					groups[groupIndex].dirX,
+					groups[groupIndex].dirY,
+					endpointIndex == 0,
+					startAngle,
+					endAngle);
+				const double visibleAngle = endpointIndex == 0
+					? std::atan2(groups[groupIndex].dirY, groups[groupIndex].dirX)
+					: std::atan2(groups[groupIndex].dirY, groups[groupIndex].dirX) + PI;
+				std::vector<double> intersectionAngles;
+				std::vector<BendLineNotchBoundaryCircleEdit> endpointBoundaryEdits;
+				NXOpen::Drawings::DraftingCurve* colorSourceCurve = NULL;
+				size_t skippedBendLine = 0;
+				size_t skippedUnsupportedCurve = 0;
+				for (size_t curveIndex = 0; curveIndex < exteriorDraftingCurves.size(); ++curveIndex)
+				{
+					NXOpen::Drawings::DraftingCurve* exteriorCurve = exteriorDraftingCurves[curveIndex];
+					if (exteriorCurve == NULL)
+					{
+						continue;
+					}
+					if (std::find(
+						allBendLineCurveTags.begin(),
+						allBendLineCurveTags.end(),
+						exteriorCurve->Tag()) != allBendLineCurveTags.end())
+					{
+						++skippedBendLine;
+						continue;
+					}
+
+					BendLineNotchBoundaryCircleEdit edit;
+					if (!CollectBoundaryCircleEdit(
+						exteriorCurve,
+						x,
+						y,
+						radius,
+						edit,
+						intersectionAngles))
+					{
+						++skippedUnsupportedCurve;
+						continue;
+					}
+					if (colorSourceCurve == NULL)
+					{
+						colorSourceCurve = exteriorCurve;
+					}
+					endpointBoundaryEdits.push_back(edit);
+				}
+				const bool arcLimitedByBoundary = false;
+				NXOpen::Arc* arc = workPart->Curves()->CreateArc(
+					NXOpen::Point3d(x, y, endpoints[endpointIndex].z),
+					wcsMatrix,
+					radius,
+					0.0,
+					2.0 * PI);
+				if (arc == NULL)
+				{
+					continue;
+				}
+				BendLineNotchCircleEdit circleEdit;
+				circleEdit.circle = arc;
+				circleEdit.centerX = x;
+				circleEdit.centerY = y;
+				circleEdit.radius = radius;
+				circleEdit.visibleAngle = visibleAngle;
+				circleEdit.intersectionAngles = intersectionAngles;
+				circleEdits.push_back(circleEdit);
+				if (colorSourceCurve != NULL)
+				{
+					UF_OBJ_disp_props_t boundaryDisplayProperties;
+					if (UF_OBJ_ask_display_properties(colorSourceCurve->Tag(), &boundaryDisplayProperties) == 0)
+					{
+						UF_OBJ_set_color(arc->Tag(), boundaryDisplayProperties.color);
+					}
+				}
+
+				if (!endpointBoundaryEdits.empty())
+				{
+					boundaryEdits.insert(boundaryEdits.end(), endpointBoundaryEdits.begin(), endpointBoundaryEdits.end());
+				}
+				else
+				{
+					std::ostringstream noBoundaryLog;
+					noBoundaryLog << "[BendLineNotch] no boundary inside circle direction=" << directionName
+						<< " point=(" << x << "," << y << ")"
+						<< " radius=" << radius;
+					BendNoteDebugLog(noBoundaryLog.str());
+				}
+				createdAny = true;
+
+				std::ostringstream log;
+				log << "[BendLineNotch] create direction=" << directionName
+					<< " group=" << groupIndex
+					<< " point=(" << x << "," << y << ")"
+					<< " diameter=" << diameter
+					<< " sourceCurves=" << groups[groupIndex].curveTags.size()
+					<< " arcTag=" << arc->Tag()
+					<< " boundaryEdits=" << endpointBoundaryEdits.size()
+					<< " intersectionAngles=" << intersectionAngles.size()
+					<< " skippedBendLine=" << skippedBendLine
+					<< " skippedUnsupportedCurve=" << skippedUnsupportedCurve
+					<< " exteriorCandidates=" << exteriorDraftingCurves.size()
+					<< " arcLimitedByBoundary=" << (arcLimitedByBoundary ? "true" : "false")
+					<< " bendDir=(" << groups[groupIndex].dirX << "," << groups[groupIndex].dirY << ")"
+					<< " endpoint=" << (endpointIndex == 0 ? "min" : "max")
+					<< " createCircle=true"
+					<< " visibleAngle=" << visibleAngle;
+				BendNoteDebugLog(log.str());
+			}
+		}
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[BendLineNotch] create arc failed: ") + ex.Message());
+	}
+
+	HideNotchCircleSegmentsAfterIntersections(baseView, circleEdits);
+
+	try
+	{
+		workPart->Views()->UnexpandWork();
+	}
+	catch (...)
+	{
+	}
+
+	const std::vector<BendLineNotchBoundaryCircleEdit> mergedBoundaryEdits =
+		MergeBoundaryCircleEdits(boundaryEdits);
+	for (size_t i = 0; i < mergedBoundaryEdits.size(); ++i)
+	{
+		HideBoundarySegmentsInsideNotchCircle(
+			baseView,
+			mergedBoundaryEdits[i]);
+	}
+
+	return createdAny;
 }
 }
 
@@ -5750,6 +6917,7 @@ bool CreateFlatPatternBendNotes(
 bool BreakFlatPatternBendLines(
 	NXOpen::Drawings::BaseView* baseView,
 	NXOpen::Features::FlatPattern* flatPattern,
+	double edgeDistance,
 	double upKeepLength,
 	double downKeepLength)
 {
@@ -5774,12 +6942,14 @@ bool BreakFlatPatternBendLines(
 		flatPattern->GetBendUpCenterLines(upObjects);
 		std::ostringstream log;
 		log << "[BendLineBreak] upObjects=" << upObjects.size()
+			<< " edgeDistance=" << edgeDistance
 			<< " keep=" << upKeepLength;
 		BendNoteDebugLog(log.str());
 		editedAny = BreakFlatPatternBendLinesForObjects(
 			baseView,
 			curves,
 			upObjects,
+			std::max(0.0, edgeDistance),
 			std::max(0.1, upKeepLength),
 			"up",
 			usedFlatPatternCurveTags) || editedAny;
@@ -5795,12 +6965,14 @@ bool BreakFlatPatternBendLines(
 		flatPattern->GetBendDownCenterLines(downObjects);
 		std::ostringstream log;
 		log << "[BendLineBreak] downObjects=" << downObjects.size()
+			<< " edgeDistance=" << edgeDistance
 			<< " keep=" << downKeepLength;
 		BendNoteDebugLog(log.str());
 		editedAny = BreakFlatPatternBendLinesForObjects(
 			baseView,
 			curves,
 			downObjects,
+			std::max(0.0, edgeDistance),
 			std::max(0.1, downKeepLength),
 			"down",
 			usedFlatPatternCurveTags) || editedAny;
@@ -5812,6 +6984,93 @@ bool BreakFlatPatternBendLines(
 
 	BendNoteDebugLog(std::string("[BendLineBreak] editedAny=") + (editedAny ? "true" : "false"));
 	return editedAny;
+}
+
+bool CreateFlatPatternBendLineNotches(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Features::FlatPattern* flatPattern,
+	bool upEnabled,
+	double upDiameter,
+	bool downEnabled,
+	double downDiameter)
+{
+	if (baseView == NULL || flatPattern == NULL || (!upEnabled && !downEnabled))
+	{
+		BendNoteDebugLog("[BendLineNotch] skipped disabled or missing input");
+		return false;
+	}
+
+	const std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(baseView);
+	if (curves.empty())
+	{
+		BendNoteDebugLog("[BendLineNotch] no drafting curves");
+		return false;
+	}
+
+	const std::vector<NXOpen::Drawings::DraftingCurve*> exteriorDraftingCurves =
+		CollectExteriorDraftingCurvesForFlatPattern(flatPattern, curves);
+	if (exteriorDraftingCurves.empty())
+	{
+		BendNoteDebugLog("[BendLineNotch] exterior drafting curves empty");
+		return false;
+	}
+
+	bool createdAny = false;
+	std::unordered_set<std::string> usedEndpointKeys;
+	if (upEnabled)
+	{
+		try
+		{
+			std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> upObjects;
+			flatPattern->GetBendUpCenterLines(upObjects);
+			std::vector<BendLineNotchGroup> groups = BuildBendLineNotchGroups(baseView, curves, upObjects, "up");
+			std::ostringstream log;
+			log << "[BendLineNotch] upObjects=" << upObjects.size()
+				<< " groups=" << groups.size()
+				<< " diameter=" << upDiameter;
+			BendNoteDebugLog(log.str());
+			createdAny = CreateNotchesForBendLineGroups(
+				baseView,
+				exteriorDraftingCurves,
+				groups,
+				std::max(0.1, upDiameter),
+				"up",
+				usedEndpointKeys) || createdAny;
+		}
+		catch (const NXOpen::NXException& ex)
+		{
+			BendNoteDebugLog(std::string("[BendLineNotch] get bend up failed: ") + ex.Message());
+		}
+	}
+
+	if (downEnabled)
+	{
+		try
+		{
+			std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> downObjects;
+			flatPattern->GetBendDownCenterLines(downObjects);
+			std::vector<BendLineNotchGroup> groups = BuildBendLineNotchGroups(baseView, curves, downObjects, "down");
+			std::ostringstream log;
+			log << "[BendLineNotch] downObjects=" << downObjects.size()
+				<< " groups=" << groups.size()
+				<< " diameter=" << downDiameter;
+			BendNoteDebugLog(log.str());
+			createdAny = CreateNotchesForBendLineGroups(
+				baseView,
+				exteriorDraftingCurves,
+				groups,
+				std::max(0.1, downDiameter),
+				"down",
+				usedEndpointKeys) || createdAny;
+		}
+		catch (const NXOpen::NXException& ex)
+		{
+			BendNoteDebugLog(std::string("[BendLineNotch] get bend down failed: ") + ex.Message());
+		}
+	}
+
+	BendNoteDebugLog(std::string("[BendLineNotch] createdAny=") + (createdAny ? "true" : "false"));
+	return createdAny;
 }
 
 bool CreateFlatPatternHoleAttributeNotes(

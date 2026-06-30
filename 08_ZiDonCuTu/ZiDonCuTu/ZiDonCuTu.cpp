@@ -1194,6 +1194,11 @@ static void SaveZiDonCuTuDialogState(
 	NXOpen::BlockStyler::Toggle* bendNoteToggleBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendNoteTextHeightBlock,
 	NXOpen::BlockStyler::Toggle* breakBendLineToggleBlock,
+	NXOpen::BlockStyler::DoubleBlock* bendLineEdgeDistanceBlock,
+	NXOpen::BlockStyler::Toggle* bendLineUpNotchToggleBlock,
+	NXOpen::BlockStyler::DoubleBlock* bendLineUpNotchDiameterBlock,
+	NXOpen::BlockStyler::Toggle* bendLineDownNotchToggleBlock,
+	NXOpen::BlockStyler::DoubleBlock* bendLineDownNotchDiameterBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineUpKeepLengthBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineDownKeepLengthBlock,
 	NXOpen::BlockStyler::Enumeration* hiddenLineEnumBlock,
@@ -1223,6 +1228,11 @@ static void SaveZiDonCuTuDialogState(
 		file << "bend_note=" << (GetToggleBlockValue(bendNoteToggleBlock, false) ? 1 : 0) << "\r\n";
 		file << "bend_note_text_height=" << GetDoubleBlockValue(bendNoteTextHeightBlock, 2.0) << "\r\n";
 		file << "break_bend_line=" << (GetToggleBlockValue(breakBendLineToggleBlock, false) ? 1 : 0) << "\r\n";
+		file << "bend_line_edge_distance=" << GetDoubleBlockValue(bendLineEdgeDistanceBlock, 0.0) << "\r\n";
+		file << "bend_line_up_notch=" << (GetToggleBlockValue(bendLineUpNotchToggleBlock, false) ? 1 : 0) << "\r\n";
+		file << "bend_line_up_notch_diameter=" << GetDoubleBlockValue(bendLineUpNotchDiameterBlock, 1.0) << "\r\n";
+		file << "bend_line_down_notch=" << (GetToggleBlockValue(bendLineDownNotchToggleBlock, false) ? 1 : 0) << "\r\n";
+		file << "bend_line_down_notch_diameter=" << GetDoubleBlockValue(bendLineDownNotchDiameterBlock, 1.0) << "\r\n";
 		file << "bend_line_up_keep_length=" << GetDoubleBlockValue(bendLineUpKeepLengthBlock, 5.0) << "\r\n";
 		file << "bend_line_down_keep_length=" << GetDoubleBlockValue(bendLineDownKeepLengthBlock, 5.0) << "\r\n";
 		file << "hidden_line=" << EncodeConfigEscapes(GetEnumBlockUtf8Value(hiddenLineEnumBlock, "\xE6\x97\xA0")) << "\r\n";
@@ -1246,6 +1256,11 @@ static void RestoreZiDonCuTuDialogState(
 	NXOpen::BlockStyler::Toggle* bendNoteToggleBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendNoteTextHeightBlock,
 	NXOpen::BlockStyler::Toggle* breakBendLineToggleBlock,
+	NXOpen::BlockStyler::DoubleBlock* bendLineEdgeDistanceBlock,
+	NXOpen::BlockStyler::Toggle* bendLineUpNotchToggleBlock,
+	NXOpen::BlockStyler::DoubleBlock* bendLineUpNotchDiameterBlock,
+	NXOpen::BlockStyler::Toggle* bendLineDownNotchToggleBlock,
+	NXOpen::BlockStyler::DoubleBlock* bendLineDownNotchDiameterBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineUpKeepLengthBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineDownKeepLengthBlock,
 	NXOpen::BlockStyler::Enumeration* hiddenLineEnumBlock,
@@ -1289,6 +1304,26 @@ static void RestoreZiDonCuTuDialogState(
 		if (breakBendLineToggleBlock != NULL)
 		{
 			breakBendLineToggleBlock->SetValue(ConfigReadBool(path, "break_bend_line", GetToggleBlockValue(breakBendLineToggleBlock, false)));
+		}
+		if (bendLineEdgeDistanceBlock != NULL)
+		{
+			bendLineEdgeDistanceBlock->SetValue(std::max(0.0, ConfigReadDouble(path, "bend_line_edge_distance", bendLineEdgeDistanceBlock->Value())));
+		}
+		if (bendLineUpNotchToggleBlock != NULL)
+		{
+			bendLineUpNotchToggleBlock->SetValue(ConfigReadBool(path, "bend_line_up_notch", GetToggleBlockValue(bendLineUpNotchToggleBlock, false)));
+		}
+		if (bendLineUpNotchDiameterBlock != NULL)
+		{
+			bendLineUpNotchDiameterBlock->SetValue(std::max(0.1, ConfigReadDouble(path, "bend_line_up_notch_diameter", bendLineUpNotchDiameterBlock->Value())));
+		}
+		if (bendLineDownNotchToggleBlock != NULL)
+		{
+			bendLineDownNotchToggleBlock->SetValue(ConfigReadBool(path, "bend_line_down_notch", GetToggleBlockValue(bendLineDownNotchToggleBlock, false)));
+		}
+		if (bendLineDownNotchDiameterBlock != NULL)
+		{
+			bendLineDownNotchDiameterBlock->SetValue(std::max(0.1, ConfigReadDouble(path, "bend_line_down_notch_diameter", bendLineDownNotchDiameterBlock->Value())));
 		}
 		if (bendLineUpKeepLengthBlock != NULL)
 		{
@@ -1335,10 +1370,16 @@ static void UpdateBendNoteControls(
 
 static void UpdateBreakBendLineControls(
 	NXOpen::BlockStyler::Toggle* breakBendLineToggle,
+	NXOpen::BlockStyler::DoubleBlock* edgeDistanceBlock,
 	NXOpen::BlockStyler::DoubleBlock* upKeepLengthBlock,
 	NXOpen::BlockStyler::DoubleBlock* downKeepLengthBlock)
 {
 	const bool showKeepLength = GetToggleBlockValue(breakBendLineToggle, false);
+	if (edgeDistanceBlock != NULL)
+	{
+		edgeDistanceBlock->SetShow(showKeepLength);
+		edgeDistanceBlock->SetEnable(showKeepLength);
+	}
 	if (upKeepLengthBlock != NULL)
 	{
 		upKeepLengthBlock->SetShow(showKeepLength);
@@ -6396,6 +6437,19 @@ static bool TryCreateOuterCircleDiameterForView(
 	}
 }
 
+static void UpdateBendLineNotchControls(
+	NXOpen::BlockStyler::Toggle* notchToggle,
+	NXOpen::BlockStyler::DoubleBlock* diameterBlock)
+{
+	if (diameterBlock == NULL)
+	{
+		return;
+	}
+	const bool showDiameter = GetToggleBlockValue(notchToggle, false);
+	diameterBlock->SetShow(showDiameter);
+	diameterBlock->SetEnable(showDiameter);
+}
+
 static void CreateSimpleDimensionsForPendingGroup(
 	NXOpen::Part* workPart,
 	const PendingScaleRefit& pending)
@@ -9388,6 +9442,11 @@ void ZiDonCuTu::initialize_cb()
 		toggleBendNote = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendNote"));
 		doubleBendNoteTextHeight = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendNoteTextHeight"));
 		toggleBreakBendLine = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBreakBendLine1"));
+		doubleBendLineEdgeDistance = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineEdgeDistance"));
+		toggleBendLineUpNotch = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendLineUpNotch"));
+		doubleBendLineUpNotchDiameter = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineUpNotchDiameter"));
+		toggleBendLineDownNotch = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendLineDownNotch"));
+		doubleBendLineDownNotchDiameter = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineDownNotchDiameter"));
 		doubleBendLineUpKeepLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineUpKeepLength1"));
 		doubleBendLineDownKeepLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineDownKeepLength1"));
 		buttonNoteFormatConfig = dynamic_cast<NXOpen::BlockStyler::Button*>(theDialog->TopBlock()->FindBlock("buttonNoteFormatConfig"));
@@ -9475,6 +9534,18 @@ void ZiDonCuTu::dialogShown_cb()
 		{
 			doubleBendLineUpKeepLength->SetValue(5.0);
 		}
+		if (doubleBendLineEdgeDistance != NULL && doubleBendLineEdgeDistance->Value() < 0.0)
+		{
+			doubleBendLineEdgeDistance->SetValue(0.0);
+		}
+		if (doubleBendLineUpNotchDiameter != NULL && doubleBendLineUpNotchDiameter->Value() <= 0.0)
+		{
+			doubleBendLineUpNotchDiameter->SetValue(1.0);
+		}
+		if (doubleBendLineDownNotchDiameter != NULL && doubleBendLineDownNotchDiameter->Value() <= 0.0)
+		{
+			doubleBendLineDownNotchDiameter->SetValue(1.0);
+		}
 		if (doubleBendLineDownKeepLength != NULL && doubleBendLineDownKeepLength->Value() <= 0.0)
 		{
 			doubleBendLineDownKeepLength->SetValue(5.0);
@@ -9491,6 +9562,11 @@ void ZiDonCuTu::dialogShown_cb()
 			toggleBendNote,
 			doubleBendNoteTextHeight,
 			toggleBreakBendLine,
+			doubleBendLineEdgeDistance,
+			toggleBendLineUpNotch,
+			doubleBendLineUpNotchDiameter,
+			toggleBendLineDownNotch,
+			doubleBendLineDownNotchDiameter,
 			doubleBendLineUpKeepLength,
 			doubleBendLineDownKeepLength,
 			enum01,
@@ -9528,7 +9604,9 @@ void ZiDonCuTu::dialogShown_cb()
 		}
 		UpdateHoleMarkerControls(toggleHoleAttribute, stringHoleMarker);
 		UpdateBendNoteControls(toggleBendNote, doubleBendNoteTextHeight);
-		UpdateBreakBendLineControls(toggleBreakBendLine, doubleBendLineUpKeepLength, doubleBendLineDownKeepLength);
+		UpdateBreakBendLineControls(toggleBreakBendLine, doubleBendLineEdgeDistance, doubleBendLineUpKeepLength, doubleBendLineDownKeepLength);
+		UpdateBendLineNotchControls(toggleBendLineUpNotch, doubleBendLineUpNotchDiameter);
+		UpdateBendLineNotchControls(toggleBendLineDownNotch, doubleBendLineDownNotchDiameter);
 		if (enum01 != NULL)
 		{
 			enum01->SetShow(false);
@@ -9570,6 +9648,11 @@ int ZiDonCuTu::apply_cb()
 			toggleBendNote,
 			doubleBendNoteTextHeight,
 			toggleBreakBendLine,
+			doubleBendLineEdgeDistance,
+			toggleBendLineUpNotch,
+			doubleBendLineUpNotchDiameter,
+			toggleBendLineDownNotch,
+			doubleBendLineDownNotchDiameter,
 			doubleBendLineUpKeepLength,
 			doubleBendLineDownKeepLength,
 			enum01,
@@ -11072,7 +11155,46 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 		{
 			blockName = "toggleBreakBendLine";
 			phase = "toggleBreakBendLine";
-			UpdateBreakBendLineControls(toggleBreakBendLine, doubleBendLineUpKeepLength, doubleBendLineDownKeepLength);
+			UpdateBreakBendLineControls(toggleBreakBendLine, doubleBendLineEdgeDistance, doubleBendLineUpKeepLength, doubleBendLineDownKeepLength);
+		}
+		else if (block == doubleBendLineEdgeDistance)
+		{
+			blockName = "doubleBendLineEdgeDistance";
+			phase = "doubleBendLineEdgeDistance";
+			if (doubleBendLineEdgeDistance != NULL && doubleBendLineEdgeDistance->Value() < 0.0)
+			{
+				doubleBendLineEdgeDistance->SetValue(0.0);
+			}
+		}
+		else if (block == toggleBendLineUpNotch)
+		{
+			blockName = "toggleBendLineUpNotch";
+			phase = "toggleBendLineUpNotch";
+			UpdateBendLineNotchControls(toggleBendLineUpNotch, doubleBendLineUpNotchDiameter);
+		}
+		else if (block == doubleBendLineUpNotchDiameter)
+		{
+			blockName = "doubleBendLineUpNotchDiameter";
+			phase = "doubleBendLineUpNotchDiameter";
+			if (doubleBendLineUpNotchDiameter != NULL && doubleBendLineUpNotchDiameter->Value() <= 0.0)
+			{
+				doubleBendLineUpNotchDiameter->SetValue(1.0);
+			}
+		}
+		else if (block == toggleBendLineDownNotch)
+		{
+			blockName = "toggleBendLineDownNotch";
+			phase = "toggleBendLineDownNotch";
+			UpdateBendLineNotchControls(toggleBendLineDownNotch, doubleBendLineDownNotchDiameter);
+		}
+		else if (block == doubleBendLineDownNotchDiameter)
+		{
+			blockName = "doubleBendLineDownNotchDiameter";
+			phase = "doubleBendLineDownNotchDiameter";
+			if (doubleBendLineDownNotchDiameter != NULL && doubleBendLineDownNotchDiameter->Value() <= 0.0)
+			{
+				doubleBendLineDownNotchDiameter->SetValue(1.0);
+			}
 		}
 		else if (block == doubleBendLineUpKeepLength)
 		{
@@ -14581,8 +14703,13 @@ int ZiDonCuTu::aabb_cb()
 				const bool bendNoteEnabled = GetToggleBlockValue(toggleBendNote, false);
 				const double bendNoteTextHeight = std::max(0.1, GetDoubleBlockValue(doubleBendNoteTextHeight, 2.0));
 				const bool breakBendLineEnabled = GetToggleBlockValue(toggleBreakBendLine, false);
+				const double bendLineEdgeDistance = std::max(0.0, GetDoubleBlockValue(doubleBendLineEdgeDistance, 0.0));
 				const double bendLineUpKeepLength = std::max(0.1, GetDoubleBlockValue(doubleBendLineUpKeepLength, 5.0));
 				const double bendLineDownKeepLength = std::max(0.1, GetDoubleBlockValue(doubleBendLineDownKeepLength, 5.0));
+				const bool bendLineUpNotchEnabled = GetToggleBlockValue(toggleBendLineUpNotch, false);
+				const double bendLineUpNotchDiameter = std::max(0.1, GetDoubleBlockValue(doubleBendLineUpNotchDiameter, 1.0));
+				const bool bendLineDownNotchEnabled = GetToggleBlockValue(toggleBendLineDownNotch, false);
+				const double bendLineDownNotchDiameter = std::max(0.1, GetDoubleBlockValue(doubleBendLineDownNotchDiameter, 1.0));
 				const std::string holeMarkerStart = GetStringBlockValue(stringHoleMarker, "A");
 				{
 					std::ostringstream holeLog;
@@ -14592,8 +14719,13 @@ int ZiDonCuTu::aabb_cb()
 						<< " bendNoteEnabled=" << (bendNoteEnabled ? "true" : "false")
 						<< " bendNoteTextHeight=" << bendNoteTextHeight
 						<< " breakBendLineEnabled=" << (breakBendLineEnabled ? "true" : "false")
+						<< " bendLineEdgeDistance=" << bendLineEdgeDistance
 						<< " bendLineUpKeepLength=" << bendLineUpKeepLength
 						<< " bendLineDownKeepLength=" << bendLineDownKeepLength
+						<< " bendLineUpNotchEnabled=" << (bendLineUpNotchEnabled ? "true" : "false")
+						<< " bendLineUpNotchDiameter=" << bendLineUpNotchDiameter
+						<< " bendLineDownNotchEnabled=" << (bendLineDownNotchEnabled ? "true" : "false")
+						<< " bendLineDownNotchDiameter=" << bendLineDownNotchDiameter
 						<< " markerStart='" << holeMarkerStart << "'";
 					HoleNoteInvokeDebugLog(holeLog.str());
 				}
@@ -14614,7 +14746,7 @@ int ZiDonCuTu::aabb_cb()
 					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped hole attribute dimensions");
 				}
 				NXOpen::Features::FlatPattern* matchedFlatPattern = NULL;
-				if (bendNoteEnabled || breakBendLineEnabled)
+				if (bendNoteEnabled || breakBendLineEnabled || bendLineUpNotchEnabled || bendLineDownNotchEnabled)
 				{
 					const std::vector<FlatPatternDraftingInfo>& flatPatternInfos = GetFlatPatternDraftingInfos(workPart);
 					for (size_t infoIndex = 0; infoIndex < flatPatternInfos.size(); ++infoIndex)
@@ -14643,7 +14775,7 @@ int ZiDonCuTu::aabb_cb()
 				}
 				if (breakBendLineEnabled && matchedFlatPattern != NULL)
 				{
-					BreakFlatPatternBendLines(baseView3C, matchedFlatPattern, bendLineUpKeepLength, bendLineDownKeepLength);
+					BreakFlatPatternBendLines(baseView3C, matchedFlatPattern, bendLineEdgeDistance, bendLineUpKeepLength, bendLineDownKeepLength);
 				}
 				else if (breakBendLineEnabled)
 				{
@@ -14652,6 +14784,24 @@ int ZiDonCuTu::aabb_cb()
 				else
 				{
 					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped bend line break");
+				}
+				if ((bendLineUpNotchEnabled || bendLineDownNotchEnabled) && matchedFlatPattern != NULL)
+				{
+					CreateFlatPatternBendLineNotches(
+						baseView3C,
+						matchedFlatPattern,
+						bendLineUpNotchEnabled,
+						bendLineUpNotchDiameter,
+						bendLineDownNotchEnabled,
+						bendLineDownNotchDiameter);
+				}
+				else if (bendLineUpNotchEnabled || bendLineDownNotchEnabled)
+				{
+					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped bend line notch: no matching flat pattern");
+				}
+				else
+				{
+					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped bend line notch");
 				}
 
 				std::vector<Drawings::DraftingBody*>DraftingBodyVector;
