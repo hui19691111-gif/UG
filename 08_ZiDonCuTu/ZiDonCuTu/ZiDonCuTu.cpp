@@ -7720,11 +7720,11 @@ static PendingGroupLayoutPlan BuildPendingGroupLayoutPlan(
 static bool FixedGapLayoutFits(
 	const std::vector<PendingGroupMetrics>& metrics,
 	int columns,
-	double scaleFrom100,
+	double scaleFromBase,
 	double safeWidth,
 	double safeHeight)
 {
-	if (columns <= 0 || scaleFrom100 <= 0.0)
+	if (columns <= 0 || scaleFromBase <= 0.0)
 	{
 		return false;
 	}
@@ -7745,8 +7745,8 @@ static bool FixedGapLayoutFits(
 			{
 				rowWidth += kBodyGroupHorizontalGap;
 			}
-			rowWidth += metrics[index].baseWidth * scaleFrom100 + metrics[index].fixedWidth;
-			rowHeight = std::max(rowHeight, metrics[index].baseHeight * scaleFrom100 + metrics[index].fixedHeight);
+			rowWidth += metrics[index].baseWidth * scaleFromBase + metrics[index].fixedWidth;
+			rowHeight = std::max(rowHeight, metrics[index].baseHeight * scaleFromBase + metrics[index].fixedHeight);
 		}
 		if (rowWidth > safeWidth || rowHeight > safeHeight)
 		{
@@ -7765,6 +7765,7 @@ static double ComputeDenominatorWithFixedGapCheck(
 	const std::vector<PendingGroupMetrics>& metrics,
 	int columns,
 	const PendingGroupLayoutPlan& noGapPlan,
+	double baseDenominator,
 	double safeWidth,
 	double safeHeight)
 {
@@ -7774,7 +7775,7 @@ static double ComputeDenominatorWithFixedGapCheck(
 		ratio = 1.0;
 	}
 
-	double denominator = ceil(100.0 * ratio);
+	double denominator = ceil(baseDenominator * ratio);
 	if (denominator < 0.5)
 	{
 		denominator = 0.5;
@@ -7782,8 +7783,8 @@ static double ComputeDenominatorWithFixedGapCheck(
 
 	for (int guard = 0; guard < 10000; ++guard)
 	{
-		double scaleFrom100 = 100.0 / denominator;
-		if (FixedGapLayoutFits(metrics, columns, scaleFrom100, safeWidth, safeHeight))
+		double scaleFromBase = baseDenominator / denominator;
+		if (FixedGapLayoutFits(metrics, columns, scaleFromBase, safeWidth, safeHeight))
 		{
 			return denominator;
 		}
@@ -7794,6 +7795,7 @@ static double ComputeDenominatorWithFixedGapCheck(
 
 static PendingGroupLayoutPlan ChoosePendingGroupLayoutPlan(
 	const std::vector<PendingGroupMetrics>& metrics,
+	double baseDenominator,
 	double safeWidth,
 	double safeHeight)
 {
@@ -7803,7 +7805,7 @@ static PendingGroupLayoutPlan ChoosePendingGroupLayoutPlan(
 	bestPlan.heightAtBaseScale = 0.0;
 	bestPlan.usedWidth = 0.0;
 	bestPlan.usedHeight = 0.0;
-	bestPlan.denominator = 100.0;
+	bestPlan.denominator = baseDenominator;
 	if (metrics.empty())
 	{
 		return bestPlan;
@@ -7812,6 +7814,7 @@ static PendingGroupLayoutPlan ChoosePendingGroupLayoutPlan(
 	const LayoutRect safeBounds{ 0.0, 0.0, safeWidth, safeHeight };
 	double startDenominator = 1.0;
 	double sumAreaAt100 = 0.0;
+	const double validBaseDenominator = (baseDenominator > 0.0) ? baseDenominator : 100.0;
 	for (size_t i = 0; i < metrics.size(); ++i)
 	{
 		double widthLimit = safeWidth - metrics[i].fixedWidth;
@@ -7822,22 +7825,22 @@ static PendingGroupLayoutPlan ChoosePendingGroupLayoutPlan(
 		}
 		else
 		{
-			startDenominator = std::max(startDenominator, ceil(metrics[i].baseWidth * 100.0 / widthLimit));
-			startDenominator = std::max(startDenominator, ceil(metrics[i].baseHeight * 100.0 / heightLimit));
+			startDenominator = std::max(startDenominator, ceil(metrics[i].baseWidth * validBaseDenominator / widthLimit));
+			startDenominator = std::max(startDenominator, ceil(metrics[i].baseHeight * validBaseDenominator / heightLimit));
 		}
 		sumAreaAt100 += metrics[i].baseWidth * metrics[i].baseHeight;
 	}
-	startDenominator = std::max(startDenominator, ceil(sqrt(std::max(0.0, sumAreaAt100) / std::max(1.0, safeWidth * safeHeight)) * 100.0));
+	startDenominator = std::max(startDenominator, ceil(sqrt(std::max(0.0, sumAreaAt100) / std::max(1.0, safeWidth * safeHeight)) * validBaseDenominator));
 
 	for (double denominator = startDenominator; denominator < 10000.0; denominator += 1.0)
 	{
-		double scaleFrom100 = 100.0 / denominator;
+		double scaleFromBase = validBaseDenominator / denominator;
 		std::vector<double> widths(metrics.size(), 0.0);
 		std::vector<double> heights(metrics.size(), 0.0);
 		for (size_t i = 0; i < metrics.size(); ++i)
 		{
-			widths[i] = metrics[i].baseWidth * scaleFrom100 + metrics[i].fixedWidth;
-			heights[i] = metrics[i].baseHeight * scaleFrom100 + metrics[i].fixedHeight;
+			widths[i] = metrics[i].baseWidth * scaleFromBase + metrics[i].fixedWidth;
+			heights[i] = metrics[i].baseHeight * scaleFromBase + metrics[i].fixedHeight;
 		}
 
 		std::vector<NXOpen::Point3d> centersOnSheet;
@@ -7849,8 +7852,8 @@ static PendingGroupLayoutPlan ChoosePendingGroupLayoutPlan(
 		}
 
 		bestPlan.denominator = denominator;
-		bestPlan.widthAtBaseScale = usedWidth / scaleFrom100;
-		bestPlan.heightAtBaseScale = usedHeight / scaleFrom100;
+		bestPlan.widthAtBaseScale = usedWidth / scaleFromBase;
+		bestPlan.heightAtBaseScale = usedHeight / scaleFromBase;
 		bestPlan.usedWidth = usedWidth;
 		bestPlan.usedHeight = usedHeight;
 		bestPlan.centersOnSheet = centersOnSheet;
@@ -8275,8 +8278,8 @@ static void ArrangePendingGroupsOnSheet(
 	oss << "[实体组排布] 实体组数量=" << pendingItems.size()
 		<< " 排版项数量=" << placements.size()
 		<< " 模式=紧凑排布"
-		<< " 100比例总宽=" << plan.widthAtBaseScale
-		<< " 100比例总高=" << plan.heightAtBaseScale
+		<< " 基准比例总宽=" << plan.widthAtBaseScale
+		<< " 基准比例总高=" << plan.heightAtBaseScale
 		<< " 可用宽=" << RectWidth(safeBounds)
 		<< " 可用高=" << RectHeight(safeBounds)
 		<< " 最终实际总宽=" << usedWidth
@@ -8741,7 +8744,7 @@ static void FinalizePendingGroupScaleAndLayout(NXOpen::Part* workPart)
 				<< " 组基础尺寸=(" << item.baseWidth << "," << item.baseHeight << ")"
 				<< " 初算不带固定间距"
 				<< " 校验固定间距=(" << item.fixedWidth << "," << item.fixedHeight << ")"
-				<< " 校验用100比例组尺寸=(" << (item.baseWidth + item.fixedWidth) << "," << (item.baseHeight + item.fixedHeight) << ")";
+				<< " 基准比例组尺寸=(" << (item.baseWidth + item.fixedWidth) << "," << (item.baseHeight + item.fixedHeight) << ")";
 			AppendLayoutDebug(itemOss.str());
 			metrics.push_back(item);
 		}
@@ -8796,15 +8799,17 @@ static void FinalizePendingGroupScaleAndLayout(NXOpen::Part* workPart)
 	}
 
 	const LayoutRect safeBounds{ 18.0, 32.0, 297.0 - 18.0, 210.0 - 20.0 };
+	const double baseDenominator = currentDenominator;
 	PendingGroupLayoutPlan plan = ChoosePendingGroupLayoutPlan(
 		metrics,
+		baseDenominator,
 		RectWidth(safeBounds),
 		RectHeight(safeBounds));
 	double rawScaleRatio = std::max(
 		plan.widthAtBaseScale / RectWidth(safeBounds),
 		plan.heightAtBaseScale / RectHeight(safeBounds));
 	double newDenominator = plan.denominator;
-	double scaleRatio = newDenominator / 100.0;
+	double scaleRatio = (baseDenominator > 0.0) ? (newDenominator / baseDenominator) : 1.0;
 	if (scaleRatio <= 0.0)
 	{
 		scaleRatio = 1.0;
@@ -8833,8 +8838,9 @@ static void FinalizePendingGroupScaleAndLayout(NXOpen::Part* workPart)
 		<< " 当前比例分母=" << currentDenominator
 		<< " 可用宽=" << RectWidth(safeBounds)
 		<< " 可用高=" << RectHeight(safeBounds)
-		<< " 100比例总宽=" << plan.widthAtBaseScale
-		<< " 100比例总高=" << plan.heightAtBaseScale
+		<< " 基准比例分母=" << baseDenominator
+		<< " 基准比例总宽=" << plan.widthAtBaseScale
+		<< " 基准比例总高=" << plan.heightAtBaseScale
 		<< " X方向比例=" << (plan.widthAtBaseScale / RectWidth(safeBounds))
 		<< " Y方向比例=" << (plan.heightAtBaseScale / RectHeight(safeBounds))
 		<< " 初算采用比例=" << rawScaleRatio
@@ -9791,7 +9797,7 @@ int ZiDonCuTu::apply_cb()
 			g_hasAutoPlacementOverride = !manualUseExistingSheet;
 			g_autoPlacementPoint = sheetCenter;
 			g_hasPageScaleOverride = !manualUseExistingSheet;
-			g_pageScaleOverride = 100.0;
+			g_pageScaleOverride = 1000.0;
 			g_deferPageRefit = !manualUseExistingSheet;
 			g_manualPlacementNoRefit = manualUseExistingSheet;
 			g_sheetIsoAlreadyCreated = false;
@@ -11284,7 +11290,7 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 					g_hasAutoPlacementOverride = true;
 					g_autoPlacementPoint = sheetCenter;
 					g_hasPageScaleOverride = true;
-					g_pageScaleOverride = 100.0;
+					g_pageScaleOverride = 1000.0;
 					g_deferPageRefit = true;
 					g_manualPlacementNoRefit = false;
 					g_sheetIsoAlreadyCreated = false;
