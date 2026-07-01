@@ -202,6 +202,8 @@ const bool kDebugLogEnabled = true;
 const wchar_t* kDebugLogPath = L"D:\\UG智辉钣金插件\\logs\\TianFenXI_debug.log";
 const wchar_t* kSettingsPath = L"D:\\UG智辉钣金插件\\config\\TianFenXI.ini";
 
+std::vector<tag_t> UfListToTags(uf_list_p_t list);
+
 struct EdgeEndpointPair
 {
     tag_t edgeTag;
@@ -600,6 +602,47 @@ bool ComputeEdgeProjectionOverlap(
     return true;
 }
 
+bool FindSharedAdjacentFace(tag_t firstEdge, tag_t secondEdge, tag_t& sharedFace)
+{
+    sharedFace = NULL_TAG;
+    uf_list_p_t firstFaces = NULL;
+    uf_list_p_t secondFaces = NULL;
+    if (firstEdge == NULL_TAG || secondEdge == NULL_TAG ||
+        UF_MODL_ask_edge_faces(firstEdge, &firstFaces) != 0 ||
+        UF_MODL_ask_edge_faces(secondEdge, &secondFaces) != 0)
+    {
+        if (firstFaces != NULL)
+        {
+            UF_MODL_delete_list(&firstFaces);
+        }
+        if (secondFaces != NULL)
+        {
+            UF_MODL_delete_list(&secondFaces);
+        }
+        return false;
+    }
+
+    std::vector<tag_t> firstAdjacentFaces = UfListToTags(firstFaces);
+    std::vector<tag_t> secondAdjacentFaces = UfListToTags(secondFaces);
+    UF_MODL_delete_list(&firstFaces);
+    UF_MODL_delete_list(&secondFaces);
+
+    for (std::size_t firstIndex = 0; firstIndex < firstAdjacentFaces.size(); ++firstIndex)
+    {
+        for (std::size_t secondIndex = 0; secondIndex < secondAdjacentFaces.size(); ++secondIndex)
+        {
+            if (firstAdjacentFaces[firstIndex] != NULL_TAG &&
+                firstAdjacentFaces[firstIndex] == secondAdjacentFaces[secondIndex])
+            {
+                sharedFace = firstAdjacentFaces[firstIndex];
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 bool AreBoundaryCurvesWithinNarrowDistance(
     const EdgeEndpointPair& first,
     const EdgeEndpointPair& second,
@@ -642,7 +685,15 @@ bool AreBoundaryCurvesWithinNarrowDistance(
         rayEndpointMatched &&
         hasOverlap &&
         overlapRatio > kGapOverlapRatio;
-    const bool matched = endpointMatched || overlapMatched;
+    bool matched = endpointMatched || overlapMatched;
+    tag_t sharedFace = NULL_TAG;
+    const bool sameFaceRejected =
+        matched &&
+        FindSharedAdjacentFace(first.edgeTag, second.edgeTag, sharedFace);
+    if (sameFaceRejected)
+    {
+        matched = false;
+    }
     DebugLog("  narrow boundary check: edge1=" +
         FormatTag(first.edgeTag) +
         ", edge2=" + FormatTag(second.edgeTag) +
@@ -661,6 +712,8 @@ bool AreBoundaryCurvesWithinNarrowDistance(
         ", endpointMatched=" + FormatTag(static_cast<tag_t>(endpointMatched ? 1 : 0)) +
         ", rayEndpointMatched=" + FormatTag(static_cast<tag_t>(rayEndpointMatched ? 1 : 0)) +
         ", overlapMatched=" + FormatTag(static_cast<tag_t>(overlapMatched ? 1 : 0)) +
+        ", sameFaceRejected=" + FormatTag(static_cast<tag_t>(sameFaceRejected ? 1 : 0)) +
+        ", sharedFace=" + FormatTag(sharedFace) +
         ", matched=" + FormatTag(static_cast<tag_t>(matched ? 1 : 0)));
     return matched;
 }
@@ -2303,6 +2356,99 @@ bool FaceHasThicknessEdge(tag_t faceTag, double thickness)
     return false;
 }
 
+bool FaceIsFourEdgeGapFaceByGapEdgeDistance(tag_t faceTag, tag_t gapEdgeTag, double thickness)
+{
+    if (faceTag == NULL_TAG || gapEdgeTag == NULL_TAG || thickness <= kMinThickness)
+    {
+        return false;
+    }
+
+    const std::vector<tag_t> edges = AskFaceEdges(faceTag);
+    if (edges.size() != 4)
+    {
+        DebugLog("  gap face rejected: edge count not 4, face=" +
+            FormatTag(faceTag) +
+            ", gapEdge=" + FormatTag(gapEdgeTag) +
+            ", edgeCount=" + FormatTag(static_cast<tag_t>(edges.size())));
+        return false;
+    }
+
+    EdgeEndpointPair gapEndpoints = {};
+    if (!AskEdgeEndpointPair(gapEdgeTag, gapEndpoints))
+    {
+        DebugLog("  gap face rejected: cannot read gap edge endpoints, face=" +
+            FormatTag(faceTag) +
+            ", gapEdge=" + FormatTag(gapEdgeTag));
+        return false;
+    }
+
+    for (std::size_t index = 0; index < edges.size(); ++index)
+    {
+        const tag_t edgeTag = edges[index];
+        if (edgeTag == NULL_TAG || edgeTag == gapEdgeTag)
+        {
+            continue;
+        }
+
+        EdgeEndpointPair edgeEndpoints = {};
+        if (!AskEdgeEndpointPair(edgeTag, edgeEndpoints))
+        {
+            DebugLog("    gap face edge distance skip: cannot read endpoints, face=" +
+                FormatTag(faceTag) +
+                ", edge=" + FormatTag(edgeTag));
+            continue;
+        }
+
+        double guess1[3] =
+        {
+            (gapEndpoints.first[0] + gapEndpoints.second[0]) * 0.5,
+            (gapEndpoints.first[1] + gapEndpoints.second[1]) * 0.5,
+            (gapEndpoints.first[2] + gapEndpoints.second[2]) * 0.5
+        };
+        double guess2[3] =
+        {
+            (edgeEndpoints.first[0] + edgeEndpoints.second[0]) * 0.5,
+            (edgeEndpoints.first[1] + edgeEndpoints.second[1]) * 0.5,
+            (edgeEndpoints.first[2] + edgeEndpoints.second[2]) * 0.5
+        };
+
+        double distance = 0.0;
+        if (!AskMinimumDistance(gapEdgeTag, edgeTag, guess1, guess2, distance))
+        {
+            distance = DistanceSegmentToSegment3(gapEndpoints, edgeEndpoints);
+            DebugLog("    gap face edge distance fallback: face=" +
+                FormatTag(faceTag) +
+                ", gapEdge=" + FormatTag(gapEdgeTag) +
+                ", edge=" + FormatTag(edgeTag) +
+                ", distance=" + FormatDouble(distance));
+        }
+
+        DebugLog("    gap face edge distance check: face=" +
+            FormatTag(faceTag) +
+            ", gapEdge=" + FormatTag(gapEdgeTag) +
+            ", edge=" + FormatTag(edgeTag) +
+            ", distance=" + FormatDouble(distance) +
+            ", delta=" + FormatDouble(std::fabs(distance - thickness)) +
+            ", thickness=" + FormatDouble(thickness));
+
+        if (std::fabs(distance - thickness) <= kThicknessEdgeTolerance)
+        {
+            DebugLog("  gap face accepted by four-edge distance rule: face=" +
+                FormatTag(faceTag) +
+                ", gapEdge=" + FormatTag(gapEdgeTag) +
+                ", edge=" + FormatTag(edgeTag) +
+                ", distance=" + FormatDouble(distance));
+            return true;
+        }
+    }
+
+    DebugLog("  gap face rejected: no edge at thickness distance from gap edge, face=" +
+        FormatTag(faceTag) +
+        ", gapEdge=" + FormatTag(gapEdgeTag) +
+        ", thickness=" + FormatDouble(thickness));
+    return false;
+}
+
 void AddUniqueTag(std::vector<tag_t>& tags, tag_t tag)
 {
     if (tag == NULL_TAG)
@@ -2647,7 +2793,8 @@ std::vector<GapFaceGroup> FindGapFaceGroupsFromGapEdgePairs(const std::vector<Ga
                     continue;
                 }
 
-                if (FaceHasThicknessEdge(faceTag, thickness))
+                if (FaceHasThicknessEdge(faceTag, thickness) &&
+                    FaceIsFourEdgeGapFaceByGapEdgeDistance(faceTag, edgeTag, thickness))
                 {
                     if (edgeSlot == 0 && pair.firstGapFace == NULL_TAG)
                     {
