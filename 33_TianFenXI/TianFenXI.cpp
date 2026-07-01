@@ -75,6 +75,10 @@
 #include <NXOpen/FaceDumbRule.hxx>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/BodyDumbRule.hxx>
+#include <NXOpen/CartesianCoordinateSystem.hxx>
+#include <NXOpen/CoordinateSystemCollection.hxx>
+#include <NXOpen/Xform.hxx>
+#include <NXOpen/XformCollection.hxx>
 #include <uf_modl.h>
 #include <uf_modl_curves.h>
 #include <uf_obj.h>
@@ -194,7 +198,7 @@ const double kGapOverlapRatio = 0.60;
 const double kSameFaceLengthTolerance = 0.2;
 const double kLongEdgeParallelCosTolerance = 0.98;
 const double kPi = 3.14159265358979323846;
-const bool kDebugLogEnabled = false;
+const bool kDebugLogEnabled = true;
 const wchar_t* kDebugLogPath = L"D:\\UG智辉钣金插件\\logs\\TianFenXI_debug.log";
 const wchar_t* kSettingsPath = L"D:\\UG智辉钣金插件\\config\\TianFenXI.ini";
 
@@ -873,54 +877,83 @@ bool AskPlanarFaceProjectedArea(tag_t faceTag, double& area)
         return false;
     }
 
-    std::vector<EdgeEndpointPair> endpoints;
-    if (!AskFaceEdgeEndpointPairs(faceTag, endpoints))
+    double param[2] = {0.5, 0.5};
+    double facePoint[3] = {0.0, 0.0, 0.0};
+    double uDirection[3] = {0.0, 0.0, 0.0};
+    double vDirection[3] = {0.0, 0.0, 0.0};
+    double u2[3] = {0.0, 0.0, 0.0};
+    double v2[3] = {0.0, 0.0, 0.0};
+    double unitNormal[3] = {0.0, 0.0, 0.0};
+    double radii[2] = {0.0, 0.0};
+    if (UF_MODL_ask_face_props(faceTag, param, facePoint, uDirection, vDirection, u2, v2, unitNormal, radii) != 0 ||
+        !Normalize3(uDirection) ||
+        !Normalize3(vDirection) ||
+        !Normalize3(unitNormal))
     {
         return false;
     }
 
-    double firstAxis[3] =
+    if (std::fabs(Dot3(unitNormal, normal)) < kParallelCosTolerance)
     {
-        endpoints.front().second[0] - endpoints.front().first[0],
-        endpoints.front().second[1] - endpoints.front().first[1],
-        endpoints.front().second[2] - endpoints.front().first[2]
-    };
-    if (!Normalize3(firstAxis))
+        unitNormal[0] = normal[0];
+        unitNormal[1] = normal[1];
+        unitNormal[2] = normal[2];
+    }
+
+    double uvNormal[3] = {0.0, 0.0, 0.0};
+    Cross3(uDirection, vDirection, uvNormal);
+    if (!Normalize3(uvNormal))
+    {
+        return false;
+    }
+    if (Dot3(uvNormal, unitNormal) < 0.0)
+    {
+        vDirection[0] = -vDirection[0];
+        vDirection[1] = -vDirection[1];
+        vDirection[2] = -vDirection[2];
+    }
+
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    NXOpen::Part* workPart = session != NULL && session->Parts() != NULL ? session->Parts()->Work() : NULL;
+    if (workPart == NULL || workPart->Xforms() == NULL || workPart->CoordinateSystems() == NULL)
     {
         return false;
     }
 
-    double secondAxis[3] = {0.0, 0.0, 0.0};
-    Cross3(normal, firstAxis, secondAxis);
-    if (!Normalize3(secondAxis))
+    NXOpen::Xform* xform = NULL;
+    NXOpen::CartesianCoordinateSystem* csys = NULL;
+    try
+    {
+        xform = workPart->Xforms()->CreateXform(
+            NXOpen::Point3d(facePoint[0], facePoint[1], facePoint[2]),
+            NXOpen::Vector3d(uDirection[0], uDirection[1], uDirection[2]),
+            NXOpen::Vector3d(vDirection[0], vDirection[1], vDirection[2]),
+            NXOpen::SmartObject::UpdateOptionWithinModeling,
+            1.0);
+        csys = workPart->CoordinateSystems()->CreateCoordinateSystem(
+            xform,
+            NXOpen::SmartObject::UpdateOptionWithinModeling);
+    }
+    catch (...)
     {
         return false;
     }
 
-    double minFirst = DBL_MAX;
-    double maxFirst = -DBL_MAX;
-    double minSecond = DBL_MAX;
-    double maxSecond = -DBL_MAX;
-    for (std::size_t index = 0; index < endpoints.size(); ++index)
-    {
-        const double* points[2] = {endpoints[index].first, endpoints[index].second};
-        for (int pointIndex = 0; pointIndex < 2; ++pointIndex)
-        {
-            const double firstProjection = Dot3(points[pointIndex], firstAxis);
-            const double secondProjection = Dot3(points[pointIndex], secondAxis);
-            minFirst = std::min(minFirst, firstProjection);
-            maxFirst = std::max(maxFirst, firstProjection);
-            minSecond = std::min(minSecond, secondProjection);
-            maxSecond = std::max(maxSecond, secondProjection);
-        }
-    }
-
-    if (minFirst == DBL_MAX || minSecond == DBL_MAX)
+    double minCorner[3] = {0.0, 0.0, 0.0};
+    double directions[3][3] = {};
+    double distances[3] = {0.0, 0.0, 0.0};
+    if (csys == NULL ||
+        UF_MODL_ask_bounding_box_exact(faceTag, csys->Tag(), minCorner, directions, distances) != 0)
     {
         return false;
     }
 
-    area = std::fabs((maxFirst - minFirst) * (maxSecond - minSecond));
+    area = std::fabs(distances[0] * distances[1]);
+    DebugLog("  planar face bbox exact area face=" + FormatTag(faceTag) +
+        ", area=" + FormatDouble(area) +
+        ", u=" + FormatDouble(distances[0]) +
+        ", v=" + FormatDouble(distances[1]) +
+        ", n=" + FormatDouble(distances[2]));
     return area > 1.0e-6;
 }
 
