@@ -47,6 +47,9 @@
 #include <cstdlib>
 #include <iomanip>
 #include <uf_eval.h>
+#include <uf_csys.h>
+#include <uf_mtx.h>
+#include <uf_modl_utilities.h>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/DisplayManager.hxx>
 #include <NXOpen/DisplayModification.hxx>
@@ -496,7 +499,7 @@ namespace
 {
 const char* ZiDonFenCenDebugLogPath()
 {
-	return "D:\\ZiDonFenCen_perf_debug.log";
+	return "D:\\UG智辉钣金插件\\logs\\ZiDonFenCen_debug.log";
 }
 
 bool ZiDonFenCenDebugLoggingEnabled();
@@ -646,6 +649,7 @@ void ResetZiDonFenCenDebugLog()
 	{
 		return;
 	}
+	CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
 	std::ofstream log(ZiDonFenCenDebugLogPath(), std::ios::out | std::ios::trunc);
 	if (log.is_open())
 	{
@@ -659,6 +663,7 @@ void ZiDonFenCenDebugLog(const std::string& message)
 	{
 		return;
 	}
+	CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
 	std::ofstream log(ZiDonFenCenDebugLogPath(), std::ios::out | std::ios::app);
 	if (log.is_open())
 	{
@@ -694,7 +699,11 @@ bool ZiDonFenCenDebugLoggingEnabled()
 {
 	char value[16] = { 0 };
 	const DWORD length = GetEnvironmentVariableA("ZH_ZIDONFENCEN_DEBUG", value, static_cast<DWORD>(sizeof(value)));
-	return length > 0 && (value[0] == '1' || value[0] == 'Y' || value[0] == 'y' || value[0] == 'T' || value[0] == 't');
+	if (length == 0)
+	{
+		return true;
+	}
+	return !(value[0] == '0' || value[0] == 'N' || value[0] == 'n' || value[0] == 'F' || value[0] == 'f');
 }
 
 bool BlockLogicalValue(Toggle* block, bool fallback = false)
@@ -1119,6 +1128,7 @@ bool FollowAuxiliaryBodiesForGroup(NXOpen::Part* part, const std::vector<Body*>&
 
 			if (distance1 < 0.01)
 			{
+				const int oldLayer = candidateBody->Layer();
 				candidateBody->SetLayer(sourceBody->Layer());
 				CopyStringAttributeIfPresent(sourceBody, candidateBody, "bianhao");
 				CopyStringAttributeIfPresent(sourceBody, candidateBody, "cailiao");
@@ -1127,9 +1137,11 @@ bool FollowAuxiliaryBodiesForGroup(NXOpen::Part* part, const std::vector<Body*>&
 				{
 					std::ostringstream oss;
 					oss << logPrefix
+						<< " reason=followAux"
 						<< " sourceTag=" << sourceBody->Tag()
 						<< " sourceLayer=" << sourceBody->Layer()
 						<< " auxTag=" << candidateBody->Tag()
+						<< " oldLayer=" << oldLayer
 						<< " auxLayer=" << candidateBody->Layer()
 						<< " distance=" << distance1
 						<< " cailiao=" << BodyStringAttributeForLog(candidateBody, "cailiao")
@@ -3660,6 +3672,9 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         bool fullCircle = false;
     };
 
+    double CylinderFaceProfileAngleDegrees(Face* face, double cylinderRadius, CircleProfileStats* stats);
+    bool BuildAxisBasis(const double axisDirection[3], double u[3], double v[3]);
+
     std::string BodyName(Body* body)
     {
         if (body == NULL)
@@ -3736,6 +3751,22 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         double dy = a[1] - b[1];
         double dz = a[2] - b[2];
         return std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    double AxisLineDistance(const double pointA[3], const double directionA[3], const double pointB[3])
+    {
+        double delta[3] = {
+            pointB[0] - pointA[0],
+            pointB[1] - pointA[1],
+            pointB[2] - pointA[2]
+        };
+        const double projection = Dot3(delta, directionA);
+        double perpendicular[3] = {
+            delta[0] - projection * directionA[0],
+            delta[1] - projection * directionA[1],
+            delta[2] - projection * directionA[2]
+        };
+        return std::sqrt(Dot3(perpendicular, perpendicular));
     }
 
     double Length3(const double v[3])
@@ -3977,6 +4008,66 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         return points;
     }
 
+    std::vector<Point3d> CollectBodySamplePoints(Body* body)
+    {
+        std::vector<Point3d> points;
+        if (body == NULL)
+        {
+            return points;
+        }
+
+        std::vector<Face*> faces = body->GetFaces();
+        std::set<tag_t> seenEdges;
+        for (size_t i = 0; i < faces.size(); ++i)
+        {
+            std::vector<Edge*> edges = FaceEdgesByUf(faces[i]);
+            for (size_t j = 0; j < edges.size(); ++j)
+            {
+                Edge* edge = edges[j];
+                if (edge == NULL || !seenEdges.insert(edge->Tag()).second)
+                {
+                    continue;
+                }
+
+                Point3d p1;
+                Point3d p2;
+                try
+                {
+                    edge->GetVertices(&p1, &p2);
+                    AddUniquePoint(&points, p1);
+                    AddUniquePoint(&points, p2);
+                }
+                catch (...)
+                {
+                }
+
+                UF_EVAL_p_t evaluator = NULL;
+                if (UF_EVAL_initialize(edge->Tag(), &evaluator) != 0 || evaluator == NULL)
+                {
+                    continue;
+                }
+
+                double limits[2] = { 0.0, 1.0 };
+                if (UF_EVAL_ask_limits(evaluator, limits) == 0 && limits[1] >= limits[0])
+                {
+                    for (int sampleIndex = 1; sampleIndex <= 5; ++sampleIndex)
+                    {
+                        const double t = limits[0] + (limits[1] - limits[0]) * (static_cast<double>(sampleIndex) / 6.0);
+                        double samplePoint[3] = { 0.0, 0.0, 0.0 };
+                        if (UF_EVAL_evaluate(evaluator, 0, t, samplePoint, NULL) == 0)
+                        {
+                            AddUniquePoint(&points, Point3d(samplePoint[0], samplePoint[1], samplePoint[2]));
+                        }
+                    }
+                }
+
+                UF_EVAL_free(evaluator);
+            }
+        }
+
+        return points;
+    }
+
     double Cross2(const Point2dLite& origin, const Point2dLite& a, const Point2dLite& b)
     {
         return (a.x - origin.x) * (b.y - origin.y) - (a.y - origin.y) * (b.x - origin.x);
@@ -4114,6 +4205,153 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         return true;
     }
 
+    bool IsEqualWithinRatio(double a, double b, double ratioTolerance)
+    {
+        const double scale = std::max(std::max(std::fabs(a), std::fabs(b)), 1.0);
+        return std::fabs(a - b) <= scale * ratioTolerance;
+    }
+
+    bool IsAtLeastWithTolerance(double value, double threshold)
+    {
+        return value + std::max(0.01, threshold * 0.02) >= threshold;
+    }
+
+    bool BodyAxisBoundingBox(Body* body, const double axisPoint[3], const double axisDirection[3], double* widthOut, double* depthOut, double* heightOut)
+    {
+        if (body == NULL || axisPoint == NULL || axisDirection == NULL || widthOut == NULL || depthOut == NULL || heightOut == NULL)
+        {
+            return false;
+        }
+
+        double matrixValues[9] = { 0.0 };
+        tag_t matrixTag = NULL_TAG;
+        tag_t csysTag = NULL_TAG;
+        if (UF_MTX3_initialize_z(axisDirection, matrixValues) == 0 &&
+            UF_CSYS_create_matrix(matrixValues, &matrixTag) == 0 &&
+            matrixTag != NULL_TAG &&
+            UF_CSYS_create_temp_csys(axisPoint, matrixTag, &csysTag) == 0 &&
+            csysTag != NULL_TAG)
+        {
+            double minCorner[3] = { 0.0, 0.0, 0.0 };
+            double directions[3][3] = {};
+            double distances[3] = { 0.0, 0.0, 0.0 };
+            if (UF_MODL_ask_bounding_box_exact(body->Tag(), csysTag, minCorner, directions, distances) == 0)
+            {
+                *widthOut = std::fabs(distances[0]);
+                *depthOut = std::fabs(distances[1]);
+                *heightOut = std::fabs(distances[2]);
+                if (*widthOut > 1e-6 && *depthOut > 1e-6 && *heightOut >= 0.0)
+                {
+                    return true;
+                }
+            }
+        }
+
+        double u[3] = { 1.0, 0.0, 0.0 };
+        double v[3] = { 0.0, 1.0, 0.0 };
+        if (!BuildAxisBasis(axisDirection, u, v))
+        {
+            return false;
+        }
+
+        std::vector<Point3d> points = CollectBodySamplePoints(body);
+        if (points.empty())
+        {
+            return false;
+        }
+
+        double minU = std::numeric_limits<double>::max();
+        double maxU = -std::numeric_limits<double>::max();
+        double minV = std::numeric_limits<double>::max();
+        double maxV = -std::numeric_limits<double>::max();
+        double minA = std::numeric_limits<double>::max();
+        double maxA = -std::numeric_limits<double>::max();
+        for (size_t i = 0; i < points.size(); ++i)
+        {
+            double delta[3] = {
+                points[i].X - axisPoint[0],
+                points[i].Y - axisPoint[1],
+                points[i].Z - axisPoint[2]
+            };
+            const double pu = Dot3(delta, u);
+            const double pv = Dot3(delta, v);
+            const double pa = Dot3(delta, axisDirection);
+            minU = std::min(minU, pu);
+            maxU = std::max(maxU, pu);
+            minV = std::min(minV, pv);
+            maxV = std::max(maxV, pv);
+            minA = std::min(minA, pa);
+            maxA = std::max(maxA, pa);
+        }
+
+        *widthOut = maxU - minU;
+        *depthOut = maxV - minV;
+        *heightOut = maxA - minA;
+        return *widthOut > 1e-6 && *depthOut > 1e-6 && *heightOut >= 0.0;
+    }
+
+    bool BodyAxisHullIsRegularHex(Body* body, const double axisPoint[3], const double axisDirection[3], double* acrossFlatsOut)
+    {
+        if (body == NULL || axisPoint == NULL || axisDirection == NULL)
+        {
+            return false;
+        }
+
+        double u[3] = { 1.0, 0.0, 0.0 };
+        double v[3] = { 0.0, 1.0, 0.0 };
+        if (!BuildAxisBasis(axisDirection, u, v))
+        {
+            return false;
+        }
+
+        std::vector<Point3d> points3 = CollectBodySamplePoints(body);
+        std::vector<Point2dLite> points2;
+        for (size_t i = 0; i < points3.size(); ++i)
+        {
+            double delta[3] = {
+                points3[i].X - axisPoint[0],
+                points3[i].Y - axisPoint[1],
+                points3[i].Z - axisPoint[2]
+            };
+            Point2dLite point;
+            point.x = Dot3(delta, u);
+            point.y = Dot3(delta, v);
+            AddUniquePoint2(&points2, point);
+        }
+
+        std::vector<Point2dLite> hull = ConvexHull2(points2);
+        return IsHexShadow(hull, acrossFlatsOut);
+    }
+
+    struct FastenerCylinderFaceInfo
+    {
+        Face* face = NULL;
+        double axisPoint[3] = { 0.0, 0.0, 0.0 };
+        double axisDirection[3] = { 0.0, 0.0, 1.0 };
+        double radius = 0.0;
+        double outerMed = 0.0;
+        bool isOuter = false;
+        bool isInner = false;
+        bool isFull = false;
+        bool isHalf = false;
+        CircleProfileStats stats;
+    };
+
+    bool SameCylinderAxisAndRadius(const FastenerCylinderFaceInfo& a, const FastenerCylinderFaceInfo& b)
+    {
+        const double radiusTolerance = std::max(0.05, a.radius * 0.03);
+        return std::fabs(a.radius - b.radius) <= radiusTolerance &&
+            std::fabs(Dot3(a.axisDirection, b.axisDirection)) >= 0.999 &&
+            AxisLineDistance(a.axisPoint, a.axisDirection, b.axisPoint) <= radiusTolerance;
+    }
+
+    bool SameCylinderAxisOnly(const FastenerCylinderFaceInfo& a, const FastenerCylinderFaceInfo& b)
+    {
+        const double axisTolerance = std::max(0.05, std::max(a.radius, b.radius) * 0.03);
+        return std::fabs(Dot3(a.axisDirection, b.axisDirection)) >= 0.999 &&
+            AxisLineDistance(a.axisPoint, a.axisDirection, b.axisPoint) <= axisTolerance;
+    }
+
     bool BuildAxisBasis(const double axisDirection[3], double u[3], double v[3])
     {
         double seed[3] = { 1.0, 0.0, 0.0 };
@@ -4201,7 +4439,67 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         return std::fabs(record.arcLength - halfLength) <= std::max(0.05, halfLength * 0.08);
     }
 
-    bool CylinderFaceHasFullCircleProfile(Face* face, double cylinderRadius, CircleProfileStats* stats)
+    bool IsHalfCylinderAngle(double angleDegrees)
+    {
+        return std::fabs(angleDegrees - 180.0) <= 5.0;
+    }
+
+    bool HasMatchingHalfOuterCylinderFace(Body* body, Face* face, const double axisPoint[3], const double axisDirection[3], double radius)
+    {
+        if (body == NULL || face == NULL || axisPoint == NULL || axisDirection == NULL || radius <= 1e-6)
+        {
+            return false;
+        }
+
+        const double radiusTolerance = std::max(0.05, radius * 0.03);
+        std::vector<Face*> faces = body->GetFaces();
+        for (size_t i = 0; i < faces.size(); ++i)
+        {
+            Face* otherFace = faces[i];
+            if (otherFace == NULL || otherFace == face)
+            {
+                continue;
+            }
+
+            double otherAxisPoint[3] = { 0.0, 0.0, 0.0 };
+            double otherAxisDirection[3] = { 0.0, 0.0, 1.0 };
+            double otherRadius = 0.0;
+            int otherNormDir = 0;
+            if (!AskCylinderFaceData(otherFace, otherAxisPoint, otherAxisDirection, &otherRadius, &otherNormDir))
+            {
+                continue;
+            }
+            if (std::fabs(otherRadius - radius) > radiusTolerance)
+            {
+                continue;
+            }
+            if (std::fabs(Dot3(axisDirection, otherAxisDirection)) < 0.999)
+            {
+                continue;
+            }
+            if (AxisLineDistance(axisPoint, axisDirection, otherAxisPoint) > radiusTolerance)
+            {
+                continue;
+            }
+
+            double otherOuterMed = 0.0;
+            if (!AskOuterCylinderMedLike08(otherFace, &otherOuterMed) || otherOuterMed >= 0.0)
+            {
+                continue;
+            }
+
+            CircleProfileStats otherStats;
+            const double otherAngleDegrees = CylinderFaceProfileAngleDegrees(otherFace, otherRadius, &otherStats);
+            if (IsHalfCylinderAngle(otherAngleDegrees))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    double CylinderFaceProfileAngleDegrees(Face* face, double cylinderRadius, CircleProfileStats* stats)
     {
         if (stats != NULL)
         {
@@ -4209,7 +4507,7 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         }
         if (face == NULL || cylinderRadius <= 1e-6)
         {
-            return false;
+            return 0.0;
         }
 
         const double radiusTolerance = std::max(0.05, cylinderRadius * 0.03);
@@ -4237,7 +4535,7 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
                 {
                     ++stats->fullCircleEdgeCount;
                 }
-                return true;
+                return 360.0;
             }
             if (IsHalfCircleRecord(record))
             {
@@ -4255,12 +4553,33 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
             {
                 if (SameCircleRecord(halfCircles[i], halfCircles[j], radiusTolerance))
                 {
-                    return true;
+                    return 180.0;
                 }
             }
         }
 
-        return false;
+        double maxAngleDegrees = 0.0;
+        for (size_t i = 0; i < edges.size(); ++i)
+        {
+            CircularEdgeRecord record;
+            if (!AskCircularEdgeRecord(edges[i], &record))
+            {
+                continue;
+            }
+            if (std::fabs(record.radius - cylinderRadius) > radiusTolerance)
+            {
+                continue;
+            }
+
+            const double circumference = 2.0 * 3.14159265358979323846 * cylinderRadius;
+            if (circumference > 1e-6)
+            {
+                const double angle = (record.arcLength / circumference) * 360.0;
+                maxAngleDegrees = std::max(maxAngleDegrees, angle);
+            }
+        }
+
+        return maxAngleDegrees;
     }
 
     bool CollectBodyShadowOutlineByNx(Body* body, const double axisPoint[3], const double axisDirection[3], ShadowOutlineInfo* info)
@@ -4395,7 +4714,7 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
             std::sort(curveTags.begin(), curveTags.end());
             curveTags.erase(std::unique(curveTags.begin(), curveTags.end()), curveTags.end());
 
-            std::vector<Point2dLite> lineEndpoints;
+            std::vector<Point2dLite> outlinePoints;
             double maxCircleDiameter = 0.0;
             int lineCount = 0;
             int circleCount = 0;
@@ -4423,8 +4742,8 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
                         Point2dLite b;
                         b.x = Dot3(p2, u);
                         b.y = Dot3(p2, v);
-                        AddUniquePoint2(&lineEndpoints, a);
-                        AddUniquePoint2(&lineEndpoints, b);
+                        AddUniquePoint2(&outlinePoints, a);
+                        AddUniquePoint2(&outlinePoints, b);
                     }
                 }
                 else if (type == UF_circle_type)
@@ -4437,6 +4756,25 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
                         if (sweep >= 6.20 && arcData.radius > 1e-6)
                         {
                             maxCircleDiameter = std::max(maxCircleDiameter, arcData.radius * 2.0);
+                        }
+                        const double sampleAngles[4] = { 0.0, 1.5707963267948966, 3.1415926535897932, 4.7123889803846899 };
+                        for (int sampleIndex = 0; sampleIndex < 4; ++sampleIndex)
+                        {
+                            const double angle = sampleAngles[sampleIndex];
+                            double worldPoint[3] = {
+                                arcData.arc_center[0] + arcData.radius * std::cos(angle),
+                                arcData.arc_center[1] + arcData.radius * std::sin(angle),
+                                arcData.arc_center[2]
+                            };
+                            double delta[3] = {
+                                worldPoint[0] - axisPoint[0],
+                                worldPoint[1] - axisPoint[1],
+                                worldPoint[2] - axisPoint[2]
+                            };
+                            Point2dLite samplePoint;
+                            samplePoint.x = Dot3(delta, u);
+                            samplePoint.y = Dot3(delta, v);
+                            AddUniquePoint2(&outlinePoints, samplePoint);
                         }
                     }
                 }
@@ -4459,7 +4797,14 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
                 info->otherCount = otherCount;
             }
 
-            if (maxCircleDiameter > 1e-6)
+            std::vector<Point2dLite> hull = ConvexHull2(outlinePoints);
+            const double hullMaxDistance = PolygonMaxPairDistance(hull);
+            if (info != NULL)
+            {
+                info->hullPointCount = hull.size();
+            }
+
+            if (maxCircleDiameter > 1e-6 && hullMaxDistance > 1e-6 && maxCircleDiameter >= hullMaxDistance * 0.90)
             {
                 if (info != NULL)
                 {
@@ -4472,12 +4817,7 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
             }
             else
             {
-                std::vector<Point2dLite> hull = ConvexHull2(lineEndpoints);
                 double acrossFlats = 0.0;
-                if (info != NULL)
-                {
-                    info->hullPointCount = hull.size();
-                }
                 if (IsHexShadow(hull, &acrossFlats) && acrossFlats > 1e-6)
                 {
                     if (info != NULL)
@@ -4569,8 +4909,9 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         }
 
         FastenerFilterInfo bestInfo;
-        bestInfo.reason = "没有外圆柱候选";
+        bestInfo.reason = "没有圆柱面候选";
         double bestRatio = -1.0;
+        std::vector<FastenerCylinderFaceInfo> cylinderFaces;
         std::vector<Face*> faces = body->GetFaces();
         for (size_t i = 0; i < faces.size(); ++i)
         {
@@ -4585,118 +4926,218 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
             }
             ++bestInfo.cylinderFaceCount;
             double outerMed = 0.0;
-            const bool hasOuterMed = AskOuterCylinderMedLike08(face, &outerMed);
+            if (!AskOuterCylinderMedLike08(face, &outerMed))
+            {
+                continue;
+            }
             bestInfo.outerMed = outerMed;
-            if (!hasOuterMed || outerMed >= 0.0)
-            {
-                continue;
-            }
-            ++bestInfo.outerCylinderFaceCount;
             CircleProfileStats circleStats;
-            if (!CylinderFaceHasFullCircleProfile(face, radius, &circleStats))
+            const double circleAngleDegrees = CylinderFaceProfileAngleDegrees(face, radius, &circleStats);
+            FastenerCylinderFaceInfo faceInfo;
+            faceInfo.face = face;
+            faceInfo.axisPoint[0] = axisPoint[0];
+            faceInfo.axisPoint[1] = axisPoint[1];
+            faceInfo.axisPoint[2] = axisPoint[2];
+            faceInfo.axisDirection[0] = axisDirection[0];
+            faceInfo.axisDirection[1] = axisDirection[1];
+            faceInfo.axisDirection[2] = axisDirection[2];
+            faceInfo.radius = radius;
+            faceInfo.outerMed = outerMed;
+            faceInfo.isOuter = outerMed < 0.0;
+            faceInfo.isInner = outerMed > 0.0;
+            faceInfo.isFull = circleAngleDegrees >= 360.0 - 5.0;
+            faceInfo.isHalf = IsHalfCylinderAngle(circleAngleDegrees) || circleStats.halfCircleEdgeCount > 0;
+            faceInfo.stats = circleStats;
+            cylinderFaces.push_back(faceInfo);
+            if (faceInfo.isOuter)
             {
-                FastenerFilterInfo circleInfo;
-                circleInfo.outlineType = "none";
-                circleInfo.cylinderDiameter = radius * 2.0;
-                circleInfo.cylinderFaceCount = bestInfo.cylinderFaceCount;
-                circleInfo.outerCylinderFaceCount = bestInfo.outerCylinderFaceCount;
-                circleInfo.outerMed = outerMed;
-                circleInfo.circularEdgeCount = circleStats.circularEdgeCount;
-                circleInfo.fullCircleEdgeCount = circleStats.fullCircleEdgeCount;
-                circleInfo.halfCircleEdgeCount = circleStats.halfCircleEdgeCount;
-                circleInfo.reason = "圆柱直径不是整圆或两个半圆";
-                if (bestRatio < 0.0)
+                ++bestInfo.outerCylinderFaceCount;
+            }
+            bestInfo.circularEdgeCount += circleStats.circularEdgeCount;
+            bestInfo.fullCircleEdgeCount += circleStats.fullCircleEdgeCount;
+            bestInfo.halfCircleEdgeCount += circleStats.halfCircleEdgeCount;
+        }
+
+        const size_t cylinderCount = cylinderFaces.size();
+        if (cylinderCount > 1)
+        {
+            for (size_t i = 1; i < cylinderFaces.size(); ++i)
+            {
+                if (!SameCylinderAxisOnly(cylinderFaces[0], cylinderFaces[i]))
                 {
-                    bestInfo = circleInfo;
-                    bestRatio = 0.0;
+                    bestInfo.outlineType = "axis";
+                    bestInfo.cylinderDiameter = cylinderFaces[i].radius * 2.0;
+                    bestInfo.cylinderFaceCount = static_cast<int>(cylinderCount);
+                    bestInfo.outerCylinderFaceCount = bestInfo.outerCylinderFaceCount;
+                    bestInfo.outerMed = cylinderFaces[i].outerMed;
+                    bestInfo.circularEdgeCount = cylinderFaces[i].stats.circularEdgeCount;
+                    bestInfo.fullCircleEdgeCount = cylinderFaces[i].stats.fullCircleEdgeCount;
+                    bestInfo.halfCircleEdgeCount = cylinderFaces[i].stats.halfCircleEdgeCount;
+                    bestInfo.reason = "圆柱面不在同一轴线上";
+                    if (info != NULL)
+                    {
+                        *info = bestInfo;
+                    }
+                    return false;
                 }
+            }
+        }
+
+        for (size_t i = 0; i < cylinderFaces.size(); ++i)
+        {
+            const FastenerCylinderFaceInfo& c = cylinderFaces[i];
+            double boxWidth = 0.0;
+            double boxDepth = 0.0;
+            double boxHeight = 0.0;
+            if (!BodyAxisBoundingBox(body, c.axisPoint, c.axisDirection, &boxWidth, &boxDepth, &boxHeight))
+            {
                 continue;
             }
 
-            double minProjection = std::numeric_limits<double>::max();
-            double maxProjection = -std::numeric_limits<double>::max();
-            std::vector<Point3d> heightPoints = CollectBodyEdgePoints(body);
-            for (size_t j = 0; j < heightPoints.size(); ++j)
-            {
-                double point[3] = { heightPoints[j].X, heightPoints[j].Y, heightPoints[j].Z };
-                double delta[3] = {
-                    point[0] - axisPoint[0],
-                    point[1] - axisPoint[1],
-                    point[2] - axisPoint[2]
-                };
-                const double projection = Dot3(delta, axisDirection);
-                minProjection = std::min(minProjection, projection);
-                maxProjection = std::max(maxProjection, projection);
-            }
-
-            const double diameter = radius * 2.0;
-            const double height = minProjection <= maxProjection ? maxProjection - minProjection : 0.0;
-            ShadowOutlineInfo shadowInfo;
-            if (!CollectBodyShadowOutlineByNx(body, axisPoint, axisDirection, &shadowInfo))
-            {
-                FastenerFilterInfo shadowFailInfo;
-                shadowFailInfo.outlineType = shadowInfo.outlineType;
-                shadowFailInfo.cylinderDiameter = diameter;
-                shadowFailInfo.height = height;
-                shadowFailInfo.outlineSize = shadowInfo.outlineSize;
-                shadowFailInfo.threshold = shadowInfo.outlineSize * 0.3;
-                shadowFailInfo.hullPointCount = shadowInfo.hullPointCount;
-                shadowFailInfo.shadowCurveCount = shadowInfo.curveCount;
-                shadowFailInfo.shadowLineCount = shadowInfo.lineCount;
-                shadowFailInfo.shadowCircleCount = shadowInfo.circleCount;
-                shadowFailInfo.shadowSplineCount = shadowInfo.splineCount;
-                shadowFailInfo.shadowOtherCount = shadowInfo.otherCount;
-                shadowFailInfo.cylinderFaceCount = bestInfo.cylinderFaceCount;
-                shadowFailInfo.outerCylinderFaceCount = bestInfo.outerCylinderFaceCount;
-                shadowFailInfo.outerMed = outerMed;
-                shadowFailInfo.circularEdgeCount = circleStats.circularEdgeCount;
-                shadowFailInfo.fullCircleEdgeCount = circleStats.fullCircleEdgeCount;
-                shadowFailInfo.halfCircleEdgeCount = circleStats.halfCircleEdgeCount;
-                shadowFailInfo.reason = shadowInfo.reason;
-                const double ratio = shadowFailInfo.outlineSize > 1e-6 ? height / shadowFailInfo.outlineSize : 0.0;
-                if (ratio > bestRatio)
-                {
-                    bestInfo = shadowFailInfo;
-                    bestRatio = ratio;
-                }
-                continue;
-            }
-
+            const double diameter = c.radius * 2.0;
             FastenerFilterInfo currentInfo;
-            currentInfo.outlineType = shadowInfo.outlineType;
-            currentInfo.height = height;
-            currentInfo.outlineSize = shadowInfo.outlineSize;
-            currentInfo.threshold = shadowInfo.outlineSize * 0.3;
+            currentInfo.outlineType = "box";
+            currentInfo.height = boxHeight;
+            currentInfo.outlineSize = std::max(boxWidth, boxDepth);
+            currentInfo.threshold = currentInfo.outlineSize * 0.3;
             currentInfo.cylinderDiameter = diameter;
-            currentInfo.hullPointCount = shadowInfo.hullPointCount;
-            currentInfo.shadowCurveCount = shadowInfo.curveCount;
-            currentInfo.shadowLineCount = shadowInfo.lineCount;
-            currentInfo.shadowCircleCount = shadowInfo.circleCount;
-            currentInfo.shadowSplineCount = shadowInfo.splineCount;
-            currentInfo.shadowOtherCount = shadowInfo.otherCount;
-            currentInfo.cylinderFaceCount = bestInfo.cylinderFaceCount;
+            currentInfo.hullPointCount = cylinderCount;
+            currentInfo.cylinderFaceCount = static_cast<int>(cylinderCount);
             currentInfo.outerCylinderFaceCount = bestInfo.outerCylinderFaceCount;
-            currentInfo.outerMed = outerMed;
-            currentInfo.circularEdgeCount = circleStats.circularEdgeCount;
-            currentInfo.fullCircleEdgeCount = circleStats.fullCircleEdgeCount;
-            currentInfo.halfCircleEdgeCount = circleStats.halfCircleEdgeCount;
-            currentInfo.reason = "阴影曲线轮廓匹配，高度不足";
-            const double ratio = shadowInfo.outlineSize > 1e-6 ? height / shadowInfo.outlineSize : 0.0;
+            currentInfo.outerMed = c.outerMed;
+            currentInfo.circularEdgeCount = c.stats.circularEdgeCount;
+            currentInfo.fullCircleEdgeCount = c.stats.fullCircleEdgeCount;
+            currentInfo.halfCircleEdgeCount = c.stats.halfCircleEdgeCount;
+            currentInfo.reason = "轴向包容盒未命中";
+            const double ratio = currentInfo.outlineSize > 1e-6 ? boxHeight / currentInfo.outlineSize : 0.0;
             if (ratio > bestRatio)
             {
-                bestRatio = ratio;
                 bestInfo = currentInfo;
+                bestRatio = ratio;
             }
 
-            if (height > currentInfo.threshold + 1e-4)
+            if (c.isOuter && (c.isFull || c.isHalf))
             {
-                currentInfo.matched = true;
-                currentInfo.reason = "阴影曲线轮廓命中跳过";
-                if (info != NULL)
+                size_t sameAxisOuterCount = 0;
+                size_t sameAxisOuterFullCount = 0;
+                size_t sameAxisOuterHalfCount = 0;
+                bool sameAxisOuterHasFull = false;
+                bool sameAxisOuterHasHalf = false;
+                size_t sameAxisInnerCount = 0;
+                size_t otherAxisCylinderCount = 0;
+                for (size_t j = 0; j < cylinderFaces.size(); ++j)
                 {
-                    *info = currentInfo;
+                    const FastenerCylinderFaceInfo& other = cylinderFaces[j];
+                    const bool sameAxisSameRadius = SameCylinderAxisAndRadius(c, other);
+                    const bool sameAxis = SameCylinderAxisOnly(c, other);
+                    if (!sameAxis)
+                    {
+                        ++otherAxisCylinderCount;
+                        continue;
+                    }
+                    if (sameAxisSameRadius && other.isOuter)
+                    {
+                        ++sameAxisOuterCount;
+                        if (other.isFull)
+                        {
+                            ++sameAxisOuterFullCount;
+                            sameAxisOuterHasFull = true;
+                        }
+                        if (other.isHalf)
+                        {
+                            ++sameAxisOuterHalfCount;
+                            sameAxisOuterHasHalf = true;
+                        }
+                    }
+                    if (other.isInner)
+                    {
+                        ++sameAxisInnerCount;
+                    }
                 }
-                return true;
+
+                const bool outerShape =
+                    sameAxisOuterHasFull ||
+                    (sameAxisOuterHalfCount >= 2 && !sameAxisOuterHasFull) ||
+                    sameAxisOuterHasHalf;
+                const bool allowedCylinderSet = otherAxisCylinderCount == 0;
+                const bool boxMatchesDiameter =
+                    IsEqualWithinRatio(boxWidth, diameter, 0.08) &&
+                    IsEqualWithinRatio(boxDepth, diameter, 0.08) &&
+                    IsAtLeastWithTolerance(boxHeight, diameter * 0.3);
+
+                if (outerShape && allowedCylinderSet && boxMatchesDiameter)
+                {
+                    currentInfo.matched = true;
+                    currentInfo.outlineType = "circleBox";
+                    currentInfo.outlineSize = diameter;
+                    currentInfo.threshold = diameter * 0.3;
+                    currentInfo.reason = sameAxisInnerCount > 0 ? "外圆柱加同轴内圆柱轴向包容盒命中跳过" : "外圆柱轴向包容盒命中跳过";
+                    if (info != NULL)
+                    {
+                        *info = currentInfo;
+                    }
+                    return true;
+                }
+            }
+
+            if (c.isInner && (c.isFull || c.isHalf))
+            {
+                size_t sameAxisInnerCount = 0;
+                size_t sameAxisInnerFullCount = 0;
+                size_t sameAxisInnerHalfCount = 0;
+                bool sameAxisInnerHasFull = false;
+                bool sameAxisInnerHasHalf = false;
+                size_t otherAxisCylinderCount = 0;
+                for (size_t j = 0; j < cylinderFaces.size(); ++j)
+                {
+                    const FastenerCylinderFaceInfo& other = cylinderFaces[j];
+                    if (!SameCylinderAxisOnly(c, other))
+                    {
+                        ++otherAxisCylinderCount;
+                        continue;
+                    }
+                    if (!other.isInner)
+                    {
+                        continue;
+                    }
+                    ++sameAxisInnerCount;
+                    if (other.isFull)
+                    {
+                        ++sameAxisInnerFullCount;
+                        sameAxisInnerHasFull = true;
+                    }
+                    if (other.isHalf)
+                    {
+                        ++sameAxisInnerHalfCount;
+                        sameAxisInnerHasHalf = true;
+                    }
+                }
+
+                const bool innerShape =
+                    sameAxisInnerHasFull ||
+                    (sameAxisInnerHalfCount >= 2 && !sameAxisInnerHasFull) ||
+                    sameAxisInnerHasHalf;
+                double hexAcrossFlats = 0.0;
+                const bool hexShape = BodyAxisHullIsRegularHex(body, c.axisPoint, c.axisDirection, &hexAcrossFlats);
+                const double hexSize = hexAcrossFlats > 1e-6 ? hexAcrossFlats : std::max(boxWidth, boxDepth);
+                const bool boxMatchesHex =
+                    IsEqualWithinRatio(boxWidth, boxDepth, 0.08) &&
+                    IsAtLeastWithTolerance(boxHeight, hexSize * 0.3) &&
+                    hexShape;
+
+                if (innerShape && otherAxisCylinderCount == 0 && boxMatchesHex)
+                {
+                    currentInfo.matched = true;
+                    currentInfo.outlineType = "hexBox";
+                    currentInfo.outlineSize = hexSize;
+                    currentInfo.threshold = hexSize * 0.3;
+                    currentInfo.reason = "内圆柱加六边形轴向包容盒命中跳过";
+                    if (info != NULL)
+                    {
+                        *info = currentInfo;
+                    }
+                    return true;
+                }
             }
         }
 
@@ -4803,7 +5244,7 @@ int ProcessBatchBodyQuantityInPart(
 			{
 				double dims[3] = { fabs(box[3] - box[0]), fabs(box[4] - box[1]), fabs(box[5] - box[2]) };
 				std::sort(dims, dims + 3);
-				keepBody = dims[1] >= minWidth && dims[2] >= minLength;
+				keepBody = dims[1] >= minWidth || dims[2] >= minLength;
 			}
 			else
 			{
@@ -4914,10 +5355,22 @@ int ProcessBatchBodyQuantityInPart(
 			bianhaoValue = batchNextNumber;
 		}
 
-		if (!keepLayerVisible)
-		{
-			body1->SetLayer(tucen);
-			std::vector<NXOpen::Layer::StateInfo> stateArray1(1);
+			if (!keepLayerVisible)
+			{
+				const int oldLayer = body1->Layer();
+				body1->SetLayer(tucen);
+				{
+					std::ostringstream oss;
+					oss << "assembly part layerAssign reason=batchReference"
+						<< " part=" << NxStringForLog(processPart->Name())
+						<< " bodyTag=" << body1->Tag()
+						<< " oldLayer=" << oldLayer
+						<< " newLayer=" << tucen
+						<< " groupIndex=" << groupCount
+						<< " groupCount=" << groupBodies.size();
+					ZiDonFenCenDebugLog(oss.str());
+				}
+				std::vector<NXOpen::Layer::StateInfo> stateArray1(1);
 			stateArray1[0] = NXOpen::Layer::StateInfo(tucen, NXOpen::Layer::StateHidden);
 			processPart->Layers()->ChangeStates(stateArray1, false);
 			needsRegenerate = true;
@@ -4936,7 +5389,20 @@ int ProcessBatchBodyQuantityInPart(
 			}
 			if (i > 0)
 			{
+				const int oldLayer = groupBody->Layer();
 				groupBody->SetLayer(matchedBodyLayer);
+				{
+					std::ostringstream oss;
+					oss << "assembly part layerAssign reason=batchMatched"
+						<< " part=" << NxStringForLog(processPart->Name())
+						<< " bodyTag=" << groupBody->Tag()
+						<< " oldLayer=" << oldLayer
+						<< " newLayer=" << matchedBodyLayer
+						<< " refTag=" << body1->Tag()
+						<< " groupIndex=" << groupCount
+						<< " memberIndex=" << i;
+					ZiDonFenCenDebugLog(oss.str());
+				}
 			}
 			if (colorMatchedBodies)
 			{
@@ -5474,7 +5940,7 @@ int ZiDonFenCen::apply_cb()
 					{
 						double dims[3] = { fabs(box[3] - box[0]), fabs(box[4] - box[1]), fabs(box[5] - box[2]) };
 						std::sort(dims, dims + 3);
-						keepBody = dims[1] >= minWidth && dims[2] >= minLength;
+						keepBody = dims[1] >= minWidth || dims[2] >= minLength;
 					}
 					else
 					{
@@ -5666,7 +6132,18 @@ int ZiDonFenCen::apply_cb()
 				}
 				if (!BlockLogicalValue(toggle03))
 				{
+					const int oldLayer = Body1->Layer();
 					Body1->SetLayer(tucen);
+					{
+						std::ostringstream oss;
+						oss << "batch layerAssign reason=batchReference"
+							<< " bodyTag=" << Body1->Tag()
+							<< " oldLayer=" << oldLayer
+							<< " newLayer=" << tucen
+							<< " groupIndex=" << groupCount
+							<< " groupCount=" << VBody_1.size();
+						ZiDonFenCenDebugLog(oss.str());
+					}
 					std::vector<NXOpen::Layer::StateInfo> stateArray1(1);
 					stateArray1[0] = NXOpen::Layer::StateInfo(tucen, NXOpen::Layer::StateHidden);
 					workPart->Layers()->ChangeStates(stateArray1, false);
@@ -5687,7 +6164,19 @@ int ZiDonFenCen::apply_cb()
 					}
 					if (groupIndex > 0)
 					{
+						const int oldLayer = groupBody->Layer();
 						groupBody->SetLayer(matchedBodyLayer);
+						{
+							std::ostringstream oss;
+							oss << "batch layerAssign reason=batchMatched"
+								<< " bodyTag=" << groupBody->Tag()
+								<< " oldLayer=" << oldLayer
+								<< " newLayer=" << matchedBodyLayer
+								<< " refTag=" << Body1->Tag()
+								<< " groupIndex=" << groupCount
+								<< " memberIndex=" << groupIndex;
+							ZiDonFenCenDebugLog(oss.str());
+						}
 					}
 					if (colorMatchedBodies)
 					{
@@ -5819,6 +6308,7 @@ int ZiDonFenCen::apply_cb()
 
 					if (distance1 < 0.01)
 					{
+						const int oldLayer = VBody[ia]->Layer();
 						VBody[ia]->SetLayer(VBody_1[i]->Layer());
 						CopyStringAttributeIfPresent(VBody_1[i], VBody[ia], "bianhao");
 						CopyStringAttributeIfPresent(VBody_1[i], VBody[ia], "cailiao");
@@ -5827,9 +6317,11 @@ int ZiDonFenCen::apply_cb()
 						{
 							std::ostringstream oss;
 							oss << "apply followAux"
+								<< " reason=followAux"
 								<< " sourceTag=" << VBody_1[i]->Tag()
 								<< " sourceLayer=" << VBody_1[i]->Layer()
 								<< " auxTag=" << VBody[ia]->Tag()
+								<< " oldLayer=" << oldLayer
 								<< " auxLayer=" << VBody[ia]->Layer()
 								<< " distance=" << distance1
 								<< " cailiao=" << BodyStringAttributeForLog(VBody[ia], "cailiao")
