@@ -84,6 +84,7 @@
 #include <uf_obj.h>
 #include <uf_disp.h>
 #include <uf_ui.h>
+#include <uf_part.h>
 #include <uf_curve.h>
 #include <uf_modl_primitives.h>
 #include <algorithm>
@@ -229,6 +230,7 @@ struct GapEdgePair
     tag_t secondGapFace;
     int firstEdgeSide;
     int secondEdgeSide;
+    int chainId;
     double length;
     bool firstEdgeIsLine;
     bool secondEdgeIsLine;
@@ -497,6 +499,174 @@ double DistanceSegmentToSegment3(const EdgeEndpointPair& first, const EdgeEndpoi
         std::min(
             DistancePointToSegment3(second.first, first.first, first.second),
             DistancePointToSegment3(second.second, first.first, first.second)));
+}
+
+bool EdgeEndpointConnected(const EdgeEndpointPair& first, const EdgeEndpointPair& second, double tolerance = 0.01)
+{
+    return Distance3(first.first, second.first) <= tolerance ||
+        Distance3(first.first, second.second) <= tolerance ||
+        Distance3(first.second, second.first) <= tolerance ||
+        Distance3(first.second, second.second) <= tolerance;
+}
+
+bool EdgeConnectsToSide(
+    tag_t edge,
+    int side,
+    const std::map<tag_t, int>& edgeSide,
+    const std::map<tag_t, EdgeEndpointPair>& endpointByEdge)
+{
+    std::map<tag_t, EdgeEndpointPair>::const_iterator edgeEndpointIt =
+        endpointByEdge.find(edge);
+    if (edgeEndpointIt == endpointByEdge.end())
+    {
+        return false;
+    }
+
+    for (std::map<tag_t, int>::const_iterator sideIt = edgeSide.begin();
+        sideIt != edgeSide.end();
+        ++sideIt)
+    {
+        if (sideIt->first == edge || sideIt->second != side)
+        {
+            continue;
+        }
+
+        std::map<tag_t, EdgeEndpointPair>::const_iterator otherEndpointIt =
+            endpointByEdge.find(sideIt->first);
+        if (otherEndpointIt != endpointByEdge.end() &&
+            EdgeEndpointConnected(edgeEndpointIt->second, otherEndpointIt->second))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void ClearGapPairEdgeSlot(GapEdgePair& pair, int slot)
+{
+    if (slot == 0)
+    {
+        pair.firstEdge = NULL_TAG;
+        pair.firstOwnerFace = NULL_TAG;
+        pair.firstGapFace = NULL_TAG;
+        pair.firstEdgeIsLine = false;
+    }
+    else
+    {
+        pair.secondEdge = NULL_TAG;
+        pair.secondOwnerFace = NULL_TAG;
+        pair.secondGapFace = NULL_TAG;
+        pair.secondEdgeIsLine = false;
+    }
+}
+
+void FilterGapEdgesConnectedToOtherChains(
+    std::vector<GapEdgePair>& gapEdgePairs,
+    const std::map<tag_t, EdgeEndpointPair>& endpointByEdge)
+{
+    struct GapEdgeRef
+    {
+        std::size_t pairIndex;
+        int slot;
+        tag_t edge;
+        int chainId;
+    };
+
+    std::vector<GapEdgeRef> edgeRefs;
+    for (std::size_t pairIndex = 0; pairIndex < gapEdgePairs.size(); ++pairIndex)
+    {
+        if (gapEdgePairs[pairIndex].chainId == 0)
+        {
+            continue;
+        }
+
+        if (gapEdgePairs[pairIndex].firstEdge != NULL_TAG)
+        {
+            GapEdgeRef ref = {};
+            ref.pairIndex = pairIndex;
+            ref.slot = 0;
+            ref.edge = gapEdgePairs[pairIndex].firstEdge;
+            ref.chainId = gapEdgePairs[pairIndex].chainId;
+            edgeRefs.push_back(ref);
+        }
+
+        if (gapEdgePairs[pairIndex].secondEdge != NULL_TAG)
+        {
+            GapEdgeRef ref = {};
+            ref.pairIndex = pairIndex;
+            ref.slot = 1;
+            ref.edge = gapEdgePairs[pairIndex].secondEdge;
+            ref.chainId = gapEdgePairs[pairIndex].chainId;
+            edgeRefs.push_back(ref);
+        }
+    }
+
+    std::set<std::pair<std::size_t, int> > slotsToClear;
+    for (std::size_t firstIndex = 0; firstIndex < edgeRefs.size(); ++firstIndex)
+    {
+        std::map<tag_t, EdgeEndpointPair>::const_iterator firstEndpointIt =
+            endpointByEdge.find(edgeRefs[firstIndex].edge);
+        if (firstEndpointIt == endpointByEdge.end())
+        {
+            continue;
+        }
+
+        for (std::size_t secondIndex = firstIndex + 1; secondIndex < edgeRefs.size(); ++secondIndex)
+        {
+            if (edgeRefs[firstIndex].chainId == edgeRefs[secondIndex].chainId)
+            {
+                continue;
+            }
+
+            std::map<tag_t, EdgeEndpointPair>::const_iterator secondEndpointIt =
+                endpointByEdge.find(edgeRefs[secondIndex].edge);
+            if (secondEndpointIt == endpointByEdge.end() ||
+                !EdgeEndpointConnected(firstEndpointIt->second, secondEndpointIt->second))
+            {
+                continue;
+            }
+
+            slotsToClear.insert(std::make_pair(edgeRefs[firstIndex].pairIndex, edgeRefs[firstIndex].slot));
+            slotsToClear.insert(std::make_pair(edgeRefs[secondIndex].pairIndex, edgeRefs[secondIndex].slot));
+            DebugLog("  gap edge cancelled by cross-chain connection: edge1=" +
+                FormatTag(edgeRefs[firstIndex].edge) +
+                ", chain1=" + FormatTag(static_cast<tag_t>(edgeRefs[firstIndex].chainId)) +
+                ", edge2=" + FormatTag(edgeRefs[secondIndex].edge) +
+                ", chain2=" + FormatTag(static_cast<tag_t>(edgeRefs[secondIndex].chainId)));
+        }
+    }
+
+    if (slotsToClear.empty())
+    {
+        return;
+    }
+
+    for (std::set<std::pair<std::size_t, int> >::const_iterator slotIt = slotsToClear.begin();
+        slotIt != slotsToClear.end();
+        ++slotIt)
+    {
+        if (slotIt->first >= gapEdgePairs.size())
+        {
+            continue;
+        }
+
+        ClearGapPairEdgeSlot(gapEdgePairs[slotIt->first], slotIt->second);
+    }
+
+    gapEdgePairs.erase(
+        std::remove_if(
+            gapEdgePairs.begin(),
+            gapEdgePairs.end(),
+            [](const GapEdgePair& pair)
+            {
+                return pair.firstEdge == NULL_TAG && pair.secondEdge == NULL_TAG;
+            }),
+        gapEdgePairs.end());
+
+    DebugLog("Narrow boundary cross-chain edge filter: cancelledEdges=" +
+        FormatTag(static_cast<tag_t>(slotsToClear.size())) +
+        ", remainingPairs=" + FormatTag(static_cast<tag_t>(gapEdgePairs.size())));
 }
 
 bool AskMinimumDistance(tag_t object1, tag_t object2, const double guess1[3], const double guess2[3], double& distance)
@@ -1048,6 +1218,56 @@ bool JoinBodyFacesOnSameSurface(tag_t bodyTag, tag_t& resultFeatureTag)
     return true;
 }
 
+void JoinVisibleBodyFacesOnSameSurface()
+{
+    const tag_t displayPartTag = UF_PART_ask_display_part();
+    if (displayPartTag == NULL_TAG)
+    {
+        DebugLog("Dialog join visible bodies skipped: no display part");
+        return;
+    }
+
+    int joinedCount = 0;
+    int skippedBlankCount = 0;
+    int failedCount = 0;
+    tag_t bodyTag = NULL_TAG;
+    while (UF_OBJ_cycle_objs_in_part(displayPartTag, UF_solid_type, &bodyTag) == 0 &&
+        bodyTag != NULL_TAG)
+    {
+        int type = 0;
+        int subtype = 0;
+        if (UF_OBJ_ask_type_and_subtype(bodyTag, &type, &subtype) != 0 ||
+            type != UF_solid_type ||
+            subtype != UF_solid_body_subtype)
+        {
+            continue;
+        }
+
+        UF_OBJ_disp_props_t displayProps = {};
+        if (UF_OBJ_ask_display_properties(bodyTag, &displayProps) == 0 &&
+            displayProps.blank_status == UF_OBJ_BLANKED)
+        {
+            ++skippedBlankCount;
+            continue;
+        }
+
+        tag_t joinFeatureTag = NULL_TAG;
+        if (JoinBodyFacesOnSameSurface(bodyTag, joinFeatureTag))
+        {
+            ++joinedCount;
+        }
+        else
+        {
+            ++failedCount;
+        }
+    }
+
+    DebugLog("Dialog join visible bodies done: joined=" +
+        FormatTag(static_cast<tag_t>(joinedCount)) +
+        ", skippedBlank=" + FormatTag(static_cast<tag_t>(skippedBlankCount)) +
+        ", failed=" + FormatTag(static_cast<tag_t>(failedCount)));
+}
+
 tag_t FindPlanarFaceNearReference(
     tag_t bodyTag,
     const double referencePoint[3],
@@ -1349,6 +1569,108 @@ bool IsFaceTangentOrEdgeConnectedToCylinder(tag_t cylinderFace, tag_t candidateF
         return true;
     }
 
+    return false;
+}
+
+bool IsCylinderAxialEdge(tag_t cylinderFace, tag_t edgeTag)
+{
+    if (cylinderFace == NULL_TAG || edgeTag == NULL_TAG || !IsLineEdge(edgeTag))
+    {
+        return false;
+    }
+
+    double axisPoint[3] = {0.0, 0.0, 0.0};
+    double axisDirection[3] = {0.0, 0.0, 0.0};
+    double radius = 0.0;
+    if (!AskCylinderFaceData(cylinderFace, axisPoint, axisDirection, radius))
+    {
+        return false;
+    }
+
+    const std::vector<tag_t> cylinderEdges = AskFaceEdges(cylinderFace);
+    if (!ContainsTag(cylinderEdges, edgeTag))
+    {
+        return false;
+    }
+
+    EdgeEndpointPair endpoints = {};
+    if (!AskEdgeEndpointPair(edgeTag, endpoints))
+    {
+        return false;
+    }
+
+    double edgeDirection[3] =
+    {
+        endpoints.second[0] - endpoints.first[0],
+        endpoints.second[1] - endpoints.first[1],
+        endpoints.second[2] - endpoints.first[2]
+    };
+    if (!Normalize3(edgeDirection))
+    {
+        return false;
+    }
+
+    const double axisCos = std::fabs(Dot3(edgeDirection, axisDirection));
+    const bool axial = axisCos >= 0.98;
+    DebugLog("    cylinder axial edge check: cylinder=" +
+        FormatTag(cylinderFace) +
+        ", edge=" + FormatTag(edgeTag) +
+        ", axisCos=" + FormatDouble(axisCos) +
+        ", axial=" + FormatTag(static_cast<tag_t>(axial ? 1 : 0)));
+    return axial;
+}
+
+bool CylinderAxialEdgeTouchesFaceChain(
+    tag_t cylinderFace,
+    tag_t bodyTag,
+    const std::set<tag_t>& chainFaces,
+    tag_t& matchedEdge,
+    tag_t& matchedFace)
+{
+    matchedEdge = NULL_TAG;
+    matchedFace = NULL_TAG;
+    if (cylinderFace == NULL_TAG || bodyTag == NULL_TAG || chainFaces.empty())
+    {
+        return false;
+    }
+
+    const std::vector<tag_t> cylinderEdges = AskFaceEdges(cylinderFace);
+    for (std::size_t edgeIndex = 0; edgeIndex < cylinderEdges.size(); ++edgeIndex)
+    {
+        const tag_t edgeTag = cylinderEdges[edgeIndex];
+        if (!IsCylinderAxialEdge(cylinderFace, edgeTag))
+        {
+            continue;
+        }
+
+        const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(edgeTag);
+        for (std::size_t faceIndex = 0; faceIndex < adjacentFaces.size(); ++faceIndex)
+        {
+            const tag_t faceTag = adjacentFaces[faceIndex];
+            if (faceTag == NULL_TAG || faceTag == cylinderFace ||
+                chainFaces.find(faceTag) == chainFaces.end())
+            {
+                continue;
+            }
+
+            tag_t faceBody = NULL_TAG;
+            if (UF_MODL_ask_face_body(faceTag, &faceBody) != 0 || faceBody != bodyTag)
+            {
+                continue;
+            }
+
+            matchedEdge = edgeTag;
+            matchedFace = faceTag;
+            DebugLog("    cylinder axial edge touches face chain: cylinder=" +
+                FormatTag(cylinderFace) +
+                ", axialEdge=" + FormatTag(matchedEdge) +
+                ", chainFace=" + FormatTag(matchedFace));
+            return true;
+        }
+    }
+
+    DebugLog("    cylinder axial edge does not touch face chain: cylinder=" +
+        FormatTag(cylinderFace));
     return false;
 }
 
@@ -1680,8 +2002,46 @@ std::vector<tag_t> BuildSelectedFaceChain(tag_t bodyTag, tag_t selectedFaceTag, 
 
                 tag_t cylinderFace = NULL_TAG;
                 tag_t tangentFace = NULL_TAG;
+                if (IsThicknessFaceByParallelEdgeDistance(adjacentFace, edges[edgeIndex], thickness))
+                {
+                    DebugLog("    adjacent excluded end face=" + FormatTag(adjacentFace));
+                    visited.insert(adjacentFace);
+                    continue;
+                }
+
                 if (MustRespectCylinderTangency(adjacentFaces, currentFace, adjacentFace, cylinderFace, tangentFace))
                 {
+                    if (IsCylinderAxialEdge(cylinderFace, edges[edgeIndex]))
+                    {
+                        DebugLog("    adjacent add by cylinder axial edge: candidate=" +
+                            FormatTag(adjacentFace) +
+                            ", cylinder=" + FormatTag(cylinderFace) +
+                            ", sharedEdge=" + FormatTag(edges[edgeIndex]));
+                        visited.insert(adjacentFace);
+                        pending.push_back(adjacentFace);
+                        continue;
+                    }
+
+                    tag_t matchedAxialEdge = NULL_TAG;
+                    tag_t matchedChainFace = NULL_TAG;
+                    if (CylinderAxialEdgeTouchesFaceChain(
+                        cylinderFace,
+                        bodyTag,
+                        visited,
+                        matchedAxialEdge,
+                        matchedChainFace))
+                    {
+                        DebugLog("    adjacent add by cylinder axial edge chain touch: candidate=" +
+                            FormatTag(adjacentFace) +
+                            ", cylinder=" + FormatTag(cylinderFace) +
+                            ", sharedEdge=" + FormatTag(edges[edgeIndex]) +
+                            ", axialEdge=" + FormatTag(matchedAxialEdge) +
+                            ", chainFace=" + FormatTag(matchedChainFace));
+                        visited.insert(adjacentFace);
+                        pending.push_back(adjacentFace);
+                        continue;
+                    }
+
                     if (IsFaceTangentToCylinder(cylinderFace, tangentFace))
                     {
                         DebugLog("    adjacent add by cylinder tangent bypass: candidate=" +
@@ -1697,13 +2057,6 @@ std::vector<tag_t> BuildSelectedFaceChain(tag_t bodyTag, tag_t selectedFaceTag, 
                         FormatTag(cylinderFace) +
                         ", tangentFace=" + FormatTag(tangentFace) +
                         ", candidate=" + FormatTag(adjacentFace));
-                    visited.insert(adjacentFace);
-                    continue;
-                }
-
-                if (IsThicknessFaceByParallelEdgeDistance(adjacentFace, edges[edgeIndex], thickness))
-                {
-                    DebugLog("    adjacent excluded end face=" + FormatTag(adjacentFace));
                     visited.insert(adjacentFace);
                     continue;
                 }
@@ -2030,50 +2383,99 @@ std::vector<GapEdgePair> PickOuterAndMultiFaceInnerBoundaryLoops(
             ", length=" + FormatDouble(candidatePairs[seedIndex].length));
 
         std::map<tag_t, int> edgeSide;
-        std::deque<tag_t> pendingEdges;
         edgeSide[candidatePairs[seedIndex].firstEdge] = 0;
         edgeSide[candidatePairs[seedIndex].secondEdge] = 1;
-        pendingEdges.push_back(candidatePairs[seedIndex].firstEdge);
-        pendingEdges.push_back(candidatePairs[seedIndex].secondEdge);
 
         std::vector<std::size_t> chainCandidateIndexes;
-        while (!pendingEdges.empty())
+        if (usedCandidateIndexes.insert(seedIndex).second)
         {
-            const tag_t currentEdge = pendingEdges.front();
-            pendingEdges.pop_front();
-            const int currentSide = edgeSide[currentEdge];
+            chainCandidateIndexes.push_back(seedIndex);
+        }
 
+        bool expanded = true;
+        while (expanded)
+        {
+            expanded = false;
             for (std::size_t candidateIndex = 0; candidateIndex < candidatePairs.size(); ++candidateIndex)
             {
+                if (usedCandidateIndexes.find(candidateIndex) != usedCandidateIndexes.end())
+                {
+                    continue;
+                }
+
                 const CandidateGapEdgePair& candidate = candidatePairs[candidateIndex];
-                if (candidate.firstEdge != currentEdge && candidate.secondEdge != currentEdge)
+                const bool firstKnown = edgeSide.find(candidate.firstEdge) != edgeSide.end();
+                const bool secondKnown = edgeSide.find(candidate.secondEdge) != edgeSide.end();
+                const bool firstConnectsSide0 =
+                    (firstKnown && edgeSide[candidate.firstEdge] == 0) ||
+                    EdgeConnectsToSide(candidate.firstEdge, 0, edgeSide, endpointByEdge);
+                const bool firstConnectsSide1 =
+                    (firstKnown && edgeSide[candidate.firstEdge] == 1) ||
+                    EdgeConnectsToSide(candidate.firstEdge, 1, edgeSide, endpointByEdge);
+                const bool secondConnectsSide0 =
+                    (secondKnown && edgeSide[candidate.secondEdge] == 0) ||
+                    EdgeConnectsToSide(candidate.secondEdge, 0, edgeSide, endpointByEdge);
+                const bool secondConnectsSide1 =
+                    (secondKnown && edgeSide[candidate.secondEdge] == 1) ||
+                    EdgeConnectsToSide(candidate.secondEdge, 1, edgeSide, endpointByEdge);
+
+                bool firstSide0SecondSide1 = firstConnectsSide0 && secondConnectsSide1;
+                bool firstSide1SecondSide0 = firstConnectsSide1 && secondConnectsSide0;
+                if (firstKnown && edgeSide[candidate.firstEdge] != 0)
                 {
-                    continue;
+                    firstSide0SecondSide1 = false;
+                }
+                if (secondKnown && edgeSide[candidate.secondEdge] != 1)
+                {
+                    firstSide0SecondSide1 = false;
+                }
+                if (firstKnown && edgeSide[candidate.firstEdge] != 1)
+                {
+                    firstSide1SecondSide0 = false;
+                }
+                if (secondKnown && edgeSide[candidate.secondEdge] != 0)
+                {
+                    firstSide1SecondSide0 = false;
                 }
 
-                const tag_t pairedEdge =
-                    candidate.firstEdge == currentEdge ? candidate.secondEdge : candidate.firstEdge;
-                const int pairedSide = 1 - currentSide;
-                std::map<tag_t, int>::const_iterator pairedSideIt = edgeSide.find(pairedEdge);
-                if (pairedSideIt != edgeSide.end() && pairedSideIt->second != pairedSide)
+                if (firstSide0SecondSide1 || firstSide1SecondSide0)
                 {
-                    DebugLog("  narrow boundary chain side conflict: edge=" +
-                        FormatTag(currentEdge) +
-                        ", pairedEdge=" + FormatTag(pairedEdge) +
-                        ", discardedCandidate=" + FormatTag(static_cast<tag_t>(candidateIndex + 1)));
+                    const int firstSide = firstSide0SecondSide1 ? 0 : 1;
+                    const int secondSide = 1 - firstSide;
+                    edgeSide[candidate.firstEdge] = firstSide;
+                    edgeSide[candidate.secondEdge] = secondSide;
                     usedCandidateIndexes.insert(candidateIndex);
+                    chainCandidateIndexes.push_back(candidateIndex);
+                    expanded = true;
+                    DebugLog("  narrow boundary chain pair extended: chain=" +
+                        FormatTag(static_cast<tag_t>(seedIndex + 1)) +
+                        ", edge1=" + FormatTag(candidate.firstEdge) +
+                        ", side1=" + FormatTag(static_cast<tag_t>(firstSide)) +
+                        ", edge2=" + FormatTag(candidate.secondEdge) +
+                        ", side2=" + FormatTag(static_cast<tag_t>(secondSide)) +
+                        ", candidate=" + FormatTag(static_cast<tag_t>(candidateIndex + 1)));
                     continue;
                 }
 
-                if (usedCandidateIndexes.insert(candidateIndex).second)
+                const bool touchesCurrentChain =
+                    firstConnectsSide0 || firstConnectsSide1 ||
+                    secondConnectsSide0 || secondConnectsSide1;
+                const bool onlyOneSideTouches =
+                    touchesCurrentChain &&
+                    !((firstConnectsSide0 || secondConnectsSide0) &&
+                      (firstConnectsSide1 || secondConnectsSide1));
+                if (onlyOneSideTouches)
                 {
-                    chainCandidateIndexes.push_back(candidateIndex);
-                }
-
-                if (pairedSideIt == edgeSide.end())
-                {
-                    edgeSide[pairedEdge] = pairedSide;
-                    pendingEdges.push_back(pairedEdge);
+                    usedCandidateIndexes.insert(candidateIndex);
+                    DebugLog("  narrow boundary chain rejected: paired side not connected, chain=" +
+                        FormatTag(static_cast<tag_t>(seedIndex + 1)) +
+                        ", edge1=" + FormatTag(candidate.firstEdge) +
+                        ", edge2=" + FormatTag(candidate.secondEdge) +
+                        ", firstConnectsSide0=" + FormatTag(static_cast<tag_t>(firstConnectsSide0 ? 1 : 0)) +
+                        ", firstConnectsSide1=" + FormatTag(static_cast<tag_t>(firstConnectsSide1 ? 1 : 0)) +
+                        ", secondConnectsSide0=" + FormatTag(static_cast<tag_t>(secondConnectsSide0 ? 1 : 0)) +
+                        ", secondConnectsSide1=" + FormatTag(static_cast<tag_t>(secondConnectsSide1 ? 1 : 0)) +
+                        ", discardedCandidate=" + FormatTag(static_cast<tag_t>(candidateIndex + 1)));
                 }
             }
         }
@@ -2090,18 +2492,21 @@ std::vector<GapEdgePair> PickOuterAndMultiFaceInnerBoundaryLoops(
             pair.secondGapFace = NULL_TAG;
             pair.firstEdgeSide = edgeSide[candidate.firstEdge];
             pair.secondEdgeSide = edgeSide[candidate.secondEdge];
+            pair.chainId = static_cast<int>(seedIndex + 1);
             pair.length = candidate.length;
             pair.firstEdgeIsLine = IsLineEdge(candidate.firstEdge);
             pair.secondEdgeIsLine = IsLineEdge(candidate.secondEdge);
             gapEdgePairs.push_back(pair);
             DebugLog("  narrow boundary chain pair selected: chain=" +
-                FormatTag(static_cast<tag_t>(seedIndex + 1)) +
+                FormatTag(static_cast<tag_t>(pair.chainId)) +
                 ", edge1=" + FormatTag(pair.firstEdge) +
                 ", side1=" + FormatTag(static_cast<tag_t>(pair.firstEdgeSide)) +
                 ", edge2=" + FormatTag(pair.secondEdge) +
                 ", side2=" + FormatTag(static_cast<tag_t>(pair.secondEdgeSide)));
         }
     }
+
+    FilterGapEdgesConnectedToOtherChains(gapEdgePairs, endpointByEdge);
 
     DebugLog("Narrow boundary gap pair selected count=" +
         FormatTag(static_cast<tag_t>(gapEdgePairs.size())) +
@@ -2364,21 +2769,115 @@ bool FaceIsFourEdgeGapFaceByGapEdgeDistance(tag_t faceTag, tag_t gapEdgeTag, dou
     }
 
     const std::vector<tag_t> edges = AskFaceEdges(faceTag);
-    if (edges.size() != 4)
-    {
-        DebugLog("  gap face rejected: edge count not 4, face=" +
-            FormatTag(faceTag) +
-            ", gapEdge=" + FormatTag(gapEdgeTag) +
-            ", edgeCount=" + FormatTag(static_cast<tag_t>(edges.size())));
-        return false;
-    }
-
     EdgeEndpointPair gapEndpoints = {};
     if (!AskEdgeEndpointPair(gapEdgeTag, gapEndpoints))
     {
         DebugLog("  gap face rejected: cannot read gap edge endpoints, face=" +
             FormatTag(faceTag) +
             ", gapEdge=" + FormatTag(gapEdgeTag));
+        return false;
+    }
+
+    double gapDirection[3] =
+    {
+        gapEndpoints.second[0] - gapEndpoints.first[0],
+        gapEndpoints.second[1] - gapEndpoints.first[1],
+        gapEndpoints.second[2] - gapEndpoints.first[2]
+    };
+    if (!Normalize3(gapDirection))
+    {
+        DebugLog("  gap face rejected: zero gap edge direction, face=" +
+            FormatTag(faceTag) +
+            ", gapEdge=" + FormatTag(gapEdgeTag));
+        return false;
+    }
+
+    if (edges.size() != 4)
+    {
+        if (edges.size() <= 4)
+        {
+            DebugLog("  gap face rejected: edge count not 4, face=" +
+                FormatTag(faceTag) +
+                ", gapEdge=" + FormatTag(gapEdgeTag) +
+                ", edgeCount=" + FormatTag(static_cast<tag_t>(edges.size())));
+            return false;
+        }
+
+        for (std::size_t index = 0; index < edges.size(); ++index)
+        {
+            const tag_t edgeTag = edges[index];
+            if (edgeTag == NULL_TAG || edgeTag == gapEdgeTag)
+            {
+                continue;
+            }
+
+            EdgeEndpointPair edgeEndpoints = {};
+            if (!AskEdgeEndpointPair(edgeTag, edgeEndpoints))
+            {
+                continue;
+            }
+
+            double edgeDirection[3] =
+            {
+                edgeEndpoints.second[0] - edgeEndpoints.first[0],
+                edgeEndpoints.second[1] - edgeEndpoints.first[1],
+                edgeEndpoints.second[2] - edgeEndpoints.first[2]
+            };
+            if (!Normalize3(edgeDirection))
+            {
+                continue;
+            }
+
+            const double parallelCos = std::fabs(Dot3(gapDirection, edgeDirection));
+            if (parallelCos < kParallelCosTolerance)
+            {
+                continue;
+            }
+
+            double guess1[3] =
+            {
+                (gapEndpoints.first[0] + gapEndpoints.second[0]) * 0.5,
+                (gapEndpoints.first[1] + gapEndpoints.second[1]) * 0.5,
+                (gapEndpoints.first[2] + gapEndpoints.second[2]) * 0.5
+            };
+            double guess2[3] =
+            {
+                (edgeEndpoints.first[0] + edgeEndpoints.second[0]) * 0.5,
+                (edgeEndpoints.first[1] + edgeEndpoints.second[1]) * 0.5,
+                (edgeEndpoints.first[2] + edgeEndpoints.second[2]) * 0.5
+            };
+
+            double distance = 0.0;
+            if (!AskMinimumDistance(gapEdgeTag, edgeTag, guess1, guess2, distance))
+            {
+                distance = DistanceSegmentToSegment3(gapEndpoints, edgeEndpoints);
+            }
+
+            DebugLog("    gap face multi-edge parallel distance check: face=" +
+                FormatTag(faceTag) +
+                ", gapEdge=" + FormatTag(gapEdgeTag) +
+                ", edge=" + FormatTag(edgeTag) +
+                ", parallelCos=" + FormatDouble(parallelCos) +
+                ", distance=" + FormatDouble(distance) +
+                ", delta=" + FormatDouble(std::fabs(distance - thickness)) +
+                ", thickness=" + FormatDouble(thickness));
+
+            if (std::fabs(distance - thickness) <= kThicknessEdgeTolerance)
+            {
+                DebugLog("  gap face accepted by multi-edge parallel thickness rule: face=" +
+                    FormatTag(faceTag) +
+                    ", gapEdge=" + FormatTag(gapEdgeTag) +
+                    ", edge=" + FormatTag(edgeTag) +
+                    ", distance=" + FormatDouble(distance));
+                return true;
+            }
+        }
+
+        DebugLog("  gap face rejected: multi-edge no parallel edge at thickness distance, face=" +
+            FormatTag(faceTag) +
+            ", gapEdge=" + FormatTag(gapEdgeTag) +
+            ", edgeCount=" + FormatTag(static_cast<tag_t>(edges.size())) +
+            ", thickness=" + FormatDouble(thickness));
         return false;
     }
 
@@ -2487,6 +2986,39 @@ bool FacesShareEdge(tag_t firstFace, tag_t secondFace)
 
 bool GapFaceGroupsConnected(const GapFaceGroup& first, const GapFaceGroup& second)
 {
+    bool hasChainId = false;
+    for (std::size_t firstPairIndex = 0; firstPairIndex < first.gapEdgePairs.size(); ++firstPairIndex)
+    {
+        const int firstChainId = first.gapEdgePairs[firstPairIndex].chainId;
+        if (firstChainId == 0)
+        {
+            continue;
+        }
+
+        hasChainId = true;
+        for (std::size_t secondPairIndex = 0; secondPairIndex < second.gapEdgePairs.size(); ++secondPairIndex)
+        {
+            if (firstChainId == second.gapEdgePairs[secondPairIndex].chainId)
+            {
+                return true;
+            }
+        }
+    }
+
+    for (std::size_t secondPairIndex = 0; secondPairIndex < second.gapEdgePairs.size(); ++secondPairIndex)
+    {
+        if (second.gapEdgePairs[secondPairIndex].chainId != 0)
+        {
+            hasChainId = true;
+            break;
+        }
+    }
+
+    if (hasChainId)
+    {
+        return false;
+    }
+
     for (std::size_t firstIndex = 0; firstIndex < first.faces.size(); ++firstIndex)
     {
         for (std::size_t secondIndex = 0; secondIndex < second.faces.size(); ++secondIndex)
@@ -2817,6 +3349,7 @@ std::vector<GapFaceGroup> FindGapFaceGroupsFromGapEdgePairs(const std::vector<Ga
         group.gapEdgePairs.push_back(pair);
         DebugLog("  gap face group result: group=" +
             FormatTag(static_cast<tag_t>(pairIndex + 1)) +
+            ", chain=" + FormatTag(static_cast<tag_t>(pair.chainId)) +
             ", faces=" + FormatTag(static_cast<tag_t>(group.faces.size())) +
             ", firstGapFace=" + FormatTag(pair.firstGapFace) +
             ", firstEdgeSide=" + FormatTag(static_cast<tag_t>(pair.firstEdgeSide)) +
@@ -2839,6 +3372,9 @@ std::vector<GapFaceGroup> FindGapFaceGroupsFromGapEdgePairs(const std::vector<Ga
         DebugLog("Gap face connected group: group=" +
             FormatTag(static_cast<tag_t>(groupIndex + 1)) +
             ", gapPairs=" + FormatTag(static_cast<tag_t>(groups[groupIndex].gapEdgePairs.size())) +
+            ", chain=" + FormatTag(groups[groupIndex].gapEdgePairs.empty()
+                ? NULL_TAG
+                : static_cast<tag_t>(groups[groupIndex].gapEdgePairs.front().chainId)) +
             ", faces=" + FormatTag(static_cast<tag_t>(groups[groupIndex].faces.size())) +
             ", touchesTangentCylinder=" +
             FormatTag(static_cast<tag_t>(groups[groupIndex].touchesTangentCylinder ? 1 : 0)));
@@ -2999,6 +3535,31 @@ void ColorFacesAsSkipped(
         if (UF_OBJ_set_color(faces[index], skippedColor) == 0)
         {
             RedisplayObject(faces[index]);
+        }
+    }
+}
+
+void ColorFaceChainTemporary(
+    const std::vector<tag_t>& faces,
+    std::vector<tag_t>& coloredFaces,
+    std::vector<int>& originalColors)
+{
+    const int chainColor = 211;
+    DebugLog("Color selected face chain count=" +
+        FormatTag(static_cast<tag_t>(faces.size())) +
+        ", color=" + FormatTag(static_cast<tag_t>(chainColor)));
+    for (std::size_t index = 0; index < faces.size(); ++index)
+    {
+        const tag_t faceTag = faces[index];
+        if (faceTag == NULL_TAG)
+        {
+            continue;
+        }
+
+        RememberOriginalFaceColor(faceTag, coloredFaces, originalColors);
+        if (UF_OBJ_set_color(faceTag, chainColor) == 0)
+        {
+            RedisplayObject(faceTag);
         }
     }
 }
@@ -6468,6 +7029,7 @@ void TianFenXI::dialogShown_cb()
 {
     try
     {
+        JoinVisibleBodyFacesOnSameSurface();
         LoadUiSettings();
         UpdateDeleteRVisibility();
     }
@@ -6831,27 +7393,6 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
     DebugLog("Preview selected plane point=" + FormatVector3(selectedPoint) +
         ", normal=" + FormatVector3(selectedNormal));
 
-    tag_t joinFaceFeatureTag = NULL_TAG;
-    if (JoinBodyFacesOnSameSurface(bodyTag, joinFaceFeatureTag))
-    {
-        const tag_t joinedSelectedFaceTag =
-            FindPlanarFaceNearReference(bodyTag, selectedPoint, selectedNormal);
-        if (joinedSelectedFaceTag != NULL_TAG)
-        {
-            selectedFaceTag = joinedSelectedFaceTag;
-            previewSelectedFaceTag = selectedFaceTag;
-            if (!AskPlanarFacePlane(selectedFaceTag, selectedPoint, selectedNormal))
-            {
-                DebugLog("Preview abort: joined selected face is not planar");
-                RefreshDisplay();
-                return;
-            }
-            DebugLog("Preview selected face after join=" + FormatTag(selectedFaceTag) +
-                ", point=" + FormatVector3(selectedPoint) +
-                ", normal=" + FormatVector3(selectedNormal));
-        }
-    }
-
     double thickness = 0.0;
     double inwardNormal[3] = {0.0, 0.0, 0.0};
     if (!AskSheetThickness(bodyTag, selectedFaceTag, selectedPoint, selectedNormal, thickness, inwardNormal))
@@ -6866,6 +7407,10 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
         }
 
         const double gapDistance = ReadPositiveStringValue(string0, kDefaultGapDistance);
+        ColorFaceChainTemporary(
+            highlightedFaceChain,
+            previewColoredFaces,
+            previewOriginalFaceColors);
         const std::vector<GapEdgePair> gapEdgePairs = FindFaceChainGapEdgePairs(highlightedFaceChain, gapDistance);
         const std::vector<GapFaceGroup> gapFaceGroups =
             FindGapFaceGroupsFromGapEdgePairs(gapEdgePairs, thickness);
@@ -6935,6 +7480,10 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
     }
 
     const double gapDistance = ReadPositiveStringValue(string0, kDefaultGapDistance);
+    ColorFaceChainTemporary(
+        highlightedFaceChain,
+        previewColoredFaces,
+        previewOriginalFaceColors);
     const std::vector<GapEdgePair> gapEdgePairs = FindFaceChainGapEdgePairs(highlightedFaceChain, gapDistance);
     const std::vector<GapFaceGroup> gapFaceGroups =
         FindGapFaceGroupsFromGapEdgePairs(gapEdgePairs, thickness);
