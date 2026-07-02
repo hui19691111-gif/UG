@@ -1757,6 +1757,51 @@ bool IsFaceOnReferencePlane(tag_t faceTag, const double referencePoint[3], const
     return std::fabs(Dot3(delta, referenceNormal)) <= kCoplanarDistanceTolerance;
 }
 
+bool IsParallelThicknessOffsetFromAcceptedChain(
+    tag_t candidateFace,
+    const std::set<tag_t>& acceptedChainFaces,
+    double thickness,
+    tag_t& matchedFace,
+    double& matchedDistance)
+{
+    matchedFace = NULL_TAG;
+    matchedDistance = 0.0;
+    if (candidateFace == NULL_TAG || acceptedChainFaces.empty() || thickness <= kMinThickness)
+    {
+        return false;
+    }
+
+    double candidatePoint[3] = {0.0, 0.0, 0.0};
+    double candidateNormal[3] = {0.0, 0.0, 0.0};
+    if (!AskPlanarFacePlane(candidateFace, candidatePoint, candidateNormal))
+    {
+        return false;
+    }
+
+    for (std::set<tag_t>::const_iterator it = acceptedChainFaces.begin();
+        it != acceptedChainFaces.end();
+        ++it)
+    {
+        double chainPoint[3] = {0.0, 0.0, 0.0};
+        double chainNormal[3] = {0.0, 0.0, 0.0};
+        if (!AskPlanarFacePlane(*it, chainPoint, chainNormal) ||
+            std::fabs(Dot3(candidateNormal, chainNormal)) < kParallelCosTolerance)
+        {
+            continue;
+        }
+
+        const double distance = DistancePointToPlane(candidatePoint, chainPoint, chainNormal);
+        if (std::fabs(distance - thickness) <= kThicknessEdgeTolerance)
+        {
+            matchedFace = *it;
+            matchedDistance = distance;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool IsThicknessFaceByParallelEdgeDistance(tag_t faceTag, tag_t sharedEdgeTag, double thickness)
 {
     if (faceTag == NULL_TAG || sharedEdgeTag == NULL_TAG || thickness <= kMinThickness)
@@ -1987,8 +2032,10 @@ std::vector<tag_t> BuildSelectedFaceChain(tag_t bodyTag, tag_t selectedFaceTag, 
         ", baseNormal=" + FormatVector3(selectedNormal));
 
     std::set<tag_t> visited;
+    std::set<tag_t> acceptedChainFaces;
     std::deque<tag_t> pending;
     visited.insert(selectedFaceTag);
+    acceptedChainFaces.insert(selectedFaceTag);
     pending.push_back(selectedFaceTag);
 
     while (!pending.empty())
@@ -2031,6 +2078,24 @@ std::vector<tag_t> BuildSelectedFaceChain(tag_t bodyTag, tag_t selectedFaceTag, 
                     continue;
                 }
 
+                tag_t parallelThicknessFace = NULL_TAG;
+                double parallelThicknessDistance = 0.0;
+                if (IsParallelThicknessOffsetFromAcceptedChain(
+                    adjacentFace,
+                    acceptedChainFaces,
+                    thickness,
+                    parallelThicknessFace,
+                    parallelThicknessDistance))
+                {
+                    DebugLog("    adjacent excluded: parallel to accepted chain at thickness distance, candidate=" +
+                        FormatTag(adjacentFace) +
+                        ", chainFace=" + FormatTag(parallelThicknessFace) +
+                        ", distance=" + FormatDouble(parallelThicknessDistance) +
+                        ", thickness=" + FormatDouble(thickness));
+                    visited.insert(adjacentFace);
+                    continue;
+                }
+
                 if (MustRespectCylinderTangency(adjacentFaces, currentFace, adjacentFace, cylinderFace, tangentFace))
                 {
                     if (IsCylinderAxialEdge(cylinderFace, edges[edgeIndex]))
@@ -2040,6 +2105,7 @@ std::vector<tag_t> BuildSelectedFaceChain(tag_t bodyTag, tag_t selectedFaceTag, 
                             ", cylinder=" + FormatTag(cylinderFace) +
                             ", sharedEdge=" + FormatTag(edges[edgeIndex]));
                         visited.insert(adjacentFace);
+                        acceptedChainFaces.insert(adjacentFace);
                         pending.push_back(adjacentFace);
                         continue;
                     }
@@ -2060,6 +2126,7 @@ std::vector<tag_t> BuildSelectedFaceChain(tag_t bodyTag, tag_t selectedFaceTag, 
                             ", axialEdge=" + FormatTag(matchedAxialEdge) +
                             ", chainFace=" + FormatTag(matchedChainFace));
                         visited.insert(adjacentFace);
+                        acceptedChainFaces.insert(adjacentFace);
                         pending.push_back(adjacentFace);
                         continue;
                     }
@@ -2071,6 +2138,7 @@ std::vector<tag_t> BuildSelectedFaceChain(tag_t bodyTag, tag_t selectedFaceTag, 
                             ", cylinder=" + FormatTag(cylinderFace) +
                             ", tangentFace=" + FormatTag(tangentFace));
                         visited.insert(adjacentFace);
+                        acceptedChainFaces.insert(adjacentFace);
                         pending.push_back(adjacentFace);
                         continue;
                     }
@@ -2085,6 +2153,7 @@ std::vector<tag_t> BuildSelectedFaceChain(tag_t bodyTag, tag_t selectedFaceTag, 
 
                 DebugLog("    adjacent add face=" + FormatTag(adjacentFace));
                 visited.insert(adjacentFace);
+                acceptedChainFaces.insert(adjacentFace);
                 pending.push_back(adjacentFace);
             }
         }
@@ -7429,10 +7498,6 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
         }
 
         const double gapDistance = ReadPositiveStringValue(string0, kDefaultGapDistance);
-        ColorFaceChainTemporary(
-            highlightedFaceChain,
-            previewColoredFaces,
-            previewOriginalFaceColors);
         const std::vector<GapEdgePair> gapEdgePairs = FindFaceChainGapEdgePairs(highlightedFaceChain, gapDistance);
         const std::vector<GapFaceGroup> gapFaceGroups =
             FindGapFaceGroupsFromGapEdgePairs(gapEdgePairs, thickness);
@@ -7502,10 +7567,6 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
     }
 
     const double gapDistance = ReadPositiveStringValue(string0, kDefaultGapDistance);
-    ColorFaceChainTemporary(
-        highlightedFaceChain,
-        previewColoredFaces,
-        previewOriginalFaceColors);
     const std::vector<GapEdgePair> gapEdgePairs = FindFaceChainGapEdgePairs(highlightedFaceChain, gapDistance);
     const std::vector<GapFaceGroup> gapFaceGroups =
         FindGapFaceGroupsFromGapEdgePairs(gapEdgePairs, thickness);
