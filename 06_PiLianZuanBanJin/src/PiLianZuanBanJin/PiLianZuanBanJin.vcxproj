@@ -117,6 +117,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="PiLianZuanBanJin.dlx" />
+    <None Include="PiLianZuanBanJinManualBaseX.dlx" />
     <None Include="PiLianZuanBanJinRulesTable.dlx" />
     <None Include="..\..\config\PiLianZuanBanJin_bend_factor_rules.ini" />
   </ItemGroup>

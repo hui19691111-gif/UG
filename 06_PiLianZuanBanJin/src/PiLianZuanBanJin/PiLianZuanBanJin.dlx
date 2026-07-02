@@ -44,6 +44,16 @@
 </PropertyList>
 </item>
 </Property>
+<Property class="UICOMP_button" hierarchy="UGS::UICOMP_group" id="manualBaseXAxisButton" mask="256" name="manualBaseXAxisButton" presentation="Action Button" type="uicomp">
+<item Expanded="1" class="UICOMP_button" hierarchy="UGS::UICOMP_button" icon="styler_browser_pushbutton.bmp" id="manualBaseXAxisButton" name="manualBaseXAxisButton" notes="" presentation="Action Button" type="uicomp">
+<PropertyList id="id" mode="0">
+<Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="API Name" mask="16400" name="API Name" sname="BlockID" source="3" type="string" value="manualBaseXAxisButton" />
+<Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="manualBaseXAxis" />
+<Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
+<Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
+</PropertyList>
+</item>
+</Property>
 <Property class="UICOMP_enum" hierarchy="UGS::UICOMP_group" id="facePreferenceEnum" mask="256" name="facePreferenceEnum" presentation="Enumeration" type="uicomp">
 <item Expanded="1" class="UICOMP_enum" hierarchy="UGS::UICOMP_enum" icon="styler_enum.bmp" id="facePreferenceEnum" name="facePreferenceEnum" notes="" presentation="Enumeration" type="uicomp">
 <PropertyList id="id" mode="0">

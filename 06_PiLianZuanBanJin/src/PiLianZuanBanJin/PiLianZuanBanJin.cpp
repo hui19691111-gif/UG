@@ -1,4 +1,4 @@
-#include "PiLianZuanBanJin.hpp"
+﻿#include "PiLianZuanBanJin.hpp"
 
 #include "../../../common/ZhihuiBendRulesIni.hpp"
 #include "../../../../common/ZhihuiEmbeddedDialog.hpp"
@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <cwctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -88,7 +89,7 @@ HMODULE LoadProtectedLicenseGate()
         }
     }
 
-    HMODULE fixedModule = LoadLibraryW(L"D:\\UG智辉钣金插件\\application\\ZhaoFuNxLicenseGate.dll");
+    HMODULE fixedModule = LoadLibraryW(L"D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\application\\ZhaoFuNxLicenseGate.dll");
     if (fixedModule != NULL)
     {
         return fixedModule;
@@ -127,6 +128,8 @@ namespace
     bool AskCylinderFaceData(Face* face, double axisPoint[3], double axisDirection[3], double* radiusOut, int* normDirOut);
     bool Normalize3(double v[3]);
     bool WriteAllText(const std::string& path, const std::string& text);
+    void AppendMarkerLineDebugLog(const std::string& text);
+    std::string FormatDouble(double value, int precision);
     bool IsOuterCylinderFaceLike08(Face* face);
     bool AskFacePointFromEdges(Face* face, double facePoint[3]);
     bool AskNxOpenCreatedFaceNormal(Face* face, const double facePoint[3], double unitNormal[3]);
@@ -479,6 +482,197 @@ namespace
         return ok;
     }
 
+    tag_t PrototypeTagOfOccurrence(tag_t objectTag)
+    {
+        if (objectTag == NULL_TAG)
+        {
+            return NULL_TAG;
+        }
+
+        tag_t prototypeTag = NULL_TAG;
+        try
+        {
+            prototypeTag = UF_ASSEM_ask_prototype_of_occ(objectTag);
+        }
+        catch (...)
+        {
+            prototypeTag = NULL_TAG;
+        }
+        return prototypeTag == objectTag ? NULL_TAG : prototypeTag;
+    }
+
+    bool HasSulianAttribute(tag_t objectTag)
+    {
+        return HasIntegerAttribute(objectTag, "sulian") ||
+            HasNonEmptyStringAttribute(objectTag, "sulian");
+    }
+
+    std::string NxExceptionSummary(const NXException& ex)
+    {
+        std::ostringstream stream;
+        stream << "NX error code=" << ex.ErrorCode();
+        return stream.str();
+    }
+
+    std::string BytesToHex(const std::string& text)
+    {
+        std::ostringstream stream;
+        stream << std::uppercase << std::hex << std::setfill('0');
+        for (size_t i = 0; i < text.size(); ++i)
+        {
+            if (i > 0)
+            {
+                stream << ' ';
+            }
+            stream << std::setw(2) << static_cast<int>(static_cast<unsigned char>(text[i]));
+        }
+        return stream.str();
+    }
+
+    bool BodyHasOwnSulianValue(Body* body)
+    {
+        if (body == NULL)
+        {
+            AppendMarkerLineDebugLog("manual sulian check: body=null result=fail");
+            return false;
+        }
+
+        try
+        {
+            std::ostringstream beginLog;
+            beginLog << "manual sulian check: body=" << body->Tag();
+            try
+            {
+                beginLog << " layer=" << body->Layer();
+            }
+            catch (...)
+            {
+                beginLog << " layer=?";
+            }
+            AppendMarkerLineDebugLog(beginLog.str());
+
+            std::vector<NXObject::AttributeInformation> attributes = body->GetUserAttributes();
+            std::ostringstream countLog;
+            countLog << "manual sulian check: body=" << body->Tag() << " attrCount=" << attributes.size();
+            AppendMarkerLineDebugLog(countLog.str());
+
+            for (size_t i = 0; i < attributes.size(); ++i)
+            {
+                const NXObject::AttributeInformation& attribute = attributes[i];
+                const std::string title = ToUtf8(attribute.Title);
+                std::ostringstream attrLog;
+                attrLog << "manual sulian check attr[" << i << "] body=" << body->Tag()
+                    << " title=[" << title << "]"
+                    << " titleHex=[" << BytesToHex(title) << "]"
+                    << " type=" << static_cast<int>(attribute.Type)
+                    << " unset=" << (attribute.Unset ? 1 : 0);
+                if (attribute.Type == NXObject::AttributeTypeInteger)
+                {
+                    attrLog << " int=" << attribute.IntegerValue;
+                }
+                else if (attribute.Type == NXObject::AttributeTypeReal)
+                {
+                    attrLog << " real=" << FormatDouble(attribute.RealValue, 6);
+                }
+                else if (attribute.Type == NXObject::AttributeTypeBoolean)
+                {
+                    attrLog << " bool=" << (attribute.BooleanValue ? 1 : 0);
+                }
+                else if (attribute.Type == NXObject::AttributeTypeString)
+                {
+                    attrLog << " string=[" << TrimCopy(ToUtf8(attribute.StringValue)) << "]";
+                }
+                AppendMarkerLineDebugLog(attrLog.str());
+
+                if (title != "sulian" || attribute.Unset)
+                {
+                    continue;
+                }
+
+                if (attribute.Type == NXObject::AttributeTypeString)
+                {
+                    const bool ok = !TrimCopy(ToUtf8(attribute.StringValue)).empty();
+                    std::ostringstream resultLog;
+                    resultLog << "manual sulian check result body=" << body->Tag()
+                        << " hitTitle=sulian type=string ok=" << (ok ? 1 : 0);
+                    AppendMarkerLineDebugLog(resultLog.str());
+                    return ok;
+                }
+
+                std::ostringstream resultLog;
+                resultLog << "manual sulian check result body=" << body->Tag()
+                    << " hitTitle=sulian type=" << static_cast<int>(attribute.Type) << " ok=1";
+                AppendMarkerLineDebugLog(resultLog.str());
+                return true;
+            }
+        }
+        catch (const NXException& ex)
+        {
+            std::ostringstream log;
+            log << "manual sulian check exception body=" << body->Tag()
+                << " nxCode=" << ex.ErrorCode();
+            AppendMarkerLineDebugLog(log.str());
+        }
+        catch (const std::exception& ex)
+        {
+            std::ostringstream log;
+            log << "manual sulian check exception body=" << body->Tag()
+                << " message=" << ex.what();
+            AppendMarkerLineDebugLog(log.str());
+        }
+        catch (...)
+        {
+            std::ostringstream log;
+            log << "manual sulian check exception body=" << body->Tag()
+                << " message=unknown";
+            AppendMarkerLineDebugLog(log.str());
+        }
+
+        std::ostringstream failLog;
+        failLog << "manual sulian check result body=" << body->Tag() << " ok=0";
+        AppendMarkerLineDebugLog(failLog.str());
+        return false;
+    }
+
+    bool BodyHasSulianValue(Body* body)
+    {
+        if (body == NULL)
+        {
+            return false;
+        }
+
+        if (BodyHasOwnSulianValue(body))
+        {
+            return true;
+        }
+
+        const tag_t bodyTag = body->Tag();
+        if (HasSulianAttribute(bodyTag))
+        {
+            return true;
+        }
+
+        const tag_t prototypeTag = PrototypeTagOfOccurrence(bodyTag);
+        return HasSulianAttribute(prototypeTag);
+    }
+
+    bool BodyTagInSetByOccurrenceOrPrototype(Body* body, const std::set<tag_t>& bodyTags)
+    {
+        if (body == NULL || bodyTags.empty())
+        {
+            return false;
+        }
+
+        const tag_t bodyTag = body->Tag();
+        if (bodyTags.find(bodyTag) != bodyTags.end())
+        {
+            return true;
+        }
+
+        const tag_t prototypeTag = PrototypeTagOfOccurrence(bodyTag);
+        return prototypeTag != NULL_TAG && bodyTags.find(prototypeTag) != bodyTags.end();
+    }
+
     bool HasUserAttributeTitle(tag_t objectTag, const char* title)
     {
         if (objectTag == NULL_TAG || title == NULL || title[0] == '\0')
@@ -587,8 +781,8 @@ namespace
     bool PartHasBatchAttributes(Part* part)
     {
         return part != NULL
-            && HasNonEmptyStringAttribute(part->Tag(), u8"材料")
-            && HasNonEmptyStringAttribute(part->Tag(), u8"数量");
+            && HasNonEmptyStringAttribute(part->Tag(), "\xE6\x9D\x90\xE6\x96\x99")
+            && HasNonEmptyStringAttribute(part->Tag(), "\xE6\x95\xB0\xE9\x87\x8F");
     }
 
     bool BodyHasBatchAttributes(Body* body)
@@ -621,6 +815,9 @@ namespace
         std::string partName;
         std::string material;
         std::string quantity;
+        bool componentVisible;
+        bool hasSheetmetalFeature;
+        int componentLayer;
     };
 
     NXString U8(const char* text);
@@ -699,13 +896,13 @@ namespace
 
     std::string ReadPartMaterialText(Part* part)
     {
-        std::string value = ReadStringUserAttribute(part, u8"材料");
+        std::string value = ReadStringUserAttribute(part, "\xE6\x9D\x90\xE6\x96\x99");
         if (!value.empty())
         {
             return value;
         }
 
-        value = ReadStringUserAttribute(part, u8"材质");
+        value = ReadStringUserAttribute(part, "\xE6\x9D\x90\xE8\xB4\xA8");
         if (!value.empty())
         {
             return value;
@@ -716,7 +913,7 @@ namespace
 
     std::string ReadPartQuantityText(Part* part)
     {
-        std::string value = ReadStringUserAttribute(part, u8"数量");
+        std::string value = ReadStringUserAttribute(part, "\xE6\x95\xB0\xE9\x87\x8F");
         if (!value.empty())
         {
             return value;
@@ -729,6 +926,125 @@ namespace
         }
 
         return value;
+    }
+
+    bool ContainsTextNoCaseAscii(const std::string& text, const char* token)
+    {
+        if (token == NULL || *token == '\0')
+        {
+            return true;
+        }
+
+        std::string left = text;
+        std::string right = token;
+        std::transform(left.begin(), left.end(), left.begin(), ::tolower);
+        std::transform(right.begin(), right.end(), right.begin(), ::tolower);
+        return left.find(right) != std::string::npos;
+    }
+
+    std::string BatchFeatureName(Feature* feature)
+    {
+        if (feature == NULL)
+        {
+            return std::string();
+        }
+
+        try
+        {
+            return ToUtf8(feature->GetFeatureName());
+        }
+        catch (...)
+        {
+            return std::string();
+        }
+    }
+
+    std::string BatchFeatureTypeText(Feature* feature)
+    {
+        if (feature == NULL)
+        {
+            return std::string();
+        }
+
+        try
+        {
+            return ToUtf8(feature->FeatureType());
+        }
+        catch (...)
+        {
+            return std::string();
+        }
+    }
+
+    bool IsBatchSheetmetalFeatureText(const std::string& text)
+    {
+        return ContainsTextNoCaseAscii(text, "Sheet Metal") ||
+            ContainsTextNoCaseAscii(text, "Sheetmetal") ||
+            ContainsTextNoCaseAscii(text, "SB_") ||
+            ContainsTextNoCaseAscii(text, "SB ");
+    }
+
+    bool PartHasBatchSheetmetalFeature(Part* part)
+    {
+        if (part == NULL || part->Features() == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            for (FeatureCollection::iterator it = part->Features()->begin(); it != part->Features()->end(); ++it)
+            {
+                Feature* feature = *it;
+                if (feature != NULL &&
+                    (IsBatchSheetmetalFeatureText(BatchFeatureName(feature)) ||
+                     IsBatchSheetmetalFeatureText(BatchFeatureTypeText(feature))))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return false;
+    }
+
+    bool IsComponentVisibleForBatchList(Component* component)
+    {
+        if (component == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            return !component->IsBlanked();
+        }
+        catch (...)
+        {
+        }
+
+        return true;
+    }
+
+    int ComponentLayerForBatchList(Component* component)
+    {
+        if (component == NULL)
+        {
+            return 0;
+        }
+
+        try
+        {
+            return component->Layer();
+        }
+        catch (...)
+        {
+        }
+
+        return 0;
     }
 
     void CollectBatchPartCandidates(Component* component, std::vector<BatchPartCandidate>& candidates, std::set<tag_t>& seenParts)
@@ -783,6 +1099,9 @@ namespace
                     }
                     candidate.material = ReadPartMaterialText(prototypePart);
                     candidate.quantity = ReadPartQuantityText(prototypePart);
+                    candidate.componentVisible = IsComponentVisibleForBatchList(child);
+                    candidate.hasSheetmetalFeature = PartHasBatchSheetmetalFeature(prototypePart);
+                    candidate.componentLayer = ComponentLayerForBatchList(child);
                     candidates.push_back(candidate);
                 }
             }
@@ -941,11 +1260,11 @@ namespace
             return std::string();
         }
 
-        if (attributeName == u8"材料")
+        if (attributeName == "\xE6\x9D\x90\xE6\x96\x99")
         {
             return ReadPartMaterialText(part);
         }
-        if (attributeName == u8"数量")
+        if (attributeName == "\xE6\x95\xB0\xE9\x87\x8F")
         {
             return ReadPartQuantityText(part);
         }
@@ -994,8 +1313,8 @@ namespace
     }
 
     const int BatchAttributeColumnCount = 4;
-    const int BatchPickerListWidth = 1008;
-    const int BatchPickerWindowWidth = 1052;
+    const int BatchPickerListWidth = 1208;
+    const int BatchPickerWindowWidth = 1252;
     const int BatchAttributeComboDropHeight = 260;
 
     struct BatchPartPickerPersistedState
@@ -1013,7 +1332,18 @@ namespace
         const BatchPartPickerPersistedState* persistedState;
         std::vector<std::string> selectedAttributes;
         std::vector<int> selectedIndices;
+        std::vector<size_t> visibleCandidateIndices;
+        std::vector<bool> checkedCandidates;
         HWND listView;
+        HWND filterEdit;
+        HWND filterClearButton;
+        HWND attributeFilterCombo;
+        HWND hasMaterialFilterCheck;
+        HWND hasQuantityFilterCheck;
+        HWND noSheetmetalFeatureFilterCheck;
+        HWND visibleComponentFilterCheck;
+        HWND layerModeCombo;
+        HWND layerFilterEdit;
         HWND comboBoxes[BatchAttributeColumnCount];
         int listX;
         int listY;
@@ -1129,7 +1459,7 @@ namespace
 
     std::wstring ListAttributeTitle(const std::string& attributeName)
     {
-        return attributeName.empty() ? L"空白" : PathTextToWide(attributeName);
+        return attributeName.empty() ? L"\u7A7A\u767D" : PathTextToWide(attributeName);
     }
 
     void RepositionHeaderCombos(BatchPartPickerState* state)
@@ -1195,56 +1525,343 @@ namespace
             column.pszText = const_cast<wchar_t*>(title.c_str());
             ListView_SetColumn(state->listView, columnIndex, &column);
 
-            for (size_t row = 0; row < state->candidates->size(); ++row)
+            const int rowCount = ListView_GetItemCount(state->listView);
+            for (int row = 0; row < rowCount; ++row)
             {
-                const BatchPartCandidate& candidate = (*state->candidates)[row];
+                if (static_cast<size_t>(row) >= state->visibleCandidateIndices.size())
+                {
+                    continue;
+                }
+                const size_t candidateIndex = state->visibleCandidateIndices[static_cast<size_t>(row)];
+                if (candidateIndex >= state->candidates->size())
+                {
+                    continue;
+                }
+                const BatchPartCandidate& candidate = (*state->candidates)[candidateIndex];
                 SetListViewText(
                     state->listView,
-                    static_cast<int>(row),
+                    row,
                     columnIndex,
                     PathTextToWide(ReadPartListAttributeText(candidate.part, attributeName)));
             }
         }
     }
 
-    void PopulateBatchPartListView(BatchPartPickerState* state)
+    std::wstring GetWindowTextWideString(HWND hwnd)
+    {
+        if (hwnd == NULL)
+        {
+            return std::wstring();
+        }
+
+        const int length = GetWindowTextLengthW(hwnd);
+        if (length <= 0)
+        {
+            return std::wstring();
+        }
+
+        std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+        GetWindowTextW(hwnd, &text[0], length + 1);
+        text.resize(static_cast<size_t>(length));
+        return text;
+    }
+
+    std::wstring LowerWideCopy(std::wstring text)
+    {
+        if (!text.empty())
+        {
+            CharLowerBuffW(&text[0], static_cast<DWORD>(text.size()));
+        }
+        return text;
+    }
+
+    bool ContainsIgnoreCaseWide(const std::wstring& text, const std::wstring& needle)
+    {
+        if (needle.empty())
+        {
+            return true;
+        }
+        return LowerWideCopy(text).find(LowerWideCopy(needle)) != std::wstring::npos;
+    }
+
+    bool ParseLayerValue(const std::wstring& text, int* value)
+    {
+        if (value == NULL || text.empty())
+        {
+            return false;
+        }
+
+        wchar_t* end = NULL;
+        long parsed = wcstol(text.c_str(), &end, 10);
+        if (end == text.c_str() || (end != NULL && *end != L'\0'))
+        {
+            return false;
+        }
+
+        if (parsed < 1) parsed = 1;
+        if (parsed > 256) parsed = 256;
+        *value = static_cast<int>(parsed);
+        return true;
+    }
+
+    bool ParseLayerFilterRanges(HWND edit, std::vector<std::pair<int, int> >* ranges)
+    {
+        if (edit == NULL || ranges == NULL)
+        {
+            return false;
+        }
+
+        std::wstring text = GetWindowTextWideString(edit);
+        text.erase(std::remove_if(text.begin(), text.end(), iswspace), text.end());
+        if (text.empty())
+        {
+            return false;
+        }
+
+        size_t start = 0;
+        while (start <= text.size())
+        {
+            size_t comma = text.find_first_of(L",", start);
+            std::wstring token = text.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start);
+            if (!token.empty())
+            {
+                size_t dash = token.find_first_of(L"-");
+                int left = 0;
+                int right = 0;
+                if (dash == std::wstring::npos)
+                {
+                    if (ParseLayerValue(token, &left))
+                    {
+                        ranges->push_back(std::make_pair(left, left));
+                    }
+                }
+                else
+                {
+                    if (ParseLayerValue(token.substr(0, dash), &left) && ParseLayerValue(token.substr(dash + 1), &right))
+                    {
+                        if (left > right)
+                        {
+                            std::swap(left, right);
+                        }
+                        ranges->push_back(std::make_pair(left, right));
+                    }
+                }
+            }
+
+            if (comma == std::wstring::npos)
+            {
+                break;
+            }
+            start = comma + 1;
+        }
+
+        return !ranges->empty();
+    }
+
+    bool LayerInRanges(int layer, const std::vector<std::pair<int, int> >& ranges)
+    {
+        for (size_t i = 0; i < ranges.size(); ++i)
+        {
+            if (layer >= ranges[i].first && layer <= ranges[i].second)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool PartHasBodyInLayerRanges(Part* part, const std::vector<std::pair<int, int> >& ranges)
+    {
+        if (part == NULL || part->Bodies() == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            for (BodyCollection::iterator it = part->Bodies()->begin(); it != part->Bodies()->end(); ++it)
+            {
+                Body* body = *it;
+                if (body == NULL || UF_OBJ_ask_status(body->Tag()) != UF_OBJ_ALIVE)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (body->IsSolidBody() && LayerInRanges(body->Layer(), ranges))
+                    {
+                        return true;
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return false;
+    }
+
+    int BatchPartListCandidateIndex(HWND listView, int row)
+    {
+        if (listView == NULL || row < 0)
+        {
+            return -1;
+        }
+
+        LVITEMW item = {};
+        item.mask = LVIF_PARAM;
+        item.iItem = row;
+        if (!ListView_GetItem(listView, &item))
+        {
+            return -1;
+        }
+
+        return static_cast<int>(item.lParam);
+    }
+
+    void SyncBatchPartVisibleChecksToModel(BatchPartPickerState* state)
+    {
+        if (state == NULL || state->listView == NULL)
+        {
+            return;
+        }
+
+        const int rowCount = ListView_GetItemCount(state->listView);
+        for (int row = 0; row < rowCount; ++row)
+        {
+            const int candidateIndex = BatchPartListCandidateIndex(state->listView, row);
+            if (candidateIndex >= 0 && static_cast<size_t>(candidateIndex) < state->checkedCandidates.size())
+            {
+                state->checkedCandidates[static_cast<size_t>(candidateIndex)] = ListView_GetCheckState(state->listView, row) ? true : false;
+            }
+        }
+    }
+
+    bool BatchPartCandidateMatchesFilter(const BatchPartPickerState* state, size_t candidateIndex, const std::wstring& filterText)
+    {
+        if (state == NULL || state->candidates == NULL || candidateIndex >= state->candidates->size())
+        {
+            return false;
+        }
+
+        const BatchPartCandidate& candidate = (*state->candidates)[candidateIndex];
+        std::vector<std::pair<int, int> > layerRanges;
+        if (ParseLayerFilterRanges(state->layerFilterEdit, &layerRanges))
+        {
+            const int layerMode = state->layerModeCombo != NULL ? static_cast<int>(SendMessageW(state->layerModeCombo, CB_GETCURSEL, 0, 0)) : 0;
+            if (layerMode == 1)
+            {
+                if (!LayerInRanges(candidate.componentLayer, layerRanges))
+                {
+                    return false;
+                }
+            }
+            else if (!PartHasBodyInLayerRanges(candidate.part, layerRanges))
+            {
+                return false;
+            }
+        }
+
+        if (state->hasMaterialFilterCheck != NULL &&
+            SendMessageW(state->hasMaterialFilterCheck, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+            TrimCopy(candidate.material).empty())
+        {
+            return false;
+        }
+        if (state->hasQuantityFilterCheck != NULL &&
+            SendMessageW(state->hasQuantityFilterCheck, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+            TrimCopy(candidate.quantity).empty())
+        {
+            return false;
+        }
+        if (state->noSheetmetalFeatureFilterCheck != NULL &&
+            SendMessageW(state->noSheetmetalFeatureFilterCheck, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+            candidate.hasSheetmetalFeature)
+        {
+            return false;
+        }
+        if (state->visibleComponentFilterCheck != NULL &&
+            SendMessageW(state->visibleComponentFilterCheck, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+            !candidate.componentVisible)
+        {
+            return false;
+        }
+
+        if (filterText.empty())
+        {
+            return true;
+        }
+
+        if (ContainsIgnoreCaseWide(PathTextToWide(candidate.partName), filterText))
+        {
+            return true;
+        }
+
+        for (size_t i = 0; i < state->selectedAttributes.size(); ++i)
+        {
+            if (ContainsIgnoreCaseWide(PathTextToWide(ReadPartListAttributeText(candidate.part, state->selectedAttributes[i])), filterText))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    void PopulateFilteredBatchPartListView(BatchPartPickerState* state)
     {
         if (state == NULL || state->listView == NULL || state->candidates == NULL)
         {
             return;
         }
 
-        AddListViewColumn(state->listView, 0, L"选择", 48);
-        AddListViewColumn(state->listView, 1, L"序号", 56);
-        AddListViewColumn(state->listView, 2, L"部件名", 220);
-        AddListViewColumn(state->listView, 3, L"材料", 170);
-        AddListViewColumn(state->listView, 4, L"数量", 170);
-        AddListViewColumn(state->listView, 5, L"空白", 170);
-        AddListViewColumn(state->listView, 6, L"空白", 154);
+        ListView_DeleteAllItems(state->listView);
+        state->visibleCandidateIndices.clear();
 
+        if (Header_GetItemCount(ListView_GetHeader(state->listView)) == 0)
+        {
+            AddListViewColumn(state->listView, 0, L"\u9009\u62E9", 48);
+            AddListViewColumn(state->listView, 1, L"\u5E8F\u53F7", 56);
+            AddListViewColumn(state->listView, 2, L"\u90E8\u4EF6\u540D", 220);
+            AddListViewColumn(state->listView, 3, L"\u6750\u6599", 170);
+            AddListViewColumn(state->listView, 4, L"\u6570\u91CF", 170);
+            AddListViewColumn(state->listView, 5, L"\u7A7A\u767D", 170);
+            AddListViewColumn(state->listView, 6, L"\u7A7A\u767D", 154);
+        }
+
+        const std::wstring filterText = GetWindowTextWideString(state->filterEdit);
         for (size_t i = 0; i < state->candidates->size(); ++i)
         {
+            if (!BatchPartCandidateMatchesFilter(state, i, filterText))
+            {
+                continue;
+            }
+
             const BatchPartCandidate& candidate = (*state->candidates)[i];
+            const int row = ListView_GetItemCount(state->listView);
             LVITEMW item = {};
-            item.mask = LVIF_TEXT;
-            item.iItem = static_cast<int>(i);
+            item.mask = LVIF_TEXT | LVIF_PARAM;
+            item.iItem = row;
             item.iSubItem = 0;
             item.pszText = const_cast<wchar_t*>(L"");
+            item.lParam = static_cast<LPARAM>(i);
             ListView_InsertItem(state->listView, &item);
-            bool checked = true;
-            if (state->persistedState != NULL && state->persistedState->hasCheckedPartNames)
-            {
-                checked = state->persistedState->checkedPartNames.find(candidate.partName) != state->persistedState->checkedPartNames.end();
-            }
-            ListView_SetCheckState(state->listView, static_cast<int>(i), checked ? TRUE : FALSE);
+            state->visibleCandidateIndices.push_back(i);
 
-            SetListViewText(state->listView, static_cast<int>(i), 1, std::to_wstring(i + 1));
-            SetListViewText(state->listView, static_cast<int>(i), 2, PathTextToWide(candidate.partName));
+            const bool checked = i < state->checkedCandidates.size() ? state->checkedCandidates[i] : true;
+            ListView_SetCheckState(state->listView, row, checked ? TRUE : FALSE);
+
+            SetListViewText(state->listView, row, 1, std::to_wstring(i + 1));
+            SetListViewText(state->listView, row, 2, PathTextToWide(candidate.partName));
         }
 
         RefreshBatchPartListAttributeColumns(state);
     }
-
     void PopulateAttributeCombo(HWND comboBox, const std::vector<std::string>& attributeNames, const std::string& selectedValue)
     {
         if (comboBox == NULL)
@@ -1286,7 +1903,7 @@ namespace
 
     std::string BatchPartPickerStatePath()
     {
-        return std::string("D:\\UG智辉钣金插件\\config\\PiLianZuanBanJin_part_picker_state.ini");
+        return std::string("D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\config\\PiLianZuanBanJin_part_picker_state.ini");
     }
 
     std::string EncodePickerStateValue(const std::string& value)
@@ -1399,7 +2016,7 @@ namespace
 
     void SaveBatchPartPickerState(const BatchPartPickerState* state)
     {
-        if (state == NULL || state->listView == NULL || state->candidates == NULL)
+        if (state == NULL || state->candidates == NULL)
         {
             return;
         }
@@ -1417,25 +2034,32 @@ namespace
         }
 
         int partIndex = 0;
-        const int count = ListView_GetItemCount(state->listView);
-        for (int i = 0; i < count && static_cast<size_t>(i) < state->candidates->size(); ++i)
+        for (size_t i = 0; i < state->candidates->size(); ++i)
         {
-            if (ListView_GetCheckState(state->listView, i))
+            const bool checked = i < state->checkedCandidates.size() ? state->checkedCandidates[i] : false;
+            if (checked)
             {
                 output << "part" << partIndex++ << "="
-                       << EncodePickerStateValue((*state->candidates)[static_cast<size_t>(i)].partName)
+                       << EncodePickerStateValue((*state->candidates)[i].partName)
                        << "\n";
             }
         }
 
         WriteAllText(BatchPartPickerStatePath(), output.str());
     }
-
     LRESULT CALLBACK BatchPartPickerWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         const int kIdList = 1001;
         const int kIdSelectAll = 1002;
         const int kIdClearAll = 1003;
+        const int kIdFilterEdit = 1004;
+        const int kIdFilterClear = 1005;
+        const int kIdLayerFilter = 1008;
+        const int kIdHasMaterialFilter = 1009;
+        const int kIdHasQuantityFilter = 1010;
+        const int kIdNoSheetmetalFeatureFilter = 1011;
+        const int kIdVisibleComponentFilter = 1012;
+        const int kIdLayerMode = 1013;
         const int kIdFirstCombo = 1100;
         const int kIdOk = IDOK;
         const int kIdCancel = IDCANCEL;
@@ -1460,13 +2084,35 @@ namespace
             }
 
             HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
-            AddPickerControl(state, CreateWindowW(L"STATIC", L"选择要自动转钣金的部件：", WS_CHILD | WS_VISIBLE, 14, 12, 250, 22, hwnd, NULL, instance, NULL));
+            AddPickerControl(state, CreateWindowW(L"STATIC", L"\u9009\u62E9\u8981\u81EA\u52A8\u8F6C\u94A3\u91D1\u7684\u90E8\u4EF6\uFF1A", WS_CHILD | WS_VISIBLE, 14, 12, 250, 22, hwnd, NULL, instance, NULL));
             if (state != NULL)
             {
+                AddPickerControl(state, CreateWindowW(L"STATIC", L"\u8FC7\u6EE4:", WS_CHILD | WS_VISIBLE, 584, 12, 44, 22, hwnd, NULL, instance, NULL));
+                state->filterEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 628, 10, 190, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdFilterEdit)), instance, NULL);
+                AddPickerControl(state, state->filterEdit);
+                AddPickerControl(state, CreateWindowW(L"STATIC", L"\u5C42:", WS_CHILD | WS_VISIBLE, 878, 12, 20, 22, hwnd, NULL, instance, NULL));
+                state->layerModeCombo = CreateWindowW(WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 902, 10, 88, 120, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdLayerMode)), instance, NULL);
+                AddPickerControl(state, state->layerModeCombo);
+                SendMessageW(state->layerModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"\u90E8\u4EF6\u56FE\u5C42"));
+                SendMessageW(state->layerModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"\u88C5\u914D\u56FE\u5C42"));
+                SendMessageW(state->layerModeCombo, CB_SETCURSEL, 0, 0);
+                state->layerFilterEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 994, 10, 92, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdLayerFilter)), instance, NULL);
+                AddPickerControl(state, state->layerFilterEdit);
+                AddPickerControl(state, CreateWindowW(L"STATIC", L"\u4F8B:1-20,35,40", WS_CHILD | WS_VISIBLE, 1090, 12, 92, 22, hwnd, NULL, instance, NULL));
+                state->filterClearButton = CreateWindowW(L"BUTTON", L"\u6E05\u7A7A", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 1184, 10, 42, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdFilterClear)), instance, NULL);
+                AddPickerControl(state, state->filterClearButton);
+                state->hasMaterialFilterCheck = CreateWindowW(L"BUTTON", L"\u6709\u6750\u6599\u5C5E\u6027\u503C", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 584, 40, 116, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdHasMaterialFilter)), instance, NULL);
+                AddPickerControl(state, state->hasMaterialFilterCheck);
+                state->hasQuantityFilterCheck = CreateWindowW(L"BUTTON", L"\u6709\u6570\u91CF\u5C5E\u6027\u503C", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 708, 40, 116, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdHasQuantityFilter)), instance, NULL);
+                AddPickerControl(state, state->hasQuantityFilterCheck);
+                state->noSheetmetalFeatureFilterCheck = CreateWindowW(L"BUTTON", L"\u90E8\u4EF6\u4E0D\u542B\u94A3\u91D1\u7279\u5F81", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 832, 40, 146, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdNoSheetmetalFeatureFilter)), instance, NULL);
+                AddPickerControl(state, state->noSheetmetalFeatureFilterCheck);
+                state->visibleComponentFilterCheck = CreateWindowW(L"BUTTON", L"\u663E\u793A\u7684\u90E8\u4EF6", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 986, 40, 120, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdVisibleComponentFilter)), instance, NULL);
+                AddPickerControl(state, state->visibleComponentFilterCheck);
                 state->listX = 14;
-                state->listY = 40;
+                state->listY = 68;
                 state->listWidth = BatchPickerListWidth;
-                state->listHeight = 326;
+                state->listHeight = 298;
             }
             state->listView = CreateWindowExW(
                 WS_EX_CLIENTEDGE,
@@ -1483,7 +2129,7 @@ namespace
                 NULL);
             AddPickerControl(state, state->listView);
             ApplyNxLikeListViewStyle(state->listView);
-            PopulateBatchPartListView(state);
+            PopulateFilteredBatchPartListView(state);
             for (int i = 0; i < BatchAttributeColumnCount; ++i)
             {
                 state->comboBoxes[i] = CreateWindowW(
@@ -1513,10 +2159,10 @@ namespace
                 }
             }
 
-            AddPickerControl(state, CreateWindowW(L"BUTTON", L"全选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 14, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSelectAll)), instance, NULL));
-            AddPickerControl(state, CreateWindowW(L"BUTTON", L"全不选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 96, 380, 84, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClearAll)), instance, NULL));
-        AddPickerControl(state, CreateWindowW(L"BUTTON", L"确定", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 860, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdOk)), instance, NULL));
-        AddPickerControl(state, CreateWindowW(L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 946, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCancel)), instance, NULL));
+            AddPickerControl(state, CreateWindowW(L"BUTTON", L"\u5168\u9009", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 14, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSelectAll)), instance, NULL));
+            AddPickerControl(state, CreateWindowW(L"BUTTON", L"\u5168\u4E0D\u9009", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 96, 380, 84, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClearAll)), instance, NULL));
+            AddPickerControl(state, CreateWindowW(L"BUTTON", L"\u786E\u5B9A", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 860, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdOk)), instance, NULL));
+            AddPickerControl(state, CreateWindowW(L"BUTTON", L"\u53D6\u6D88", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 946, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCancel)), instance, NULL));
             return 0;
         }
         case WM_NOTIFY:
@@ -1569,9 +2215,53 @@ namespace
                     static_cast<size_t>(selectedIndex) < state->attributeNames->size() &&
                     comboIndex < static_cast<int>(state->selectedAttributes.size()))
                 {
+                    SyncBatchPartVisibleChecksToModel(state);
                     state->selectedAttributes[static_cast<size_t>(comboIndex)] = (*state->attributeNames)[static_cast<size_t>(selectedIndex)];
-                    RefreshBatchPartListAttributeColumns(state);
+                    PopulateFilteredBatchPartListView(state);
                 }
+                return 0;
+            }
+
+            if ((commandId == kIdFilterEdit || commandId == kIdLayerFilter) && notifyCode == EN_CHANGE)
+            {
+                SyncBatchPartVisibleChecksToModel(state);
+                PopulateFilteredBatchPartListView(state);
+                RepositionHeaderCombos(state);
+                return 0;
+            }
+
+            if (commandId == kIdLayerMode && notifyCode == CBN_SELCHANGE)
+            {
+                SyncBatchPartVisibleChecksToModel(state);
+                PopulateFilteredBatchPartListView(state);
+                RepositionHeaderCombos(state);
+                return 0;
+            }
+
+            if ((commandId == kIdHasMaterialFilter ||
+                 commandId == kIdHasQuantityFilter ||
+                 commandId == kIdNoSheetmetalFeatureFilter ||
+                 commandId == kIdVisibleComponentFilter) &&
+                notifyCode == BN_CLICKED)
+            {
+                SyncBatchPartVisibleChecksToModel(state);
+                PopulateFilteredBatchPartListView(state);
+                RepositionHeaderCombos(state);
+                return 0;
+            }
+
+            if (commandId == kIdFilterClear)
+            {
+                SyncBatchPartVisibleChecksToModel(state);
+                SetWindowTextW(state->filterEdit, L"");
+                SetWindowTextW(state->layerFilterEdit, L"");
+                if (state->layerModeCombo != NULL) SendMessageW(state->layerModeCombo, CB_SETCURSEL, 0, 0);
+                if (state->hasMaterialFilterCheck != NULL) SendMessageW(state->hasMaterialFilterCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                if (state->hasQuantityFilterCheck != NULL) SendMessageW(state->hasQuantityFilterCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                if (state->noSheetmetalFeatureFilterCheck != NULL) SendMessageW(state->noSheetmetalFeatureFilterCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                if (state->visibleComponentFilterCheck != NULL) SendMessageW(state->visibleComponentFilterCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                PopulateFilteredBatchPartListView(state);
+                RepositionHeaderCombos(state);
                 return 0;
             }
 
@@ -1582,19 +2272,24 @@ namespace
                 for (int i = 0; i < count; ++i)
                 {
                     ListView_SetCheckState(state->listView, i, checked);
+                    const int candidateIndex = BatchPartListCandidateIndex(state->listView, i);
+                    if (candidateIndex >= 0 && static_cast<size_t>(candidateIndex) < state->checkedCandidates.size())
+                    {
+                        state->checkedCandidates[static_cast<size_t>(candidateIndex)] = checked ? true : false;
+                    }
                 }
                 return 0;
             }
 
             if (commandId == kIdOk)
             {
+                SyncBatchPartVisibleChecksToModel(state);
                 state->selectedIndices.clear();
-                const int count = ListView_GetItemCount(state->listView);
-                for (int i = 0; i < count; ++i)
+                for (size_t i = 0; i < state->checkedCandidates.size(); ++i)
                 {
-                    if (ListView_GetCheckState(state->listView, i))
+                    if (state->checkedCandidates[i])
                     {
-                        state->selectedIndices.push_back(i);
+                        state->selectedIndices.push_back(static_cast<int>(i));
                     }
                 }
                 SaveBatchPartPickerState(state);
@@ -1690,11 +2385,28 @@ namespace
         state.attributeNames = &attributeNames;
         state.persistedState = &persistedState;
         state.selectedAttributes.resize(BatchAttributeColumnCount);
-        state.selectedAttributes[0] = persistedState.hasAttributes ? persistedState.attributes[0] : AttributeDefaultIfPresent(attributeNames, u8"材料");
-        state.selectedAttributes[1] = persistedState.hasAttributes ? persistedState.attributes[1] : AttributeDefaultIfPresent(attributeNames, u8"数量");
+        state.selectedAttributes[0] = persistedState.hasAttributes ? persistedState.attributes[0] : AttributeDefaultIfPresent(attributeNames, u8"\u6750\u6599");
+        state.selectedAttributes[1] = persistedState.hasAttributes ? persistedState.attributes[1] : AttributeDefaultIfPresent(attributeNames, u8"\u6570\u91CF");
         state.selectedAttributes[2] = persistedState.hasAttributes ? persistedState.attributes[2] : std::string();
         state.selectedAttributes[3] = persistedState.hasAttributes ? persistedState.attributes[3] : std::string();
+        state.checkedCandidates.resize(candidates.size(), false);
+        if (persistedState.hasCheckedPartNames)
+        {
+            for (size_t i = 0; i < candidates.size(); ++i)
+            {
+                state.checkedCandidates[i] = persistedState.checkedPartNames.find(candidates[i].partName) != persistedState.checkedPartNames.end();
+            }
+        }
         state.listView = NULL;
+        state.filterEdit = NULL;
+        state.filterClearButton = NULL;
+        state.attributeFilterCombo = NULL;
+        state.hasMaterialFilterCheck = NULL;
+        state.hasQuantityFilterCheck = NULL;
+        state.noSheetmetalFeatureFilterCheck = NULL;
+        state.visibleComponentFilterCheck = NULL;
+        state.layerModeCombo = NULL;
+        state.layerFilterEdit = NULL;
         for (int i = 0; i < BatchAttributeColumnCount; ++i)
         {
             state.comboBoxes[i] = NULL;
@@ -1708,12 +2420,12 @@ namespace
         HWND hwnd = CreateWindowExW(
             WS_EX_DLGMODALFRAME,
             className,
-            L"批量转钣金部件列表",
+            L"Batch sheet metal parts",
             WS_CAPTION | WS_SYSMENU | WS_BORDER,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             BatchPickerWindowWidth,
-            456,
+            468,
             parent,
             NULL,
             instance,
@@ -1762,12 +2474,11 @@ namespace
         }
 
         const std::string message =
-            "准备对本工作装配里的所有子装配进行批量转钣金跟展开处理。\n\n"
-            "执行前请确保所有要转钣金的部件都已经设置了材料跟数量，"
-            "并且零件已经全部处理成可成功转钣金跟展开的状态。\n\n"
-            "继续执行请选择“是”，退出请选择“否”。";
+            "Batch convert and flatten all child parts in the current assembly.\\n\\n"
+            "Please confirm the parts are ready before running.\\n\\n"
+            "Choose Yes to continue, or No to cancel.";
         return ui->NXMessageBox()->Show(
-            U8("批量转钣金"),
+            U8("Batch sheet metal"),
             NXMessageBox::DialogTypeQuestion,
             U8(message.c_str())) == 1;
     }
@@ -1868,8 +2579,8 @@ namespace
 
     void AppendMarkerLineDebugLog(const std::string& text)
     {
-        const std::string path = "D:\\UG智辉钣金插件\\logs\\PiLianZuanBanJin_marker_line.log";
-        CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
+        const std::string path = "D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\logs\\PiLianZuanBanJin_marker_line.log";
+        CreateDirectoryW(L"D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\logs", NULL);
         std::wstring widePath = PathTextToWide(path);
         FILE* file = NULL;
         if (widePath.empty() || _wfopen_s(&file, widePath.c_str(), L"ab") != 0 || file == NULL)
@@ -1940,13 +2651,13 @@ namespace
 
     std::string FindConfigPath()
     {
-        std::string path = std::string("D:\\UG智辉钣金插件\\config\\") + PiLianConfigFileName;
+        std::string path = std::string("D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\config\\") + PiLianConfigFileName;
         return FileExists(path) ? path : std::string();
     }
 
     std::string FindRulesIniPath()
     {
-        std::string path = std::string("D:\\UG智辉钣金插件\\config\\") + PiLianRulesIniFileName;
+        std::string path = std::string("D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\config\\") + PiLianRulesIniFileName;
         return FileExists(path) ? path : std::string();
     }
 
@@ -2577,7 +3288,7 @@ namespace
         }
         if (body == NULL || axisPoint == NULL || axisDirection == NULL)
         {
-            if (info != NULL) info->reason = "阴影输入为空";
+            if (info != NULL) info->reason = "invalid body or axis";
             return false;
         }
 
@@ -2585,7 +3296,7 @@ namespace
         double v[3] = { 0.0, 1.0, 0.0 };
         if (!BuildAxisBasis(axisDirection, u, v))
         {
-            if (info != NULL) info->reason = "圆柱轴向无法创建投影基准";
+            if (info != NULL) info->reason = u8"閸﹀棙鐓存潪鏉戞倻閺冪姵纭堕崚娑樼紦閹舵洖濂栭崺鍝勫櫙";
             return false;
         }
 
@@ -2593,7 +3304,7 @@ namespace
         Part* workPart = session != NULL ? session->Parts()->Work() : NULL;
         if (workPart == NULL)
         {
-            if (info != NULL) info->reason = "没有工作部件，无法创建阴影曲线";
+            if (info != NULL) info->reason = "No work part.";
             return false;
         }
 
@@ -2772,7 +3483,7 @@ namespace
                     info->matched = true;
                     info->outlineType = "circle";
                     info->outlineSize = maxCircleDiameter;
-                    info->reason = "阴影曲线最大外形为圆";
+                    info->reason = "Shadow outline is circle.";
                 }
                 ok = true;
             }
@@ -2791,14 +3502,14 @@ namespace
                         info->matched = true;
                         info->outlineType = "hex";
                         info->outlineSize = acrossFlats;
-                        info->reason = "阴影曲线最大外形为等六边形";
+                        info->reason = "hex shadow matched";
                     }
                     ok = true;
                 }
                 else if (info != NULL)
                 {
                     info->outlineType = "other";
-                    info->reason = curveTags.empty() ? "阴影曲线没有输出曲线" : "阴影曲线最大外形不是圆或等六边形";
+                    info->reason = curveTags.empty() ? "No shadow curves." : "Shadow outline is not circle or hexagon.";
                 }
             }
         }
@@ -2807,7 +3518,7 @@ namespace
             if (info != NULL)
             {
                 std::ostringstream stream;
-                stream << "创建阴影曲线异常 code=" << ex.ErrorCode() << " msg=" << ex.Message();
+                stream << "闁告帗绋戠紓鎾绘⒓閺夋垵顨涢柡鍥皺閸ゅ骸顕ｉ崒姘卞煑 code=" << ex.ErrorCode() << " msg=" << ex.Message();
                 if (builder != NULL)
                 {
                     stream << " distance_threshold=" << builder->DistanceThreshold();
@@ -2823,7 +3534,7 @@ namespace
         }
         catch (...)
         {
-            if (info != NULL) info->reason = "创建阴影曲线异常";
+            if (info != NULL) info->reason = "闁告帗绋戠紓鎾绘⒓閺夋垵顨涢柡鍥皺閸ゅ骸顕ｉ崒姘卞煑";
             ok = false;
         }
 
@@ -2870,12 +3581,12 @@ namespace
 
         if (body == NULL)
         {
-            if (info != NULL) info->reason = "空实体";
+            if (info != NULL) info->reason = "Empty body.";
             return false;
         }
 
         FastenerFilterInfo bestInfo;
-        bestInfo.reason = "没有外圆柱候选";
+        bestInfo.reason = "No outer cylinder candidate.";
         double bestRatio = -1.0;
         std::vector<Face*> faces = body->GetFaces();
         for (size_t i = 0; i < faces.size(); ++i)
@@ -2910,7 +3621,7 @@ namespace
                 circleInfo.circularEdgeCount = circleStats.circularEdgeCount;
                 circleInfo.fullCircleEdgeCount = circleStats.fullCircleEdgeCount;
                 circleInfo.halfCircleEdgeCount = circleStats.halfCircleEdgeCount;
-                circleInfo.reason = "圆柱直径不是整圆或两个半圆";
+                circleInfo.reason = "Cylinder diameter is not full circle or two half circles.";
                 if (bestRatio < 0.0)
                 {
                     bestInfo = circleInfo;
@@ -2986,7 +3697,7 @@ namespace
             currentInfo.circularEdgeCount = circleStats.circularEdgeCount;
             currentInfo.fullCircleEdgeCount = circleStats.fullCircleEdgeCount;
             currentInfo.halfCircleEdgeCount = circleStats.halfCircleEdgeCount;
-            currentInfo.reason = "阴影曲线轮廓匹配，高度不足";
+            currentInfo.reason = "Shadow outline matched, height is not enough.";
             const double ratio = shadowInfo.outlineSize > 1e-6 ? height / shadowInfo.outlineSize : 0.0;
             if (ratio > bestRatio)
             {
@@ -2997,7 +3708,7 @@ namespace
             if (height > currentInfo.threshold + 1e-4)
             {
                 currentInfo.matched = true;
-                currentInfo.reason = "阴影曲线轮廓命中跳过";
+                currentInfo.reason = "circle shadow matched";
                 if (info != NULL)
                 {
                     *info = currentInfo;
@@ -3121,7 +3832,14 @@ namespace
         double radius = 0.0;
         double radiusData = 0.0;
         int normDir = 0;
-        return UF_MODL_ask_face_data(face->Tag(), type, point, direction, box, &radius, &radiusData, &normDir) == 0;
+        try
+        {
+            return UF_MODL_ask_face_data(face->Tag(), type, point, direction, box, &radius, &radiusData, &normDir) == 0;
+        }
+        catch (...)
+        {
+            return false;
+        }
     }
 
     bool AskFaceData(Face* face, int* type, double center[3], double normal[3], double* radiusOut)
@@ -5848,10 +6566,10 @@ namespace
         }
 
         std::map<std::string, double> variables;
-        variables["扣除"] = deduction;
-        variables["角度"] = angleDeg;
-        variables["内R"] = innerRadius;
-        variables["板厚"] = thickness;
+        variables[u8"鎵ｉ櫎"] = deduction;
+        variables[u8"瑙掑害"] = angleDeg;
+        variables[u8"鍐匯"] = innerRadius;
+        variables[u8"鏉垮帤"] = thickness;
         variables["DEDUCTION"] = deduction;
         variables["Q"] = deduction;
         variables["ANGLE"] = angleDeg;
@@ -5947,7 +6665,7 @@ namespace
         }
 
         std::string text = FormatDouble(flatCheck.flatSizeX, 1) + "*" + FormatDouble(flatCheck.flatSizeY, 1);
-        body->SetUserAttribute(u8"展开尺寸", -1, text.c_str(), Update::OptionNow);
+        body->SetUserAttribute(u8"鐏炴洖绱戠亸鍝勵嚟", -1, text.c_str(), Update::OptionNow);
         return true;
     }
 
@@ -5971,23 +6689,23 @@ namespace
 
     std::string RuleMethodDisplay(const std::string& method)
     {
-        return method == "Deduction" ? std::string(u8"扣除") : std::string(u8"K因子");
+        return method == "Deduction" ? std::string("Deduction") : std::string("KFactor");
     }
 
     std::string RuleBoolDisplay(bool value)
     {
-        return value ? std::string(u8"是") : std::string(u8"否");
+        return value ? std::string("yes") : std::string("no");
     }
 
     bool RuleBoolValue(const std::string& value, bool defaultValue)
     {
         std::string text = TrimCopy(value);
         std::transform(text.begin(), text.end(), text.begin(), ::tolower);
-        if (text == u8"是" || text == "true" || text == "1" || text == "yes" || text == "y")
+        if (text == "true" || text == "1" || text == "yes" || text == "y")
         {
             return true;
         }
-        if (text == u8"否" || text == "false" || text == "0" || text == "no" || text == "n")
+        if (text == "false" || text == "0" || text == "no" || text == "n")
         {
             return false;
         }
@@ -6164,7 +6882,7 @@ namespace
         {
             return path;
         }
-        return std::string("D:\\UG智辉钣金插件\\config\\") + PiLianRulesIniFileName;
+        return std::string("D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\config\\") + PiLianRulesIniFileName;
     }
 
     bool SaveRuleConfigToJson(const RuleConfig& config, std::string* pathOut, std::string* error)
@@ -6172,31 +6890,31 @@ namespace
         std::string path = RulesJsonSavePath();
         std::ostringstream ini;
         ini << "\xEF\xBB\xBF";
-        ini << "# 智辉钣金批量转钣金折弯规则表\n";
-        ini << "# UG 内置表格保存的明细规则。\n\n";
-        ini << u8"[大圆弧判定]\n";
-        ini << u8"使用绝对内R=" << RuleBoolDisplay(config.useAbsoluteLargeArc) << "\n";
-        ini << u8"最小半径=" << NumberText(config.absoluteLargeArcRadius) << "\n";
-        ini << u8"使用R比厚度=" << RuleBoolDisplay(config.useRatioLargeArc) << "\n";
-        ini << u8"R比厚度阈值=" << NumberText(config.ratioLargeArc) << "\n\n";
-        ini << u8"[规则]\n";
+        ini << u8"# 閺呴缚绶ｉ柦锝夊櫨閹靛綊鍣烘潪顒勬寴闁叉垶濮屽顖濐潐閸掓瑨銆僜n";
+        ini << u8"# UG 閸愬懐鐤嗙悰銊︾壐娣囨繂鐡ㄩ惃鍕缂佸棜顫夐崚娆嶁偓淇搉\n";
+        ini << u8"[婢堆冩妇瀵冨灲鐎规瓥\n";
+        ini << u8"娴ｈ法鏁ょ紒婵嗩嚠閸愬尟=" << RuleBoolDisplay(config.useAbsoluteLargeArc) << "\n";
+        ini << u8"闁哄牃鍋撻悘蹇撶箰瀹曟劕顕?" << NumberText(config.absoluteLargeArcRadius) << "\n";
+        ini << u8"濞达綀娉曢弫顥告慨锝嗘煥鐢倖鎯?" << RuleBoolDisplay(config.useRatioLargeArc) << "\n";
+        ini << u8"R婵絾鏌ㄧ敮銈嗘償閿曞倹顫岄柛?" << NumberText(config.ratioLargeArc) << "\n\n";
+        ini << u8"[鐟欏嫬鍨痌\n";
         for (size_t i = 0; i < config.rules.size(); ++i)
         {
             const BendRule& rule = config.rules[i];
-            ini << u8"规则" << (i + 1) << u8"=启用=" << RuleBoolDisplay(rule.enabled);
-            ini << u8";名称=" << rule.name;
-            ini << u8";材料=" << rule.material;
-            ini << u8";方法=" << RuleMethodDisplay(rule.method);
-            ini << u8";值=" << NumberText(rule.value);
-            AppendIniOptionalNumber(ini, u8"角度最小", rule.hasAngleMin, rule.angleMin);
-            AppendIniOptionalNumber(ini, u8"角度最大", rule.hasAngleMax, rule.angleMax);
-            AppendIniOptionalNumber(ini, u8"厚度最小", rule.hasThicknessMin, rule.thicknessMin);
-            AppendIniOptionalNumber(ini, u8"厚度最大", rule.hasThicknessMax, rule.thicknessMax);
-            AppendIniOptionalNumber(ini, u8"内R最小", rule.hasRadiusMin, rule.radiusMin);
-            AppendIniOptionalNumber(ini, u8"内R最大", rule.hasRadiusMax, rule.radiusMax);
-            AppendIniOptionalNumber(ini, u8"半径覆盖", rule.hasRadiusOverride, rule.radiusOverride);
-            ini << u8";兜底=" << RuleBoolDisplay(rule.fallback);
-            ini << u8";备注=" << rule.note << "\n";
+            ini << "Rule" << (i + 1) << "=Enabled" << RuleBoolDisplay(rule.enabled);
+            ini << u8";闁告艾绉惰ⅷ=" << rule.name;
+            ini << u8";閺夋劖鏋?" << rule.material;
+            ini << u8";闁哄倽顫夌涵?" << RuleMethodDisplay(rule.method);
+            ini << u8";闁?" << NumberText(rule.value);
+            AppendIniOptionalNumber(ini, "AngleMin", rule.hasAngleMin, rule.angleMin);
+            AppendIniOptionalNumber(ini, "AngleMax", rule.hasAngleMax, rule.angleMax);
+            AppendIniOptionalNumber(ini, "ThicknessMin", rule.hasThicknessMin, rule.thicknessMin);
+            AppendIniOptionalNumber(ini, "ThicknessMax", rule.hasThicknessMax, rule.thicknessMax);
+            AppendIniOptionalNumber(ini, "RadiusMin", rule.hasRadiusMin, rule.radiusMin);
+            AppendIniOptionalNumber(ini, "RadiusMax", rule.hasRadiusMax, rule.radiusMax);
+            AppendIniOptionalNumber(ini, "RadiusOverride", rule.hasRadiusOverride, rule.radiusOverride);
+            ini << u8";閸忔粌绨?" << RuleBoolDisplay(rule.fallback);
+            ini << u8";婢跺洦鏁?" << rule.note << "\n";
         }
 
         std::string text = ini.str();
@@ -6204,7 +6922,7 @@ namespace
         {
             if (error != NULL)
             {
-                *error = u8"无法写入规则配置：" + path;
+                *error = std::string("Cannot write rule config: ") + path;
             }
             return false;
         }
@@ -6289,6 +7007,28 @@ namespace
         }
     }
 
+    void TrySetBlockLogical(UIBlock* block, const char* name, bool value)
+    {
+        if (block == NULL || name == NULL || name[0] == '\0')
+        {
+            return;
+        }
+
+        PropertyList* props = NULL;
+        try
+        {
+            props = block->GetProperties();
+            props->SetLogical(name, value);
+        }
+        catch (...)
+        {
+        }
+        if (props != NULL)
+        {
+            delete props;
+        }
+    }
+
     void SetNodeColumnText(Node* node, int columnID, const std::string& text)
     {
         if (node != NULL)
@@ -6308,7 +7048,7 @@ namespace
             return existing;
         }
 
-        return std::string("D:\\UG智辉钣金插件\\config\\") + PiLianRulesIniFileName;
+        return std::string("D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\config\\") + PiLianRulesIniFileName;
     }
 
     std::vector<CoefficientRow> LoadCoefficientRowsFromIni()
@@ -6392,18 +7132,18 @@ namespace
     std::string PromptCoefficientCsvPath(bool save)
     {
         wchar_t fileName[MAX_PATH] = L"PiLianZuanBanJin_bend_factor_rules.csv";
-        wchar_t initialDir[MAX_PATH] = L"D:\\UG智辉钣金插件\\config";
+        wchar_t initialDir[MAX_PATH] = L"D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\config";
         OPENFILENAMEW ofn;
         ZeroMemory(&ofn, sizeof(ofn));
         ofn.lStructSize = sizeof(ofn);
         ofn.hwndOwner = NULL;
-        ofn.lpstrFilter = L"CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0\0";
+        ofn.lpstrFilter = L"CSV \u6587\u4EF6 (*.csv)\0*.csv\0\u6240\u6709\u6587\u4EF6 (*.*)\0*.*\0\0";
         ofn.lpstrFile = fileName;
         ofn.nMaxFile = MAX_PATH;
         ofn.lpstrInitialDir = initialDir;
         ofn.lpstrDefExt = L"csv";
         ofn.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
-        ofn.lpstrTitle = save ? L"选择导出位置" : L"选择导入文件";
+        ofn.lpstrTitle = save ? L"\u9009\u62E9\u5BFC\u51FA\u4F4D\u7F6E" : L"\u9009\u62E9\u5BFC\u5165\u6587\u4EF6";
 
         BOOL ok = save ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn);
         if (!ok)
@@ -6534,14 +7274,14 @@ namespace
             !ParseEditDouble(state->radiusEdit, &radius) ||
             !ParseEditDouble(state->thicknessEdit, &thickness))
         {
-            MessageBoxW(hwnd, L"请输入有效的扣除、角度、内R、板厚。", L"计算K因子", MB_ICONWARNING | MB_OK);
+            MessageBoxW(hwnd, L"\u8BF7\u8F93\u5165\u6709\u6548\u7684\u6263\u9664\u3001\u89D2\u5EA6\u3001\u5185R\u548C\u677F\u539A\u3002", L"K\u56E0\u5B50", MB_ICONWARNING | MB_OK);
             return;
         }
 
         double result = 0.0;
         if (!EvaluateKFormulaText(GetEditUtf8(state->formulaEdit), deduction, angle, radius, thickness, &result))
         {
-            MessageBoxW(hwnd, L"公式计算失败，或结果不在 0 到 1 之间。", L"计算K因子", MB_ICONWARNING | MB_OK);
+            MessageBoxW(hwnd, L"\u516C\u5F0F\u8BA1\u7B97\u5931\u8D25\uFF0C\u6216\u7ED3\u679C\u4E0D\u57280\u52301\u4E4B\u95F4\u3002", L"K\u56E0\u5B50", MB_ICONWARNING | MB_OK);
             return;
         }
 
@@ -6573,11 +7313,11 @@ namespace
             }
 
             HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
-            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"扣除", WS_CHILD | WS_VISIBLE, 18, 20, 70, 22, hwnd, NULL, instance, NULL));
-            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"角度", WS_CHILD | WS_VISIBLE, 18, 54, 70, 22, hwnd, NULL, instance, NULL));
-            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"内R", WS_CHILD | WS_VISIBLE, 18, 88, 70, 22, hwnd, NULL, instance, NULL));
-            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"板厚", WS_CHILD | WS_VISIBLE, 18, 122, 70, 22, hwnd, NULL, instance, NULL));
-            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"公式", WS_CHILD | WS_VISIBLE, 18, 156, 70, 22, hwnd, NULL, instance, NULL));
+            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"\u6263\u9664", WS_CHILD | WS_VISIBLE, 18, 20, 70, 22, hwnd, NULL, instance, NULL));
+            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"\u89D2\u5EA6", WS_CHILD | WS_VISIBLE, 18, 54, 70, 22, hwnd, NULL, instance, NULL));
+            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"\u5185R", WS_CHILD | WS_VISIBLE, 18, 88, 70, 22, hwnd, NULL, instance, NULL));
+            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"\u677F\u539A", WS_CHILD | WS_VISIBLE, 18, 122, 70, 22, hwnd, NULL, instance, NULL));
+            AddCalculatorControl(state, CreateWindowW(L"STATIC", L"\u516C\u5F0F", WS_CHILD | WS_VISIBLE, 18, 156, 70, 22, hwnd, NULL, instance, NULL));
 
             if (state != NULL)
             {
@@ -6607,8 +7347,8 @@ namespace
                 AddCalculatorControl(state, state->resultText);
             }
 
-            AddCalculatorControl(state, CreateWindowW(L"BUTTON", L"计算", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 350, 222, 76, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCalculate)), instance, NULL));
-            AddCalculatorControl(state, CreateWindowW(L"BUTTON", L"关闭", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 444, 222, 76, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClose)), instance, NULL));
+            AddCalculatorControl(state, CreateWindowW(L"BUTTON", L"\u8BA1\u7B97", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 350, 222, 76, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCalculate)), instance, NULL));
+            AddCalculatorControl(state, CreateWindowW(L"BUTTON", L"\u5173\u95ED", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 444, 222, 76, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClose)), instance, NULL));
             return 0;
         }
         case WM_CTLCOLORSTATIC:
@@ -6679,7 +7419,7 @@ namespace
         HWND hwnd = CreateWindowExW(
             WS_EX_DLGMODALFRAME,
             className,
-            L"计算K因子",
+            L"\u8BA1\u7B97K\u56E0\u5B50",
             WS_CAPTION | WS_SYSMENU | WS_BORDER,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -6691,7 +7431,7 @@ namespace
             &state);
         if (hwnd == NULL)
         {
-            MessageBoxW(parent, L"无法打开K因子计算窗口。", L"计算K因子", MB_ICONERROR | MB_OK);
+            MessageBoxW(parent, L"\u65E0\u6CD5\u6253\u5F00K\u56E0\u5B50\u8BA1\u7B97\u7A97\u53E3\u3002", L"K\u56E0\u5B50", MB_ICONERROR | MB_OK);
             return;
         }
 
@@ -6755,14 +7495,14 @@ namespace
     std::string NormalizeCoefficientCsvHeader(const std::string& text)
     {
         std::string value = TrimCopy(NormalizeUtf8Message(text));
-        if (value == u8"材料") return "Material";
-        if (value == u8"厚度") return "Thickness";
-        if (value == u8"扣除1") return "Q1";
-        if (value == u8"扣除2") return "Q2";
-        if (value == u8"扣除3") return "Q3";
-        if (value == u8"K因子1") return "K1";
-        if (value == u8"K因子2") return "K2";
-        if (value == u8"K因子3") return "K3";
+        if (value == u8"鏉愭枡") return "Material";
+        if (value == u8"鍘氬害" || value == u8"鏉垮帤") return "Thickness";
+        if (value == u8"鎵ｉ櫎1") return "Q1";
+        if (value == u8"鎵ｉ櫎2") return "Q2";
+        if (value == u8"鎵ｉ櫎3") return "Q3";
+        if (value == u8"K鍥犲瓙1") return "K1";
+        if (value == u8"K鍥犲瓙2") return "K2";
+        if (value == u8"K鍥犲瓙3") return "K3";
         if (value == "A1" || value == "A2" || value == "A3") return value;
         return value;
     }
@@ -6796,7 +7536,7 @@ namespace
     {
         std::ostringstream file;
         file << "\xEF\xBB\xBF";
-        file << u8"材料,厚度,扣除1,扣除2,扣除3,K因子1,K因子2,K因子3,A1,A2,A3\n";
+        file << u8"閺夋劖鏋?閸樻艾瀹?閹碉綁娅?,閹碉綁娅?,閹碉綁娅?,K閸ョ姴鐡?,K閸ョ姴鐡?,K閸ョ姴鐡?,A1,A2,A3\n";
         for (size_t i = 0; i < rows.size(); ++i)
         {
             const CoefficientRow& row = rows[i];
@@ -6816,7 +7556,7 @@ namespace
         std::string text = file.str();
         if (!WriteAllText(path, text))
         {
-            if (error != NULL) *error = u8"无法导出EXCEL数据：" + path;
+            if (error != NULL) *error = std::string("Cannot export CSV data: ") + path;
             return false;
         }
         return true;
@@ -6831,7 +7571,7 @@ namespace
         std::string text = ReadAllText(path);
         if (text.empty())
         {
-            if (error != NULL) *error = u8"无法导入EXCEL数据：" + path;
+            if (error != NULL) *error = std::string("Cannot import CSV data: ") + path;
             return false;
         }
 
@@ -6839,7 +7579,7 @@ namespace
         std::string line;
         if (!std::getline(stream, line))
         {
-            if (error != NULL) *error = u8"EXCEL数据为空：" + path;
+            if (error != NULL) *error = std::string("CSV data is empty: ") + path;
             return false;
         }
         if (!line.empty() && line[line.size() - 1] == '\r') line.erase(line.size() - 1);
@@ -6863,7 +7603,7 @@ namespace
 
             std::vector<std::string> cells = SplitCsvLine(line);
             CoefficientRow row;
-            row.material = u8"材质 <未指定>";
+            row.material = u8"閺夋劘宸?<閺堫亝瀵氱€?";
             bool hasThickness = false;
             for (size_t i = 0; i < headers.size() && i < cells.size(); ++i)
             {
@@ -6871,7 +7611,7 @@ namespace
                 std::string value = TrimCopy(NormalizeUtf8Message(cells[i]));
                 if (key == "Material")
                 {
-                    row.material = value.empty() ? std::string(u8"材质 <未指定>") : value;
+                    row.material = value.empty() ? std::string(u8"閺夋劘宸?<閺堫亝瀵氱€?") : value;
                 }
                 else if (key == "Thickness")
                 {
@@ -6891,7 +7631,7 @@ namespace
 
             if (!hasThickness)
             {
-                if (error != NULL) *error = u8"导入失败：第 " + std::to_string(lineNumber) + u8" 行厚度为空或无效。";
+                if (error != NULL) *error = std::string("Import failed at line ") + std::to_string(lineNumber) + ": thickness is empty or invalid.";
                 return false;
             }
             imported.push_back(row);
@@ -6899,7 +7639,7 @@ namespace
 
         if (imported.empty())
         {
-            if (error != NULL) *error = u8"导入失败：没有读取到有效厚度数据。";
+            if (error != NULL) *error = "Import failed: no valid thickness data.";
             return false;
         }
 
@@ -6977,11 +7717,11 @@ namespace
                 }
                 catch (const std::exception& ex)
                 {
-                    ShowMessage(ui_, "折弯系数表", NXMessageBox::DialogTypeError, ex.what());
+                    ShowMessage(ui_, "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8", NXMessageBox::DialogTypeError, ex.what());
                 }
                 catch (...)
                 {
-                    ShowMessage(ui_, "折弯系数表", NXMessageBox::DialogTypeError, u8"打开规则表时发生未知异常。");
+                    ShowMessage(ui_, "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8", NXMessageBox::DialogTypeError, "\xE6\x89\x93\xE5\xBC\x80\xE8\xA7\x84\xE5\x88\x99\xE8\xA1\xA8\xE6\x97\xB6\xE5\x8F\x91\xE7\x94\x9F\xE6\x9C\xAA\xE7\x9F\xA5\xE9\x94\x99\xE8\xAF\xAF\xE3\x80\x82");
                 }
             }
         }
@@ -7018,14 +7758,14 @@ namespace
         {
             if (tree_ != NULL && !columnsInserted_)
             {
-                tree_->InsertColumn(ColumnMaterial, U8("材料"), 110);
-                tree_->InsertColumn(ColumnThickness, U8("厚度"), 70);
-                tree_->InsertColumn(ColumnQ1, U8("扣除1"), 70);
-                tree_->InsertColumn(ColumnQ2, U8("扣除2"), 70);
-                tree_->InsertColumn(ColumnQ3, U8("扣除3"), 70);
-                tree_->InsertColumn(ColumnK1, U8("K因子1"), 70);
-                tree_->InsertColumn(ColumnK2, U8("K因子2"), 70);
-                tree_->InsertColumn(ColumnK3, U8("K因子3"), 70);
+                tree_->InsertColumn(ColumnMaterial, U8("\xE6\x9D\x90\xE6\x96\x99"), 110);
+                tree_->InsertColumn(ColumnThickness, U8("\xE5\x8E\x9A\xE5\xBA\xA6"), 70);
+                tree_->InsertColumn(ColumnQ1, U8("\xE6\x89\xA3\xE9\x99\xA4" "1"), 70);
+                tree_->InsertColumn(ColumnQ2, U8("\xE6\x89\xA3\xE9\x99\xA4" "2"), 70);
+                tree_->InsertColumn(ColumnQ3, U8("\xE6\x89\xA3\xE9\x99\xA4" "3"), 70);
+                tree_->InsertColumn(ColumnK1, U8("K\xE5\x9B\xA0\xE5\xAD\x90" "1"), 70);
+                tree_->InsertColumn(ColumnK2, U8("K\xE5\x9B\xA0\xE5\xAD\x90" "2"), 70);
+                tree_->InsertColumn(ColumnK3, U8("K\xE5\x9B\xA0\xE5\xAD\x90" "3"), 70);
                 tree_->InsertColumn(ColumnA1, U8("A1"), 60);
                 tree_->InsertColumn(ColumnA2, U8("A2"), 60);
                 tree_->InsertColumn(ColumnA3, U8("A3"), 60);
@@ -7155,28 +7895,28 @@ namespace
 
         void LocalizeAndHideUnusedBlocks()
         {
-            TrySetBlockString(dialog_->TopBlock(), "Label", "折弯系数表");
-            TrySetBlockString(dialog_->TopBlock(), "LabelString", "折弯系数表");
-            TrySetBlockString(dialog_->TopBlock(), "Title", "折弯系数表");
+            TrySetBlockString(dialog_->TopBlock(), "Label", "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8");
+            TrySetBlockString(dialog_->TopBlock(), "LabelString", "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8");
+            TrySetBlockString(dialog_->TopBlock(), "Title", "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8");
             UIBlock* selectRuleGroup = dynamic_cast<UIBlock*>(dialog_->TopBlock()->FindBlock("nodeDataGroup"));
             UIBlock* coefficientGroup = dynamic_cast<UIBlock*>(dialog_->TopBlock()->FindBlock("group0"));
             UIBlock* actionGroup = dynamic_cast<UIBlock*>(dialog_->TopBlock()->FindBlock("addDeleteNodeGroup"));
-            TrySetBlockString(selectRuleGroup, "Label", "选择规则");
-            TrySetBlockString(selectRuleGroup, "LabelString", "选择规则");
-            TrySetBlockString(coefficientGroup, "Label", "折弯系数表");
-            TrySetBlockString(coefficientGroup, "LabelString", "折弯系数表");
-            TrySetBlockString(actionGroup, "Label", "保存");
-            TrySetBlockString(actionGroup, "LabelString", "保存");
-            TrySetBlockString(rulePageEnum_, "Label", "选择规则");
-            TrySetBlockString(largeArcEnum_, "Label", "多刀折圆");
-            TrySetBlockString(smallArcEnum_, "Label", "普通折弯");
-            TrySetBlockString(multiBendMinRadiusDouble_, "Label", "多刀折圆最小半径");
-            TrySetBlockString(materialPageEnum_, "Label", "材料分页");
-            TrySetBlockString(addButton_, "Label", "新增厚度");
-            TrySetBlockString(saveButton_, "Label", "保存");
-            TrySetBlockString(importExcelButton_, "Label", "导入EXCEL数据");
-            TrySetBlockString(exportExcelButton_, "Label", "导出EXCEL数据");
-            TrySetBlockString(calculateKButton_, "Label", "计算K因子");
+            TrySetBlockString(selectRuleGroup, "Label", "\xE9\x80\x89\xE6\x8B\xA9\xE8\xA7\x84\xE5\x88\x99");
+            TrySetBlockString(selectRuleGroup, "LabelString", "\xE9\x80\x89\xE6\x8B\xA9\xE8\xA7\x84\xE5\x88\x99");
+            TrySetBlockString(coefficientGroup, "Label", "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8");
+            TrySetBlockString(coefficientGroup, "LabelString", "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8");
+            TrySetBlockString(actionGroup, "Label", "\xE4\xBF\x9D\xE5\xAD\x98");
+            TrySetBlockString(actionGroup, "LabelString", "\xE4\xBF\x9D\xE5\xAD\x98");
+            TrySetBlockString(rulePageEnum_, "Label", "\xE9\x80\x89\xE6\x8B\xA9\xE8\xA7\x84\xE5\x88\x99");
+            TrySetBlockString(largeArcEnum_, "Label", "\xE5\xA4\x9A\xE5\x88\x80\xE6\x8A\x98\xE5\x9C\x86");
+            TrySetBlockString(smallArcEnum_, "Label", "\xE6\x99\xAE\xE9\x80\x9A\xE6\x8A\x98\xE5\xBC\xAF");
+            TrySetBlockString(multiBendMinRadiusDouble_, "Label", "\xE5\xA4\x9A\xE5\x88\x80\xE6\x8A\x98\xE6\x9C\x80\xE5\xB0\x8F\u534A\u5F84");
+            TrySetBlockString(materialPageEnum_, "Label", "\xE6\x9D\x90\xE6\x96\x99\xE5\x88\x86\xE9\xA1\xB5");
+            TrySetBlockString(addButton_, "Label", "\xE6\x96\xB0\xE5\xA2\x9E\xE5\x8E\x9A\xE5\xBA\xA6");
+            TrySetBlockString(saveButton_, "Label", "\xE4\xBF\x9D\xE5\xAD\x98");
+            TrySetBlockString(importExcelButton_, "Label", "\xE5\xAF\xBC\xE5\x85\xA5" "EXCEL\xE6\x95\xB0\xE6\x8D\xAE");
+            TrySetBlockString(exportExcelButton_, "Label", "\xE5\xAF\xBC\xE5\x87\xBA" "EXCEL\xE6\x95\xB0\xE6\x8D\xAE");
+            TrySetBlockString(calculateKButton_, "Label", "\xE8\xAE\xA1\xE7\xAE\x97K\xE5\x9B\xA0\xE5\xAD\x90");
 
             const char* hideBlockIds[] = {
                 "selection0", "conditionTree", "autoTapHoleToggle", "autoPemHoleToggle", "autoCounterboreHoleToggle",
@@ -7236,11 +7976,11 @@ namespace
         std::string RulePageText(const ConditionRuleRow& row) const
         {
             std::string label = TrimCopy(row.angleLabel);
-            if (label == "90") return u8"90度角折弯";
-            if (label == "(0,90)") return u8"小于90度折弯";
-            if (label == "(90,180)") return u8"大于90度折弯";
-            if (label == "(180,360)") return u8"压死边";
-            return label.empty() ? std::string(u8"未命名规则") : label;
+            if (label == "90") return "90";
+            if (label == "(0,90)") return "(0,90)";
+            if (label == "(90,180)") return "(90,180)";
+            if (label == "(180,360)") return "(180,360)";
+            return label.empty() ? std::string("Unnamed rule") : label;
         }
 
         void SelectConditionByRulePage()
@@ -7299,12 +8039,12 @@ namespace
 
         std::string CoefficientDisplayName(const std::string& code) const
         {
-            if (code == "Q1") return u8"扣除1";
-            if (code == "Q2") return u8"扣除2";
-            if (code == "Q3") return u8"扣除3";
-            if (code == "K1") return u8"K因子1";
-            if (code == "K2") return u8"K因子2";
-            if (code == "K3") return u8"K因子3";
+            if (code == "Q1") return u8"閹碉綁娅?";
+            if (code == "Q2") return u8"閹碉綁娅?";
+            if (code == "Q3") return u8"閹碉綁娅?";
+            if (code == "K1") return u8"K閸ョ姴鐡?";
+            if (code == "K2") return u8"K閸ョ姴鐡?";
+            if (code == "K3") return u8"K閸ョ姴鐡?";
             if (code == "A1") return "A1";
             if (code == "A2") return "A2";
             if (code == "A3") return "A3";
@@ -7313,12 +8053,12 @@ namespace
 
         std::string CoefficientCodeFromDisplay(const std::string& display) const
         {
-            if (display == u8"扣除1") return "Q1";
-            if (display == u8"扣除2") return "Q2";
-            if (display == u8"扣除3") return "Q3";
-            if (display == u8"K因子1") return "K1";
-            if (display == u8"K因子2") return "K2";
-            if (display == u8"K因子3") return "K3";
+            if (display == u8"閹碉綁娅?" || display == u8"闁圭缍佸▍?") return "Q1";
+            if (display == u8"閹碉綁娅?" || display == u8"闁圭缍佸▍?") return "Q2";
+            if (display == u8"閹碉綁娅?" || display == u8"闁圭缍佸▍?") return "Q3";
+            if (display == u8"K閸ョ姴鐡?" || display == u8"K闁搞儳濮撮悺?") return "K1";
+            if (display == u8"K閸ョ姴鐡?" || display == u8"K闁搞儳濮撮悺?") return "K2";
+            if (display == u8"K閸ョ姴鐡?" || display == u8"K闁搞儳濮撮悺?") return "K3";
             if (display == "A1" || display == "A2" || display == "A3") return display;
             return display;
         }
@@ -7356,7 +8096,7 @@ namespace
 
         std::string NormalizeMaterialPage(const std::string& material) const
         {
-            return TrimCopy(material).empty() ? std::string(u8"材质 <未指定>") : TrimCopy(material);
+            return TrimCopy(material).empty() ? std::string(u8"閺夋劘宸?<閺堫亝瀵氱€?") : TrimCopy(material);
         }
 
         void SortRows()
@@ -7375,7 +8115,7 @@ namespace
         void RefreshMaterialPages()
         {
             materialPages_.clear();
-            materialPages_.push_back(u8"全部");
+            materialPages_.push_back("All");
             std::set<std::string> seen;
             for (size_t i = 0; i < rows_.size(); ++i)
             {
@@ -7387,10 +8127,10 @@ namespace
             }
             if (selectedMaterialPage_.empty())
             {
-                selectedMaterialPage_ = u8"全部";
+                selectedMaterialPage_ = "All";
             }
 
-            bool exists = selectedMaterialPage_ == u8"全部";
+            bool exists = selectedMaterialPage_ == "All";
             for (size_t i = 1; i < materialPages_.size(); ++i)
             {
                 if (materialPages_[i] == selectedMaterialPage_)
@@ -7401,7 +8141,7 @@ namespace
             }
             if (!exists)
             {
-                selectedMaterialPage_ = u8"全部";
+                selectedMaterialPage_ = "All";
             }
 
             if (materialPageEnum_ != NULL)
@@ -7419,7 +8159,7 @@ namespace
         bool RowVisible(const CoefficientRow& row) const
         {
             return selectedMaterialPage_.empty() ||
-                selectedMaterialPage_ == u8"全部" ||
+                selectedMaterialPage_ == "All" ||
                 NormalizeMaterialPage(row.material) == selectedMaterialPage_;
         }
 
@@ -7489,7 +8229,7 @@ namespace
             std::string value = TrimCopy(text);
             if (columnID == ColumnMaterial)
             {
-                row.material = value.empty() ? std::string(u8"材质 <未指定>") : value;
+                row.material = value.empty() ? std::string(u8"閺夋劘宸?<閺堫亝瀵氱€?") : value;
                 selectedMaterialPage_ = NormalizeMaterialPage(row.material);
                 return true;
             }
@@ -7534,8 +8274,8 @@ namespace
             }
             else
             {
-                row.material = (!selectedMaterialPage_.empty() && selectedMaterialPage_ != u8"全部") ?
-                    selectedMaterialPage_ : std::string(u8"材质 <未指定>");
+                row.material = (!selectedMaterialPage_.empty() && selectedMaterialPage_ != "All") ?
+                    selectedMaterialPage_ : std::string("Material");
                 row.thickness = 1.0;
                 FillDefaultCoefficientValues(&row);
             }
@@ -7586,7 +8326,7 @@ namespace
 
             if (!zhihui_bend_rules_ini::SaveCoefficientRowsToIniFile<RuleConfig>(settings_, rows_, conditionRows_, tempPath, &error))
             {
-                ShowMessage(ui_, "折弯系数表", NXMessageBox::DialogTypeError, error);
+                ShowMessage(ui_, "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8", NXMessageBox::DialogTypeError, error);
                 return false;
             }
 
@@ -7594,11 +8334,11 @@ namespace
             DeleteFileA(tempPath.c_str());
             if (text.empty() || !WriteAllText(path, text))
             {
-                ShowMessage(ui_, "折弯系数表", NXMessageBox::DialogTypeError, u8"无法写入规则表：" + path);
+                ShowMessage(ui_, "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8", NXMessageBox::DialogTypeError, std::string(u8"\u65E0\u6CD5\u5199\u5165\u89C4\u5219\u8868: ") + path);
                 return false;
             }
 
-            ShowMessage(ui_, "折弯系数表", NXMessageBox::DialogTypeInformation, u8"系数表已保存：" + path);
+            ShowMessage(ui_, "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8", NXMessageBox::DialogTypeInformation, std::string(u8"\u7CFB\u6570\u8868\u5DF2\u4FDD\u5B58: ") + path);
             return true;
         }
 
@@ -7614,15 +8354,15 @@ namespace
             std::string error;
             if (!LoadCoefficientRowsFromCsv(path, &imported, &error))
             {
-                ShowMessage(ui_, "折弯系数表", NXMessageBox::DialogTypeError, error);
+                ShowMessage(ui_, "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8", NXMessageBox::DialogTypeError, error);
                 return;
             }
 
             rows_ = imported;
             RefreshMaterialPages();
             RebuildTree();
-            ShowMessage(ui_, "折弯系数表", NXMessageBox::DialogTypeInformation,
-                u8"已导入EXCEL数据：\n" + path + u8"\n请点击保存写入规则配置。");
+            ShowMessage(ui_, "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8", NXMessageBox::DialogTypeInformation,
+                std::string(u8"\u5DF2\u5BFC\u5165CSV\u6570\u636E:\n") + path + u8"\n\u8BF7\u70B9\u51FB\u4FDD\u5B58\u5199\u5165\u89C4\u5219\u914D\u7F6E\u3002");
         }
 
         void ExportExcelData()
@@ -7636,12 +8376,12 @@ namespace
             std::string error;
             if (!SaveCoefficientRowsToCsv(rows_, path, &error))
             {
-                ShowMessage(ui_, "折弯系数表", NXMessageBox::DialogTypeError, error);
+                ShowMessage(ui_, "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8", NXMessageBox::DialogTypeError, error);
                 return;
             }
 
-            ShowMessage(ui_, "折弯系数表", NXMessageBox::DialogTypeInformation,
-                u8"已导出EXCEL数据：\n" + path);
+            ShowMessage(ui_, "\xE6\x8A\x98\xE5\xBC\xAF\xE7\xB3\xBB\xE6\x95\xB0\xE8\xA1\xA8", NXMessageBox::DialogTypeInformation,
+                u8"\u5DF2\u5BFC\u51FAEXCEL\u6570\u636E:\n" + path);
         }
     };
 
@@ -7754,6 +8494,824 @@ namespace
         }
 
         return bestEdge;
+    }
+
+    Point3d MidPoint(const Point3d& a, const Point3d& b)
+    {
+        return Point3d((a.X + b.X) * 0.5, (a.Y + b.Y) * 0.5, (a.Z + b.Z) * 0.5);
+    }
+
+    bool UnitDirection(const Point3d& startPoint, const Point3d& endPoint, double* x, double* y, double* z, double* length)
+    {
+        const double dx = endPoint.X - startPoint.X;
+        const double dy = endPoint.Y - startPoint.Y;
+        const double dz = endPoint.Z - startPoint.Z;
+        const double len = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (len <= 1.0e-6)
+        {
+            return false;
+        }
+        if (x != NULL) *x = dx / len;
+        if (y != NULL) *y = dy / len;
+        if (z != NULL) *z = dz / len;
+        if (length != NULL) *length = len;
+        return true;
+    }
+
+    Edge* FindMatchingStraightEdgeByDirection(
+        Face* face,
+        const Point3d& originalStart,
+        const Point3d& originalEnd,
+        Point3d* startPoint,
+        Point3d* endPoint)
+    {
+        if (face == NULL)
+        {
+            return NULL;
+        }
+
+        double ox = 0.0;
+        double oy = 0.0;
+        double oz = 0.0;
+        double originalLength = 0.0;
+        if (!UnitDirection(originalStart, originalEnd, &ox, &oy, &oz, &originalLength))
+        {
+            return NULL;
+        }
+
+        const Point3d originalMid = MidPoint(originalStart, originalEnd);
+        Edge* bestEdge = NULL;
+        Point3d bestStart;
+        Point3d bestEnd;
+        double bestScore = 1.0e100;
+        std::vector<Edge*> edges = FaceEdgesByUf(face);
+        for (size_t i = 0; i < edges.size(); ++i)
+        {
+            Edge* edge = edges[i];
+            if (edge == NULL)
+            {
+                continue;
+            }
+
+            Point3d p1;
+            Point3d p2;
+            try
+            {
+                if (edge->SolidEdgeType() != NXOpen::Edge::EdgeTypeLinear)
+                {
+                    continue;
+                }
+                edge->GetVertices(&p1, &p2);
+            }
+            catch (...)
+            {
+                continue;
+            }
+
+            double ex = 0.0;
+            double ey = 0.0;
+            double ez = 0.0;
+            double edgeLength = 0.0;
+            if (!UnitDirection(p1, p2, &ex, &ey, &ez, &edgeLength))
+            {
+                continue;
+            }
+
+            const double parallel = std::fabs(ox * ex + oy * ey + oz * ez);
+            if (parallel < 0.995)
+            {
+                continue;
+            }
+
+            const double score =
+                (1.0 - parallel) * 100000.0 +
+                std::fabs(edgeLength - originalLength) +
+                Distance(MidPoint(p1, p2), originalMid) * 0.01;
+            if (score < bestScore)
+            {
+                bestScore = score;
+                bestEdge = edge;
+                bestStart = p1;
+                bestEnd = p2;
+            }
+        }
+
+        if (bestEdge != NULL)
+        {
+            if (startPoint != NULL)
+            {
+                *startPoint = bestStart;
+            }
+            if (endPoint != NULL)
+            {
+                *endPoint = bestEnd;
+            }
+        }
+        return bestEdge;
+    }
+
+    bool IsEdgeOnFace(Face* face, Edge* edge)
+    {
+        if (face == NULL || edge == NULL)
+        {
+            return false;
+        }
+
+        std::vector<Edge*> edges = FaceEdgesByUf(face);
+        for (size_t i = 0; i < edges.size(); ++i)
+        {
+            if (edges[i] != NULL && edges[i]->Tag() == edge->Tag())
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool IsUsableBaseXAxisEdge(Face* face, Edge* edge, Point3d* startPoint, Point3d* endPoint)
+    {
+        if (!IsEdgeOnFace(face, edge))
+        {
+            return false;
+        }
+
+        Point3d p1;
+        Point3d p2;
+        try
+        {
+            if (edge->SolidEdgeType() != NXOpen::Edge::EdgeTypeLinear)
+            {
+                return false;
+            }
+
+            edge->GetVertices(&p1, &p2);
+        }
+        catch (...)
+        {
+            return false;
+        }
+
+        if (Distance(p1, p2) <= 1.0e-6)
+        {
+            return false;
+        }
+
+        if (startPoint != NULL)
+        {
+            *startPoint = p1;
+        }
+        if (endPoint != NULL)
+        {
+            *endPoint = p2;
+        }
+        return true;
+    }
+
+    bool IsFaceOnBody(Body* body, Face* face)
+    {
+        if (body == NULL || face == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            Body* faceBody = face->GetBody();
+            return faceBody != NULL && faceBody->Tag() == body->Tag();
+        }
+        catch (...)
+        {
+        }
+
+        return false;
+    }
+
+    struct ManualBaseSelection
+    {
+        Body* body = NULL;
+        Face* baseFace = NULL;
+        Edge* xAxisEdge = NULL;
+        Point3d startPoint;
+        Point3d endPoint;
+    };
+
+    enum ManualBaseXDialogMode
+    {
+        ManualBaseXDialogModeFaceAndEdge,
+        ManualBaseXDialogModeFaceOnly,
+        ManualBaseXDialogModeEdgeOnly
+    };
+
+    class ManualBaseXDialog
+    {
+    public:
+        ManualBaseXDialog(UI* ui, Body* body, ManualBaseXDialogMode mode, Face* fixedFace = NULL) :
+            ui_(ui),
+            body_(body),
+            mode_(mode),
+            fixedFace_(fixedFace),
+            dialog_(NULL),
+            faceSelect_(NULL),
+            edgeSelect_(NULL),
+            selectedFace_(NULL),
+            selectedEdge_(NULL),
+            accepted_(false)
+        {
+            const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(
+                IDR_ZH_DLX_PILIANZUANBANJIN_MANUAL_BASE_X_DLX,
+                L"PiLianZuanBanJinManualBaseX.dlx");
+            if (ui_ == NULL || dlxPath.empty())
+            {
+                return;
+            }
+
+            dialog_ = ui_->CreateDialog(dlxPath.c_str());
+            dialog_->AddInitializeHandler(make_callback(this, &ManualBaseXDialog::initialize_cb));
+            dialog_->AddUpdateHandler(make_callback(this, &ManualBaseXDialog::update_cb));
+            dialog_->AddFilterHandler(make_callback(this, &ManualBaseXDialog::filter_cb));
+            dialog_->AddDialogShownHandler(make_callback(this, &ManualBaseXDialog::dialogShown_cb));
+            dialog_->AddApplyHandler(make_callback(this, &ManualBaseXDialog::apply_cb));
+            dialog_->AddOkHandler(make_callback(this, &ManualBaseXDialog::ok_cb));
+        }
+
+        ManualBaseXDialog(
+            UI* ui,
+            const std::vector<Body*>& bodies,
+            const std::set<tag_t>& excludedBodyTags,
+            ManualBaseXDialogMode mode) :
+            ManualBaseXDialog(ui, static_cast<Body*>(NULL), mode)
+        {
+            for (size_t i = 0; i < bodies.size(); ++i)
+            {
+                if (bodies[i] != NULL)
+                {
+                    allowedBodyTags_.insert(bodies[i]->Tag());
+                }
+            }
+            excludedBodyTags_ = excludedBodyTags;
+        }
+
+        ~ManualBaseXDialog()
+        {
+            // This dialog is created and launched repeatedly from another BlockStyler
+            // dialog. NX can free the internal DialogCreator when Launch returns or
+            // aborts; deleting it here may double-free that internal object on the
+            // next manual run.
+            dialog_ = NULL;
+        }
+
+        bool Show(ManualBaseSelection* selection)
+        {
+            if (dialog_ == NULL || selection == NULL)
+            {
+                return false;
+            }
+
+            accepted_ = false;
+            try
+            {
+                dialog_->Launch();
+            }
+            catch (const NXException& ex)
+            {
+                AppendMarkerLineDebugLog(std::string("manual base x dialog launch nx exception: ") + NxExceptionSummary(ex));
+                ShowMessage(ui_, "\xE6\x89\x8B\xE5\x8A\xA8\xE5\xAE\x9A\xE4\xB9\x89\xE5\x9F\xBA\xE9\x9D\xA2X\xE5\x90\x91", NXMessageBox::DialogTypeError, "\xE6\x89\x93\xE5\xBC\x80\xE6\x89\x8B\xE5\x8A\xA8\xE9\x80\x89\xE6\x8B\xA9\xE5\xAF\xB9\xE8\xAF\x9D\xE6\xA1\x86\xE5\xA4\xB1\xE8\xB4\xA5\xE3\x80\x82");
+                return false;
+            }
+            catch (const std::exception& ex)
+            {
+                AppendMarkerLineDebugLog(std::string("manual base x dialog launch std exception: ") + ex.what());
+                ShowMessage(ui_, "\xE6\x89\x8B\xE5\x8A\xA8\xE5\xAE\x9A\xE4\xB9\x89\xE5\x9F\xBA\xE9\x9D\xA2X\xE5\x90\x91", NXMessageBox::DialogTypeError, "\xE6\x89\x93\xE5\xBC\x80\xE6\x89\x8B\xE5\x8A\xA8\xE9\x80\x89\xE6\x8B\xA9\xE5\xAF\xB9\xE8\xAF\x9D\xE6\xA1\x86\xE5\xA4\xB1\xE8\xB4\xA5\xE3\x80\x82");
+                return false;
+            }
+            catch (...)
+            {
+                ShowMessage(ui_, "\xE6\x89\x8B\xE5\x8A\xA8\xE5\xAE\x9A\xE4\xB9\x89\xE5\x9F\xBA\xE9\x9D\xA2X\xE5\x90\x91", NXMessageBox::DialogTypeError, "\xE6\x89\x93\xE5\xBC\x80\xE6\x89\x8B\xE5\x8A\xA8\xE9\x80\x89\xE6\x8B\xA9\xE5\xAF\xB9\xE8\xAF\x9D\xE6\xA1\x86\xE5\xA4\xB1\xE8\xB4\xA5\xE3\x80\x82");
+                return false;
+            }
+
+            if (!accepted_ || selectedFace_ == NULL ||
+                (mode_ != ManualBaseXDialogModeFaceOnly && selectedEdge_ == NULL))
+            {
+                return false;
+            }
+
+            selection->baseFace = selectedFace_;
+            selection->body = selectedFace_ == NULL ? NULL : selectedFace_->GetBody();
+            selection->xAxisEdge = selectedEdge_;
+            selection->startPoint = startPoint_;
+            selection->endPoint = endPoint_;
+            return true;
+        }
+
+        void initialize_cb()
+        {
+            try
+            {
+                faceSelect_ = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(dialog_->TopBlock()->FindBlock("selection0"));
+                edgeSelect_ = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(dialog_->TopBlock()->FindBlock("selectionEdge0"));
+
+                if (mode_ == ManualBaseXDialogModeFaceOnly)
+                {
+                    TrySetBlockVisible(edgeSelect_, false);
+                }
+                else if (mode_ == ManualBaseXDialogModeEdgeOnly)
+                {
+                    TrySetBlockVisible(faceSelect_, false);
+                    selectedFace_ = fixedFace_;
+                }
+
+                Selection::SelectionAction action = Selection::SelectionActionClearAndEnableSpecific;
+                std::vector<Selection::MaskTriple> faceMask(1);
+                faceMask[0] = Selection::MaskTriple(UF_solid_type, UF_solid_body_subtype, UF_UI_SEL_FEATURE_ANY_FACE);
+                if (faceSelect_ != NULL)
+                {
+                    PropertyList* props = faceSelect_->GetProperties();
+                    props->SetSelectionFilter("SelectionFilter", action, faceMask);
+                    delete props;
+                }
+
+                std::vector<Selection::MaskTriple> edgeMask(1);
+                edgeMask[0] = Selection::MaskTriple(UF_solid_type, UF_solid_body_subtype, UF_UI_SEL_FEATURE_ANY_EDGE);
+                if (edgeSelect_ != NULL)
+                {
+                    PropertyList* props = edgeSelect_->GetProperties();
+                    props->SetSelectionFilter("SelectionFilter", action, edgeMask);
+                    delete props;
+                }
+            }
+            catch (const NXException& ex)
+            {
+                AppendMarkerLineDebugLog(std::string("manual base x dialog initialize nx exception: ") + NxExceptionSummary(ex));
+            }
+            catch (const std::exception& ex)
+            {
+                AppendMarkerLineDebugLog(std::string("manual base x dialog initialize std exception: ") + ex.what());
+            }
+            catch (...)
+            {
+                AppendMarkerLineDebugLog("manual base x dialog initialize unknown exception");
+            }
+        }
+
+        void dialogShown_cb()
+        {
+        }
+
+        int update_cb(UIBlock* block)
+        {
+            if (block == faceSelect_ && mode_ != ManualBaseXDialogModeEdgeOnly)
+            {
+                Face* face = ReadSelectedFace();
+                if (face != selectedFace_)
+                {
+                    selectedEdge_ = NULL;
+                }
+                selectedFace_ = face;
+            }
+            else if (block == edgeSelect_)
+            {
+                Point3d startPoint;
+                Point3d endPoint;
+                Edge* edge = ReadSelectedEdge(selectedFace_, &startPoint, &endPoint);
+                if (edge != NULL)
+                {
+                    selectedEdge_ = edge;
+                    startPoint_ = startPoint;
+                    endPoint_ = endPoint;
+                }
+                else
+                {
+                    selectedEdge_ = NULL;
+                }
+            }
+
+            return 0;
+        }
+
+        int filter_cb(UIBlock* block, TaggedObject* selectedObject)
+        {
+            try
+            {
+                if (block == faceSelect_)
+                {
+                    if (mode_ == ManualBaseXDialogModeEdgeOnly)
+                    {
+                        return UF_UI_SEL_REJECT;
+                    }
+
+                    Face* face = dynamic_cast<Face*>(selectedObject);
+                    return face != NULL &&
+                        IsFaceAllowed(face) ? UF_UI_SEL_ACCEPT : UF_UI_SEL_REJECT;
+                }
+
+                if (block == edgeSelect_)
+                {
+                    Edge* edge = dynamic_cast<Edge*>(selectedObject);
+                    return IsUsableBaseXAxisEdge(selectedFace_, edge, NULL, NULL) ? UF_UI_SEL_ACCEPT : UF_UI_SEL_REJECT;
+                }
+            }
+            catch (...)
+            {
+                return UF_UI_SEL_REJECT;
+            }
+
+            return UF_UI_SEL_ACCEPT;
+        }
+
+        int ok_cb()
+        {
+            selectedFace_ = mode_ == ManualBaseXDialogModeEdgeOnly ? fixedFace_ : ReadSelectedFace();
+            selectedEdge_ = mode_ == ManualBaseXDialogModeFaceOnly ? NULL : ReadSelectedEdge(selectedFace_, &startPoint_, &endPoint_);
+            if (selectedFace_ == NULL)
+            {
+                ShowMessage(ui_, "\xE6\x89\x8B\xE5\x8A\xA8\xE5\xAE\x9A\xE4\xB9\x89\xE5\x9F\xBA\xE9\x9D\xA2X\xE5\x90\x91", NXMessageBox::DialogTypeWarning, "\xE8\xAF\xB7\xE5\x85\x88\xE9\x80\x89\xE6\x8B\xA9\xE5\xBD\x93\xE5\x89\x8D\xE5\xAE\x9E\xE4\xBD\x93\xE4\xB8\x8A\xE7\x9A\x84\xE5\xB9\xB3\xE9\x9D\xA2\xE3\x80\x82");
+                return 1;
+            }
+            if (mode_ != ManualBaseXDialogModeFaceOnly && selectedEdge_ == NULL)
+            {
+                ShowMessage(ui_, "\xE6\x89\x8B\xE5\x8A\xA8\xE5\xAE\x9A\xE4\xB9\x89\xE5\x9F\xBA\xE9\x9D\xA2X\xE5\x90\x91", NXMessageBox::DialogTypeWarning, "\xE8\xAF\xB7\xE9\x80\x89\xE6\x8B\xA9\xE5\xBD\x93\xE5\x89\x8D\xE5\x9F\xBA\xE9\x9D\xA2\xE4\xB8\x8A\xE7\x9A\x84\xE7\x9B\xB4\xE7\xBA\xBF\xE8\xBE\xB9\xE3\x80\x82");
+                return 1;
+            }
+
+            accepted_ = true;
+            return 0;
+        }
+
+        int apply_cb()
+        {
+            return ok_cb();
+        }
+
+    private:
+        Face* ReadSelectedFace() const
+        {
+            if (faceSelect_ == NULL)
+            {
+                return NULL;
+            }
+
+            PropertyList* props = faceSelect_->GetProperties();
+            std::vector<TaggedObject*> objects = props->GetTaggedObjectVector("SelectedObjects");
+            delete props;
+            if (objects.empty())
+            {
+                return NULL;
+            }
+
+            Face* face = dynamic_cast<Face*>(objects[0]);
+            if (face == NULL || !IsFaceAllowed(face))
+            {
+                return NULL;
+            }
+
+            return face;
+        }
+
+        Edge* ReadSelectedEdge(Face* face, Point3d* startPoint, Point3d* endPoint) const
+        {
+            if (edgeSelect_ == NULL || face == NULL)
+            {
+                return NULL;
+            }
+
+            PropertyList* props = edgeSelect_->GetProperties();
+            std::vector<TaggedObject*> objects = props->GetTaggedObjectVector("SelectedObjects");
+            delete props;
+            if (objects.empty())
+            {
+                return NULL;
+            }
+
+            Edge* edge = dynamic_cast<Edge*>(objects[0]);
+            return IsUsableBaseXAxisEdge(face, edge, startPoint, endPoint) ? edge : NULL;
+        }
+
+        UI* ui_;
+        Body* body_;
+        ManualBaseXDialogMode mode_;
+        Face* fixedFace_;
+        std::set<tag_t> allowedBodyTags_;
+        std::set<tag_t> excludedBodyTags_;
+        BlockDialog* dialog_;
+        NXOpen::BlockStyler::SelectObject* faceSelect_;
+        NXOpen::BlockStyler::SelectObject* edgeSelect_;
+        Face* selectedFace_;
+        Edge* selectedEdge_;
+        Point3d startPoint_;
+        Point3d endPoint_;
+        bool accepted_;
+
+        bool IsFaceAllowed(Face* face) const
+        {
+            if (face == NULL)
+            {
+                return false;
+            }
+            try
+            {
+                Body* faceBody = face->GetBody();
+                if (faceBody == NULL)
+                {
+                    return false;
+                }
+                if (!BodyHasSulianValue(faceBody))
+                {
+                    return false;
+                }
+                if (body_ != NULL)
+                {
+                    const tag_t faceBodyTag = faceBody->Tag();
+                    const tag_t faceBodyPrototypeTag = PrototypeTagOfOccurrence(faceBodyTag);
+                    const tag_t bodyTag = body_->Tag();
+                    const tag_t bodyPrototypeTag = PrototypeTagOfOccurrence(bodyTag);
+                    return faceBodyTag == bodyTag ||
+                        faceBodyPrototypeTag == bodyTag ||
+                        faceBodyTag == bodyPrototypeTag ||
+                        (faceBodyPrototypeTag != NULL_TAG && faceBodyPrototypeTag == bodyPrototypeTag);
+                }
+                if (!allowedBodyTags_.empty() && !BodyTagInSetByOccurrenceOrPrototype(faceBody, allowedBodyTags_))
+                {
+                    return false;
+                }
+                if (BodyTagInSetByOccurrenceOrPrototype(faceBody, excludedBodyTags_))
+                {
+                    return false;
+                }
+                return true;
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
+    };
+
+    bool PromptSelectManualBaseAndXAxis(Body* body, ManualBaseSelection* selection)
+    {
+        UI* ui = NULL;
+        try
+        {
+            ui = UI::GetUI();
+        }
+        catch (...)
+        {
+            ui = NULL;
+        }
+
+        ManualBaseXDialog dialog(ui, body, ManualBaseXDialogModeFaceAndEdge);
+        return dialog.Show(selection);
+    }
+
+    bool PromptSelectManualBaseAndXAxis(
+        const std::vector<Body*>& bodies,
+        const std::set<tag_t>& excludedBodyTags,
+        ManualBaseSelection* selection)
+    {
+        UI* ui = NULL;
+        try
+        {
+            ui = UI::GetUI();
+        }
+        catch (...)
+        {
+            ui = NULL;
+        }
+        ManualBaseXDialog dialog(ui, bodies, excludedBodyTags, ManualBaseXDialogModeFaceAndEdge);
+        return dialog.Show(selection);
+    }
+
+    bool PromptSelectManualBaseFace(Body* body, ManualBaseSelection* selection)
+    {
+        UI* ui = NULL;
+        try
+        {
+            ui = UI::GetUI();
+        }
+        catch (...)
+        {
+            ui = NULL;
+        }
+
+        ManualBaseXDialog dialog(ui, body, ManualBaseXDialogModeFaceOnly);
+        return dialog.Show(selection);
+    }
+
+    bool PromptSelectManualBaseFace(
+        const std::vector<Body*>& bodies,
+        const std::set<tag_t>& excludedBodyTags,
+        ManualBaseSelection* selection)
+    {
+        if (selection == NULL)
+        {
+            return false;
+        }
+
+        UI* ui = NULL;
+        try
+        {
+            ui = UI::GetUI();
+        }
+        catch (...)
+        {
+            ui = NULL;
+        }
+        if (ui == NULL || ui->SelectionManager() == NULL)
+        {
+            return false;
+        }
+
+        std::set<tag_t> allowedBodyTags;
+        for (size_t i = 0; i < bodies.size(); ++i)
+        {
+            if (bodies[i] != NULL)
+            {
+                allowedBodyTags.insert(bodies[i]->Tag());
+            }
+        }
+
+        std::vector<Selection::MaskTriple> masks(1);
+        masks[0] = Selection::MaskTriple(UF_solid_type, UF_solid_body_subtype, UF_UI_SEL_FEATURE_ANY_FACE);
+        for (;;)
+        {
+            TaggedObject* selectedObject = NULL;
+            Point3d cursor(0.0, 0.0, 0.0);
+            Selection::Response response = Selection::ResponseCancel;
+            try
+            {
+                ui->SelectionManager()->ClearGlobalSelectionList();
+                AppendMarkerLineDebugLog("native manual face select begin");
+                response = ui->SelectionManager()->SelectTaggedObject(
+                    U8("\xE9\x80\x89\xE6\x8B\xA9\xE5\xB1\x95\xE5\xBC\x80\xE5\x9F\xBA\xE9\x9D\xA2"),
+                    U8("\xE6\x89\x8B\xE5\x8A\xA8\xE5\xAE\x9A\xE4\xB9\x89\xE5\x9F\xBA\xE9\x9D\xA2X\xE5\x90\x91"),
+                    Selection::SelectionScopeWorkPart,
+                    Selection::SelectionActionClearAndEnableSpecific,
+                    false,
+                    false,
+                    masks,
+                    &selectedObject,
+                    &cursor);
+                std::ostringstream log;
+                log << "native manual face select response=" << static_cast<int>(response)
+                    << " object=" << (selectedObject == NULL ? 0 : selectedObject->Tag());
+                AppendMarkerLineDebugLog(log.str());
+            }
+            catch (const NXException& ex)
+            {
+                AppendMarkerLineDebugLog(std::string("native manual face select nx exception: ") + NxExceptionSummary(ex));
+                return false;
+            }
+            catch (...)
+            {
+                AppendMarkerLineDebugLog("native manual face select unknown exception");
+                return false;
+            }
+
+            if (response != Selection::ResponseObjectSelected &&
+                response != Selection::ResponseObjectSelectedByName)
+            {
+                return false;
+            }
+
+            Face* face = dynamic_cast<Face*>(selectedObject);
+            Body* faceBody = NULL;
+            bool faceAllowed = false;
+            try
+            {
+                faceBody = face == NULL ? NULL : face->GetBody();
+                faceAllowed = face != NULL &&
+                    faceBody != NULL &&
+                    excludedBodyTags.find(faceBody->Tag()) == excludedBodyTags.end() &&
+                    BodyHasSulianValue(faceBody);
+            }
+            catch (const NXException& ex)
+            {
+                AppendMarkerLineDebugLog(std::string("native manual face selected validation nx exception: ") + NxExceptionSummary(ex));
+                faceAllowed = false;
+            }
+            catch (...)
+            {
+                AppendMarkerLineDebugLog("native manual face selected validation unknown exception");
+                faceAllowed = false;
+            }
+
+            if (!faceAllowed)
+            {
+                std::ostringstream log;
+                log << "native manual face selected rejected face=" << (face == NULL ? 0 : face->Tag())
+                    << " body=" << (faceBody == NULL ? 0 : faceBody->Tag());
+                AppendMarkerLineDebugLog(log.str());
+                continue;
+            }
+
+            selection->baseFace = face;
+            selection->body = faceBody;
+            selection->xAxisEdge = NULL;
+            return true;
+        }
+    }
+
+    bool PromptSelectManualXAxisEdge(Body* body, Face* baseFace, ManualBaseSelection* selection)
+    {
+        if (selection == NULL || baseFace == NULL)
+        {
+            return false;
+        }
+
+        UI* ui = NULL;
+        try
+        {
+            ui = UI::GetUI();
+        }
+        catch (...)
+        {
+            ui = NULL;
+        }
+        if (ui == NULL || ui->SelectionManager() == NULL)
+        {
+            return false;
+        }
+
+        class ManualBaseXAxisEdgeFilter
+        {
+        public:
+            explicit ManualBaseXAxisEdgeFilter(Face* baseFace) :
+                baseFace_(baseFace)
+            {
+            }
+
+            int Accept(TaggedObject* selectedObject)
+            {
+                try
+                {
+                    Edge* edge = dynamic_cast<Edge*>(selectedObject);
+                    return IsUsableBaseXAxisEdge(baseFace_, edge, NULL, NULL) ? 1 : 0;
+                }
+                catch (...)
+                {
+                    return 0;
+                }
+            }
+
+        private:
+            Face* baseFace_;
+        };
+
+        ManualBaseXAxisEdgeFilter edgeFilter(baseFace);
+        std::vector<Select::FilterMember> edgeFilters(1);
+        edgeFilters[0] = Select::FilterMemberLinearEdge;
+        for (;;)
+        {
+            TaggedObject* selectedObject = NULL;
+            Point3d cursor(0.0, 0.0, 0.0);
+            Selection::Response response = Selection::ResponseCancel;
+            try
+            {
+                ui->SelectionManager()->ClearGlobalSelectionList();
+                response = ui->SelectionManager()->SelectTaggedObjectWithFilterCallback(
+                    U8("\xE9\x80\x89\xE6\x8B\xA9\xE5\x9F\xBA\xE9\x9D\xA2\xE4\xB8\x8A\xE7\x9A\x84X\xE5\x90\x91\xE7\x9B\xB4\xE8\xBE\xB9"),
+                    U8("\xE6\x89\x8B\xE5\x8A\xA8\xE5\xAE\x9A\xE4\xB9\x89\xE5\x9F\xBA\xE9\x9D\xA2X\xE5\x90\x91"),
+                    Selection::SelectionScopeWorkPart,
+                    Selection::SelectionActionClearAndEnableSpecific,
+                    edgeFilters,
+                    make_callback(&edgeFilter, &ManualBaseXAxisEdgeFilter::Accept),
+                    &selectedObject,
+                    &cursor);
+            }
+            catch (const NXException& ex)
+            {
+                AppendMarkerLineDebugLog(std::string("native manual edge select nx exception: ") + NxExceptionSummary(ex));
+                return false;
+            }
+            catch (...)
+            {
+                AppendMarkerLineDebugLog("native manual edge select unknown exception");
+                return false;
+            }
+
+            if (response != Selection::ResponseObjectSelected &&
+                response != Selection::ResponseObjectSelectedByName)
+            {
+                return false;
+            }
+
+            Point3d startPoint;
+            Point3d endPoint;
+            Edge* edge = dynamic_cast<Edge*>(selectedObject);
+            if (!IsUsableBaseXAxisEdge(baseFace, edge, &startPoint, &endPoint))
+            {
+                ShowMessage(ui, "\xE6\x89\x8B\xE5\x8A\xA8\xE5\xAE\x9A\xE4\xB9\x89\xE5\x9F\xBA\xE9\x9D\xA2X\xE5\x90\x91", NXMessageBox::DialogTypeWarning, "\xE8\xAF\xB7\xE9\x80\x89\xE6\x8B\xA9\xE5\xBD\x93\xE5\x89\x8D\xE5\x9F\xBA\xE9\x9D\xA2\xE4\xB8\x8A\xE7\x9A\x84\xE7\x9B\xB4\xE7\xBA\xBF\xE8\xBE\xB9\xE3\x80\x82");
+                continue;
+            }
+
+            selection->body = body;
+            selection->baseFace = baseFace;
+            selection->xAxisEdge = edge;
+            selection->startPoint = startPoint;
+            selection->endPoint = endPoint;
+            return true;
+        }
     }
 
     std::vector<CylinderAxisRecord> CollectUniqueBendAxes(SheetmetalManager* manager, Body* body)
@@ -9356,6 +10914,18 @@ namespace
         }
     }
 
+    void ShowDisplayBody(Body* body, bool useAssemblyOccurrences)
+    {
+        std::vector<DisplayableObject*> objects = ResolveDisplayOccurrences(body, useAssemblyOccurrences);
+        for (size_t i = 0; i < objects.size(); ++i)
+        {
+            if (objects[i] != NULL)
+            {
+                UF_OBJ_set_blank_status(objects[i]->Tag(), UF_OBJ_NOT_BLANKED);
+            }
+        }
+    }
+
     void HighlightDisplayBody(Body* body, bool useAssemblyOccurrences)
     {
         std::vector<DisplayableObject*> objects = ResolveDisplayOccurrences(body, useAssemblyOccurrences);
@@ -9489,22 +11059,22 @@ namespace
         }
 
         std::ostringstream builder;
-        builder << "C++自动转钣金执行完成\n";
-        builder << "成功转钣金: " << convertCount << " 个实体\n";
-        builder << "成功展开: " << flatCount << " 个实体\n";
-        builder << "失败/跳过: " << failCount << " 个实体\n\n";
+        builder << u8"C++閼奉亜濮╂潪顒勬寴闁叉垶澧界悰灞界暚閹存€絥";
+        builder << u8"閹存劕濮涙潪顒勬寴闁? " << convertCount << u8" 娑擃亜鐤勬担鎻琻";
+        builder << u8"閹存劕濮涚仦鏇炵磻: " << flatCount << u8" 娑擃亜鐤勬担鎻琻";
+        builder << u8"婢惰精瑙?鐠哄疇绻? " << failCount << u8" 娑擃亜鐤勬担鎻琻\n";
         if (!results.empty())
         {
-            builder << "[明细]\n";
+            builder << u8"[閺勫海绮廬\n";
             for (size_t i = 0; i < results.size(); ++i)
             {
-                builder << "- 图层 " << results[i].layer << " / " << results[i].name
-                        << "  转钣金=" << (results[i].convertOk ? "成功" : "未执行")
-                        << "  调因子面=" << results[i].neutralFaceCount
-                        << "  展开=" << (results[i].flatOk ? "成功" : "失败");
+                builder << u8"- 閸ユ儳鐪?" << results[i].layer << " / " << results[i].name
+                        << "  convert=" << (results[i].convertOk ? "ok" : "not-run")
+                        << u8"  璋冨洜瀛愰潰=" << results[i].neutralFaceCount
+                        << u8"  灞曞紑=" << (results[i].flatOk ? u8"鎴愬姛" : u8"澶辫触");
                 if (!results[i].error.empty())
                 {
-                    builder << "  原因=" << results[i].error;
+                    builder << u8"  鍘熷洜=" << results[i].error;
                 }
                 builder << "\n";
             }
@@ -9522,7 +11092,7 @@ UI* PiLianZuanBanJinDialog::theUI = NULL;
         std::string dlxPath = FindRulesTableDlxPath();
         if (dlxPath.empty())
         {
-            ShowMessage(ui, "自动转钣金 C++", NXMessageBox::DialogTypeInformation, "未找到UG内置规则表。");
+            ShowMessage(ui, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeInformation, "\xE6\x9C\xAA\xE6\x89\xBE\xE5\x88\xB0UG\xE5\x86\x85\xE7\xBD\xAE\xE8\xA7\x84\xE5\x88\x99\xE8\xA1\xA8\xE3\x80\x82");
             return;
         }
 
@@ -9533,11 +11103,11 @@ UI* PiLianZuanBanJinDialog::theUI = NULL;
         }
         catch (const std::exception& ex)
         {
-            ShowMessage(ui, "自动转钣金 C++", NXMessageBox::DialogTypeError, ex.what());
+            ShowMessage(ui, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, ex.what());
         }
         catch (...)
         {
-            ShowMessage(ui, "自动转钣金 C++", NXMessageBox::DialogTypeError, "UG内置规则表打开失败。");
+            ShowMessage(ui, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, "\xE6\x89\x93\xE5\xBC\x80UG\xE5\x86\x85\xE7\xBD\xAE\xE8\xA7\x84\xE5\x88\x99\xE8\xA1\xA8\xE5\xA4\xB1\xE8\xB4\xA5\xE3\x80\x82");
         }
     }
 
@@ -9553,6 +11123,7 @@ PiLianZuanBanJinDialog::PiLianZuanBanJinDialog()
       advancedGroup(NULL),
       markerLineFaceUpToggle(NULL),
       autoSaveAfterRunToggle(NULL),
+      manualBaseXAxisButton(NULL),
       facePreferenceEnum(NULL),
       failureActionEnum(NULL),
       fixedFaceColorToggle(NULL),
@@ -9570,7 +11141,10 @@ PiLianZuanBanJinDialog::PiLianZuanBanJinDialog()
       largestBodyOnlyToggle(NULL),
       settingsButton(NULL),
       assemblySelectionActive(false),
-      selectedAssemblyParts()
+      selectedAssemblyParts(),
+      runAfterDialog_(false),
+      pendingOptions_(),
+      manualButtonProcessedBodyTags_()
 {
     PiLianZuanBanJinDialog::theSession = Session::GetSession();
     PiLianZuanBanJinDialog::theUI = UI::GetUI();
@@ -9608,7 +11182,7 @@ int PiLianZuanBanJinDialog::Show()
         std::vector<BatchPartCandidate> candidates = CollectBatchPartCandidates(assemblyPart);
         if (candidates.empty())
         {
-            ShowMessage(theUI, "自动转钣金 C++", NXMessageBox::DialogTypeInformation, "当前装配没有可选择的子部件。");
+            ShowMessage(theUI, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeInformation, "\xE5\xBD\x93\xE5\x89\x8D\xE8\xA3\x85\xE9\x85\x8D\u4E2D\u6CA1\u6709\u53EF\u9009\u62E9\u7684\u5B50\u90E8\u4EF6\u3002");
             return 0;
         }
 
@@ -9620,7 +11194,22 @@ int PiLianZuanBanJinDialog::Show()
         assemblySelectionActive = true;
     }
 
-    return theDialog->Launch();
+    runAfterDialog_ = false;
+    NXOpen::BlockStyler::BlockDialog::DialogResponse response = theDialog->Launch();
+    if (runAfterDialog_)
+    {
+        try
+        {
+            Run(pendingOptions_);
+        }
+        catch (const std::exception& ex)
+        {
+            ShowMessage(theUI, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, ex.what());
+            return 1;
+        }
+    }
+
+    return static_cast<int>(response);
 }
 
 void PiLianZuanBanJinDialog::initialize_cb()
@@ -9629,6 +11218,7 @@ void PiLianZuanBanJinDialog::initialize_cb()
     advancedGroup = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("advancedGroup"));
     markerLineFaceUpToggle = dynamic_cast<Toggle*>(theDialog->TopBlock()->FindBlock("markerLineFaceUpToggle"));
     autoSaveAfterRunToggle = dynamic_cast<Toggle*>(theDialog->TopBlock()->FindBlock("autoSaveAfterRunToggle"));
+    manualBaseXAxisButton = dynamic_cast<Button*>(theDialog->TopBlock()->FindBlock("manualBaseXAxisButton"));
     facePreferenceEnum = dynamic_cast<Enumeration*>(theDialog->TopBlock()->FindBlock("facePreferenceEnum"));
     failureActionEnum = dynamic_cast<Enumeration*>(theDialog->TopBlock()->FindBlock("failureActionEnum"));
     fixedFaceColorToggle = dynamic_cast<Toggle*>(theDialog->TopBlock()->FindBlock("fixedFaceColorToggle"));
@@ -9655,6 +11245,24 @@ int PiLianZuanBanJinDialog::update_cb(UIBlock* block)
     {
         ShowPiLianRulesTableBuiltin(theUI);
     }
+    else if (block == manualBaseXAxisButton)
+    {
+        try
+        {
+            AutoConvertOptions options = CollectOptions();
+            options.manualBaseXAxis = true;
+            options.manualOnly = true;
+            Run(options);
+        }
+        catch (const NXException& ex)
+        {
+            ShowMessage(theUI, "\xE6\x89\x8B\xE5\x8A\xA8\xE9\x80\x89\xE6\x8B\xA9\xE5\x9F\xBA\xE9\x9D\xA2\xE5\x92\x8CX\xE5\x90\x91", NXMessageBox::DialogTypeError, NxExceptionSummary(ex));
+        }
+        catch (const std::exception& ex)
+        {
+            AppendMarkerLineDebugLog(std::string("manual button std exception: ") + ex.what());
+        }
+    }
     else if (block == skipSmallBodyToggle || block == layerRangeToggle || block == fixedFaceColorToggle)
     {
         UpdateSensitivity();
@@ -9667,12 +11275,13 @@ int PiLianZuanBanJinDialog::ok_cb()
 {
     try
     {
-        Run(CollectOptions());
+        pendingOptions_ = CollectOptions();
+        runAfterDialog_ = true;
         return 0;
     }
     catch (const std::exception& ex)
     {
-        ShowMessage(theUI, "自动转钣金 C++", NXMessageBox::DialogTypeError, ex.what());
+        ShowMessage(theUI, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, ex.what());
         return 1;
     }
 }
@@ -9686,37 +11295,38 @@ void PiLianZuanBanJinDialog::InitializeValues()
 {
     if (theDialog != NULL && theDialog->TopBlock() != NULL)
     {
-        theDialog->TopBlock()->SetLabel(U8("自动转钣金"));
+        theDialog->TopBlock()->SetLabel(U8("\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91"));
     }
 
-    SetLabel(strategyGroup, "系数策略");
-    SetLabel(markerLineFaceUpToggle, "按标记面找基面");
-    SetLabel(autoSaveAfterRunToggle, "运行完成自动保存");
-    SetLabel(facePreferenceEnum, "固定面方向");
+    SetLabel(strategyGroup, "\xE7\xB3\xBB\xE6\x95\xB0\xE7\xAD\x96\xE7\x95\xA5");
+    SetLabel(markerLineFaceUpToggle, "\xE6\x8C\x89\xE6\xA0\x87\xE8\xAE\xB0\xE7\xBA\xBF\xE6\x89\xBE\xE5\x9F\xBA\xE9\x9D\xA2");
+    SetLabel(autoSaveAfterRunToggle, "\xE8\xBF\x90\xE8\xA1\x8C\xE5\xAE\x8C\xE6\x88\x90\xE8\x87\xAA\xE5\x8A\xA8\xE4\xBF\x9D\xE5\xAD\x98");
+    SetLabel(manualBaseXAxisButton, "\xE6\x89\x8B\xE5\x8A\xA8\xE9\x80\x89\xE6\x8B\xA9...");
+    SetLabel(facePreferenceEnum, "\xE5\x9B\xBA\xE5\xAE\x9A\xE9\x9D\xA2\xE6\x96\xB9\xE5\x90\x91");
     SetLabel(failureActionEnum, "\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91\xE5\xB1\x95\xE5\xBC\x80\xE5\xA4\xB1\xE8\xB4\xA5\xE5\xA4\x84\xE7\x90\x86\xE6\x96\xB9\xE5\xBC\x8F");
-    SetLabel(fixedFaceColorToggle, "展开基面颜色");
+    SetLabel(fixedFaceColorToggle, "\xE5\xB1\x95\xE5\xBC\x80\xE5\x9F\xBA\xE9\x9D\xA2\xE9\xA2\x9C\xE8\x89\xB2");
     SetLabel(fixedFaceColorPicker, "");
-    SetLabel(reliefDepthDouble, "避让槽深");
-    SetLabel(reliefWidthDouble, "避让槽宽");
-    SetLabel(innerRadiusDouble, "内R半径");
-    SetLabel(advancedGroup, "高级过滤");
-    SetLabel(skipSmallBodyToggle, "跳过过小实体");
-    SetLabel(minLengthDouble, "最小长度");
-    SetLabel(minWidthDouble, "最小宽度");
-    SetLabel(skipTallCylinderToggle, "跳过螺母，螺柱，螺钉");
-    SetLabel(layerRangeToggle, "按图层范围查找实体");
-    SetLabel(startLayerInteger, "初始图层");
-    SetLabel(endLayerInteger, "结束图层");
-    SetLabel(largestBodyOnlyToggle, "每层只处理最大实体");
-    SetLabel(settingsButton, "规则设置...");
+    SetLabel(reliefDepthDouble, "\xE9\x81\xBF\xE8\xAE\xA9\xE6\xA7\xBD\xE6\xB7\xB1");
+    SetLabel(reliefWidthDouble, "\xE9\x81\xBF\xE8\xAE\xA9\xE6\xA7\xBD\xE5\xAE\xBD");
+    SetLabel(innerRadiusDouble, "\xE5\x86\x85R\xE5\x8D\x8A\xE5\xBE\x84");
+    SetLabel(advancedGroup, "\xE9\xAB\x98\xE7\xBA\xA7\xE8\xBF\x87\xE6\xBB\xA4");
+    SetLabel(skipSmallBodyToggle, "\xE8\xB7\xB3\xE8\xBF\x87\xE8\xBF\x87\xE5\xB0\x8F\xE5\xAE\x9E\xE4\xBD\x93");
+    SetLabel(minLengthDouble, "\xE6\x9C\x80\xE5\xB0\x8F\xE9\x95\xBF\xE5\xBA\xA6");
+    SetLabel(minWidthDouble, "\xE6\x9C\x80\xE5\xB0\x8F\xE5\xAE\xBD\xE5\xBA\xA6");
+    SetLabel(skipTallCylinderToggle, "\xE8\xB7\xB3\xE8\xBF\x87\xE8\x9E\xBA\xE6\xAF\x8D\xE3\x80\x81\xE8\x9E\xBA\xE6\x9F\xB1\xE3\x80\x81\xE8\x9E\xBA\xE9\x92\x89");
+    SetLabel(layerRangeToggle, "\xE6\x8C\x89\xE5\x9B\xBE\xE5\xB1\x82\xE8\x8C\x83\xE5\x9B\xB4\xE6\x89\xBE\xE5\xAE\x9E\xE4\xBD\x93");
+    SetLabel(startLayerInteger, "\xE8\xB5\xB7\xE5\xA7\x8B\xE5\x9B\xBE\xE5\xB1\x82");
+    SetLabel(endLayerInteger, "\xE7\xBB\x93\xE6\x9D\x9F\xE5\x9B\xBE\xE5\xB1\x82");
+    SetLabel(largestBodyOnlyToggle, "\xE6\xAF\x8F\xE5\xB1\x82\xE5\x8F\xAA\xE5\xA4\x84\xE7\x90\x86\xE6\x9C\x80\xE5\xA4\xA7\u5B9E\u4F53");
+    SetLabel(settingsButton, "\xE8\xA7\x84\xE5\x88\x99\xE8\xAE\xBE\xE7\xBD\xAE...");
 
     if (facePreferenceEnum != NULL)
     {
         std::vector<NXString> members;
-        members.push_back(U8("下折多"));
-        members.push_back(U8("上折多"));
+        members.push_back(U8("\xE4\xB8\x8B\xE6\x8A\x98\xE5\xA4\x9A"));
+        members.push_back(U8("\xE4\xB8\x8A\xE6\x8A\x98\xE5\xA4\x9A"));
         facePreferenceEnum->SetEnumMembers(members);
-        facePreferenceEnum->SetValueAsString(U8("下折多"));
+        facePreferenceEnum->SetValueAsString(U8("\xE4\xB8\x8B\xE6\x8A\x98\xE5\xA4\x9A"));
     }
 
     if (failureActionEnum != NULL)
@@ -9776,9 +11386,11 @@ void PiLianZuanBanJinDialog::InitializeValues()
         std::string preference = ExtractJsonString(json, "BaseFaceDirectionPreference", "PreferDownBends");
         if (facePreferenceEnum != NULL)
         {
-            facePreferenceEnum->SetValueAsString(ContainsTextNoCase(preference, "Up") ? U8("上折多") : U8("下折多"));
+            facePreferenceEnum->SetValueAsString(ContainsTextNoCase(preference, "Up") ? U8("\xE4\xB8\x8A\xE6\x8A\x98\xE5\xA4\x9A") : U8("\xE4\xB8\x8B\xE6\x8A\x98\xE5\xA4\x9A"));
         }
     }
+
+    UpdateSensitivity();
 }
 void PiLianZuanBanJinDialog::UpdateSensitivity()
 {
@@ -9825,8 +11437,10 @@ AutoConvertOptions PiLianZuanBanJinDialog::CollectOptions() const
     AutoConvertOptions options;
     options.markerLineFaceUp = GetLogicalValue(markerLineFaceUpToggle, false);
     options.autoSaveAfterRun = GetLogicalValue(autoSaveAfterRunToggle, true);
-    options.preferUpBends = facePreferenceEnum != NULL &&
-        ToUtf8(facePreferenceEnum->ValueAsString()).find("上") != std::string::npos;
+    std::string facePreferenceText = facePreferenceEnum != NULL ? ToUtf8(facePreferenceEnum->ValueAsString()) : std::string();
+    options.preferUpBends = ContainsTextNoCase(facePreferenceText, "Up") ||
+        facePreferenceText.find(u8"\u4E0A") != std::string::npos;
+    options.manualBaseXAxis = false;
     options.applyFixedFaceColor = GetLogicalValue(fixedFaceColorToggle, true);
     options.fixedFaceColor = GetColorValue(fixedFaceColorPicker, 6);
     options.reliefDepth = std::max(0.0, GetDoubleValue(reliefDepthDouble, 0.2));
@@ -9886,12 +11500,20 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
     Part* workPart = session->Parts()->Work();
     if (workPart == NULL)
     {
-        throw std::runtime_error("请先打开一个工作部件。");
+        throw std::runtime_error("Please open a work part first.");
     }
 
     RuleConfig ruleConfig = LoadRuleConfig();
     std::vector<Part*> partsToProcess;
     std::set<tag_t> seenParts;
+
+    {
+        std::ostringstream log;
+        log << "run begin manualBaseXAxis=" << (options.manualBaseXAxis ? 1 : 0)
+            << " manualOnly=" << (options.manualOnly ? 1 : 0)
+            << " rememberedManualBodies=" << manualButtonProcessedBodyTags_.size();
+        AppendMarkerLineDebugLog(log.str());
+    }
 
     bool assemblyMode = false;
     if (assemblySelectionActive)
@@ -9939,82 +11561,162 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
         SheetmetalManager* manager = processPart->Features()->SheetmetalManager();
         const bool partAttributesOk = PartHasBatchAttributes(processPart);
         const std::string processPartName = PartName(processPart);
-        std::vector<Body*> candidates;
-        std::map<int, Body*> largestByLayer;
-        std::map<int, double> largestScoreByLayer;
-        for (BodyCollection::iterator it = processPart->Bodies()->begin(); it != processPart->Bodies()->end(); ++it)
+        auto collectCandidates = [&](bool countAttributeSkipped) -> std::vector<Body*>
         {
-            Body* body = *it;
-            if (body == NULL || !IsAlive(body->Tag()))
+            std::vector<Body*> collected;
+            std::map<int, Body*> largestByLayer;
+            std::map<int, double> largestScoreByLayer;
+            for (BodyCollection::iterator it = processPart->Bodies()->begin(); it != processPart->Bodies()->end(); ++it)
             {
-                continue;
-            }
-
-            try
-            {
-                if (!body->IsSolidBody())
+                Body* body = *it;
+                if (body == NULL || !IsAlive(body->Tag()))
                 {
+                    if (manualButtonProcessedBodyTags_.size() > 0)
+                    {
+                        std::ostringstream log;
+                        log << "candidate skip null_or_dead body=" << (body == NULL ? 0 : body->Tag());
+                        AppendMarkerLineDebugLog(log.str());
+                    }
                     continue;
                 }
-            }
-            catch (...)
-            {
-                continue;
-            }
 
-            if (!partAttributesOk && !BodyHasBatchAttributes(body))
-            {
-                ++attributeSkippedCount;
-                continue;
-            }
-
-            const int layer = body->Layer();
-            if (options.filterLayerRange && (layer < options.startLayer || layer > options.endLayer))
-            {
-                continue;
-            }
-
-            BodyBox box = MeasureBodyBox(body);
-            if (options.skipSmallBody && (box.length < options.minLength || box.width < options.minWidth))
-            {
-                continue;
-            }
-
-            if (options.skipFasteners)
-            {
-                FastenerFilterInfo fastenerInfo;
-                const bool skipFastener = ShouldSkipFastenerBody(body, &fastenerInfo);
-                if (skipFastener)
+                try
                 {
+                    if (!body->IsSolidBody())
+                    {
+                        if (manualButtonProcessedBodyTags_.size() > 0)
+                        {
+                            std::ostringstream log;
+                            log << "candidate skip not_solid body=" << body->Tag();
+                            AppendMarkerLineDebugLog(log.str());
+                        }
+                        continue;
+                    }
+                }
+                catch (...)
+                {
+                    if (manualButtonProcessedBodyTags_.size() > 0)
+                    {
+                        std::ostringstream log;
+                        log << "candidate skip solid_exception body=" << body->Tag();
+                        AppendMarkerLineDebugLog(log.str());
+                    }
                     continue;
                 }
+
+                if (!partAttributesOk && !BodyHasBatchAttributes(body) &&
+                    !(manualButtonProcessedBodyTags_.size() > 0 && BodyHasSulianValue(body)))
+                {
+                    if (countAttributeSkipped)
+                    {
+                        ++attributeSkippedCount;
+                    }
+                    if (manualButtonProcessedBodyTags_.size() > 0)
+                    {
+                        std::ostringstream log;
+                        log << "candidate skip attributes body=" << body->Tag()
+                            << " layer=" << body->Layer()
+                            << " partAttributesOk=" << (partAttributesOk ? 1 : 0);
+                        AppendMarkerLineDebugLog(log.str());
+                    }
+                    continue;
+                }
+
+                const int layer = body->Layer();
+                if (options.filterLayerRange && (layer < options.startLayer || layer > options.endLayer))
+                {
+                    if (manualButtonProcessedBodyTags_.size() > 0)
+                    {
+                        std::ostringstream log;
+                        log << "candidate skip layer body=" << body->Tag()
+                            << " layer=" << layer
+                            << " start=" << options.startLayer
+                            << " end=" << options.endLayer;
+                        AppendMarkerLineDebugLog(log.str());
+                    }
+                    continue;
+                }
+
+                BodyBox box = MeasureBodyBox(body);
+                if (options.skipSmallBody && (box.length < options.minLength || box.width < options.minWidth))
+                {
+                    if (manualButtonProcessedBodyTags_.size() > 0)
+                    {
+                        std::ostringstream log;
+                        log << "candidate skip small body=" << body->Tag()
+                            << " length=" << FormatDouble(box.length, 3)
+                            << " width=" << FormatDouble(box.width, 3)
+                            << " minLength=" << FormatDouble(options.minLength, 3)
+                            << " minWidth=" << FormatDouble(options.minWidth, 3);
+                        AppendMarkerLineDebugLog(log.str());
+                    }
+                    continue;
+                }
+
+                if (options.skipFasteners)
+                {
+                    FastenerFilterInfo fastenerInfo;
+                    const bool skipFastener = ShouldSkipFastenerBody(body, &fastenerInfo);
+                    if (skipFastener)
+                    {
+                        if (manualButtonProcessedBodyTags_.size() > 0)
+                        {
+                            std::ostringstream log;
+                            log << "candidate skip fastener body=" << body->Tag();
+                            AppendMarkerLineDebugLog(log.str());
+                        }
+                        continue;
+                    }
+                }
+                if (manualButtonProcessedBodyTags_.size() > 0)
+                {
+                    std::ostringstream log;
+                    log << "candidate accept body=" << body->Tag()
+                        << " layer=" << layer
+                        << " score=" << FormatDouble(box.score, 3);
+                    AppendMarkerLineDebugLog(log.str());
+                }
+                if (options.largestBodyOnlyPerLayer)
+                {
+                    if (largestByLayer.find(layer) == largestByLayer.end() || box.score > largestScoreByLayer[layer])
+                    {
+                        largestByLayer[layer] = body;
+                        largestScoreByLayer[layer] = box.score;
+                    }
+                }
+                else
+                {
+                    collected.push_back(body);
+                }
             }
+
             if (options.largestBodyOnlyPerLayer)
             {
-                if (largestByLayer.find(layer) == largestByLayer.end() || box.score > largestScoreByLayer[layer])
+                for (std::map<int, Body*>::iterator it = largestByLayer.begin(); it != largestByLayer.end(); ++it)
                 {
-                    largestByLayer[layer] = body;
-                    largestScoreByLayer[layer] = box.score;
+                    collected.push_back(it->second);
                 }
             }
-            else
-            {
-                candidates.push_back(body);
-            }
-        }
 
-        if (options.largestBodyOnlyPerLayer)
+            return collected;
+        };
+
+        std::vector<Body*> candidates = collectCandidates(true);
+
         {
-            for (std::map<int, Body*>::iterator it = largestByLayer.begin(); it != largestByLayer.end(); ++it)
-            {
-                candidates.push_back(it->second);
-            }
+            std::ostringstream log;
+            log << "run candidates part=" << processPartName
+                << " count=" << candidates.size()
+                << " manualBaseXAxis=" << (options.manualBaseXAxis ? 1 : 0)
+                << " manualOnly=" << (options.manualOnly ? 1 : 0);
+            AppendMarkerLineDebugLog(log.str());
         }
 
         const size_t resultStart = results.size();
-        for (size_t i = 0; i < candidates.size(); ++i)
+        std::set<tag_t> manuallyProcessedBodyTags = manualButtonProcessedBodyTags_;
+        std::set<tag_t> manualTemporarilyHiddenBodyTags;
+        auto processBody = [&](Body* body, const ManualBaseSelection* manualBaseSelection) -> tag_t
         {
-            Body* body = candidates[i];
             BodyResult result;
             Body* displayResultBody = body;
             result.layer = body == NULL ? 0 : body->Layer();
@@ -10023,10 +11725,27 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
 
             try
             {
-                FaceInfo fixedFaceInfo = SelectConvertBaseFace(body, options);
+                ManualBaseSelection manualSelection;
+                bool hasManualSelection = false;
+                bool hasManualXAxisSelection = false;
+
+                FaceInfo fixedFaceInfo;
+                if (manualBaseSelection != NULL && manualBaseSelection->baseFace != NULL)
+                {
+                    manualSelection = *manualBaseSelection;
+                    hasManualSelection = true;
+                    fixedFaceInfo.face = manualSelection.baseFace;
+                    fixedFaceInfo.type = UF_MODL_PLANAR_FACE;
+                    fixedFaceInfo.areaScore = FaceAreaScore(manualSelection.baseFace);
+                }
+                else
+                {
+                    fixedFaceInfo = SelectConvertBaseFace(body, options);
+                }
+
                 if (fixedFaceInfo.face == NULL)
                 {
-                    result.error = "未找到可用固定面";
+                    result.error = "no fixed face";
                     throw std::runtime_error(result.error);
                 }
 
@@ -10063,25 +11782,64 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 result.neutralFaceCount = ApplyNeutralFactorByRules(processPart, manager, activeBody, ruleConfig, bodyMaterial);
 
                 Feature* existingFlatPattern = FindExistingFlatPatternFeature(processPart, manager, activeBody);
-                FaceInfo postConvertFaceInfo = SelectSheetmetalBaseFaceByBendDirection(manager, activeBody, options);
-                Face* flatFace = postConvertFaceInfo.face == NULL ? fixedFace : postConvertFaceInfo.face;
+                FaceInfo postConvertFaceInfo;
+                if (!hasManualSelection)
+                {
+                    postConvertFaceInfo = SelectSheetmetalBaseFaceByBendDirection(manager, activeBody, options);
+                }
+                Face* flatFace = hasManualSelection ? fixedFace : (postConvertFaceInfo.face == NULL ? fixedFace : postConvertFaceInfo.face);
                 if (options.applyFixedFaceColor)
                 {
                     ApplyFaceColor(session, flatFace, options.fixedFaceColor);
                 }
                 Point3d startPoint;
                 Point3d endPoint;
-                Edge* xAxisEdge = FindXAxisEdgeForSingleBend(manager, activeBody, flatFace, &startPoint, &endPoint);
-                if (xAxisEdge == NULL)
+                Edge* xAxisEdge = NULL;
+                if (hasManualSelection)
+                {
+                    AppendMarkerLineDebugLog("manual x edge select begin after convert");
+                    ManualBaseSelection xAxisSelection;
+                    xAxisSelection.body = activeBody;
+                    xAxisSelection.baseFace = flatFace;
+                    if (!PromptSelectManualXAxisEdge(activeBody, flatFace, &xAxisSelection) ||
+                        xAxisSelection.xAxisEdge == NULL)
+                    {
+                        result.error = "manual x edge selection canceled or failed";
+                        throw std::runtime_error(result.error);
+                    }
+                    xAxisEdge = xAxisSelection.xAxisEdge;
+                    startPoint = xAxisSelection.startPoint;
+                    endPoint = xAxisSelection.endPoint;
+                    hasManualXAxisSelection = true;
+                    AppendMarkerLineDebugLog("manual x edge select accepted after convert");
+                    if (!IsUsableBaseXAxisEdge(flatFace, xAxisEdge, &startPoint, &endPoint))
+                    {
+                        result.error = "manual x edge is not on converted base face";
+                        throw std::runtime_error(result.error);
+                    }
+                }
+                if (!hasManualSelection && !hasManualXAxisSelection && xAxisEdge == NULL)
+                {
+                    xAxisEdge = FindXAxisEdgeForSingleBend(manager, activeBody, flatFace, &startPoint, &endPoint);
+                }
+                if (!hasManualSelection && !hasManualXAxisSelection && xAxisEdge == NULL)
                 {
                     xAxisEdge = FindLongestStraightEdge(flatFace, &startPoint, &endPoint);
+                }
+                if (!hasManualSelection && !hasManualXAxisSelection && !IsUsableBaseXAxisEdge(flatFace, xAxisEdge, &startPoint, &endPoint))
+                {
+                    xAxisEdge = FindLongestStraightEdge(flatFace, &startPoint, &endPoint);
+                    if (!IsUsableBaseXAxisEdge(flatFace, xAxisEdge, &startPoint, &endPoint))
+                    {
+                        xAxisEdge = NULL;
+                    }
                 }
                 const std::set<tag_t> beforeFlatBodyTags = CollectPartSolidBodyTags(processPart);
                 Feature* flatFeature = CommitFlatPattern(processPart, existingFlatPattern, flatFace, xAxisEdge, endPoint);
                 result.flatOk = flatFeature != NULL;
                 if (!result.flatOk)
                 {
-                    result.error = existingFlatPattern == NULL ? "?????????" : "???????????";
+                    result.error = existingFlatPattern == NULL ? "create flat pattern failed" : "update flat pattern failed";
                 }
                 else
                 {
@@ -10093,11 +11851,11 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                         result.convertOk = false;
                         result.flatOk = false;
                         std::ostringstream error;
-                        error << "SB Flat Solid thickness validation failed";
+                        error << u8"鐏炴洖绱戠€圭偘缍嬮崢姘閺嶏繝鐛欐径杈Е";
                         if (flatCheck.expectedThickness > 0.0 || flatCheck.measuredThickness > 0.0)
                         {
-                            error << ", expected=" << FormatDouble(flatCheck.expectedThickness, 6)
-                                  << ", measured=" << FormatDouble(flatCheck.measuredThickness, 6);
+                            error << u8"閿涘本婀￠張?" << FormatDouble(flatCheck.expectedThickness, 6)
+                                  << u8"閿涘苯鐤勫ù?" << FormatDouble(flatCheck.measuredThickness, 6);
                         }
                         result.error = error.str();
                     }
@@ -10113,7 +11871,7 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
             }
             catch (const NXException& ex)
             {
-                result.error = "NX执行失败: " + NormalizeUtf8Message(ex.Message());
+                result.error = NxExceptionSummary(ex);
             }
             catch (const std::exception& ex)
             {
@@ -10133,7 +11891,7 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 AppendMarkerLineDebugLog(log.str());
             }
 
-            if (options.failureAction == 1 && result.error.empty())
+            if (options.failureAction == 1 && result.error.empty() && !(options.manualBaseXAxis && options.manualOnly))
             {
                 HideDisplayBody(displayResultBody, assemblyMode);
             }
@@ -10147,6 +11905,69 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
             }
 
             results.push_back(result);
+            return displayResultBody == NULL ? NULL_TAG : displayResultBody->Tag();
+        };
+
+        if (options.manualBaseXAxis)
+        {
+            for (;;)
+            {
+                AppendMarkerLineDebugLog("manual loop select face begin");
+                ManualBaseSelection manualSelection;
+                if (!PromptSelectManualBaseFace(candidates, manuallyProcessedBodyTags, &manualSelection))
+                {
+                    AppendMarkerLineDebugLog("manual loop select face finished by cancel or no selection");
+                    break;
+                }
+                Body* manualBody = manualSelection.body;
+                if (manualBody == NULL)
+                {
+                    continue;
+                }
+                manuallyProcessedBodyTags.insert(manualBody->Tag());
+                manualButtonProcessedBodyTags_.insert(manualBody->Tag());
+                tag_t processedBodyTag = processBody(manualBody, &manualSelection);
+                if (processedBodyTag != NULL_TAG)
+                {
+                    manuallyProcessedBodyTags.insert(processedBodyTag);
+                    manualButtonProcessedBodyTags_.insert(processedBodyTag);
+                }
+                AppendMarkerLineDebugLog("manual loop body processed continue next face");
+            }
+
+            for (std::set<tag_t>::const_iterator it = manualTemporarilyHiddenBodyTags.begin(); it != manualTemporarilyHiddenBodyTags.end(); ++it)
+            {
+                Body* hiddenBody = dynamic_cast<Body*>(ObjectFromTag(*it));
+                if (hiddenBody != NULL)
+                {
+                    ShowDisplayBody(hiddenBody, assemblyMode);
+                }
+            }
+        }
+
+        if (options.manualOnly)
+        {
+            continue;
+        }
+
+        std::vector<Body*> automaticCandidates = options.manualBaseXAxis ? collectCandidates(false) : candidates;
+        {
+            std::ostringstream log;
+            log << "auto phase begin candidates=" << automaticCandidates.size()
+                << " rememberedManualBodies=" << manuallyProcessedBodyTags.size();
+            AppendMarkerLineDebugLog(log.str());
+        }
+        for (size_t i = 0; i < automaticCandidates.size(); ++i)
+        {
+            Body* body = automaticCandidates[i];
+            if (body != NULL && manuallyProcessedBodyTags.find(body->Tag()) != manuallyProcessedBodyTags.end())
+            {
+                std::ostringstream log;
+                log << "auto phase skip manual body=" << body->Tag();
+                AppendMarkerLineDebugLog(log.str());
+                continue;
+            }
+            processBody(body, NULL);
         }
 
         if (options.autoSaveAfterRun && results.size() > resultStart)
@@ -10181,17 +12002,17 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
     }
     if (assemblyMode)
     {
-        message += "\n扫描部件: " + std::to_string(partsToProcess.size()) + " 个";
+        message += "\nScanned parts: " + std::to_string(partsToProcess.size());
     }
     if (attributeSkippedCount > 0)
     {
-        message += "\n属性不完整跳过: " + std::to_string(attributeSkippedCount) + " 个实体";
+        message += u8"\n鐠哄疇绻冪仦鐐粹偓褌绗夌€瑰本鏆ｇ€圭偘缍? " + std::to_string(attributeSkippedCount);
     }
 
 
     if (hasFailedResult)
     {
-        ShowMessage(theUI, "自动转钣金 C++", NXMessageBox::DialogTypeError, message);
+        ShowMessage(theUI, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, message);
     }
 }
 
@@ -10214,7 +12035,7 @@ extern "C" DllExport void ufusr(char* param, int* retcod, int param_len)
     }
     catch (const std::exception& ex)
     {
-        ShowMessage(UI::GetUI(), "自动转钣金 C++", NXMessageBox::DialogTypeError, ex.what());
+        ShowMessage(UI::GetUI(), "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, ex.what());
     }
 
     if (dialog != NULL)
@@ -10228,7 +12049,3 @@ extern "C" DllExport int ufusr_ask_unload()
 {
     return UF_UNLOAD_IMMEDIATELY;
 }
-
-
-
-

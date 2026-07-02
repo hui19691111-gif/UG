@@ -21,6 +21,7 @@
 #include <NXOpen/BlockStyler_IntegerBlock.hxx>
 #include <NXOpen/BlockStyler_ObjectColorPicker.hxx>
 #include <NXOpen/BlockStyler_PropertyList.hxx>
+#include <NXOpen/BlockStyler_SelectObject.hxx>
 #include <NXOpen/BlockStyler_Toggle.hxx>
 #include <NXOpen/BlockStyler_Tree.hxx>
 #include <NXOpen/BlockStyler_Node.hxx>
@@ -79,6 +80,7 @@
 #include <NXOpen/SelectEdge.hxx>
 #include <NXOpen/SelectFace.hxx>
 #include <NXOpen/SelectNXObjectList.hxx>
+#include <NXOpen/Selection.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
 #include <NXOpen/Session.hxx>
@@ -94,6 +96,7 @@
 #include <NXOpen/Update.hxx>
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -102,6 +105,8 @@ struct AutoConvertOptions
     bool markerLineFaceUp = false;
     bool autoSaveAfterRun = true;
     bool preferUpBends = false;
+    bool manualBaseXAxis = false;
+    bool manualOnly = false;
     bool applyFixedFaceColor = true;
     int fixedFaceColor = 6;
     double reliefDepth = 0.2;
@@ -137,6 +142,7 @@ private:
     NXOpen::BlockStyler::Group* advancedGroup;
     NXOpen::BlockStyler::Toggle* markerLineFaceUpToggle;
     NXOpen::BlockStyler::Toggle* autoSaveAfterRunToggle;
+    NXOpen::BlockStyler::Button* manualBaseXAxisButton;
     NXOpen::BlockStyler::Enumeration* facePreferenceEnum;
     NXOpen::BlockStyler::Enumeration* failureActionEnum;
     NXOpen::BlockStyler::Toggle* fixedFaceColorToggle;
@@ -155,6 +161,9 @@ private:
     NXOpen::BlockStyler::Button* settingsButton;
     bool assemblySelectionActive;
     std::vector<NXOpen::Part*> selectedAssemblyParts;
+    bool runAfterDialog_;
+    AutoConvertOptions pendingOptions_;
+    std::set<tag_t> manualButtonProcessedBodyTags_;
 
     void initialize_cb();
     int update_cb(NXOpen::BlockStyler::UIBlock* block);
