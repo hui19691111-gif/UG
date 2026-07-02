@@ -279,6 +279,7 @@ bool AskArcCenter(tag_t edgeTag, double center[3]);
 bool IsArcEdge(tag_t edgeTag);
 bool IsLineEdge(tag_t edgeTag);
 bool IsCurveLikeEdge(tag_t edgeTag);
+double AskEdgeLength(tag_t edgeTag);
 bool DeleteFacesWithHealBuilder(const std::vector<tag_t>& faceTags);
 bool BuildBoundingBoxCoordinateFromGapGroup(
     const GapFaceGroup& group,
@@ -571,6 +572,7 @@ void FilterGapEdgesConnectedToOtherChains(
         int slot;
         tag_t edge;
         int chainId;
+        double length;
     };
 
     std::vector<GapEdgeRef> edgeRefs;
@@ -588,6 +590,7 @@ void FilterGapEdgesConnectedToOtherChains(
             ref.slot = 0;
             ref.edge = gapEdgePairs[pairIndex].firstEdge;
             ref.chainId = gapEdgePairs[pairIndex].chainId;
+            ref.length = AskEdgeLength(ref.edge);
             edgeRefs.push_back(ref);
         }
 
@@ -598,6 +601,7 @@ void FilterGapEdgesConnectedToOtherChains(
             ref.slot = 1;
             ref.edge = gapEdgePairs[pairIndex].secondEdge;
             ref.chainId = gapEdgePairs[pairIndex].chainId;
+            ref.length = AskEdgeLength(ref.edge);
             edgeRefs.push_back(ref);
         }
     }
@@ -627,13 +631,31 @@ void FilterGapEdgesConnectedToOtherChains(
                 continue;
             }
 
-            slotsToClear.insert(std::make_pair(edgeRefs[firstIndex].pairIndex, edgeRefs[firstIndex].slot));
-            slotsToClear.insert(std::make_pair(edgeRefs[secondIndex].pairIndex, edgeRefs[secondIndex].slot));
-            DebugLog("  gap edge cancelled by cross-chain connection: edge1=" +
+            const GapEdgeRef* clearRef = &edgeRefs[firstIndex];
+            const GapEdgeRef* keepRef = &edgeRefs[secondIndex];
+            if (edgeRefs[secondIndex].length > edgeRefs[firstIndex].length + 1.0e-6 ||
+                (std::fabs(edgeRefs[secondIndex].length - edgeRefs[firstIndex].length) <= 1.0e-6 &&
+                    edgeRefs[secondIndex].edge > edgeRefs[firstIndex].edge))
+            {
+                clearRef = &edgeRefs[secondIndex];
+                keepRef = &edgeRefs[firstIndex];
+            }
+
+            slotsToClear.insert(std::make_pair(clearRef->pairIndex, clearRef->slot));
+            DebugLog("  gap edge cancelled by cross-chain connection: clearEdge=" +
+                FormatTag(clearRef->edge) +
+                ", clearChain=" + FormatTag(static_cast<tag_t>(clearRef->chainId)) +
+                ", clearLength=" + FormatDouble(clearRef->length) +
+                ", keepEdge=" + FormatTag(keepRef->edge) +
+                ", keepChain=" + FormatTag(static_cast<tag_t>(keepRef->chainId)) +
+                ", keepLength=" + FormatDouble(keepRef->length) +
+                ", edge1=" +
                 FormatTag(edgeRefs[firstIndex].edge) +
                 ", chain1=" + FormatTag(static_cast<tag_t>(edgeRefs[firstIndex].chainId)) +
+                ", length1=" + FormatDouble(edgeRefs[firstIndex].length) +
                 ", edge2=" + FormatTag(edgeRefs[secondIndex].edge) +
-                ", chain2=" + FormatTag(static_cast<tag_t>(edgeRefs[secondIndex].chainId)));
+                ", chain2=" + FormatTag(static_cast<tag_t>(edgeRefs[secondIndex].chainId)) +
+                ", length2=" + FormatDouble(edgeRefs[secondIndex].length));
         }
     }
 
