@@ -130,6 +130,7 @@ namespace
     bool WriteAllText(const std::string& path, const std::string& text);
     void AppendMarkerLineDebugLog(const std::string& text);
     std::string FormatDouble(double value, int precision);
+    std::string NxExceptionSummary(const NXException& ex);
     bool IsOuterCylinderFaceLike08(Face* face);
     bool AskFacePointFromEdges(Face* face, double facePoint[3]);
     bool AskNxOpenCreatedFaceNormal(Face* face, const double facePoint[3], double unitNormal[3]);
@@ -2841,7 +2842,30 @@ namespace
     {
         if (ui != NULL)
         {
-            ui->NXMessageBox()->Show(U8(title), type, U8(message));
+            std::string displayMessage = message;
+            if (displayMessage.find("Use askUserMessage") != std::string::npos ||
+                displayMessage.find("askSyslogMessage") != std::string::npos)
+            {
+                AppendMarkerLineDebugLog(std::string("suppressed nx internal message: ") + displayMessage);
+                displayMessage = "NX operation failed. See PiLianZuanBanJin log for details.";
+            }
+
+            try
+            {
+                ui->NXMessageBox()->Show(U8(title), type, U8(displayMessage));
+            }
+            catch (const NXException& ex)
+            {
+                AppendMarkerLineDebugLog(std::string("ShowMessage nx exception: ") + NxExceptionSummary(ex));
+            }
+            catch (const std::exception& ex)
+            {
+                AppendMarkerLineDebugLog(std::string("ShowMessage std exception: ") + ex.what());
+            }
+            catch (...)
+            {
+                AppendMarkerLineDebugLog("ShowMessage unknown exception");
+            }
         }
     }
 
@@ -11101,6 +11125,10 @@ UI* PiLianZuanBanJinDialog::theUI = NULL;
             PiLianRulesTableDialog rulesDialog(ui, dlxPath);
             rulesDialog.Show();
         }
+        catch (const NXException& ex)
+        {
+            ShowMessage(ui, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, NxExceptionSummary(ex));
+        }
         catch (const std::exception& ex)
         {
             ShowMessage(ui, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, ex.what());
@@ -11202,6 +11230,11 @@ int PiLianZuanBanJinDialog::Show()
         {
             Run(pendingOptions_);
         }
+        catch (const NXException& ex)
+        {
+            ShowMessage(theUI, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, NxExceptionSummary(ex));
+            return 1;
+        }
         catch (const std::exception& ex)
         {
             ShowMessage(theUI, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, ex.what());
@@ -11278,6 +11311,11 @@ int PiLianZuanBanJinDialog::ok_cb()
         pendingOptions_ = CollectOptions();
         runAfterDialog_ = true;
         return 0;
+    }
+    catch (const NXException& ex)
+    {
+        ShowMessage(theUI, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, NxExceptionSummary(ex));
+        return 1;
     }
     catch (const std::exception& ex)
     {
@@ -11604,8 +11642,7 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                     continue;
                 }
 
-                if (!partAttributesOk && !BodyHasBatchAttributes(body) &&
-                    !(manualButtonProcessedBodyTags_.size() > 0 && BodyHasSulianValue(body)))
+                if (!partAttributesOk && !BodyHasBatchAttributes(body))
                 {
                     if (countAttributeSkipped)
                     {
@@ -11990,11 +12027,16 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
     {
     }
 
+    if (options.manualBaseXAxis && options.manualOnly)
+    {
+        return;
+    }
+
     std::string message = BuildResultMessage(results);
-    bool hasFailedResult = attributeSkippedCount > 0;
+    bool hasFailedResult = false;
     for (size_t i = 0; i < results.size(); ++i)
     {
-        if (!results[i].error.empty())
+        if (!results[i].error.empty() || !results[i].convertOk || !results[i].flatOk)
         {
             hasFailedResult = true;
             break;
@@ -12006,7 +12048,7 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
     }
     if (attributeSkippedCount > 0)
     {
-        message += u8"\n鐠哄疇绻冪仦鐐粹偓褌绗夌€瑰本鏆ｇ€圭偘缍? " + std::to_string(attributeSkippedCount);
+        message += u8"\n因属性过滤跳过: " + std::to_string(attributeSkippedCount);
     }
 
 
@@ -12032,6 +12074,10 @@ extern "C" DllExport void ufusr(char* param, int* retcod, int param_len)
     {
         dialog = new PiLianZuanBanJinDialog();
         dialog->Show();
+    }
+    catch (const NXException& ex)
+    {
+        ShowMessage(UI::GetUI(), "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, NxExceptionSummary(ex));
     }
     catch (const std::exception& ex)
     {
