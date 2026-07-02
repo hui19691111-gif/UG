@@ -55,6 +55,7 @@
 #include <NXOpen/Features_FeatureCollection.hxx>
 #include <NXOpen/Features_BooleanBuilder.hxx>
 #include <NXOpen/Features_BooleanFeature.hxx>
+#include <NXOpen/Features_EdgeBlendBuilder.hxx>
 #include <NXOpen/Features_RemoveParametersBuilder.hxx>
 #include <NXOpen/Features_ToolingBox.hxx>
 #include <NXOpen/Features_ToolingBoxBuilder.hxx>
@@ -73,6 +74,7 @@
 #include <NXOpen/Update.hxx>
 #include <NXOpen/WCS.hxx>
 #include <NXOpen/FaceDumbRule.hxx>
+#include <NXOpen/EdgeDumbRule.hxx>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/BodyDumbRule.hxx>
 #include <NXOpen/CartesianCoordinateSystem.hxx>
@@ -273,6 +275,19 @@ struct PendingSubtractCleanup
     tag_t groupIndex;
 };
 
+struct RemovedGapBlend
+{
+    tag_t blendFace;
+    tag_t gapFace;
+    tag_t otherFace;
+    std::vector<tag_t> otherFaces;
+    tag_t thicknessEdge;
+    double radius;
+    double edgeLength;
+    double position[3];
+    bool deleted;
+};
+
 bool AskEdgeEndpointPair(tag_t edgeTag, EdgeEndpointPair& endpoints);
 bool ContainsTag(const std::vector<tag_t>& tags, tag_t tag);
 bool AskArcCenter(tag_t edgeTag, double center[3]);
@@ -290,8 +305,13 @@ bool TryBuildReplaceGapPlan(const GapFaceGroup& group, ReplaceGapPlan& plan);
 bool ExecuteReplaceGapPlan(const ReplaceGapPlan& plan, const GapFaceGroup& group);
 bool GapGroupTouchesTangentCylinderFace(const GapFaceGroup& group);
 void DeleteSmallRadiusFacesIfRequested(tag_t bodyTag, double thickness, bool enabled, double maxRadius);
+std::vector<RemovedGapBlend> DeleteGapBlendFacesBeforeFeatureCleanup(
+    const std::vector<PendingSubtractCleanup>& pendingSubtractCleanups,
+    double thickness);
+void RestoreDeletedGapBlends(const std::vector<RemovedGapBlend>& blends, tag_t bodyTag);
 std::vector<std::vector<tag_t>> GroupConnectedFaces(const std::vector<tag_t>& faceTags);
 bool AskCylinderFaceData(tag_t faceTag, double axisPoint[3], double axisDirection[3], double& radius);
+tag_t ResolveCurrentFaceTag(tag_t faceTag);
 void ResetDebugLogForRun();
 
 std::map<tag_t, tag_t> replacedFaceTagMap;
@@ -5196,10 +5216,21 @@ bool DeleteGapGroupAfterMiddlePlaneFailed(
     double thickness,
     bool deleteREnabled,
     double maxRadius,
-    std::vector<PendingSubtractCleanup>& pendingSubtractCleanups)
+    std::vector<PendingSubtractCleanup>& pendingSubtractCleanups,
+    std::vector<RemovedGapBlend>& removedGapBlends)
 {
     tag_t subtractFeatureTag = NULL_TAG;
     NXOpen::Session::UndoMarkId undoMark = static_cast<NXOpen::Session::UndoMarkId>(0);
+    PendingSubtractCleanup blendScanCleanup = {};
+    blendScanCleanup.group = group;
+    blendScanCleanup.groupIndex = groupIndex;
+    std::vector<PendingSubtractCleanup> blendScanCleanups(1, blendScanCleanup);
+    std::vector<RemovedGapBlend> groupRemovedGapBlends =
+        DeleteGapBlendFacesBeforeFeatureCleanup(blendScanCleanups, thickness);
+    DebugLog("  gap blend delete before bounding: group=" +
+        FormatTag(groupIndex) +
+        ", records=" + FormatTag(static_cast<tag_t>(groupRemovedGapBlends.size())));
+
     const bool bounded = DeleteGapGroupWithBoundingTool(
         bodyTag,
         group,
@@ -5214,6 +5245,10 @@ bool DeleteGapGroupAfterMiddlePlaneFailed(
         cleanup.undoMark = undoMark;
         cleanup.groupIndex = groupIndex;
         pendingSubtractCleanups.push_back(cleanup);
+        for (std::size_t blendIndex = 0; blendIndex < groupRemovedGapBlends.size(); ++blendIndex)
+        {
+            removedGapBlends.push_back(groupRemovedGapBlends[blendIndex]);
+        }
         DebugLog("  gap bounding pending cleanup add: subtractFeature=" +
             FormatTag(subtractFeatureTag) +
             ", undoMark=" + FormatTag(static_cast<tag_t>(undoMark)) +
@@ -5222,6 +5257,7 @@ bool DeleteGapGroupAfterMiddlePlaneFailed(
         return true;
     }
 
+    RestoreDeletedGapBlends(groupRemovedGapBlends, bodyTag);
     return TryReplaceGapGroupAfterBoundingFailed(
         bodyTag,
         group,
@@ -6566,6 +6602,482 @@ void DeleteSmallRadiusFacesIfRequested(tag_t bodyTag, double thickness, bool ena
         ", faceTags=[" + FormatTagList(facesToDelete) + "]");
 }
 
+tag_t FindOtherFaceAcrossBlend(tag_t blendFace, tag_t gapFace)
+{
+    const std::vector<tag_t> blendEdges = AskFaceEdges(blendFace);
+    for (std::size_t edgeIndex = 0; edgeIndex < blendEdges.size(); ++edgeIndex)
+    {
+        const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(blendEdges[edgeIndex]);
+        for (std::size_t faceIndex = 0; faceIndex < adjacentFaces.size(); ++faceIndex)
+        {
+            const tag_t faceTag = adjacentFaces[faceIndex];
+            if (faceTag != NULL_TAG && faceTag != blendFace && faceTag != gapFace)
+            {
+                return faceTag;
+            }
+        }
+    }
+
+    return NULL_TAG;
+}
+
+std::vector<tag_t> FindOtherFacesAcrossBlend(tag_t blendFace, tag_t gapFace)
+{
+    std::vector<tag_t> otherFaces;
+    const std::vector<tag_t> blendEdges = AskFaceEdges(blendFace);
+    for (std::size_t edgeIndex = 0; edgeIndex < blendEdges.size(); ++edgeIndex)
+    {
+        const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(blendEdges[edgeIndex]);
+        for (std::size_t faceIndex = 0; faceIndex < adjacentFaces.size(); ++faceIndex)
+        {
+            const tag_t faceTag = adjacentFaces[faceIndex];
+            if (faceTag != NULL_TAG && faceTag != blendFace && faceTag != gapFace)
+            {
+                AddUniqueTag(otherFaces, faceTag);
+            }
+        }
+    }
+
+    return otherFaces;
+}
+
+void AddGapBlendRemovalCandidate(
+    std::vector<RemovedGapBlend>& blends,
+    tag_t blendFace,
+    tag_t gapFace,
+    tag_t otherFace,
+    tag_t thicknessEdge,
+    double radius)
+{
+    if (blendFace == NULL_TAG || gapFace == NULL_TAG || otherFace == NULL_TAG || radius <= 1.0e-6)
+    {
+        return;
+    }
+
+    for (std::size_t index = 0; index < blends.size(); ++index)
+    {
+        if (blends[index].blendFace == blendFace &&
+            blends[index].thicknessEdge == thicknessEdge &&
+            blends[index].gapFace == gapFace)
+        {
+            AddUniqueTag(blends[index].otherFaces, otherFace);
+            DebugLog("  gap blend removal candidate merged: blendFace=" +
+                FormatTag(blendFace) +
+                ", gapFace=" + FormatTag(gapFace) +
+                ", otherFace=" + FormatTag(otherFace) +
+                ", otherFaces=[" + FormatTagList(blends[index].otherFaces) + "]");
+            return;
+        }
+    }
+
+    RemovedGapBlend blend = {};
+    blend.blendFace = blendFace;
+    blend.gapFace = gapFace;
+    blend.otherFace = otherFace;
+    blend.otherFaces = FindOtherFacesAcrossBlend(blendFace, gapFace);
+    AddUniqueTag(blend.otherFaces, otherFace);
+    blend.thicknessEdge = thicknessEdge;
+    blend.radius = radius;
+    blend.edgeLength = AskEdgeLength(thicknessEdge);
+    blend.deleted = false;
+    EdgeEndpointPair endpoints = {};
+    if (AskEdgeEndpointPair(thicknessEdge, endpoints))
+    {
+        blend.position[0] = (endpoints.first[0] + endpoints.second[0]) * 0.5;
+        blend.position[1] = (endpoints.first[1] + endpoints.second[1]) * 0.5;
+        blend.position[2] = (endpoints.first[2] + endpoints.second[2]) * 0.5;
+    }
+
+    blends.push_back(blend);
+    DebugLog("  gap blend removal candidate: blendFace=" +
+        FormatTag(blendFace) +
+        ", gapFace=" + FormatTag(gapFace) +
+        ", otherFace=" + FormatTag(otherFace) +
+        ", otherFaces=[" + FormatTagList(blend.otherFaces) + "]" +
+        ", thicknessEdge=" + FormatTag(thicknessEdge) +
+        ", radius=" + FormatDouble(radius) +
+        ", position=" + FormatVector3(blend.position));
+}
+
+bool TryAddGapBlendCylinderCandidate(
+    std::vector<RemovedGapBlend>& blends,
+    tag_t cylinderFace,
+    tag_t gapFace,
+    tag_t thicknessEdge,
+    const std::string& reason)
+{
+    if (cylinderFace == NULL_TAG || gapFace == NULL_TAG)
+    {
+        return false;
+    }
+
+    double axisPoint[3] = {0.0, 0.0, 0.0};
+    double axisDirection[3] = {0.0, 0.0, 0.0};
+    double radius = 0.0;
+    if (!AskCylinderFaceData(cylinderFace, axisPoint, axisDirection, radius))
+    {
+        return false;
+    }
+
+    const bool tangent = IsFaceTangentOrEdgeConnectedToCylinder(cylinderFace, gapFace);
+    DebugLog("  gap blend cylinder scan: gapFace=" +
+        FormatTag(gapFace) +
+        ", cylinderFace=" + FormatTag(cylinderFace) +
+        ", thicknessEdge=" + FormatTag(thicknessEdge) +
+        ", radius=" + FormatDouble(radius) +
+        ", tangent=" + FormatTag(static_cast<tag_t>(tangent ? 1 : 0)) +
+        ", reason=" + reason);
+    if (!tangent)
+    {
+        return false;
+    }
+
+    const tag_t otherFace = FindOtherFaceAcrossBlend(cylinderFace, gapFace);
+    AddGapBlendRemovalCandidate(
+        blends,
+        cylinderFace,
+        gapFace,
+        otherFace,
+        thicknessEdge,
+        radius);
+    return true;
+}
+
+std::vector<RemovedGapBlend> FindGapBlendRemovalCandidates(
+    const std::vector<PendingSubtractCleanup>& pendingSubtractCleanups,
+    double thickness)
+{
+    std::vector<RemovedGapBlend> blends;
+    for (std::size_t cleanupIndex = 0; cleanupIndex < pendingSubtractCleanups.size(); ++cleanupIndex)
+    {
+        const GapFaceGroup& group = pendingSubtractCleanups[cleanupIndex].group;
+        for (std::size_t faceIndex = 0; faceIndex < group.faces.size(); ++faceIndex)
+        {
+            const tag_t gapFace = group.faces[faceIndex];
+            const std::vector<tag_t> gapEdges = AskFaceEdges(gapFace);
+            DebugLog("Gap blend removal scan gapFace=" +
+                FormatTag(gapFace) +
+                ", edgeCount=" + FormatTag(static_cast<tag_t>(gapEdges.size())));
+            for (std::size_t edgeIndex = 0; edgeIndex < gapEdges.size(); ++edgeIndex)
+            {
+                const tag_t edgeTag = gapEdges[edgeIndex];
+                const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(edgeTag);
+                for (std::size_t adjacentIndex = 0; adjacentIndex < adjacentFaces.size(); ++adjacentIndex)
+                {
+                    const tag_t candidateFace = adjacentFaces[adjacentIndex];
+                    if (candidateFace == NULL_TAG || candidateFace == gapFace)
+                    {
+                        continue;
+                    }
+
+                    const bool directThicknessEdge = IsStraightThicknessEdge(edgeTag, thickness);
+                    if (TryAddGapBlendCylinderCandidate(
+                            blends,
+                            candidateFace,
+                            gapFace,
+                            edgeTag,
+                            directThicknessEdge ? "direct-thickness-edge" : "direct-gap-edge"))
+                    {
+                        continue;
+                    }
+
+                    const std::vector<tag_t> neighborEdges = AskFaceEdges(candidateFace);
+                    for (std::size_t neighborEdgeIndex = 0; neighborEdgeIndex < neighborEdges.size(); ++neighborEdgeIndex)
+                    {
+                        const tag_t neighborEdge = neighborEdges[neighborEdgeIndex];
+                        if (!IsStraightThicknessEdge(neighborEdge, thickness))
+                        {
+                            continue;
+                        }
+
+                        const std::vector<tag_t> neighborAdjacentFaces = AskEdgeAdjacentFaces(neighborEdge);
+                        for (std::size_t neighborFaceIndex = 0; neighborFaceIndex < neighborAdjacentFaces.size(); ++neighborFaceIndex)
+                        {
+                            const tag_t neighborCandidateFace = neighborAdjacentFaces[neighborFaceIndex];
+                            if (neighborCandidateFace == NULL_TAG ||
+                                neighborCandidateFace == candidateFace ||
+                                neighborCandidateFace == gapFace)
+                            {
+                                continue;
+                            }
+
+                            TryAddGapBlendCylinderCandidate(
+                                blends,
+                                neighborCandidateFace,
+                                gapFace,
+                                neighborEdge,
+                                "neighbor-thickness-edge");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    DebugLog("Gap blend removal candidate result: count=" +
+        FormatTag(static_cast<tag_t>(blends.size())));
+    return blends;
+}
+
+std::vector<RemovedGapBlend> DeleteGapBlendFacesBeforeFeatureCleanup(
+    const std::vector<PendingSubtractCleanup>& pendingSubtractCleanups,
+    double thickness)
+{
+    std::vector<RemovedGapBlend> blends =
+        FindGapBlendRemovalCandidates(pendingSubtractCleanups, thickness);
+    if (blends.empty())
+    {
+        return blends;
+    }
+
+    std::vector<tag_t> blendFaces;
+    for (std::size_t index = 0; index < blends.size(); ++index)
+    {
+        AddUniqueTag(blendFaces, blends[index].blendFace);
+    }
+
+    DebugLog("Delete gap blend faces before subtract feature cleanup: faces=" +
+        FormatTag(static_cast<tag_t>(blendFaces.size())) +
+        ", faceTags=[" + FormatTagList(blendFaces) + "]");
+    const bool batchDeleted = DeleteFacesWithHealBuilder(blendFaces);
+    if (batchDeleted)
+    {
+        for (std::size_t index = 0; index < blends.size(); ++index)
+        {
+            blends[index].deleted = true;
+        }
+        DebugLog("Delete gap blend faces batch result: committed=1");
+        return blends;
+    }
+
+    DebugLog("Delete gap blend faces batch result: committed=0, retry per face");
+    std::vector<tag_t> deletedBlendFaces;
+    for (std::size_t blendIndex = 0; blendIndex < blends.size(); ++blendIndex)
+    {
+        bool deleted = ContainsTag(deletedBlendFaces, blends[blendIndex].blendFace);
+        if (!deleted)
+        {
+            std::vector<tag_t> singleFace(1, blends[blendIndex].blendFace);
+            deleted = DeleteFacesWithHealBuilder(singleFace);
+            if (deleted)
+            {
+                AddUniqueTag(deletedBlendFaces, blends[blendIndex].blendFace);
+            }
+        }
+        blends[blendIndex].deleted = deleted;
+        DebugLog("  delete gap blend face result: blendFace=" +
+            FormatTag(blends[blendIndex].blendFace) +
+            ", gapFace=" + FormatTag(blends[blendIndex].gapFace) +
+            ", otherFace=" + FormatTag(blends[blendIndex].otherFace) +
+            ", committed=" + FormatTag(static_cast<tag_t>(deleted ? 1 : 0)));
+    }
+
+    return blends;
+}
+
+bool CreateEdgeBlendOnEdge(tag_t edgeTag, double radius)
+{
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    NXOpen::Part* workPart = session != NULL && session->Parts() != NULL ? session->Parts()->Work() : NULL;
+    NXOpen::Edge* edge = dynamic_cast<NXOpen::Edge*>(NXOpen::NXObjectManager::Get(edgeTag));
+    if (workPart == NULL || edge == NULL || radius <= 1.0e-6)
+    {
+        return false;
+    }
+
+    NXOpen::Features::EdgeBlendBuilder* builder =
+        workPart->Features()->CreateEdgeBlendBuilder(NULL);
+    if (builder == NULL)
+    {
+        return false;
+    }
+
+    bool committed = false;
+    try
+    {
+        builder->SetTolerance(0.0001);
+        builder->SetRemoveSelfIntersection(true);
+        builder->SetRollOntoEdge(true);
+
+        NXOpen::ScCollector* collector = workPart->ScCollectors()->CreateCollector();
+        NXOpen::SelectionIntentRuleOptions* ruleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+        ruleOptions->SetSelectedFromInactive(false);
+        std::vector<NXOpen::Edge*> edges(1, edge);
+        NXOpen::EdgeDumbRule* edgeRule = workPart->ScRuleFactory()->CreateRuleEdgeDumb(edges, ruleOptions);
+        std::vector<NXOpen::SelectionIntentRule*> rules(1, edgeRule);
+        collector->ReplaceRules(rules, false);
+        delete ruleOptions;
+
+        builder->AddChainset(collector, FormatDouble(radius).c_str());
+        NXOpen::Features::Feature* feature = builder->CommitFeature();
+        committed = feature != NULL;
+        DebugLog("  restore gap blend edge result: edge=" +
+            FormatTag(edgeTag) +
+            ", radius=" + FormatDouble(radius) +
+            ", feature=" + FormatTag(feature == NULL ? NULL_TAG : feature->Tag()) +
+            ", committed=" + FormatTag(static_cast<tag_t>(committed ? 1 : 0)));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        DebugLog("  restore gap blend failed: NXException=" +
+            std::string(ex.Message()) +
+            ", edge=" + FormatTag(edgeTag) +
+            ", radius=" + FormatDouble(radius));
+    }
+    catch (...)
+    {
+        DebugLog("  restore gap blend failed: unknown exception, edge=" +
+            FormatTag(edgeTag) +
+            ", radius=" + FormatDouble(radius));
+    }
+
+    builder->Destroy();
+    return committed;
+}
+
+tag_t FindRestoreGapBlendEdgeOnEndFace(tag_t endFace, const RemovedGapBlend& blend)
+{
+    if (endFace == NULL_TAG)
+    {
+        return NULL_TAG;
+    }
+
+    const std::vector<tag_t> edges = AskFaceEdges(endFace);
+    tag_t bestEdge = NULL_TAG;
+    double bestScore = 1.0e99;
+    double bestDistance = 0.0;
+    double bestLength = 0.0;
+    const double lengthTolerance = std::max(kThicknessEdgeTolerance, blend.edgeLength * 0.05);
+    for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex)
+    {
+        const tag_t edgeTag = edges[edgeIndex];
+        if (edgeTag == NULL_TAG)
+        {
+            continue;
+        }
+
+        EdgeEndpointPair endpoints = {};
+        if (!AskEdgeEndpointPair(edgeTag, endpoints))
+        {
+            continue;
+        }
+
+        const double length = AskEdgeLength(edgeTag);
+        const double lengthDelta = blend.edgeLength > 1.0e-6
+            ? std::fabs(length - blend.edgeLength)
+            : 0.0;
+        if (blend.edgeLength > 1.0e-6 && lengthDelta > lengthTolerance)
+        {
+            continue;
+        }
+
+        double midpoint[3] =
+        {
+            (endpoints.first[0] + endpoints.second[0]) * 0.5,
+            (endpoints.first[1] + endpoints.second[1]) * 0.5,
+            (endpoints.first[2] + endpoints.second[2]) * 0.5
+        };
+        const double distance = Distance3(midpoint, blend.position);
+        const double score = distance + lengthDelta * 0.1;
+        if (score < bestScore)
+        {
+            bestScore = score;
+            bestDistance = distance;
+            bestLength = length;
+            bestEdge = edgeTag;
+        }
+    }
+
+    const double maxDistance = std::max(10.0, blend.radius * 3.0);
+    DebugLog("  restore gap blend edge on end face: blendFace=" +
+        FormatTag(blend.blendFace) +
+        ", endFace=" + FormatTag(endFace) +
+        ", edgeCount=" + FormatTag(static_cast<tag_t>(edges.size())) +
+        ", bestEdge=" + FormatTag(bestEdge) +
+        ", distance=" + FormatDouble(bestDistance) +
+        ", oldLength=" + FormatDouble(blend.edgeLength) +
+        ", bestLength=" + FormatDouble(bestLength) +
+        ", lengthTolerance=" + FormatDouble(lengthTolerance) +
+        ", maxDistance=" + FormatDouble(maxDistance));
+    if (bestEdge == NULL_TAG || bestDistance > maxDistance)
+    {
+        return NULL_TAG;
+    }
+
+    return bestEdge;
+}
+
+void RestoreDeletedGapBlends(const std::vector<RemovedGapBlend>& blends, tag_t bodyTag)
+{
+    int restoredCount = 0;
+    int deletedCount = 0;
+    std::vector<tag_t> restoredEdges;
+    DebugLog("Restore deleted gap blends start: records=" +
+        FormatTag(static_cast<tag_t>(blends.size())));
+    for (std::size_t index = 0; index < blends.size(); ++index)
+    {
+        if (!blends[index].deleted)
+        {
+            continue;
+        }
+        ++deletedCount;
+
+        const tag_t currentGapFace = ResolveCurrentFaceTag(blends[index].gapFace);
+        std::vector<tag_t> restoreFaceCandidates = blends[index].otherFaces;
+        AddUniqueTag(restoreFaceCandidates, blends[index].otherFace);
+        std::vector<tag_t> currentRestoreFaces;
+        for (std::size_t faceIndex = 0; faceIndex < restoreFaceCandidates.size(); ++faceIndex)
+        {
+            AddUniqueTag(currentRestoreFaces, ResolveCurrentFaceTag(restoreFaceCandidates[faceIndex]));
+        }
+        const tag_t currentOtherFace = currentRestoreFaces.empty() ? NULL_TAG : currentRestoreFaces.front();
+        tag_t restoreEdge = NULL_TAG;
+        if (!FacesShareEdgeTag(currentGapFace, currentOtherFace, restoreEdge))
+        {
+            DebugLog("  restore gap blend shared edge not found, try position: blendFace=" +
+                FormatTag(blends[index].blendFace) +
+                ", gapFace=" + FormatTag(blends[index].gapFace) +
+                ", currentGapFace=" + FormatTag(currentGapFace) +
+                ", otherFace=" + FormatTag(blends[index].otherFace) +
+                ", currentOtherFaces=[" + FormatTagList(currentRestoreFaces) + "]" +
+                ", radius=" + FormatDouble(blends[index].radius) +
+                ", oldPosition=" + FormatVector3(blends[index].position));
+            for (std::size_t faceIndex = 0; faceIndex < currentRestoreFaces.size(); ++faceIndex)
+            {
+                restoreEdge = FindRestoreGapBlendEdgeOnEndFace(currentRestoreFaces[faceIndex], blends[index]);
+                if (restoreEdge != NULL_TAG)
+                {
+                    break;
+                }
+            }
+            if (restoreEdge == NULL_TAG)
+            {
+                DebugLog("  restore gap blend skipped: no restore edge, blendFace=" +
+                    FormatTag(blends[index].blendFace));
+                continue;
+            }
+        }
+
+        if (ContainsTag(restoredEdges, restoreEdge))
+        {
+            DebugLog("  restore gap blend skipped: edge already restored, blendFace=" +
+                FormatTag(blends[index].blendFace) +
+                ", edge=" + FormatTag(restoreEdge));
+            continue;
+        }
+
+        if (CreateEdgeBlendOnEdge(restoreEdge, blends[index].radius))
+        {
+            AddUniqueTag(restoredEdges, restoreEdge);
+            ++restoredCount;
+        }
+    }
+
+    DebugLog("Restore deleted gap blends result: deletedRecords=" +
+        FormatTag(static_cast<tag_t>(deletedCount)) +
+        ", restored=" + FormatTag(static_cast<tag_t>(restoredCount)));
+}
+
 void DeleteGapGroupsWithMiddlePlanes(
     const std::vector<GapFaceGroup>& groups,
     tag_t bodyTag,
@@ -6576,6 +7088,7 @@ void DeleteGapGroupsWithMiddlePlanes(
     int createdCount = 0;
     int deletedCount = 0;
     std::vector<PendingSubtractCleanup> pendingSubtractCleanups;
+    std::vector<RemovedGapBlend> removedGapBlends;
     std::vector<tag_t> failedGroupIndexes;
     DebugLog("Delete gap groups with middle planes start: groups=" +
         FormatTag(static_cast<tag_t>(groups.size())));
@@ -6595,7 +7108,8 @@ void DeleteGapGroupsWithMiddlePlanes(
                 thickness,
                 deleteREnabled,
                 maxRadius,
-                pendingSubtractCleanups);
+                pendingSubtractCleanups,
+                removedGapBlends);
             if (bounded)
             {
                 ++deletedCount;
@@ -6632,7 +7146,8 @@ void DeleteGapGroupsWithMiddlePlanes(
                 thickness,
                 deleteREnabled,
                 maxRadius,
-                pendingSubtractCleanups);
+                pendingSubtractCleanups,
+                removedGapBlends);
             if (bounded)
             {
                 ++deletedCount;
@@ -6677,6 +7192,7 @@ void DeleteGapGroupsWithMiddlePlanes(
         NXOpen::Session* session = NXOpen::Session::GetSession();
         if (deletedSubtractFaces)
         {
+            RestoreDeletedGapBlends(removedGapBlends, bodyTag);
             for (std::size_t cleanupIndex = 0; cleanupIndex < pendingSubtractCleanups.size(); ++cleanupIndex)
             {
                 if (session != NULL && pendingSubtractCleanups[cleanupIndex].undoMark != 0)
