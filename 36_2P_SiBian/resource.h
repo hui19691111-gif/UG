@@ -1,0 +1,4 @@
+#pragma once
+
+#define IDR_UDF_TEMPLATE_PRT 101
+#define IDR_UDF_TEMPLATE_90L_PRT 102

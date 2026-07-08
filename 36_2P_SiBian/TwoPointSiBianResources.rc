@@ -1,0 +1,4 @@
+#include "resource.h"
+
+IDR_UDF_TEMPLATE_PRT RCDATA "2p_SiBian_1.prt"
+IDR_UDF_TEMPLATE_90L_PRT RCDATA "2P_SiBian_90R.prt"
