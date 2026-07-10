@@ -364,6 +364,15 @@ bool IntersectCoplanarLines(
 
 void AppendDebugLog(const std::string& message)
 {
+    wchar_t debugFlag[8] = {};
+    if (GetEnvironmentVariableW(
+            L"ZH_TWOPOINT_BILANCAO_DEBUG",
+            debugFlag,
+            static_cast<DWORD>(sizeof(debugFlag) / sizeof(debugFlag[0]))) == 0)
+    {
+        return;
+    }
+
     try
     {
         const std::filesystem::path logPath =
@@ -499,13 +508,21 @@ bool TwoPointBiLanCaoDialog::enable_ok_cb()
             return true;
         }
 
-        DialogValues values;
-        const bool canApply = ReadDialogValues(values);
-        if (canApply && !hasLiveSlot_ && !liveSlotRefreshInProgress_)
+        NXOpen::TaggedObject* startObject = nullptr;
+        NXOpen::TaggedObject* endObject = nullptr;
+        NXOpen::Point3d startPoint;
+        NXOpen::Point3d endPoint;
+        if (!ReadSelectedPoint(startPointBlock_, startObject, startPoint) ||
+            !ReadSelectedPoint(endPointBlock_, endObject, endPoint))
         {
-            RefreshLiveSlot();
+            return false;
         }
-        return canApply;
+
+        const double slotClearance = ReadDouble(slotClearanceBlock_, 0.5);
+        const double bendRadius = ReadDouble(bendRadiusBlock_, 1.0);
+        return PointDistance(startPoint, endPoint) > kPointTolerance &&
+               slotClearance > 0.0 &&
+               bendRadius >= 0.0;
     }
     catch (const NXOpen::NXException& ex)
     {
@@ -526,11 +543,13 @@ int TwoPointBiLanCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
     try
     {
-        const bool isEndBlock = block == endPointBlock_;
-
         if (block == startPointBlock_)
         {
             CacheStartPointOwner();
+            if (hasLiveSlot_)
+            {
+                RevertLiveSlot();
+            }
         }
         else if (block == slotClearanceBlock_)
         {
@@ -538,7 +557,6 @@ int TwoPointBiLanCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
             if (hasLiveSlot_)
             {
                 RevertLiveSlot();
-                RefreshLiveSlot();
             }
         }
         else if (block == bendRadiusBlock_)
@@ -547,7 +565,6 @@ int TwoPointBiLanCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
             if (hasLiveSlot_)
             {
                 RevertLiveSlot();
-                RefreshLiveSlot();
             }
         }
         else if (block == chamferEdgeToggleBlock_)
@@ -560,7 +577,6 @@ int TwoPointBiLanCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
             if (hasLiveSlot_)
             {
                 RevertLiveSlot();
-                RefreshLiveSlot();
             }
         }
         else if (block == gapOnlyToggleBlock_)
@@ -573,7 +589,6 @@ int TwoPointBiLanCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
             if (hasLiveSlot_)
             {
                 RevertLiveSlot();
-                RefreshLiveSlot();
             }
         }
         else if (block == normalDirectionBlock_)
@@ -581,7 +596,6 @@ int TwoPointBiLanCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
             if (hasLiveSlot_)
             {
                 RevertLiveSlot();
-                RefreshLiveSlot();
             }
         }
         else if (block == wrapCornerModeBlock_)
@@ -589,29 +603,15 @@ int TwoPointBiLanCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
             if (hasLiveSlot_)
             {
                 RevertLiveSlot();
-                RefreshLiveSlot();
             }
         }
 
-        if (isEndBlock && !hasLiveSlot_ && !slotCreatedOnSelection_)
+        if ((block == startPointBlock_ || block == endPointBlock_) &&
+            !hasLiveSlot_ &&
+            !slotCreatedOnSelection_ &&
+            !liveSlotRefreshInProgress_)
         {
-            DialogValues values;
-            const bool valuesRead = ReadDialogValues(values);
-
-            if (valuesRead)
-            {
-                const bool profileCreated = CreateReliefSlotProfile(values, true);
-                slotCreatedOnSelection_ = profileCreated;
-                if (profileCreated)
-                {
-                    hasLiveSlot_ = true;
-                    liveSlotSignature_ = BuildLiveSlotSignature(values);
-                    liveSlotFeatureTags_ = values.profileFeatureTags;
-                    liveSlotCurveTags_ = values.profileCurveTags;
-                    liveSlotToolBodyTags_ = values.profileToolBodyTags;
-                    liveSlotToolBodyTag_ = values.profileToolBodyTag;
-                }
-            }
+            RefreshLiveSlot();
         }
     }
     catch (const NXOpen::NXException& ex)
@@ -650,6 +650,7 @@ int TwoPointBiLanCaoDialog::cancel_cb()
 
 void TwoPointBiLanCaoDialog::focus_notify_cb(NXOpen::BlockStyler::UIBlock* block, bool focus)
 {
+    (void)focus;
     if (hasLiveSlot_)
     {
         return;
@@ -674,7 +675,6 @@ void TwoPointBiLanCaoDialog::keyboard_focus_notify_cb(NXOpen::BlockStyler::UIBlo
         if (hasLiveSlot_)
         {
             RevertLiveSlot();
-            RefreshLiveSlot();
         }
     }
     else if (block == bendRadiusBlock_)
@@ -683,7 +683,6 @@ void TwoPointBiLanCaoDialog::keyboard_focus_notify_cb(NXOpen::BlockStyler::UIBlo
         if (hasLiveSlot_)
         {
             RevertLiveSlot();
-            RefreshLiveSlot();
         }
     }
     else if (block == chamferEdgeToggleBlock_)
@@ -696,7 +695,6 @@ void TwoPointBiLanCaoDialog::keyboard_focus_notify_cb(NXOpen::BlockStyler::UIBlo
         if (hasLiveSlot_)
         {
             RevertLiveSlot();
-            RefreshLiveSlot();
         }
     }
     else if (block == gapOnlyToggleBlock_)
@@ -709,7 +707,6 @@ void TwoPointBiLanCaoDialog::keyboard_focus_notify_cb(NXOpen::BlockStyler::UIBlo
         if (hasLiveSlot_)
         {
             RevertLiveSlot();
-            RefreshLiveSlot();
         }
     }
 }
@@ -1116,6 +1113,92 @@ double TwoPointBiLanCaoDialog::MeasureFaceArea(NXOpen::Face* face) const
     }
 
     return 0.0;
+}
+
+bool TwoPointBiLanCaoDialog::FindSheetThicknessByReferenceFace(NXOpen::Body* body,
+                                                               NXOpen::Face* referenceFace,
+                                                               NXOpen::Face** largestFace,
+                                                               NXOpen::Face** oppositeFace,
+                                                               double& largestArea,
+                                                               double& oppositeArea,
+                                                               double& thickness) const
+{
+    if (largestFace != nullptr)
+    {
+        *largestFace = nullptr;
+    }
+    if (oppositeFace != nullptr)
+    {
+        *oppositeFace = nullptr;
+    }
+    largestArea = 0.0;
+    oppositeArea = 0.0;
+    thickness = 0.0;
+
+    if (body == nullptr || referenceFace == nullptr)
+    {
+        return false;
+    }
+
+    NXOpen::Point3d referenceOrigin;
+    NXOpen::Vector3d referenceNormal;
+    if (!GetPlanarFacePlane(referenceFace, referenceOrigin, referenceNormal))
+    {
+        return false;
+    }
+
+    NXOpen::Face* bestFace = nullptr;
+    double bestDistance = std::numeric_limits<double>::max();
+    const std::vector<NXOpen::Face*> faces = body->GetFaces();
+    for (NXOpen::Face* face : faces)
+    {
+        if (face == nullptr || face == referenceFace)
+        {
+            continue;
+        }
+
+        NXOpen::Point3d origin;
+        NXOpen::Vector3d normal;
+        if (!GetPlanarFacePlane(face, origin, normal))
+        {
+            continue;
+        }
+
+        if (std::fabs(Dot(referenceNormal, normal)) < 1.0 - 1.0e-4)
+        {
+            continue;
+        }
+
+        const double distance = std::fabs(Dot(Subtract(origin, referenceOrigin), referenceNormal));
+        if (distance <= kPlaneTolerance)
+        {
+            continue;
+        }
+
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            bestFace = face;
+        }
+    }
+
+    if (bestFace == nullptr)
+    {
+        return false;
+    }
+
+    if (largestFace != nullptr)
+    {
+        *largestFace = referenceFace;
+    }
+    if (oppositeFace != nullptr)
+    {
+        *oppositeFace = bestFace;
+    }
+    largestArea = 0.0;
+    oppositeArea = 0.0;
+    thickness = bestDistance;
+    return true;
 }
 
 bool TwoPointBiLanCaoDialog::FindSheetThicknessByLargestParallelFaces(NXOpen::Body* body,
@@ -4326,7 +4409,7 @@ void TwoPointBiLanCaoDialog::RefreshLiveSlot()
 
     liveSlotRefreshInProgress_ = true;
 
-    if (!CreateReliefSlotProfile(values, true))
+    if (!CreateReliefSlotProfile(values, false))
     {
         AppendDebugLog("RefreshLiveSlot CreateReliefSlotProfile failed");
         for (tag_t curveTag : values.profileCurveTags)
@@ -4344,10 +4427,11 @@ void TwoPointBiLanCaoDialog::RefreshLiveSlot()
 
     hasLiveSlot_ = true;
     liveSlotSignature_ = newSignature;
-    liveSlotFeatureTags_ = values.profileFeatureTags;
+    previewProfileCurveTags_ = values.profileCurveTags;
     liveSlotCurveTags_ = values.profileCurveTags;
-    liveSlotToolBodyTags_ = values.profileToolBodyTags;
-    liveSlotToolBodyTag_ = values.profileToolBodyTag;
+    liveSlotFeatureTags_.clear();
+    liveSlotToolBodyTags_.clear();
+    liveSlotToolBodyTag_ = NULL_TAG;
     liveSlotRefreshInProgress_ = false;
     AppendDebugLog("RefreshLiveSlot success featureCount=" +
                    std::to_string(liveSlotFeatureTags_.size()) +
@@ -4944,13 +5028,23 @@ bool TwoPointBiLanCaoDialog::ReadDialogValues(DialogValues& values) const
             values.gapOnlyHasOffsetDirection = false;
         }
     }
-    FindSheetThicknessByLargestParallelFaces(
-        values.targetBody,
-        &values.largestPlanarFace,
-        &values.oppositePlanarFace,
-        values.largestPlanarFaceArea,
-        values.oppositePlanarFaceArea,
-        values.sheetThickness);
+    if (!FindSheetThicknessByReferenceFace(
+            values.targetBody,
+            values.containingPlaneFace,
+            &values.largestPlanarFace,
+            &values.oppositePlanarFace,
+            values.largestPlanarFaceArea,
+            values.oppositePlanarFaceArea,
+            values.sheetThickness))
+    {
+        FindSheetThicknessByLargestParallelFaces(
+            values.targetBody,
+            &values.largestPlanarFace,
+            &values.oppositePlanarFace,
+            values.largestPlanarFaceArea,
+            values.oppositePlanarFaceArea,
+            values.sheetThickness);
+    }
 
     if (PointDistance(values.startPoint, values.endPoint) <= kPointTolerance)
     {
@@ -4972,9 +5066,14 @@ int TwoPointBiLanCaoDialog::Execute()
 {
     if (hasLiveSlot_ || slotCreatedOnSelection_)
     {
-        CommitLiveSlot();
-        ClearPointSelections();
-        return 0;
+        if (!liveSlotFeatureTags_.empty())
+        {
+            CommitLiveSlot();
+            ClearPointSelections();
+            return 0;
+        }
+
+        RevertLiveSlot();
     }
 
     DialogValues values;

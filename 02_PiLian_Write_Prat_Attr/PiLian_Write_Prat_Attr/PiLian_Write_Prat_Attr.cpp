@@ -85,7 +85,9 @@ namespace
 
     std::wstring ConfigFilePath()
     {
-        return PluginDirectory() + L"\\PiLian_Write_Prat_Attr.ini";
+        CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+        CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
+        return L"D:\\UG智辉钣金插件\\config\\PiLian_Write_Prat_Attr.ini";
     }
 
     const std::vector<std::string>& DefaultCustomers()

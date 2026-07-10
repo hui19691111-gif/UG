@@ -506,7 +506,9 @@ static std::wstring PluginDirectory()
 
 static std::wstring BodyNoteConfigFilePath()
 {
-    return PluginDirectory() + L"\\ZiDonCuTu_note_format.ini";
+    CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+    CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
+    return L"D:\\UG智辉钣金插件\\config\\ZiDonCuTu_note_format.ini";
 }
 
 static void EnsureDefaultBodyNoteConfigFile(const std::wstring& path)
@@ -693,6 +695,11 @@ static std::string ReadFirstAttribute(NXOpen::NXObject* first, NXOpen::NXObject*
     return "";
 }
 
+static std::string ReadPartFileNameReferenceText(NXOpen::Part* part)
+{
+    return ReadAttributeText(part, "\xE5\x90\x8D\xE7\xA7\xB0");
+}
+
 static std::vector<double> ParsePositiveNumbers(const std::string& text)
 {
     std::string normalized = text;
@@ -864,10 +871,7 @@ static std::string ReadPartFileName(NXOpen::Part* part)
 
 static std::string ReadQuantityText(NXOpen::Part* part, NXOpen::Body* body, int occurrenceQuantity)
 {
-    if (occurrenceQuantity > 1)
-    {
-        return std::to_string(occurrenceQuantity);
-    }
+    (void)occurrenceQuantity;
 
     try
     {
@@ -887,9 +891,7 @@ static std::string ReadQuantityText(NXOpen::Part* part, NXOpen::Body* body, int 
     {
     }
 
-    const char* titles[] = { "sulian", "\xE6\x95\xB0\xE9\x87\x8F" };
-    std::string value = ReadFirstAttribute(body, part, titles, sizeof(titles) / sizeof(titles[0]));
-    return value.empty() ? "1" : value;
+    return "";
 }
 
 static std::string LoadBodyNoteFormat()
@@ -1054,6 +1056,7 @@ static std::string BodyLayoutKey(const std::string& material, const std::string&
 
 static std::string BuildBodyNoteText(NXOpen::Part* part, NXOpen::Body* body, int occurrenceQuantity)
 {
+    const std::string fileName = ReadPartFileNameReferenceText(part);
     const std::string material = BodyMaterialText(part, body);
     const std::string thickness = BodyThicknessText(part, body);
 
@@ -1062,12 +1065,12 @@ static std::string BuildBodyNoteText(NXOpen::Part* part, NXOpen::Body* body, int
     const std::string number = ReadAttributeText(body, "bianhao");
 
     std::string note = CachedBodyNoteFormat();
-    ReplaceAllText(note, "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}", "");
+    ReplaceAllText(note, "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}", fileName);
     ReplaceAllText(note, "{\xE7\xBC\x96\xE5\x8F\xB7=}", number.empty() ? "" : number + "=");
     ReplaceAllText(note, "{\xE7\xBC\x96\xE5\x8F\xB7}", number);
     ReplaceAllText(note, "{\xE6\x9D\x90\xE6\x96\x99}", material);
     ReplaceAllText(note, "{\xE5\x8E\x9A\xE5\xBA\xA6}", thickness);
-    ReplaceAllText(note, "{\xE6\x95\xB0\xE9\x87\x8F}", quantity.empty() ? "1" : quantity);
+    ReplaceAllText(note, "{\xE6\x95\xB0\xE9\x87\x8F}", quantity);
     ReplaceAllText(note, "{\xE9\x95\x9C\xE5\x83\x8F}", mirror);
     note = Trim(note);
     if (note.empty())
@@ -1079,7 +1082,7 @@ static std::string BuildBodyNoteText(NXOpen::Part* part, NXOpen::Body* body, int
         + " bodyTag=" + std::to_string(static_cast<unsigned long long>(body != NULL ? body->Tag() : NULL_TAG))
         + " material=" + material
         + " thickness=" + thickness
-        + " quantity=" + (quantity.empty() ? "1" : quantity)
+        + " quantity=" + quantity
         + " number=" + number
         + " mirror=" + mirror
         + " note=" + note);
@@ -1108,7 +1111,7 @@ static std::string BodyNoteTokenValueForUf(
 {
     if (token == "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}")
     {
-        return "";
+        return ReadPartFileNameReferenceText(part);
     }
     if (token == "{\xE7\xBC\x96\xE5\x8F\xB7=}")
     {
@@ -1129,8 +1132,7 @@ static std::string BodyNoteTokenValueForUf(
     }
     if (token == "{\xE6\x95\xB0\xE9\x87\x8F}")
     {
-        const std::string quantity = ReadQuantityText(part, body, occurrenceQuantity);
-        return quantity.empty() ? "1" : quantity;
+        return ReadQuantityText(part, body, occurrenceQuantity);
     }
     if (token == "{\xE9\x95\x9C\xE5\x83\x8F}")
     {
@@ -1380,12 +1382,6 @@ static bool PrepareBodyNoteReference(
 
     if (token == "{\xE6\x95\xB0\xE9\x87\x8F}")
     {
-        const char* titles[] = { "sulian", "\xE6\x95\xB0\xE9\x87\x8F" };
-        if (FindAttributeOwner(body, part, titles, sizeof(titles) / sizeof(titles[0]), insert.owner, insert.title))
-        {
-            insert.kind = DraftNoteReferenceInsert::KindAttribute;
-            return true;
-        }
         if (FindQuantityExpression(part, body, insert.expressionName))
         {
             insert.kind = DraftNoteReferenceInsert::KindExpression;

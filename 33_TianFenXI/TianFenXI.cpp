@@ -7636,7 +7636,7 @@ void TianFenXI::dialogShown_cb()
 {
     try
     {
-        JoinVisibleBodyFacesOnSameSurface();
+        DebugLog("Dialog join visible bodies disabled");
         LoadUiSettings();
         UpdateDeleteRVisibility();
     }

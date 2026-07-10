@@ -17,39 +17,7 @@ namespace
 {
 bool GetSpecFilePath(wchar_t path[MAX_PATH])
 {
-    HMODULE selfModule = NULL;
-    if (!GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCWSTR>(&GetSpecFilePath),
-            &selfModule))
-    {
-        return false;
-    }
-
-    DWORD length = GetModuleFileNameW(selfModule, path, MAX_PATH);
-    if (length == 0 || length >= MAX_PATH)
-    {
-        return false;
-    }
-
-    DWORD slash = length;
-    while (slash > 0 && path[slash - 1] != L'\\' && path[slash - 1] != L'/')
-    {
-        --slash;
-    }
-    if (slash == 0)
-    {
-        return false;
-    }
-
-    const wchar_t* suffix = L"config\\FanTonGMK_specs.txt";
-    DWORD pos = slash;
-    for (DWORD index = 0; suffix[index] != L'\0' && pos + 1 < MAX_PATH; ++index, ++pos)
-    {
-        path[pos] = suffix[index];
-    }
-    path[pos] = L'\0';
-    return true;
+    return wcscpy_s(path, MAX_PATH, L"D:\\UG智辉钣金插件\\config\\FanTonGMK_specs.txt") == 0;
 }
 }
 
@@ -84,7 +52,7 @@ extern "C" DllExport void ufusr(char* param, int* retcode, int param_len)
 
     if (GetFileAttributesW(specPath) == INVALID_FILE_ATTRIBUTES)
     {
-        MessageBoxW(NULL, L"FanTonGMK_specs.txt was not found in application\\config.", L"FanTonGMK", MB_ICONERROR);
+        MessageBoxW(NULL, L"FanTonGMK_specs.txt was not found in D:\\UG智辉钣金插件\\config.", L"FanTonGMK", MB_ICONERROR);
         if (retcode != NULL)
         {
             *retcode = 1;

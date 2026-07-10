@@ -1,4 +1,5 @@
 #include "ZheWanBiRangCao.hpp"
+#include "../../common/ZhihuiDialogMemory.hpp"
 #include "../../common/ZhihuiEmbeddedDialog.hpp"
 #include "embedded_dialog_resources.h"
 
@@ -55,7 +56,6 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <string>
@@ -64,29 +64,6 @@
 namespace
 {
 constexpr double kVectorTolerance = 1.0e-6;
-const char* kDialogStatePath = "D:\\UG智辉钣金插件\\config\\ZheWanBiRangCao_state.ini";
-
-double ReadStateDouble(const char* key, const double fallbackValue)
-{
-    char buffer[128] = {};
-    GetPrivateProfileStringA("Dialog", key, "", buffer, static_cast<DWORD>(sizeof(buffer)), kDialogStatePath);
-    if (buffer[0] == '\0')
-    {
-        return fallbackValue;
-    }
-
-    char* end = nullptr;
-    const double value = std::strtod(buffer, &end);
-    return end != buffer ? value : fallbackValue;
-}
-
-void WriteStateDouble(const char* key, const double value)
-{
-    char buffer[64] = {};
-    std::snprintf(buffer, sizeof(buffer), "%.15g", value);
-    WritePrivateProfileStringA("Dialog", key, buffer, kDialogStatePath);
-}
-
 std::string FormatDouble(const double value)
 {
     char buffer[64] = {};
@@ -630,14 +607,14 @@ void ZheWanBiRangCaoDialog::SetDoubleValue(NXOpen::BlockStyler::UIBlock* block, 
 
 void ZheWanBiRangCaoDialog::LoadDialogState() const
 {
-    SetDoubleValue(slotWidthBlock_, ReadStateDouble("slotWidthY", GetSlotWidthY()));
-    SetDoubleValue(slotDepthBlock_, ReadStateDouble("slotDepthZ", GetSlotDepthZ()));
+    zhihui_dialog_memory::LoadDouble(L"ZheWanBiRangCao_state.ini", L"slotWidthY", slotWidthBlock_);
+    zhihui_dialog_memory::LoadDouble(L"ZheWanBiRangCao_state.ini", L"slotDepthZ", slotDepthBlock_);
 }
 
 void ZheWanBiRangCaoDialog::SaveDialogState() const
 {
-    WriteStateDouble("slotWidthY", GetSlotWidthY());
-    WriteStateDouble("slotDepthZ", GetSlotDepthZ());
+    zhihui_dialog_memory::SaveDouble(L"ZheWanBiRangCao_state.ini", L"slotWidthY", slotWidthBlock_);
+    zhihui_dialog_memory::SaveDouble(L"ZheWanBiRangCao_state.ini", L"slotDepthZ", slotDepthBlock_);
 }
 
 void ZheWanBiRangCaoDialog::ShowError(const std::string& message) const

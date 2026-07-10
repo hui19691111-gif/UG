@@ -501,36 +501,12 @@ void LoadTubeSpecsFromFile(const std::string& path, std::set<std::pair<int, int>
 
 std::string SharedSpecTablePath()
 {
-    const std::string moduleDirectory = GetModuleDirectory();
-    if (moduleDirectory.empty())
-    {
-        return "";
-    }
-
-    const std::string appRoot = moduleDirectory + "\\..";
-    const std::string rootConfigPath = appRoot + "\\config\\FangTongKaKou_specs.txt";
-    if (GetFileAttributesA(rootConfigPath.c_str()) != INVALID_FILE_ATTRIBUTES)
-    {
-        return rootConfigPath;
-    }
-
-    const std::string legacyConfigPath = moduleDirectory + "\\config\\FangTongKaKou_specs.txt";
-    if (GetFileAttributesA(legacyConfigPath.c_str()) != INVALID_FILE_ATTRIBUTES)
-    {
-        return legacyConfigPath;
-    }
-
-    return moduleDirectory + "\\FangTongKaKou_specs.txt";
+    return "D:\\UG智辉钣金插件\\config\\FangTongKaKou_specs.txt";
 }
 
 std::string MaterialConfigPath()
 {
-    const std::string moduleDirectory = GetModuleDirectory();
-    if (moduleDirectory.empty())
-    {
-        return "";
-    }
-    return moduleDirectory + "\\Write_Prat_Attr.ini";
+    return "D:\\UG智辉钣金插件\\config\\Write_Prat_Attr.ini";
 }
 
 std::vector<std::string> LoadMaterialOptions()
@@ -588,13 +564,7 @@ const std::set<std::pair<int, int> >& GetTubeSpecs()
     }
 
     loaded = true;
-    const std::string moduleDirectory = GetModuleDirectory();
-    if (!moduleDirectory.empty())
-    {
-        LoadTubeSpecsFromFile(moduleDirectory + "\\..\\config\\FangTongKaKou_specs.txt", specs);
-        LoadTubeSpecsFromFile(moduleDirectory + "\\config\\FangTongKaKou_specs.txt", specs);
-        LoadTubeSpecsFromFile(moduleDirectory + "\\FangTongKaKou_specs.txt", specs);
-    }
+    LoadTubeSpecsFromFile(SharedSpecTablePath(), specs);
     if (specs.empty())
     {
         AddFallbackTubeSpecs(specs);

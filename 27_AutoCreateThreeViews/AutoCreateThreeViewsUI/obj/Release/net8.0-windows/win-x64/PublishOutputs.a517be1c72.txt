@@ -1,12 +1,2 @@
 G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\publish\AutoCreateThreeViewsUI.pdb
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\publish\Assets\technical_requirements.default.cfg
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\publish\Assets\ViewButtons\back.png
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\publish\Assets\ViewButtons\backbottom.png
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\publish\Assets\ViewButtons\bottom.png
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\publish\Assets\ViewButtons\flat.png
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\publish\Assets\ViewButtons\front.png
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\publish\Assets\ViewButtons\iso.png
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\publish\Assets\ViewButtons\left.png
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\publish\Assets\ViewButtons\right.png
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\publish\Assets\ViewButtons\top.png
 G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\publish\AutoCreateThreeViewsUI.exe

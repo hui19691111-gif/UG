@@ -120,7 +120,9 @@ std::wstring PluginDirectory()
 
 std::wstring BodyNoteConfigFilePath()
 {
-    return PluginDirectory() + L"\\ZiDonCuTu_note_format.ini";
+    CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+    CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
+    return L"D:\\UG智辉钣金插件\\config\\ZiDonCuTu_note_format.ini";
 }
 
 void EnsureDefaultBodyNoteConfigFile(const std::wstring& path)

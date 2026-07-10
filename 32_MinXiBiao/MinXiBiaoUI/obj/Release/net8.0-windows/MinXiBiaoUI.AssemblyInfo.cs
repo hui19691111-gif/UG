@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("MinXiBiaoUI")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+71490cfe769c21e18da0532bfaca1d31a8f6d58d")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+9b6d217e8074d61b0457ece15596f8197ddfe481")]
 [assembly: System.Reflection.AssemblyProductAttribute("MinXiBiaoUI")]
 [assembly: System.Reflection.AssemblyTitleAttribute("MinXiBiaoUI")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

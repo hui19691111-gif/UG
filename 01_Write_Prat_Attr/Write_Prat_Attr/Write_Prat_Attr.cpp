@@ -46,10 +46,14 @@
 #include <NXOpen/Assemblies_Component.hxx>
 #include <NXOpen/Assemblies_ComponentAssembly.hxx>
 #include <NXOpen/BasePart.hxx>
+#include <NXOpen/Update.hxx>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <fstream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -61,6 +65,8 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 namespace
 {
+    std::string Utf8Text(const NXOpen::NXString& value);
+
     std::wstring PluginDirectory()
     {
         wchar_t modulePath[MAX_PATH] = { 0 };
@@ -82,7 +88,59 @@ namespace
 
     std::wstring ConfigFilePath()
     {
-        return PluginDirectory() + L"\\Write_Prat_Attr.ini";
+        CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+        CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
+        return L"D:\\UG智辉钣金插件\\config\\Write_Prat_Attr.ini";
+    }
+
+    std::wstring LogFilePath()
+    {
+        CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+        CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
+        return L"D:\\UG智辉钣金插件\\logs\\Write_Prat_Attr.log";
+    }
+
+    std::string TimestampText()
+    {
+        std::time_t now = std::time(NULL);
+        std::tm localTime = {};
+        localtime_s(&localTime, &now);
+
+        char buffer[32] = { 0 };
+        std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &localTime);
+        return buffer;
+    }
+
+    void AppendDebugLog(const std::string& message)
+    {
+        std::ofstream file(LogFilePath(), std::ios::app | std::ios::binary);
+        if (!file)
+        {
+            return;
+        }
+
+        file << "[" << TimestampText() << "] " << message << "\r\n";
+    }
+
+    std::string NxExceptionText(const NXOpen::NXException& ex)
+    {
+        std::ostringstream stream;
+        stream << "NXException code=" << ex.ErrorCode()
+            << " message=" << (ex.Message() != NULL ? ex.Message() : "");
+        return stream.str();
+    }
+
+    std::string PartDebugText(NXOpen::Part* part)
+    {
+        if (part == NULL)
+        {
+            return "<null part>";
+        }
+
+        std::ostringstream stream;
+        stream << "leaf=" << Utf8Text(part->Leaf())
+            << " fullPath=" << Utf8Text(part->FullPath());
+        return stream.str();
     }
 
     const std::vector<std::string>& DefaultCustomers()
@@ -567,6 +625,15 @@ namespace
     std::string QuantityFromPartAttribute(NXOpen::Part* workPart)
     {
         const NXOpen::NXString title("数量", NXOpen::NXString::UTF8);
+        if (workPart->HasUserAttribute(title, NXOpen::NXObject::AttributeType::AttributeTypeInteger, -1))
+        {
+            const int value = workPart->GetIntegerAttribute(title);
+            if (value > 0)
+            {
+                return std::to_string(value);
+            }
+        }
+
         if (workPart->HasUserAttribute(title, NXOpen::NXObject::AttributeType::AttributeTypeString, -1))
         {
             const std::string value = Trim(Utf8Text(workPart->GetUserAttributeAsString(title, NXOpen::NXObject::AttributeType::AttributeTypeString, -1)));
@@ -793,9 +860,563 @@ namespace
 
     void CommitStringAttribute(NXOpen::AttributePropertiesBuilder* builder, const char* title, const NXOpen::NXString& value)
     {
+        AppendDebugLog(std::string("CommitStringAttribute begin title=") + (title != NULL ? title : "<null>") +
+            " value=" + Utf8Text(value));
         builder->SetTitle(title);
         builder->SetStringValue(value);
         builder->Commit();
+        AppendDebugLog(std::string("CommitStringAttribute ok title=") + (title != NULL ? title : "<null>"));
+    }
+
+    void SetPartStringAttribute(NXOpen::Part* workPart, const char* title, const NXOpen::NXString& value)
+    {
+        if (workPart == NULL)
+        {
+            AppendDebugLog(std::string("SetPartStringAttribute skipped null part title=") + (title != NULL ? title : "<null>"));
+            return;
+        }
+
+        AppendDebugLog(std::string("SetPartStringAttribute begin title=") + (title != NULL ? title : "<null>") +
+            " value=" + Utf8Text(value));
+        workPart->SetUserAttribute(title, -1, value, NXOpen::Update::OptionNow);
+        AppendDebugLog(std::string("SetPartStringAttribute ok title=") + (title != NULL ? title : "<null>"));
+    }
+
+    NXOpen::Expression* FindExpression(NXOpen::Part* workPart, const char* name)
+    {
+        if (workPart == NULL || name == NULL || name[0] == '\0')
+        {
+            return NULL;
+        }
+
+        try
+        {
+            return dynamic_cast<NXOpen::Expression*>(workPart->Expressions()->FindObject(name));
+        }
+        catch (NXOpen::NXException&)
+        {
+            return NULL;
+        }
+    }
+
+    void UnlockQuantityAttributeIfPossible(NXOpen::Part* workPart, NXOpen::NXObject::AttributeType type)
+    {
+        if (workPart == NULL)
+        {
+            AppendDebugLog("UnlockQuantityAttributeIfPossible skipped null part");
+            return;
+        }
+
+        const NXOpen::NXString title("数量", NXOpen::NXString::UTF8);
+        try
+        {
+            if (workPart->HasUserAttribute(title, type, -1))
+            {
+                AppendDebugLog("UnlockQuantityAttributeIfPossible begin type=" + std::to_string(static_cast<int>(type)));
+                workPart->SetUserAttributeLock(title, type, false);
+                AppendDebugLog("UnlockQuantityAttributeIfPossible ok type=" + std::to_string(static_cast<int>(type)));
+            }
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog("UnlockQuantityAttributeIfPossible failed type=" +
+                std::to_string(static_cast<int>(type)) + " " + NxExceptionText(ex));
+        }
+    }
+
+    void DeleteQuantityAttributeIfPresent(NXOpen::Part* workPart, NXOpen::NXObject::AttributeType type)
+    {
+        if (workPart == NULL)
+        {
+            AppendDebugLog("DeleteQuantityAttributeIfPresent skipped null part");
+            return;
+        }
+
+        const NXOpen::NXString title("数量", NXOpen::NXString::UTF8);
+        try
+        {
+            if (workPart->HasUserAttribute(title, type, -1))
+            {
+                AppendDebugLog("DeleteQuantityAttributeIfPresent begin type=" + std::to_string(static_cast<int>(type)));
+                UnlockQuantityAttributeIfPossible(workPart, type);
+                workPart->DeleteUserAttribute(type, title, true, NXOpen::Update::OptionNow);
+                AppendDebugLog("DeleteQuantityAttributeIfPresent ok type=" + std::to_string(static_cast<int>(type)));
+            }
+            else
+            {
+                AppendDebugLog("DeleteQuantityAttributeIfPresent not found type=" + std::to_string(static_cast<int>(type)));
+            }
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog("DeleteQuantityAttributeIfPresent failed type=" +
+                std::to_string(static_cast<int>(type)) + " " + NxExceptionText(ex));
+        }
+    }
+
+    bool LinkQuantityAttributeExpression(NXOpen::Part* workPart, NXOpen::Expression* expression)
+    {
+        if (workPart == NULL || expression == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            AppendDebugLog("LinkQuantityAttributeExpression begin");
+            workPart->Expressions()->ReplaceAttributeExpression(
+                expression,
+                workPart,
+                NXOpen::NXString("数量", NXOpen::NXString::UTF8),
+                NXOpen::NXObject::AttributeTypeInteger,
+                -1);
+            AppendDebugLog("LinkQuantityAttributeExpression ok");
+            return true;
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog("LinkQuantityAttributeExpression failed " + NxExceptionText(ex));
+            return false;
+        }
+    }
+
+    void DeleteExpressionIfPresent(NXOpen::Part* workPart, NXOpen::Expression* expression)
+    {
+        if (workPart == NULL || expression == NULL)
+        {
+            return;
+        }
+
+        try
+        {
+            AppendDebugLog("DeleteExpressionIfPresent begin name=" + Utf8Text(expression->Name()));
+            workPart->Expressions()->Delete(expression);
+            AppendDebugLog("DeleteExpressionIfPresent ok");
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog("DeleteExpressionIfPresent failed " + NxExceptionText(ex));
+        }
+    }
+
+    NXOpen::Expression* CreateQuantityIntegerExpression(NXOpen::Part* workPart, const std::string& quantityText)
+    {
+        char equation[256];
+        std::snprintf(equation, sizeof(equation), "数量=%s", quantityText.c_str());
+        NXOpen::Unit* nullUnit(NULL);
+        AppendDebugLog(std::string("CreateQuantityIntegerExpression begin equation=") + equation);
+        NXOpen::Expression* expression = workPart->Expressions()->CreateExpressionWithUnit("Integer", equation, nullUnit);
+        AppendDebugLog("CreateQuantityIntegerExpression ok");
+        return expression;
+    }
+
+    NXOpen::Expression* CreateOrResetQuantityIntegerExpression(NXOpen::Part* workPart, const std::string& quantityText)
+    {
+        if (workPart == NULL)
+        {
+            AppendDebugLog("CreateOrResetQuantityIntegerExpression skipped null part");
+            return NULL;
+        }
+
+        NXOpen::Expression* expression = FindExpression(workPart, "数量");
+        if (expression != NULL)
+        {
+            try
+            {
+                AppendDebugLog("CreateOrResetQuantityIntegerExpression existing SetFormula begin");
+                expression->SetFormula(quantityText.c_str());
+                AppendDebugLog("CreateOrResetQuantityIntegerExpression existing SetFormula ok");
+                return expression;
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                AppendDebugLog("CreateOrResetQuantityIntegerExpression existing SetFormula failed " + NxExceptionText(ex));
+                DeleteExpressionIfPresent(workPart, expression);
+            }
+        }
+
+        return CreateQuantityIntegerExpression(workPart, quantityText);
+    }
+
+    void DeleteQuantityExpressionIfPresent(NXOpen::Part* workPart)
+    {
+        DeleteExpressionIfPresent(workPart, FindExpression(workPart, "数量"));
+
+        NXOpen::Expression* attributeExpression = NULL;
+        try
+        {
+            AppendDebugLog("GetAttributeExpression for quantity begin");
+            attributeExpression = workPart->Expressions()->GetAttributeExpression(
+                workPart,
+                NXOpen::NXString("数量", NXOpen::NXString::UTF8),
+                NXOpen::NXObject::AttributeTypeInteger,
+                -1);
+            AppendDebugLog("GetAttributeExpression for quantity ok");
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog("GetAttributeExpression for quantity failed " + NxExceptionText(ex));
+        }
+        DeleteExpressionIfPresent(workPart, attributeExpression);
+    }
+
+    void DeleteQuantityAttributesIfPresent(NXOpen::Part* workPart)
+    {
+        if (workPart != NULL)
+        {
+            try
+            {
+                std::vector<NXOpen::NXObject::AttributeInformation> attributes = workPart->GetUserAttributes();
+                for (const NXOpen::NXObject::AttributeInformation& attribute : attributes)
+                {
+                    if (Utf8Text(attribute.Title) == "数量")
+                    {
+                        std::ostringstream stream;
+                        stream << "Existing quantity attribute type=" << static_cast<int>(attribute.Type)
+                            << " index=" << attribute.ArrayElementIndex
+                            << " locked=" << (attribute.Locked ? 1 : 0)
+                            << " ownedBySystem=" << (attribute.OwnedBySystem ? 1 : 0)
+                            << " required=" << (attribute.Required ? 1 : 0)
+                            << " array=" << (attribute.Array ? 1 : 0)
+                            << " notSaved=" << (attribute.NotSaved ? 1 : 0)
+                            << " hasExpression=" << (attribute.Expression != NULL ? 1 : 0)
+                            << " expressionNotLoaded=" << (attribute.ExpressionNotLoaded ? 1 : 0);
+                        AppendDebugLog(stream.str());
+                    }
+                }
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                AppendDebugLog("List existing quantity attributes failed " + NxExceptionText(ex));
+            }
+        }
+
+        DeleteQuantityAttributeIfPresent(workPart, NXOpen::NXObject::AttributeTypeInteger);
+        DeleteQuantityAttributeIfPresent(workPart, NXOpen::NXObject::AttributeTypeReal);
+        DeleteQuantityAttributeIfPresent(workPart, NXOpen::NXObject::AttributeTypeString);
+        DeleteQuantityAttributeIfPresent(workPart, NXOpen::NXObject::AttributeTypeBoolean);
+        DeleteQuantityAttributeIfPresent(workPart, NXOpen::NXObject::AttributeTypeTime);
+        DeleteExpressionIfPresent(workPart, FindExpression(workPart, "数量"));
+    }
+
+    void DeleteNonIntegerQuantityAttributesIfPresent(NXOpen::Part* workPart)
+    {
+        if (workPart != NULL)
+        {
+            try
+            {
+                std::vector<NXOpen::NXObject::AttributeInformation> attributes = workPart->GetUserAttributes();
+                for (const NXOpen::NXObject::AttributeInformation& attribute : attributes)
+                {
+                    if (Utf8Text(attribute.Title) == "数量")
+                    {
+                        std::ostringstream stream;
+                        stream << "Existing quantity attribute type=" << static_cast<int>(attribute.Type)
+                            << " index=" << attribute.ArrayElementIndex
+                            << " locked=" << (attribute.Locked ? 1 : 0)
+                            << " ownedBySystem=" << (attribute.OwnedBySystem ? 1 : 0)
+                            << " required=" << (attribute.Required ? 1 : 0)
+                            << " array=" << (attribute.Array ? 1 : 0)
+                            << " notSaved=" << (attribute.NotSaved ? 1 : 0)
+                            << " hasExpression=" << (attribute.Expression != NULL ? 1 : 0)
+                            << " expressionNotLoaded=" << (attribute.ExpressionNotLoaded ? 1 : 0);
+                        AppendDebugLog(stream.str());
+                    }
+                }
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                AppendDebugLog("List existing quantity attributes failed " + NxExceptionText(ex));
+            }
+        }
+
+        DeleteQuantityAttributeIfPresent(workPart, NXOpen::NXObject::AttributeTypeReal);
+        DeleteQuantityAttributeIfPresent(workPart, NXOpen::NXObject::AttributeTypeString);
+        DeleteQuantityAttributeIfPresent(workPart, NXOpen::NXObject::AttributeTypeBoolean);
+        DeleteQuantityAttributeIfPresent(workPart, NXOpen::NXObject::AttributeTypeTime);
+    }
+
+    bool HasQuantityIntegerAttribute(NXOpen::Part* workPart)
+    {
+        if (workPart == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            return workPart->HasUserAttribute(
+                NXOpen::NXString("数量", NXOpen::NXString::UTF8),
+                NXOpen::NXObject::AttributeTypeInteger,
+                -1);
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog("HasQuantityIntegerAttribute failed " + NxExceptionText(ex));
+            return false;
+        }
+    }
+
+    bool IsQuantityPartAttributeExpression(NXOpen::Expression* expression)
+    {
+        if (expression == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!expression->HasReferencedAttribute())
+            {
+                return false;
+            }
+
+            NXOpen::NXObject::AttributeInformation info = expression->GetReferencedAttribute();
+            return Utf8Text(info.Title) == "数量" &&
+                info.Type == NXOpen::NXObject::AttributeTypeInteger;
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog("IsQuantityPartAttributeExpression failed " + NxExceptionText(ex));
+            return false;
+        }
+    }
+
+    void LogQuantityAttributeLinkState(NXOpen::Part* workPart, NXOpen::Expression* expression)
+    {
+        if (workPart == NULL)
+        {
+            AppendDebugLog("LogQuantityAttributeLinkState skipped null part");
+            return;
+        }
+
+        try
+        {
+            NXOpen::NXObject::AttributeInformation info = workPart->GetUserAttribute(
+                NXOpen::NXString("数量", NXOpen::NXString::UTF8),
+                NXOpen::NXObject::AttributeTypeInteger,
+                -1);
+            std::ostringstream stream;
+            stream << "Quantity attribute after write type=" << static_cast<int>(info.Type)
+                << " intValue=" << info.IntegerValue
+                << " hasExpression=" << (info.Expression != NULL ? 1 : 0)
+                << " expressionNotLoaded=" << (info.ExpressionNotLoaded ? 1 : 0);
+            if (info.Expression != NULL)
+            {
+                stream << " expressionTag=" << info.Expression->Tag();
+            }
+            AppendDebugLog(stream.str());
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog("Quantity attribute after write GetUserAttribute failed " + NxExceptionText(ex));
+        }
+
+        if (expression != NULL)
+        {
+            try
+            {
+                std::ostringstream stream;
+                stream << "Quantity attribute expression name=" << Utf8Text(expression->Name())
+                    << " tag=" << expression->Tag();
+                try
+                {
+                    stream << " hasReferencingPartAttribute=" << (expression->HasReferencingPartAttribute() ? 1 : 0);
+                }
+                catch (const NXOpen::NXException& ex)
+                {
+                    stream << " hasReferencingPartAttributeFailed=" << NxExceptionText(ex);
+                }
+                try
+                {
+                    stream << " hasReferencedAttribute=" << (expression->HasReferencedAttribute() ? 1 : 0);
+                    if (expression->HasReferencedAttribute())
+                    {
+                        NXOpen::NXObject::AttributeInformation referenced = expression->GetReferencedAttribute();
+                        stream << " referencedTitle=" << Utf8Text(referenced.Title)
+                            << " referencedType=" << static_cast<int>(referenced.Type);
+                    }
+                }
+                catch (const NXOpen::NXException& ex)
+                {
+                    stream << " hasReferencedAttributeFailed=" << NxExceptionText(ex);
+                }
+                AppendDebugLog(stream.str());
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                AppendDebugLog("Quantity attribute expression log failed " + NxExceptionText(ex));
+            }
+        }
+    }
+
+    NXOpen::Expression* GetQuantityAttributeExpression(NXOpen::Part* workPart)
+    {
+        if (workPart == NULL)
+        {
+            AppendDebugLog("GetQuantityAttributeExpression skipped null part");
+            return NULL;
+        }
+
+        try
+        {
+            AppendDebugLog("GetQuantityAttributeExpression begin");
+            NXOpen::Expression* expression = workPart->Expressions()->GetAttributeExpression(
+                workPart,
+                NXOpen::NXString("数量", NXOpen::NXString::UTF8),
+                NXOpen::NXObject::AttributeTypeInteger,
+                -1);
+            AppendDebugLog("GetQuantityAttributeExpression ok");
+            return expression;
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog("GetQuantityAttributeExpression failed " + NxExceptionText(ex));
+            return NULL;
+        }
+    }
+
+    void SetQuantityIntegerAttribute(NXOpen::Part* workPart, int value)
+    {
+        if (workPart == NULL)
+        {
+            AppendDebugLog("SetQuantityIntegerAttribute skipped null part");
+            return;
+        }
+
+        AppendDebugLog("SetQuantityIntegerAttribute begin value=" + std::to_string(value));
+        workPart->SetUserAttribute(NXOpen::NXString("数量", NXOpen::NXString::UTF8), -1, value, NXOpen::Update::OptionNow);
+        AppendDebugLog("SetQuantityIntegerAttribute ok");
+    }
+
+    NXOpen::Expression* EnsureQuantityAttributeExpressionLikeFeature03(NXOpen::Part* workPart)
+    {
+        NXOpen::Expression* namedExpression = FindExpression(workPart, "数量");
+        if (IsQuantityPartAttributeExpression(namedExpression))
+        {
+            AppendDebugLog("EnsureQuantityAttributeExpressionLikeFeature03 existing quantity part attribute expression found");
+            LogQuantityAttributeLinkState(workPart, namedExpression);
+            return namedExpression;
+        }
+
+        if (namedExpression != NULL)
+        {
+            AppendDebugLog("EnsureQuantityAttributeExpressionLikeFeature03 deleting non-attribute expression named quantity");
+            DeleteExpressionIfPresent(workPart, namedExpression);
+        }
+
+        NXOpen::Expression* attributeExpression = GetQuantityAttributeExpression(workPart);
+        if (attributeExpression == NULL)
+        {
+            LogQuantityAttributeLinkState(workPart, NULL);
+            return NULL;
+        }
+
+        LogQuantityAttributeLinkState(workPart, attributeExpression);
+        return attributeExpression;
+    }
+
+    void WriteQuantityAttributeAndEnsureExpression(NXOpen::Part* workPart, int quantityValue)
+    {
+        if (workPart == NULL)
+        {
+            AppendDebugLog("WriteQuantityAttributeAndEnsureExpression skipped null part");
+            return;
+        }
+
+        NXOpen::Expression* namedExpression = FindExpression(workPart, "数量");
+        if (IsQuantityPartAttributeExpression(namedExpression))
+        {
+            AppendDebugLog("WriteQuantityAttributeAndEnsureExpression expression exists, edit quantity attribute only");
+            SetQuantityIntegerAttribute(workPart, quantityValue);
+            LogQuantityAttributeLinkState(workPart, namedExpression);
+            return;
+        }
+
+        if (!HasQuantityIntegerAttribute(workPart))
+        {
+            AppendDebugLog("WriteQuantityAttributeAndEnsureExpression no integer quantity attr, delete non-integer attrs first");
+            DeleteNonIntegerQuantityAttributesIfPresent(workPart);
+        }
+        else
+        {
+            AppendDebugLog("WriteQuantityAttributeAndEnsureExpression integer quantity attr exists");
+        }
+
+        SetQuantityIntegerAttribute(workPart, quantityValue);
+        EnsureQuantityAttributeExpressionLikeFeature03(workPart);
+    }
+
+    void SyncQuantityExpression(NXOpen::Part* workPart, const std::string& quantityText)
+    {
+        if (workPart == NULL)
+        {
+            AppendDebugLog("SyncQuantityExpression skipped null part");
+            return;
+        }
+
+        AppendDebugLog("SyncQuantityExpression begin value=" + quantityText);
+        NXOpen::Expression* expression = FindExpression(workPart, "数量");
+        if (expression != NULL)
+        {
+            bool expressionIsUsable = false;
+            try
+            {
+                AppendDebugLog("SyncQuantityExpression existing expression SetFormula begin");
+                expression->SetFormula(quantityText.c_str());
+                AppendDebugLog("SyncQuantityExpression existing expression SetFormula ok");
+                expressionIsUsable = LinkQuantityAttributeExpression(workPart, expression);
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                AppendDebugLog("SyncQuantityExpression existing expression SetFormula failed " + NxExceptionText(ex));
+                expressionIsUsable = false;
+            }
+
+            if (expressionIsUsable)
+            {
+                AppendDebugLog("SyncQuantityExpression ok via existing expression");
+                return;
+            }
+
+            DeleteExpressionIfPresent(workPart, expression);
+        }
+
+        NXOpen::Expression* attributeExpression = NULL;
+        try
+        {
+            attributeExpression = workPart->Expressions()->GetAttributeExpression(
+                workPart,
+                NXOpen::NXString("数量", NXOpen::NXString::UTF8),
+                NXOpen::NXObject::AttributeTypeInteger,
+                -1);
+        }
+        catch (NXOpen::NXException&)
+        {
+        }
+
+        if (attributeExpression != NULL)
+        {
+            try
+            {
+                AppendDebugLog("SyncQuantityExpression attribute expression SetFormula begin");
+                attributeExpression->SetFormula(quantityText.c_str());
+                AppendDebugLog("SyncQuantityExpression attribute expression SetFormula ok");
+                AppendDebugLog("SyncQuantityExpression attribute expression SetName begin");
+                attributeExpression->SetName(NXOpen::NXString("数量", NXOpen::NXString::UTF8));
+                AppendDebugLog("SyncQuantityExpression ok via attribute expression");
+                return;
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                AppendDebugLog("SyncQuantityExpression attribute expression SetName failed " + NxExceptionText(ex));
+                DeleteExpressionIfPresent(workPart, attributeExpression);
+            }
+        }
+
+        expression = CreateQuantityIntegerExpression(workPart, quantityText);
+        LinkQuantityAttributeExpression(workPart, expression);
+        AppendDebugLog("SyncQuantityExpression end via new expression");
     }
 
 }
@@ -1135,9 +1756,11 @@ int Write_Prat_Attr::apply_cb()
     int errorCode = 0;
     try
     {
+        AppendDebugLog("apply_cb begin");
         UfSessionGuard ufGuard;
         NXOpen::Session* session = NXOpen::Session::GetSession();
         NXOpen::Part* workPart = CurrentWorkPart();
+        AppendDebugLog("apply_cb workPart " + PartDebugText(workPart));
 
         //获取客户
         NXString Theenum0 = GetEnumValue(enum0);
@@ -1169,44 +1792,27 @@ int Write_Prat_Attr::apply_cb()
         {
             throw std::runtime_error("数量必须是大于 0 的整数。");
         }
+        const int quantityValue = std::atoi(quantityText.c_str());
+        AppendDebugLog("apply_cb values customer=" + Utf8Text(Theenum0) +
+            " model=" + Utf8Text(Thestring0) +
+            " name=" + Utf8Text(Thestring01) +
+            " drawingNo=" + Utf8Text(Thestring02) +
+            " color=" + Utf8Text(Theenum01) +
+            " material=" + Utf8Text(Theenum02) +
+            " quantity=" + quantityText);
 
-        std::vector<NXOpen::NXObject*> objects1(1);
-        objects1[0] = workPart; 
-        AttributeBuilderPtr attributePropertiesBuilder1(
-            session->AttributeManager()->CreateAttributePropertiesBuilder(workPart, objects1, NXOpen::AttributePropertiesBuilder::OperationTypeNone));
-        CommitStringAttribute(attributePropertiesBuilder1.get(), "客户", Theenum0);
-        CommitStringAttribute(attributePropertiesBuilder1.get(), "机型", Thestring0);
-        CommitStringAttribute(attributePropertiesBuilder1.get(), "名称", Thestring01);
-        CommitStringAttribute(attributePropertiesBuilder1.get(), "图号", Thestring02);
-        CommitStringAttribute(attributePropertiesBuilder1.get(), "颜色", Theenum01);
-        CommitStringAttribute(attributePropertiesBuilder1.get(), "材料", Theenum02);
-        CommitStringAttribute(attributePropertiesBuilder1.get(), "数量", Thestring03);
+        AppendDebugLog("apply_cb write part string attributes begin");
+        SetPartStringAttribute(workPart, "客户", Theenum0);
+        SetPartStringAttribute(workPart, "机型", Thestring0);
+        SetPartStringAttribute(workPart, "名称", Thestring01);
+        SetPartStringAttribute(workPart, "图号", Thestring02);
+        SetPartStringAttribute(workPart, "颜色", Theenum01);
+        SetPartStringAttribute(workPart, "材料", Theenum02);
+        AppendDebugLog("apply_cb write part string attributes ok");
 
-        NXOpen::Unit* unit1(dynamic_cast<NXOpen::Unit*>(workPart->UnitCollection()->FindObject("MilliMeter")));
-        if (unit1 == NULL)
-        {
-            throw std::runtime_error("未找到 MilliMeter 单位。");
-        }
-
-        char ShuLiang1[256];
-        std::snprintf(ShuLiang1, sizeof(ShuLiang1), "数量=%s", quantityText.c_str());
-        std::vector<Expression*> abc = workPart->Expressions()->GetExpressionsOfType(ExpressionCollection::Type::TypeAll, false);
-        int b=0;
-        for (size_t i = 0; i < abc.size(); i++)
-		{
-			if (Utf8Text(abc[i]->Name()) == "数量")
-			{
-                
-                abc[i]->SetFormula(quantityText.c_str());
-                b = 1;
-                break;
-			}
-		}
-
-        if (b==0)
-        {
-            workPart->Expressions()->CreateWithUnits(ShuLiang1, unit1);
-        }
+        AppendDebugLog("apply_cb write quantity attribute/expression begin");
+        WriteQuantityAttributeAndEnsureExpression(workPart, quantityValue);
+        AppendDebugLog("apply_cb write quantity attribute/expression ok");
 
         NXOpen::BodyCollection* Cbody = workPart->Bodies();
         Body* body1;
@@ -1222,9 +1828,15 @@ int Write_Prat_Attr::apply_cb()
 
         if (!Vobjects2.empty())
         {
+            AppendDebugLog("apply_cb write body cailiao begin bodyCount=" + std::to_string(Vobjects2.size()));
             AttributeBuilderPtr attributePropertiesBuilder2(
                 session->AttributeManager()->CreateAttributePropertiesBuilder(workPart, Vobjects2, NXOpen::AttributePropertiesBuilder::OperationTypeNone));
             CommitStringAttribute(attributePropertiesBuilder2.get(), "cailiao", Theenum02);
+            AppendDebugLog("apply_cb write body cailiao ok");
+        }
+        else
+        {
+            AppendDebugLog("apply_cb write body cailiao skipped no bodies");
         }
 
         DialogConfig config = LoadDialogConfig();
@@ -1236,6 +1848,7 @@ int Write_Prat_Attr::apply_cb()
         config.lastManualQuantity = ToggleValue(toggleManualQuantity);
         config.lastQuantity = StringBlockValue(string03);
         WriteDialogConfig(config);
+        AppendDebugLog("apply_cb config saved");
 
 
         //int cc = 0;
@@ -1264,12 +1877,19 @@ int Write_Prat_Attr::apply_cb()
         //    NXOpen::Expression* expression1(dynamic_cast<NXOpen::Expression*>(workPart->Expressions()->FindObject("ZonSuLian")));
         //    workPart->Expressions()->EditExpression(expression1, Thestring03.GetLocaleText());
         //}
-
+        AppendDebugLog("apply_cb ok");
+    }
+    catch(NXOpen::NXException& ex)
+    {
+        errorCode = 1;
+        AppendDebugLog("apply_cb failed " + NxExceptionText(ex));
+        Write_Prat_Attr::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
     catch(exception& ex)
     {
         //---- Enter your exception handling code here -----
         errorCode = 1;
+        AppendDebugLog(std::string("apply_cb failed std::exception message=") + ex.what());
         Write_Prat_Attr::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
     return errorCode;

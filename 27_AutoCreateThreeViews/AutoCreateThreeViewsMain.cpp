@@ -23,6 +23,7 @@
 #include <uf_view.h>
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -591,6 +592,22 @@ std::string FindPartValue(
     return FindValue(values, key, fallback);
 }
 
+bool IsManualFrontDirectionModeText(std::string value)
+{
+    value = TrimText(value);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value == "manualfacex" || value == "manual" || value == "selectedfacex";
+}
+
+bool IsManualPartFrontDirection(
+    const std::map<std::string, std::string>& values,
+    int index)
+{
+    return IsManualFrontDirectionModeText(FindPartValue(values, index, "frontDirectionMode", FindValue(values, "frontDirectionMode")));
+}
+
 std::string DecodeBase64TextOrOriginal(const std::string& text)
 {
     const std::string trimmed = TrimText(text);
@@ -709,6 +726,11 @@ std::filesystem::path ProgressPathFromRequest(const std::filesystem::path& reque
     if (directory.empty())
     {
         directory = CurrentModuleDirectory();
+    }
+    const std::string fileName = requestPath.filename().string();
+    if (fileName.find(".request.part") != std::string::npos)
+    {
+        return directory / "AutoCreateThreeViews.progress";
     }
     return directory / "AutoCreateThreeViews.progress";
 }
@@ -1253,11 +1275,24 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
 
     int progressIndex = 0;
     const int progressTotal = static_cast<int>(drawingParts.size());
-    WriteProgressFile(requestPath, 0, progressTotal, progressTotal == 0 ? "No drawable parts." : "Starting drawing...", progressTotal == 0);
+    bool hasManualFrontDirection = false;
+    for (const SelectedDrawingPart& selected : drawingParts)
+    {
+        if (IsManualPartFrontDirection(values, selected.index))
+        {
+            hasManualFrontDirection = true;
+            break;
+        }
+    }
+    if (!hasManualFrontDirection || progressTotal == 0)
+    {
+        WriteProgressFile(requestPath, 0, progressTotal, progressTotal == 0 ? "No drawable parts." : "Starting drawing...", progressTotal == 0);
+    }
     for (const SelectedDrawingPart& selected : drawingParts)
     {
         ++progressIndex;
         const std::string progressPartName = ProgressPartDisplayName(values, selected.index, selected.prototypePart);
+        const bool manualFrontDirection = IsManualPartFrontDirection(values, selected.index);
         std::ostringstream progressLog;
         progressLog << "AutoCreateThreeViews: drawing progress "
                     << progressIndex << "/" << progressTotal
@@ -1268,14 +1303,29 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
             std::string("Progress: ") + std::to_string(progressIndex) + "/" + std::to_string(progressTotal) +
             ", drawing part");
         std::string progressMessage = "Drawing " + progressPartName;
-        WriteProgressFile(
-            requestPath,
-            progressIndex,
-            progressTotal,
-            progressMessage,
-            false);
+        if (!manualFrontDirection)
+        {
+            WriteProgressFile(
+                requestPath,
+                progressIndex,
+                progressTotal,
+                progressMessage,
+                false);
+        }
 
-        DisplaySelectedOccurrence(selected.occurrence);
+        if (!manualFrontDirection)
+        {
+            DisplaySelectedOccurrence(selected.occurrence);
+        }
+        else
+        {
+            int clearedHighlights = 0;
+            UnhighlightKnownOccurrences(clearedHighlights);
+            UnhighlightDisplayedAssemblyTree(clearedHighlights);
+            g_highlightedOccurrence = NULL_TAG;
+            g_knownHighlightedOccurrences.clear();
+            WriteLauncherLog("AutoCreateThreeViews: manual front direction skips occurrence highlight before selection.");
+        }
         if (!SetDrawingDisplayPart(selected.prototypePart, selected.occurrence))
         {
             AddAutoCreateThreeViewsRunResultLine(u8"失败：无法切换到选中的零件。");

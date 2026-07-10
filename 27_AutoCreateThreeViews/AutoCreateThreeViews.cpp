@@ -827,8 +827,7 @@ std::string LoadFlatPatternNoteFormat()
 {
     static const char* defaultFormat = "{\xE7\xBC\x96\xE5\x8F\xB7=}{\xE6\x9D\x90\xE6\x96\x99} T={\xE5\x8E\x9A\xE5\xBA\xA6} {\xE6\x95\xB0\xE9\x87\x8F}PCS{\xE9\x95\x9C\xE5\x83\x8F}";
     const std::vector<std::filesystem::path> candidates = {
-        CurrentModuleDirectory().parent_path() / "config" / "ZiDonCuTu_note_format.ini",
-        CurrentModuleDirectory() / "ZiDonCuTu_note_format.ini"};
+        std::filesystem::path("D:\\UG智辉钣金插件\\config\\ZiDonCuTu_note_format.ini")};
 
     for (const std::filesystem::path& path : candidates)
     {
@@ -1029,10 +1028,8 @@ std::vector<HoleRuleRecord> BuildFallbackHoleRules()
 
 std::vector<std::filesystem::path> HoleRuleCandidatePaths()
 {
-    const std::filesystem::path moduleDir = CurrentModuleDirectory();
     return {
-        moduleDir.parent_path() / "config" / "KonBiaoZuRules.ini",
-        moduleDir / "AutoCreateThreeViews.hole_rules.ini"};
+        std::filesystem::path("D:\\UG智辉钣金插件\\config\\KonBiaoZuRules.ini")};
 }
 
 const std::vector<HoleRuleRecord>& HoleRules(NXOpen::Session* session)
@@ -1516,6 +1513,38 @@ void WriteLine(NXOpen::Session* session, const std::string& message)
         {
             log << message << '\n';
         }
+    }
+    catch (...)
+    {
+    }
+}
+
+std::filesystem::path ProgressPathFromRequest(const std::filesystem::path& requestPath)
+{
+    std::filesystem::path directory = requestPath.parent_path();
+    if (directory.empty())
+    {
+        directory = CurrentModuleDirectory();
+    }
+    return directory / "AutoCreateThreeViews.progress";
+}
+
+void WriteProgressFile(
+    const std::filesystem::path& requestPath,
+    int current,
+    int total,
+    const std::string& message,
+    bool done)
+{
+    try
+    {
+        const std::filesystem::path progressPath = ProgressPathFromRequest(requestPath);
+        std::filesystem::create_directories(progressPath.parent_path());
+        std::ofstream output(progressPath, std::ios::binary | std::ios::trunc);
+        output << "current=" << current << '\n'
+               << "total=" << total << '\n'
+               << "message=" << message << '\n'
+               << "done=" << (done ? "1" : "0") << '\n';
     }
     catch (...)
     {
@@ -2328,6 +2357,154 @@ bool TryReadPlanarFaceNormal(tag_t faceTag, NXOpen::Vector3d& normal)
     return TryReadPlanarFacePointAndNormal(faceTag, nullptr, normal);
 }
 
+double AskPlanarFaceAreaWithApproximation(NXOpen::Part* part, tag_t faceTag)
+{
+    double area = AskPlanarFaceArea(part, faceTag);
+    if (area > 1.0e-6)
+    {
+        return area;
+    }
+
+    int faceType = 0;
+    double point[3] = {0.0, 0.0, 0.0};
+    double normalData[3] = {0.0, 0.0, 0.0};
+    double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double radius = 0.0;
+    double radData = 0.0;
+    int normDir = 1;
+    if (UF_MODL_ask_face_data(faceTag, &faceType, point, normalData, box, &radius, &radData, &normDir) == 0 &&
+        faceType == 22)
+    {
+        area = ApproximatePlanarFaceArea(normalData, box);
+    }
+    return area;
+}
+
+bool CorrectSelectedPlanarFaceOuterNormal(
+    NXOpen::Part* part,
+    tag_t selectedFaceTag,
+    NXOpen::Vector3d& normal)
+{
+    NXOpen::Point3d selectedPoint(0.0, 0.0, 0.0);
+    NXOpen::Vector3d selectedNormal(0.0, 0.0, 0.0);
+    if (!TryReadPlanarFacePointAndNormal(selectedFaceTag, &selectedPoint, selectedNormal))
+    {
+        WriteLine(nullptr, "AutoCreateThreeViews: manual face normal correction skipped; selected face plane was not readable.");
+        return false;
+    }
+
+    const double selectedArea = AskPlanarFaceAreaWithApproximation(part, selectedFaceTag);
+    if (selectedArea <= 1.0e-6)
+    {
+        WriteLine(nullptr, "AutoCreateThreeViews: manual face normal correction skipped; selected face area was not readable.");
+        return false;
+    }
+
+    tag_t bodyTag = NULL_TAG;
+    if (UF_MODL_ask_face_body(selectedFaceTag, &bodyTag) != 0 || bodyTag == NULL_TAG)
+    {
+        WriteLine(nullptr, "AutoCreateThreeViews: manual face normal correction skipped; selected face body was not readable.");
+        return false;
+    }
+
+    uf_list_p_t faceList = nullptr;
+    if (UF_MODL_ask_body_faces(bodyTag, &faceList) != 0 || faceList == nullptr)
+    {
+        WriteLine(nullptr, "AutoCreateThreeViews: manual face normal correction skipped; body faces were not readable.");
+        return false;
+    }
+
+    const double minimumParallelArea = selectedArea * 0.60;
+    tag_t nearestParallelFaceTag = NULL_TAG;
+    double nearestParallelArea = 0.0;
+    double nearestSignedDistance = 0.0;
+    double nearestDistance = std::numeric_limits<double>::max();
+
+    int faceCount = 0;
+    UF_MODL_ask_list_count(faceList, &faceCount);
+    for (int faceIndex = 0; faceIndex < faceCount; ++faceIndex)
+    {
+        tag_t faceTag = NULL_TAG;
+        if (UF_MODL_ask_list_item(faceList, faceIndex, &faceTag) != 0 ||
+            faceTag == NULL_TAG ||
+            faceTag == selectedFaceTag)
+        {
+            continue;
+        }
+
+        NXOpen::Point3d candidatePoint(0.0, 0.0, 0.0);
+        NXOpen::Vector3d candidateNormal(0.0, 0.0, 0.0);
+        if (!TryReadPlanarFacePointAndNormal(faceTag, &candidatePoint, candidateNormal))
+        {
+            continue;
+        }
+
+        const double candidateArea = AskPlanarFaceAreaWithApproximation(part, faceTag);
+        if (candidateArea + 1.0e-6 < minimumParallelArea)
+        {
+            continue;
+        }
+
+        if (std::abs(DotVector(selectedNormal, candidateNormal)) < 0.995)
+        {
+            continue;
+        }
+
+        const NXOpen::Vector3d pointDelta(
+            candidatePoint.X - selectedPoint.X,
+            candidatePoint.Y - selectedPoint.Y,
+            candidatePoint.Z - selectedPoint.Z);
+        const double signedDistance = DotVector(pointDelta, selectedNormal);
+        const double distance = std::abs(signedDistance);
+        if (distance <= 1.0e-6 || distance >= nearestDistance)
+        {
+            continue;
+        }
+
+        nearestParallelFaceTag = faceTag;
+        nearestParallelArea = candidateArea;
+        nearestSignedDistance = signedDistance;
+        nearestDistance = distance;
+    }
+
+    UF_MODL_delete_list(&faceList);
+
+    if (nearestParallelFaceTag == NULL_TAG)
+    {
+        std::ostringstream line;
+        line << "AutoCreateThreeViews: manual face normal correction found no parallel face, selectedArea="
+             << selectedArea
+             << ", minimumParallelArea="
+             << minimumParallelArea
+             << ".";
+        WriteLine(nullptr, line.str());
+        return false;
+    }
+
+    const bool reversed = nearestSignedDistance > 1.0e-6;
+    if (reversed)
+    {
+        normal.X = -normal.X;
+        normal.Y = -normal.Y;
+        normal.Z = -normal.Z;
+    }
+
+    std::ostringstream line;
+    line << "AutoCreateThreeViews: manual face normal correction selectedArea="
+         << selectedArea
+         << ", nearestParallelFaceTag="
+         << static_cast<unsigned long long>(nearestParallelFaceTag)
+         << ", nearestParallelArea="
+         << nearestParallelArea
+         << ", signedDistanceAlongSelectedNormal="
+         << nearestSignedDistance
+         << ", reversed="
+         << (reversed ? "true" : "false")
+         << ".";
+    WriteLine(nullptr, line.str());
+    return reversed;
+}
+
 bool TryReadPlanarFaceNormalWithNxOpenDirection(
     NXOpen::Part* part,
     NXOpen::Face* face,
@@ -2472,7 +2649,8 @@ bool TryReadStraightEdgeDirectionTowardPoint(
                   (endPointReference.Y - end[1]) * (endPointReference.Y - end[1]) +
                   (endPointReference.Z - end[2]) * (endPointReference.Z - end[2]));
 
-    if (distanceToStart < distanceToEnd)
+    const bool reverseFromEnd = distanceToEnd < distanceToStart;
+    if (reverseFromEnd)
     {
         startToEnd.X = -startToEnd.X;
         startToEnd.Y = -startToEnd.Y;
@@ -3837,7 +4015,7 @@ NXOpen::TaggedObject* SelectSingleSolidObject(
         response = selection->SelectTaggedObject(
             message,
             title,
-            NXOpen::Selection::SelectionScopeWorkPart,
+            NXOpen::Selection::SelectionScopeAnyInAssembly,
             NXOpen::Selection::SelectionActionClearAndEnableSpecific,
             false,
             true,
@@ -3853,6 +4031,13 @@ NXOpen::TaggedObject* SelectSingleSolidObject(
     if (response != NXOpen::Selection::ResponseObjectSelected &&
         response != NXOpen::Selection::ResponseObjectSelectedByName)
     {
+        std::ostringstream line;
+        line << "AutoCreateThreeViews: selection canceled or skipped, title="
+             << title
+             << ", response="
+             << static_cast<int>(response)
+             << ".";
+        WriteLine(nullptr, line.str());
         return nullptr;
     }
 
@@ -3873,9 +4058,10 @@ bool TryComputeFrontDirectionFromSelectedFaceAndX(
         return false;
     }
 
+    WriteLine(nullptr, "AutoCreateThreeViews: manual front direction selection started.");
     NXOpen::TaggedObject* selectedFaceObject = SelectSingleSolidObject(
-        "Select front base planar face",
-        "AutoCreateThreeViews - Select Face",
+        u8"请选择主视图基面（平面）",
+        u8"自动创建三视图 - 选择基面",
         UF_UI_SEL_FEATURE_ANY_FACE);
     NXOpen::Face* selectedFace = dynamic_cast<NXOpen::Face*>(selectedFaceObject);
     if (selectedFace == nullptr)
@@ -3883,11 +4069,18 @@ bool TryComputeFrontDirectionFromSelectedFaceAndX(
         WriteLine(nullptr, "AutoCreateThreeViews: manual front direction canceled or no planar face selected.");
         return false;
     }
+    {
+        std::ostringstream line;
+        line << "AutoCreateThreeViews: manual front direction face selected, tag="
+             << static_cast<unsigned long long>(selectedFace->Tag())
+             << ".";
+        WriteLine(nullptr, line.str());
+    }
 
     NXOpen::Point3d edgeCursor(0.0, 0.0, 0.0);
     NXOpen::TaggedObject* selectedEdgeObject = SelectSingleSolidObject(
-        "Select straight edge as front X direction",
-        "AutoCreateThreeViews - Select X Edge",
+        u8"请选择主视图 X 方向直边",
+        u8"自动创建三视图 - 选择 X 向直边",
         UF_UI_SEL_FEATURE_ANY_EDGE,
         &edgeCursor);
     NXOpen::Edge* selectedEdge = dynamic_cast<NXOpen::Edge*>(selectedEdgeObject);
@@ -3904,6 +4097,7 @@ bool TryComputeFrontDirectionFromSelectedFaceAndX(
         WriteLine(nullptr, "AutoCreateThreeViews: selected front face is not planar.");
         return false;
     }
+    CorrectSelectedPlanarFaceOuterNormal(part, selectedFace->Tag(), normal);
 
     NXOpen::Vector3d xDirection(0.0, 0.0, 0.0);
     double edgeLength = 0.0;
@@ -3930,10 +4124,7 @@ bool TryComputeFrontDirectionFromSelectedFaceAndX(
     }
 
     const NXOpen::Vector3d selectedOuterNormal = normal;
-    const NXOpen::Vector3d drawingViewNormal = NormalizeVector(NXOpen::Vector3d(
-        -selectedOuterNormal.X,
-        -selectedOuterNormal.Y,
-        -selectedOuterNormal.Z));
+    const NXOpen::Vector3d drawingViewNormal = selectedOuterNormal;
 
     result.normal = drawingViewNormal;
     result.xDirection = xDirection;
@@ -3961,6 +4152,8 @@ bool TryComputeFrontDirectionFromSelectedFaceAndX(
          << edgeCursorDistanceToStart
          << ", edgeCursorDistToEnd="
          << edgeCursorDistanceToEnd
+         << ", xDirectionFromPickedEnd="
+         << (edgeCursorDistanceToEnd < edgeCursorDistanceToStart ? "end-to-start" : "start-to-end")
          << ", faceTag="
          << static_cast<unsigned long long>(result.faceTag)
          << ", edgeTag="
@@ -17213,8 +17406,36 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         WriteLine(session, "AutoCreateThreeViews: execute request work part=" + partLabel + ".");
         const ModelBounds bounds = AskModelBounds(workPart);
         const std::string frontDirectionMode = NormalizeFrontDirectionMode(request.frontDirectionMode);
+        const bool manualFrontDirection = frontDirectionMode == "manualFaceX";
+        WriteLine(
+            session,
+            std::string("AutoCreateThreeViews: request front direction raw=") +
+                request.frontDirectionMode +
+                ", normalized=" +
+                frontDirectionMode +
+                ", assemblyDrawing=" +
+                (request.assemblyDrawing ? "true" : "false") +
+                ".");
         AutoViewDirection frontDirection;
-        if (!request.assemblyDrawing)
+        if (manualFrontDirection)
+        {
+            WriteLine(session, "AutoCreateThreeViews: manual front direction mode active; switch to modeling before selection.");
+            try
+            {
+                session->ApplicationSwitchImmediate("UG_APP_MODELING");
+                UF_DISP_make_display_up_to_date();
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                WriteLine(session, std::string("AutoCreateThreeViews: switch to modeling before manual selection failed, NXException: ") + ex.Message() + ".");
+            }
+            catch (...)
+            {
+                WriteLine(session, "AutoCreateThreeViews: switch to modeling before manual selection failed.");
+            }
+            frontDirection = ComputeFrontDirection(workPart, request);
+        }
+        else if (!request.assemblyDrawing)
         {
             frontDirection = ComputeFrontDirection(workPart, request);
         }
@@ -17229,12 +17450,17 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                 WriteLine(session, "AutoCreateThreeViews: assembly leaf front direction not found; fallback to Top model view as front view.");
             }
         }
-        if (!frontDirection.valid && !request.assemblyDrawing)
+        if (!frontDirection.valid && (!request.assemblyDrawing || manualFrontDirection))
         {
             const std::string failureMessage = FrontDirectionFailureMessage(frontDirectionMode);
             WriteLine(session, "AutoCreateThreeViews: front view not created; " + failureMessage);
             AddAutoCreateThreeViewsRunResultLine(std::string(u8"失败：") + partLabel + u8"，" + failureMessage);
             return 1;
+        }
+
+        if (manualFrontDirection)
+        {
+            WriteProgressFile(requestPath, 1, 1, "Drawing " + partLabel, false);
         }
 
         NXOpen::Drawings::DraftingDrawingSheet* sheet = CreateDrawingSheet(session, workPart, request, 1.0);
@@ -17277,7 +17503,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         const double temporarySheetScaleDenominator = 100.0;
         ApplyDrawingSheetScale(session, workPart, sheet, temporarySheetScaleDenominator);
         const double viewScaleDenominator = temporarySheetScaleDenominator;
-        if (request.assemblyDrawing || frontDirectionMode == "overallBoxMaxArea")
+        if ((request.assemblyDrawing && !manualFrontDirection) || frontDirectionMode == "overallBoxMaxArea")
         {
             PreferOverallBoxDirectionWithMostCurves(session, workPart, frontDirection, viewScaleDenominator);
         }

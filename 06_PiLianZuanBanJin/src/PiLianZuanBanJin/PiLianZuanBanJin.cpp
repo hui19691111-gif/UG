@@ -2580,32 +2580,7 @@ namespace
 
     void AppendMarkerLineDebugLog(const std::string& text)
     {
-        const std::string path = "D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\logs\\PiLianZuanBanJin_marker_line.log";
-        CreateDirectoryW(L"D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\logs", NULL);
-        std::wstring widePath = PathTextToWide(path);
-        FILE* file = NULL;
-        if (widePath.empty() || _wfopen_s(&file, widePath.c_str(), L"ab") != 0 || file == NULL)
-        {
-            return;
-        }
-
-        SYSTEMTIME time = {};
-        GetLocalTime(&time);
-        char prefix[64] = { 0 };
-        sprintf_s(prefix,
-            "[%04d-%02d-%02d %02d:%02d:%02d.%03d] ",
-            time.wYear,
-            time.wMonth,
-            time.wDay,
-            time.wHour,
-            time.wMinute,
-            time.wSecond,
-            time.wMilliseconds);
-
-        fwrite(prefix, 1, strlen(prefix), file);
-        fwrite(text.c_str(), 1, text.size(), file);
-        fwrite("\r\n", 1, 2, file);
-        fclose(file);
+        (void)text;
     }
 
     std::string ModuleDirectory()
@@ -2658,7 +2633,7 @@ namespace
 
     std::string FindRulesIniPath()
     {
-        std::string path = std::string("D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\config\\") + PiLianRulesIniFileName;
+        std::string path = std::string(u8"D:\\UG智辉钣金插件\\config\\") + PiLianRulesIniFileName;
         return FileExists(path) ? path : std::string();
     }
 
@@ -6590,6 +6565,10 @@ namespace
         }
 
         std::map<std::string, double> variables;
+        variables[u8"扣除"] = deduction;
+        variables[u8"角度"] = angleDeg;
+        variables[u8"内R"] = innerRadius;
+        variables[u8"板厚"] = thickness;
         variables[u8"鎵ｉ櫎"] = deduction;
         variables[u8"瑙掑害"] = angleDeg;
         variables[u8"鍐匯"] = innerRadius;
@@ -6689,7 +6668,7 @@ namespace
         }
 
         std::string text = FormatDouble(flatCheck.flatSizeX, 1) + "*" + FormatDouble(flatCheck.flatSizeY, 1);
-        body->SetUserAttribute(u8"鐏炴洖绱戠亸鍝勵嚟", -1, text.c_str(), Update::OptionNow);
+        body->SetUserAttribute(u8"体展开尺寸", -1, text.c_str(), Update::OptionNow);
         return true;
     }
 
@@ -6906,7 +6885,7 @@ namespace
         {
             return path;
         }
-        return std::string("D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\config\\") + PiLianRulesIniFileName;
+        return std::string(u8"D:\\UG智辉钣金插件\\config\\") + PiLianRulesIniFileName;
     }
 
     bool SaveRuleConfigToJson(const RuleConfig& config, std::string* pathOut, std::string* error)
@@ -6914,22 +6893,22 @@ namespace
         std::string path = RulesJsonSavePath();
         std::ostringstream ini;
         ini << "\xEF\xBB\xBF";
-        ini << u8"# 閺呴缚绶ｉ柦锝夊櫨閹靛綊鍣烘潪顒勬寴闁叉垶濮屽顖濐潐閸掓瑨銆僜n";
-        ini << u8"# UG 閸愬懐鐤嗙悰銊︾壐娣囨繂鐡ㄩ惃鍕缂佸棜顫夐崚娆嶁偓淇搉\n";
-        ini << u8"[婢堆冩妇瀵冨灲鐎规瓥\n";
-        ini << u8"娴ｈ法鏁ょ紒婵嗩嚠閸愬尟=" << RuleBoolDisplay(config.useAbsoluteLargeArc) << "\n";
-        ini << u8"闁哄牃鍋撻悘蹇撶箰瀹曟劕顕?" << NumberText(config.absoluteLargeArcRadius) << "\n";
-        ini << u8"濞达綀娉曢弫顥告慨锝嗘煥鐢倖鎯?" << RuleBoolDisplay(config.useRatioLargeArc) << "\n";
-        ini << u8"R婵絾鏌ㄧ敮銈嗘償閿曞倹顫岄柛?" << NumberText(config.ratioLargeArc) << "\n\n";
-        ini << u8"[鐟欏嫬鍨痌\n";
+        ini << u8"# 智辉钣金批量转钣金折弯规则配置\n";
+        ini << u8"# 由 UG 插件规则表保存，请优先通过规则表界面维护。\n";
+        ini << u8"[多刀折圆判断]\n";
+        ini << u8"启用绝对半径=" << RuleBoolDisplay(config.useAbsoluteLargeArc) << "\n";
+        ini << u8"绝对半径阈值=" << NumberText(config.absoluteLargeArcRadius) << "\n";
+        ini << u8"启用R板厚比例=" << RuleBoolDisplay(config.useRatioLargeArc) << "\n";
+        ini << u8"R板厚比例阈值=" << NumberText(config.ratioLargeArc) << "\n\n";
+        ini << u8"[规则]\n";
         for (size_t i = 0; i < config.rules.size(); ++i)
         {
             const BendRule& rule = config.rules[i];
             ini << "Rule" << (i + 1) << "=Enabled" << RuleBoolDisplay(rule.enabled);
-            ini << u8";闁告艾绉惰ⅷ=" << rule.name;
-            ini << u8";閺夋劖鏋?" << rule.material;
-            ini << u8";闁哄倽顫夌涵?" << RuleMethodDisplay(rule.method);
-            ini << u8";闁?" << NumberText(rule.value);
+            ini << u8";名称=" << rule.name;
+            ini << u8";材料=" << rule.material;
+            ini << u8";方式=" << RuleMethodDisplay(rule.method);
+            ini << u8";值=" << NumberText(rule.value);
             AppendIniOptionalNumber(ini, "AngleMin", rule.hasAngleMin, rule.angleMin);
             AppendIniOptionalNumber(ini, "AngleMax", rule.hasAngleMax, rule.angleMax);
             AppendIniOptionalNumber(ini, "ThicknessMin", rule.hasThicknessMin, rule.thicknessMin);
@@ -6937,8 +6916,8 @@ namespace
             AppendIniOptionalNumber(ini, "RadiusMin", rule.hasRadiusMin, rule.radiusMin);
             AppendIniOptionalNumber(ini, "RadiusMax", rule.hasRadiusMax, rule.radiusMax);
             AppendIniOptionalNumber(ini, "RadiusOverride", rule.hasRadiusOverride, rule.radiusOverride);
-            ini << u8";閸忔粌绨?" << RuleBoolDisplay(rule.fallback);
-            ini << u8";婢跺洦鏁?" << rule.note << "\n";
+            ini << u8";兜底=" << RuleBoolDisplay(rule.fallback);
+            ini << u8";备注=" << rule.note << "\n";
         }
 
         std::string text = ini.str();
@@ -7156,7 +7135,7 @@ namespace
     std::string PromptCoefficientCsvPath(bool save)
     {
         wchar_t fileName[MAX_PATH] = L"PiLianZuanBanJin_bend_factor_rules.csv";
-        wchar_t initialDir[MAX_PATH] = L"D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\config";
+        wchar_t initialDir[MAX_PATH] = L"D:\\UG智辉钣金插件\\config";
         OPENFILENAMEW ofn;
         ZeroMemory(&ofn, sizeof(ofn));
         ofn.lStructSize = sizeof(ofn);
@@ -7519,14 +7498,14 @@ namespace
     std::string NormalizeCoefficientCsvHeader(const std::string& text)
     {
         std::string value = TrimCopy(NormalizeUtf8Message(text));
-        if (value == u8"鏉愭枡") return "Material";
-        if (value == u8"鍘氬害" || value == u8"鏉垮帤") return "Thickness";
-        if (value == u8"鎵ｉ櫎1") return "Q1";
-        if (value == u8"鎵ｉ櫎2") return "Q2";
-        if (value == u8"鎵ｉ櫎3") return "Q3";
-        if (value == u8"K鍥犲瓙1") return "K1";
-        if (value == u8"K鍥犲瓙2") return "K2";
-        if (value == u8"K鍥犲瓙3") return "K3";
+        if (value == u8"材料") return "Material";
+        if (value == u8"厚度") return "Thickness";
+        if (value == u8"扣除1") return "Q1";
+        if (value == u8"扣除2") return "Q2";
+        if (value == u8"扣除3") return "Q3";
+        if (value == u8"K因子1") return "K1";
+        if (value == u8"K因子2") return "K2";
+        if (value == u8"K因子3") return "K3";
         if (value == "A1" || value == "A2" || value == "A3") return value;
         return value;
     }
@@ -7560,7 +7539,7 @@ namespace
     {
         std::ostringstream file;
         file << "\xEF\xBB\xBF";
-        file << u8"閺夋劖鏋?閸樻艾瀹?閹碉綁娅?,閹碉綁娅?,閹碉綁娅?,K閸ョ姴鐡?,K閸ョ姴鐡?,K閸ョ姴鐡?,A1,A2,A3\n";
+        file << u8"材料,厚度,扣除1,扣除2,扣除3,K因子1,K因子2,K因子3,A1,A2,A3\n";
         for (size_t i = 0; i < rows.size(); ++i)
         {
             const CoefficientRow& row = rows[i];
@@ -7627,7 +7606,7 @@ namespace
 
             std::vector<std::string> cells = SplitCsvLine(line);
             CoefficientRow row;
-            row.material = u8"閺夋劘宸?<閺堫亝瀵氱€?";
+            row.material = u8"材质 <未指定>";
             bool hasThickness = false;
             for (size_t i = 0; i < headers.size() && i < cells.size(); ++i)
             {
@@ -7635,7 +7614,7 @@ namespace
                 std::string value = TrimCopy(NormalizeUtf8Message(cells[i]));
                 if (key == "Material")
                 {
-                    row.material = value.empty() ? std::string(u8"閺夋劘宸?<閺堫亝瀵氱€?") : value;
+                    row.material = value.empty() ? std::string(u8"材质 <未指定>") : value;
                 }
                 else if (key == "Thickness")
                 {
@@ -8063,12 +8042,12 @@ namespace
 
         std::string CoefficientDisplayName(const std::string& code) const
         {
-            if (code == "Q1") return u8"閹碉綁娅?";
-            if (code == "Q2") return u8"閹碉綁娅?";
-            if (code == "Q3") return u8"閹碉綁娅?";
-            if (code == "K1") return u8"K閸ョ姴鐡?";
-            if (code == "K2") return u8"K閸ョ姴鐡?";
-            if (code == "K3") return u8"K閸ョ姴鐡?";
+            if (code == "Q1") return u8"扣除1";
+            if (code == "Q2") return u8"扣除2";
+            if (code == "Q3") return u8"扣除3";
+            if (code == "K1") return u8"K因子1";
+            if (code == "K2") return u8"K因子2";
+            if (code == "K3") return u8"K因子3";
             if (code == "A1") return "A1";
             if (code == "A2") return "A2";
             if (code == "A3") return "A3";
@@ -8077,13 +8056,12 @@ namespace
 
         std::string CoefficientCodeFromDisplay(const std::string& display) const
         {
-            if (display == u8"閹碉綁娅?" || display == u8"闁圭缍佸▍?") return "Q1";
-            if (display == u8"閹碉綁娅?" || display == u8"闁圭缍佸▍?") return "Q2";
-            if (display == u8"閹碉綁娅?" || display == u8"闁圭缍佸▍?") return "Q3";
-            if (display == u8"K閸ョ姴鐡?" || display == u8"K闁搞儳濮撮悺?") return "K1";
-            if (display == u8"K閸ョ姴鐡?" || display == u8"K闁搞儳濮撮悺?") return "K2";
-            if (display == u8"K閸ョ姴鐡?" || display == u8"K闁搞儳濮撮悺?") return "K3";
-            if (display == "A1" || display == "A2" || display == "A3") return display;
+            if (display == u8"扣除1") return "Q1";
+            if (display == u8"扣除2") return "Q2";
+            if (display == u8"扣除3") return "Q3";
+            if (display == u8"K因子1") return "K1";
+            if (display == u8"K因子2") return "K2";
+            if (display == u8"K因子3") return "K3";
             return display;
         }
 
@@ -8120,7 +8098,7 @@ namespace
 
         std::string NormalizeMaterialPage(const std::string& material) const
         {
-            return TrimCopy(material).empty() ? std::string(u8"閺夋劘宸?<閺堫亝瀵氱€?") : TrimCopy(material);
+            return TrimCopy(material).empty() ? std::string(u8"材质 <未指定>") : TrimCopy(material);
         }
 
         void SortRows()
@@ -8253,7 +8231,7 @@ namespace
             std::string value = TrimCopy(text);
             if (columnID == ColumnMaterial)
             {
-                row.material = value.empty() ? std::string(u8"閺夋劘宸?<閺堫亝瀵氱€?") : value;
+                row.material = value.empty() ? std::string(u8"材质 <未指定>") : value;
                 selectedMaterialPage_ = NormalizeMaterialPage(row.material);
                 return true;
             }
@@ -11083,22 +11061,22 @@ namespace
         }
 
         std::ostringstream builder;
-        builder << u8"C++閼奉亜濮╂潪顒勬寴闁叉垶澧界悰灞界暚閹存€絥";
-        builder << u8"閹存劕濮涙潪顒勬寴闁? " << convertCount << u8" 娑擃亜鐤勬担鎻琻";
-        builder << u8"閹存劕濮涚仦鏇炵磻: " << flatCount << u8" 娑擃亜鐤勬担鎻琻";
-        builder << u8"婢惰精瑙?鐠哄疇绻? " << failCount << u8" 娑擃亜鐤勬担鎻琻\n";
+        builder << u8"C++批量转钣金处理结果\n";
+        builder << u8"转钣金成功: " << convertCount << u8" 个\n";
+        builder << u8"展开成功: " << flatCount << u8" 个\n";
+        builder << u8"失败/异常: " << failCount << u8" 个\n";
         if (!results.empty())
         {
-            builder << u8"[閺勫海绮廬\n";
+            builder << u8"[明细]\n";
             for (size_t i = 0; i < results.size(); ++i)
             {
-                builder << u8"- 閸ユ儳鐪?" << results[i].layer << " / " << results[i].name
+                builder << u8"- 图层 " << results[i].layer << " / " << results[i].name
                         << "  convert=" << (results[i].convertOk ? "ok" : "not-run")
-                        << u8"  璋冨洜瀛愰潰=" << results[i].neutralFaceCount
-                        << u8"  灞曞紑=" << (results[i].flatOk ? u8"鎴愬姛" : u8"澶辫触");
+                        << u8"  中性面=" << results[i].neutralFaceCount
+                        << u8"  展开=" << (results[i].flatOk ? u8"成功" : u8"失败");
                 if (!results[i].error.empty())
                 {
-                    builder << u8"  鍘熷洜=" << results[i].error;
+                    builder << u8"  原因=" << results[i].error;
                 }
                 builder << "\n";
             }
@@ -11888,11 +11866,11 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                         result.convertOk = false;
                         result.flatOk = false;
                         std::ostringstream error;
-                        error << u8"鐏炴洖绱戠€圭偘缍嬮崢姘閺嶏繝鐛欐径杈Е";
+                        error << u8"展开厚度校验失败";
                         if (flatCheck.expectedThickness > 0.0 || flatCheck.measuredThickness > 0.0)
                         {
-                            error << u8"閿涘本婀￠張?" << FormatDouble(flatCheck.expectedThickness, 6)
-                                  << u8"閿涘苯鐤勫ù?" << FormatDouble(flatCheck.measuredThickness, 6);
+                            error << u8"，期望厚度=" << FormatDouble(flatCheck.expectedThickness, 6)
+                                  << u8"，实际厚度=" << FormatDouble(flatCheck.measuredThickness, 6);
                         }
                         result.error = error.str();
                     }

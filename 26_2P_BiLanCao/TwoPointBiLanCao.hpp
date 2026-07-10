@@ -96,6 +96,13 @@ private:
     NXOpen::Body* FindBodyByEdgeEndpoint(const NXOpen::Point3d& point, NXOpen::Edge** matchedEdge) const;
     bool GetPlanarFacePlane(NXOpen::Face* face, NXOpen::Point3d& origin, NXOpen::Vector3d& normal) const;
     double MeasureFaceArea(NXOpen::Face* face) const;
+    bool FindSheetThicknessByReferenceFace(NXOpen::Body* body,
+                                           NXOpen::Face* referenceFace,
+                                           NXOpen::Face** largestFace,
+                                           NXOpen::Face** oppositeFace,
+                                           double& largestArea,
+                                           double& oppositeArea,
+                                           double& thickness) const;
     bool FindSheetThicknessByLargestParallelFaces(NXOpen::Body* body,
                                                   NXOpen::Face** largestFace,
                                                   NXOpen::Face** oppositeFace,

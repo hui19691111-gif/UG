@@ -180,12 +180,16 @@ std::wstring PluginDirectory()
 
 std::wstring BodyNoteConfigFilePath()
 {
-	return PluginDirectory() + L"\\ZiDonCuTu_note_format.ini";
+	CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+	CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
+	return L"D:\\UG智辉钣金插件\\config\\ZiDonCuTu_note_format.ini";
 }
 
 std::wstring DialogStateConfigFilePath()
 {
-	return PluginDirectory() + L"\\ZiDonCuTu_dialog_state.ini";
+	CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+	CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
+	return L"D:\\UG智辉钣金插件\\config\\ZiDonCuTu_dialog_state.ini";
 }
 
 void EnsureDefaultBodyNoteConfigFile(const std::wstring& path)
@@ -259,6 +263,7 @@ static std::vector<FlatPatternDraftingInfo> g_flatPatternDraftingInfos;
 static bool g_sheetIsoAlreadyCreated = false;
 static bool g_runLegacyAabbAnnotationOnly = false;
 static bool g_runLegacyAaaaAnnotationOnly = false;
+static bool g_skipLegacyDraftNoteDuringFinalLayout = false;
 static ZiDonCuTu* g_activeZiDonCuTuDialog = NULL;
 static NXOpen::Body* g_manualPendingBody = NULL;
 static bool g_manualActionCompleted = false;
@@ -2987,12 +2992,7 @@ static std::string ReadBodyTotalQuantityText(NXOpen::Part* part, NXOpen::Body* b
 		}
 	}
 
-	std::string quantity = ReadAttributeText(body, "sulian");
-	if (quantity.empty())
-	{
-		quantity = ReadAttributeText(body, "数量");
-	}
-	return quantity;
+	return "";
 }
 static std::string ReadBodyTotalQuantityReferenceText(NXOpen::Part* part, NXOpen::Body* body)
 {
@@ -3014,15 +3014,6 @@ static std::string ReadBodyTotalQuantityReferenceText(NXOpen::Part* part, NXOpen
 		}
 	}
 
-	std::string quantityReference = ObjectAttributeReferenceText(body, "sulian");
-	if (quantityReference.empty())
-	{
-		quantityReference = ObjectAttributeReferenceText(body, "\xE6\x95\xB0\xE9\x87\x8F");
-	}
-	if (!quantityReference.empty())
-	{
-		return quantityReference;
-	}
 	return ReadBodyTotalQuantityText(part, body);
 }
 
@@ -3151,15 +3142,6 @@ static std::string ReadBodyTotalQuantityDraftText(
 		}
 	}
 
-	std::string quantityReference = DraftAttributeReferenceText(textBlock, body, "sulian");
-	if (quantityReference.empty())
-	{
-		quantityReference = DraftAttributeReferenceText(textBlock, body, "\xE6\x95\xB0\xE9\x87\x8F");
-	}
-	if (!quantityReference.empty())
-	{
-		return quantityReference;
-	}
 	return ReadBodyTotalQuantityText(part, body);
 }
 
@@ -3248,7 +3230,7 @@ static std::string BuildBodyDraftNoteText(
 	ReplaceAllText(line, "{\xE7\xBC\x96\xE5\x8F\xB7}", number);
 	ReplaceAllText(line, "{\xE6\x9D\x90\xE6\x96\x99}", material);
 	ReplaceAllText(line, "{\xE5\x8E\x9A\xE5\xBA\xA6}", thickness);
-	ReplaceAllText(line, "{\xE6\x95\xB0\xE9\x87\x8F}", quantity.empty() ? "1" : quantity);
+	ReplaceAllText(line, "{\xE6\x95\xB0\xE9\x87\x8F}", quantity);
 	ReplaceAllText(line, "{\xE9\x95\x9C\xE5\x83\x8F}", mirror);
 	return line;
 }
@@ -3371,12 +3353,6 @@ static bool ReadBodyTotalQuantityDraftNxString(
 		catch (...)
 		{
 		}
-	}
-
-	if (DraftAttributeReferenceNxString(textBlock, body, "sulian", value) ||
-		DraftAttributeReferenceNxString(textBlock, body, "\xE6\x95\xB0\xE9\x87\x8F", value))
-	{
-		return true;
 	}
 
 	const std::string quantity = ReadBodyTotalQuantityText(part, body);
@@ -3504,7 +3480,7 @@ static std::vector<NXOpen::NXString> BuildBodyDraftNoteLines(
 	NXOpen::NXString fileName("");
 	NXOpen::NXString material("");
 	NXOpen::NXString thickness("");
-	NXOpen::NXString quantity("1");
+	NXOpen::NXString quantity("");
 	NXOpen::NXString mirror("");
 	NXOpen::NXString number("");
 
@@ -3675,20 +3651,6 @@ static bool FindQuantityReference(NXOpen::Part* part, NXOpen::Body* body, DraftN
 		{
 		}
 	}
-	if (HasAnyUserAttribute(body, "sulian"))
-	{
-		insert.kind = DraftNoteReferenceInsert::KindAttribute;
-		insert.owner = body;
-		insert.title = "sulian";
-		return true;
-	}
-	if (HasAnyUserAttribute(body, "\xE6\x95\xB0\xE9\x87\x8F"))
-	{
-		insert.kind = DraftNoteReferenceInsert::KindAttribute;
-		insert.owner = body;
-		insert.title = "\xE6\x95\xB0\xE9\x87\x8F";
-		return true;
-	}
 	return false;
 }
 
@@ -3763,10 +3725,6 @@ static bool PrepareDraftNoteReferenceForToken(
 			return true;
 		}
 		fallbackText = ReadBodyTotalQuantityText(part, body);
-		if (fallbackText.empty())
-		{
-			fallbackText = "1";
-		}
 		return false;
 	}
 
@@ -4799,7 +4757,10 @@ struct AssemblyDraftPickerState
 {
 	const std::vector<AssemblyDraftCandidate>* candidates;
 	std::vector<int> selectedIndices;
+	std::vector<size_t> visibleCandidateIndices;
+	std::vector<bool> checkedCandidates;
 	HWND listView;
+	HWND noDrawingFilterCheck;
 	std::vector<HWND> childControls;
 	HFONT dialogFont;
 	HBRUSH backgroundBrush;
@@ -4906,8 +4867,23 @@ static void SetListViewText(HWND listView, int row, int column, const std::wstri
 	ListView_SetItem(listView, &item);
 }
 
-static void PopulateAssemblyDraftListView(HWND listView, const std::vector<AssemblyDraftCandidate>& candidates)
+static void PopulateAssemblyDraftListView(AssemblyDraftPickerState* state)
 {
+	if (state == NULL || state->listView == NULL || state->candidates == NULL)
+	{
+		return;
+	}
+
+	HWND listView = state->listView;
+	const std::vector<AssemblyDraftCandidate>& candidates = *state->candidates;
+	ListView_DeleteAllItems(listView);
+	state->visibleCandidateIndices.clear();
+
+	if (Header_GetItemCount(ListView_GetHeader(listView)) > 0)
+	{
+		goto fillRows;
+	}
+
 	AddListViewColumn(listView, 0, L"选择", 48);
 	AddListViewColumn(listView, 1, L"序号", 56);
 	AddListViewColumn(listView, 2, L"部件名", 210);
@@ -4916,22 +4892,71 @@ static void PopulateAssemblyDraftListView(HWND listView, const std::vector<Assem
 	AddListViewColumn(listView, 5, L"类别", 70);
 	AddListViewColumn(listView, 6, L"工程图", 70);
 
+fillRows:
 	for (size_t i = 0; i < candidates.size(); ++i)
 	{
+		if (state->noDrawingFilterCheck != NULL &&
+			SendMessageW(state->noDrawingFilterCheck, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+			candidates[i].drawingSheetCount > 0)
+		{
+			continue;
+		}
+
+		const int row = static_cast<int>(state->visibleCandidateIndices.size());
+		state->visibleCandidateIndices.push_back(i);
+
 		LVITEMW item = {};
-		item.mask = LVIF_TEXT;
-		item.iItem = static_cast<int>(i);
+		item.mask = LVIF_TEXT | LVIF_PARAM;
+		item.iItem = row;
 		item.iSubItem = 0;
 		item.pszText = const_cast<wchar_t*>(L"");
+		item.lParam = static_cast<LPARAM>(i);
 		ListView_InsertItem(listView, &item);
-		ListView_SetCheckState(listView, static_cast<int>(i), TRUE);
+		const bool checked = i < state->checkedCandidates.size() ? state->checkedCandidates[i] : false;
+		ListView_SetCheckState(listView, row, checked ? TRUE : FALSE);
 
-		SetListViewText(listView, static_cast<int>(i), 1, std::to_wstring(i + 1));
-		SetListViewText(listView, static_cast<int>(i), 2, Utf8ToWideText(candidates[i].partName));
-		SetListViewText(listView, static_cast<int>(i), 3, Utf8ToWideText(candidates[i].material));
-		SetListViewText(listView, static_cast<int>(i), 4, Utf8ToWideText(candidates[i].quantity));
-		SetListViewText(listView, static_cast<int>(i), 5, Utf8ToWideText(candidates[i].category));
-		SetListViewText(listView, static_cast<int>(i), 6, std::to_wstring(candidates[i].drawingSheetCount));
+		SetListViewText(listView, row, 1, std::to_wstring(i + 1));
+		SetListViewText(listView, row, 2, Utf8ToWideText(candidates[i].partName));
+		SetListViewText(listView, row, 3, Utf8ToWideText(candidates[i].material));
+		SetListViewText(listView, row, 4, Utf8ToWideText(candidates[i].quantity));
+		SetListViewText(listView, row, 5, Utf8ToWideText(candidates[i].category));
+		SetListViewText(listView, row, 6, std::to_wstring(candidates[i].drawingSheetCount));
+	}
+}
+
+static int AssemblyDraftListCandidateIndex(HWND listView, int row)
+{
+	if (listView == NULL || row < 0)
+	{
+		return -1;
+	}
+
+	LVITEMW item = {};
+	item.mask = LVIF_PARAM;
+	item.iItem = row;
+	if (!ListView_GetItem(listView, &item))
+	{
+		return -1;
+	}
+
+	return static_cast<int>(item.lParam);
+}
+
+static void SyncAssemblyDraftVisibleChecksToModel(AssemblyDraftPickerState* state)
+{
+	if (state == NULL || state->listView == NULL)
+	{
+		return;
+	}
+
+	const int count = ListView_GetItemCount(state->listView);
+	for (int row = 0; row < count; ++row)
+	{
+		const int candidateIndex = AssemblyDraftListCandidateIndex(state->listView, row);
+		if (candidateIndex >= 0 && static_cast<size_t>(candidateIndex) < state->checkedCandidates.size())
+		{
+			state->checkedCandidates[static_cast<size_t>(candidateIndex)] = ListView_GetCheckState(state->listView, row) ? true : false;
+		}
 	}
 }
 
@@ -4940,6 +4965,7 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 	const int kIdList = 1001;
 	const int kIdSelectAll = 1002;
 	const int kIdClearAll = 1003;
+	const int kIdNoDrawingFilter = 1004;
 	const int kIdOk = IDOK;
 	const int kIdCancel = IDCANCEL;
 
@@ -4964,15 +4990,20 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 
 		HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
 		AddPickerControl(state, CreateWindowW(L"STATIC", L"选择要自动出图的叶子部件：", WS_CHILD | WS_VISIBLE, 14, 12, 300, 22, hwnd, NULL, instance, NULL));
+		if (state != NULL)
+		{
+			state->noDrawingFilterCheck = CreateWindowW(L"BUTTON", L"无工程图", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 590, 12, 96, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdNoDrawingFilter)), instance, NULL);
+			AddPickerControl(state, state->noDrawingFilterCheck);
+		}
 		state->listView = CreateWindowExW(
 			WS_EX_CLIENTEDGE,
 			WC_LISTVIEWW,
 			L"",
 			WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
 			14,
-			40,
+			44,
 			674,
-			312,
+			308,
 			hwnd,
 			reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdList)),
 			instance,
@@ -4981,7 +5012,7 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 		ApplyNxLikeListViewStyle(state->listView);
 		if (state->candidates != NULL)
 		{
-			PopulateAssemblyDraftListView(state->listView, *state->candidates);
+			PopulateAssemblyDraftListView(state);
 		}
 		AddPickerControl(state, CreateWindowW(L"BUTTON", L"全选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 14, 366, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSelectAll)), instance, NULL));
 		AddPickerControl(state, CreateWindowW(L"BUTTON", L"全不选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 96, 366, 84, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClearAll)), instance, NULL));
@@ -5006,6 +5037,12 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 		{
 			break;
 		}
+		if (commandId == kIdNoDrawingFilter)
+		{
+			SyncAssemblyDraftVisibleChecksToModel(state);
+			PopulateAssemblyDraftListView(state);
+			return 0;
+		}
 		if (commandId == kIdSelectAll || commandId == kIdClearAll)
 		{
 			const BOOL checked = commandId == kIdSelectAll ? TRUE : FALSE;
@@ -5013,18 +5050,23 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 			for (int i = 0; i < count; ++i)
 			{
 				ListView_SetCheckState(state->listView, i, checked);
+				const int candidateIndex = AssemblyDraftListCandidateIndex(state->listView, i);
+				if (candidateIndex >= 0 && static_cast<size_t>(candidateIndex) < state->checkedCandidates.size())
+				{
+					state->checkedCandidates[static_cast<size_t>(candidateIndex)] = checked ? true : false;
+				}
 			}
 			return 0;
 		}
 		if (commandId == kIdOk)
 		{
+			SyncAssemblyDraftVisibleChecksToModel(state);
 			state->selectedIndices.clear();
-			const int count = ListView_GetItemCount(state->listView);
-			for (int i = 0; i < count; ++i)
+			for (size_t i = 0; i < state->checkedCandidates.size(); ++i)
 			{
-				if (ListView_GetCheckState(state->listView, i))
+				if (state->checkedCandidates[i])
 				{
-					state->selectedIndices.push_back(i);
+					state->selectedIndices.push_back(static_cast<int>(i));
 				}
 			}
 			state->accepted = true;
@@ -5095,7 +5137,9 @@ static bool ShowAssemblyDraftPicker(
 
 	AssemblyDraftPickerState state = {};
 	state.candidates = &candidates;
+	state.checkedCandidates.resize(candidates.size(), false);
 	state.listView = NULL;
+	state.noDrawingFilterCheck = NULL;
 	state.dialogFont = NULL;
 	state.backgroundBrush = NULL;
 	state.backgroundColor = RGB(236, 236, 236);
@@ -6252,6 +6296,20 @@ static int CreateDraftNoteForBodyView(
 		NXOpen::Annotations::Annotation::AssociativeOriginData assocOrigin;
 		assocOrigin.OriginType = NXOpen::Annotations::AssociativeOriginTypeRelativeToView;
 		assocOrigin.View = baseView;
+		assocOrigin.ViewOfGeometry = baseView;
+		assocOrigin.PointOnGeometry = NULL;
+		assocOrigin.VertAnnotation = NULL;
+		assocOrigin.VertAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+		assocOrigin.HorizAnnotation = NULL;
+		assocOrigin.HorizAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+		assocOrigin.AlignedAnnotation = NULL;
+		assocOrigin.DimensionLine = 0;
+		assocOrigin.AssociatedView = baseView;
+		assocOrigin.AssociatedPoint = NULL;
+		assocOrigin.OffsetAnnotation = NULL;
+		assocOrigin.OffsetAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+		assocOrigin.XOffsetFactor = 0.0;
+		assocOrigin.YOffsetFactor = 0.0;
 		assocOrigin.StackAlignmentPosition = NXOpen::Annotations::StackAlignmentPositionAbove;
 		NXOpen::View* nullView(NULL);
 		builder->Origin()->SetAssociativeOrigin(assocOrigin);
@@ -6470,12 +6528,6 @@ static void CreateSimpleDimensionsForPendingGroup(
 	CreateOverallDimensionForView(workPart, pending.mainView, mainCurves, mainRect, true);
 	CreateOverallDimensionForView(workPart, pending.mainView, mainCurves, mainRect, false);
 
-	NXOpen::Point3d notePoint(
-		(mainRect.minX + mainRect.maxX) * 0.5,
-		mainRect.minY - 5.0,
-		0.0);
-	CreateDraftNoteForBodyView(workPart, pending.targetBody, notePoint, pending.mainView);
-
 	for (size_t i = 0; i < pending.sideViews.size(); ++i)
 	{
 		NXOpen::Drawings::BaseView* sideView = pending.sideViews[i];
@@ -6493,6 +6545,28 @@ static void CreateSimpleDimensionsForPendingGroup(
 		CreateOverallDimensionForView(workPart, sideView, sideCurves, sideRect, true);
 		CreateOverallDimensionForView(workPart, sideView, sideCurves, sideRect, false);
 	}
+}
+
+static void CreateDraftNoteForPendingGroup(
+	NXOpen::Part* workPart,
+	const PendingScaleRefit& pending)
+{
+	if (workPart == NULL || pending.mainView == NULL || pending.targetBody == NULL)
+	{
+		return;
+	}
+
+	LayoutRect mainRect{};
+	if (!AskDisplayedCurveRectFromWholeView(pending.mainView, mainRect))
+	{
+		return;
+	}
+
+	NXOpen::Point3d notePoint(
+		(mainRect.minX + mainRect.maxX) * 0.5,
+		mainRect.minY - 5.0,
+		0.0);
+	CreateDraftNoteForBodyView(workPart, pending.targetBody, notePoint, pending.mainView);
 }
 
 static std::string RectToString(const LayoutRect& rect)
@@ -8937,9 +9011,11 @@ static void FinalizePendingGroupScaleAndLayout(NXOpen::Part* workPart)
 				}
 			}
 
+			g_skipLegacyDraftNoteDuringFinalLayout = true;
 			g_runLegacyAaaaAnnotationOnly = true;
 			g_activeZiDonCuTuDialog->aaaa_cb();
 			g_runLegacyAaaaAnnotationOnly = false;
+			g_skipLegacyDraftNoteDuringFinalLayout = false;
 
 			{
 				NXOpen::Drawings::DrawingSheet* currentSheet = workPart->DrawingSheets()->CurrentDrawingSheet();
@@ -9001,6 +9077,10 @@ static void FinalizePendingGroupScaleAndLayout(NXOpen::Part* workPart)
 	{
 		const PendingScaleRefit& pending = g_pendingScaleRefits[i];
 		ApplySideViewLayerIsolationForBody(pending.targetBody, pending.sideViews);
+	}
+	for (size_t i = 0; i < g_pendingScaleRefits.size(); ++i)
+	{
+		CreateDraftNoteForPendingGroup(workPart, g_pendingScaleRefits[i]);
 	}
 }
 }
@@ -12183,7 +12263,7 @@ int ZiDonCuTu::aaaa_cb()
 				g_runLegacyAabbAnnotationOnly = true;
 				aabb_cb();
 				g_runLegacyAabbAnnotationOnly = false;
-				if (Body1 != NULL && BaseView1A != NULL)
+				if (!g_skipLegacyDraftNoteDuringFinalLayout && !g_deferPageRefit && Body1 != NULL && BaseView1A != NULL)
 				{
 					Create_Draft_Not(Body1, notPoint3d, BaseView1A);
 				}
@@ -12191,7 +12271,7 @@ int ZiDonCuTu::aaaa_cb()
 			else
 			{
 				aabb_cb();
-				if (Body1 != NULL && BaseView1A != NULL)
+				if (!g_skipLegacyDraftNoteDuringFinalLayout && !g_deferPageRefit && Body1 != NULL && BaseView1A != NULL)
 				{
 					Create_Draft_Not(Body1, notPoint3d, BaseView1A);
 				}
@@ -14427,7 +14507,7 @@ int ZiDonCuTu::aaaa_cb()
 			g_runLegacyAabbAnnotationOnly = false;
 		}
 
-		if (Body1 != NULL && BaseView1A != NULL)
+		if (!g_skipLegacyDraftNoteDuringFinalLayout && !g_deferPageRefit && Body1 != NULL && BaseView1A != NULL)
 		{
 			Create_Draft_Not(Body1, notPoint3d, BaseView1A);
 		}

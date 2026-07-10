@@ -83,7 +83,9 @@ namespace
 
     std::wstring MaterialConfigFilePath()
     {
-        return PluginDirectory() + L"\\Write_Prat_Attr.ini";
+        CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+        CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
+        return L"D:\\UG智辉钣金插件\\config\\Write_Prat_Attr.ini";
     }
 
     const std::vector<std::string>& DefaultMaterials()

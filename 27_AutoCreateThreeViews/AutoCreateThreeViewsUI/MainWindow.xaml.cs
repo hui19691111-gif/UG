@@ -24,7 +24,7 @@ public partial class MainWindow : Window
     private bool isLoadingPartOptions;
     private bool assemblySelectionAvailable = true;
     private static readonly string DefaultTechnicalRequirementsPath = Path.Combine(AppContext.BaseDirectory, "Assets", "technical_requirements.default.cfg");
-    private static readonly string UserTechnicalRequirementsPath = Path.Combine(AppContext.BaseDirectory, "technical_requirements.user.cfg");
+    private static readonly string UserTechnicalRequirementsPath = Path.Combine(GetConfigDirectory(), "technical_requirements.user.cfg");
     private bool isUpdatingPreview;
     private readonly DispatcherTimer progressTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
     private Window? progressWindow;
@@ -174,9 +174,10 @@ public partial class MainWindow : Window
         bool progressStarted = false;
         try
         {
+            bool delayProgressWindow = RequestUsesManualFrontDirection();
             if (ShouldShowProgressForCurrentRequest())
             {
-                StartProgressMonitor();
+                StartProgressMonitor(delayProgressWindow);
                 progressStarted = true;
             }
             WriteCreateDrawingRequest();
@@ -194,6 +195,48 @@ public partial class MainWindow : Window
             }
             MessageBox.Show(ex.Message, "\u81ea\u52a8\u521b\u5efa\u4e09\u89c6\u56fe", MessageBoxButton.OK, MessageBoxImage.Error);
         }
+    }
+
+    private bool RequestUsesManualFrontDirection()
+    {
+        Dictionary<string, string> sharedSettings = CaptureCurrentDrawingSettings();
+        List<AssemblyNode> checkedNodes = GetCheckedAssemblyNodes();
+        if (!assemblySelectionAvailable)
+        {
+            return IsManualFrontDirectionMode(ReadText(sharedSettings, "frontDirectionMode", ""));
+        }
+        if (checkedNodes.Count == 0 && selectedAssemblyNode != null)
+        {
+            checkedNodes.Add(selectedAssemblyNode);
+        }
+        if (checkedNodes.Count == 0)
+        {
+            return IsManualFrontDirectionMode(ReadText(sharedSettings, "frontDirectionMode", ""));
+        }
+
+        foreach (AssemblyNode node in checkedNodes)
+        {
+            Dictionary<string, string> partSettings = sharedSettings;
+            if (ShareAllPartsOptionsCheckBox.IsChecked != true &&
+                partOptionsByOccurrence.TryGetValue(node.OccurrenceTag, out Dictionary<string, string>? savedPartSettings))
+            {
+                partSettings = savedPartSettings;
+            }
+            if (IsManualFrontDirectionMode(ReadText(partSettings, "frontDirectionMode", "")))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsManualFrontDirectionMode(string value)
+    {
+        string mode = (value ?? "").Trim();
+        return mode.Equals("manualFaceX", StringComparison.OrdinalIgnoreCase) ||
+               mode.Equals("manual", StringComparison.OrdinalIgnoreCase) ||
+               mode.Equals("selectedFaceX", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool ShouldShowProgressForCurrentRequest()
@@ -223,7 +266,7 @@ public partial class MainWindow : Window
         return IsRootAssemblyNode(node) && node.TreeItem != null && node.TreeItem.Items.Count > 0;
     }
 
-    private void StartProgressMonitor()
+    private void StartProgressMonitor(bool delayProgressWindow = false)
     {
         string progressPath = GetProgressPath();
         try
@@ -237,8 +280,11 @@ public partial class MainWindow : Window
         {
         }
 
-        ShowProgressWindow();
-        SetProgressDisplay("Preparing drawing...", 0, 0, true);
+        if (!delayProgressWindow)
+        {
+            ShowProgressWindow();
+            SetProgressDisplay("Preparing drawing...", 0, 0, true);
+        }
         GenerateButton.IsEnabled = false;
         progressTimer.Start();
     }
@@ -338,6 +384,11 @@ public partial class MainWindow : Window
             int total = ParseInt(values.TryGetValue("total", out string? totalText) ? totalText : "", 0);
             string message = values.TryGetValue("message", out string? messageText) ? messageText : "Drawing...";
             bool done = values.TryGetValue("done", out string? doneText) && IsTruthy(doneText);
+
+            if (progressWindow == null && total > 0 && !done)
+            {
+                ShowProgressWindow();
+            }
 
             if (total > 0)
             {
@@ -1406,6 +1457,7 @@ public partial class MainWindow : Window
             values[prefix + "occurrenceTag"] = node.OccurrenceTag;
             values[prefix + "name"] = EncodeText(node.Name);
             values[prefix + "partPath"] = EncodeText(node.PartPath);
+            values[prefix + "quantity"] = node.Quantity.ToString();
             foreach (KeyValuePair<string, string> setting in partSettings)
             {
                 values[prefix + setting.Key] = setting.Value;
@@ -1448,38 +1500,18 @@ public partial class MainWindow : Window
 
         try
         {
-            Dictionary<string, TreeViewItem> itemById = new(StringComparer.OrdinalIgnoreCase);
-            foreach (string rawLine in File.ReadLines(manifestPath, Encoding.UTF8))
+            List<AssemblyManifestRecord> records = ReadAssemblyManifestRecords(manifestPath);
+            Dictionary<string, List<AssemblyManifestRecord>> childrenByParent = records
+                .GroupBy(record => record.ParentOccurrenceTag, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+            HashSet<string> parentIds = records
+                .Select(record => record.ParentOccurrenceTag)
+                .Where(parent => !string.IsNullOrWhiteSpace(parent) && parent != "0")
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            AddAggregatedAssemblyNodes(childrenByParent, parentIds, "0", AssemblyTree.Items, 1);
+            if (AssemblyTree.Items.Count == 0)
             {
-                Dictionary<string, string> values = ReadTabbedKeyValueLine(rawLine);
-                if (!values.TryGetValue("id", out string? id) || string.IsNullOrWhiteSpace(id))
-                {
-                    continue;
-                }
-
-                values.TryGetValue("parent", out string? parentId);
-                values.TryGetValue("name", out string? name);
-                values.TryGetValue("part", out string? part);
-                AssemblyNode node = new(
-                    id,
-                    parentId ?? "",
-                    string.IsNullOrWhiteSpace(name) ? $"零件 {id}" : name,
-                    part ?? "");
-                TreeViewItem item = CreateAssemblyTreeItem(node);
-                itemById[id] = item;
-
-                if (!string.IsNullOrWhiteSpace(node.ParentOccurrenceTag) &&
-                    node.ParentOccurrenceTag != "0" &&
-                    itemById.TryGetValue(node.ParentOccurrenceTag, out TreeViewItem? parentItem))
-                {
-                    parentItem.Items.Add(item);
-                    parentItem.IsExpanded = true;
-                }
-                else
-                {
-                    AssemblyTree.Items.Add(item);
-                    item.IsExpanded = true;
-                }
+                AddAggregatedAssemblyNodes(childrenByParent, parentIds, "", AssemblyTree.Items, 1);
             }
 
             TreeViewItem? firstItem = AssemblyTree.Items.OfType<TreeViewItem>().FirstOrDefault();
@@ -1537,6 +1569,10 @@ public partial class MainWindow : Window
             string.Equals(compareName, partStem, StringComparison.OrdinalIgnoreCase)
                 ? displayName
                 : $"{displayName}  [{partStem}]";
+        if (node.Quantity > 1)
+        {
+            headerText += $"  x{node.Quantity}";
+        }
 
         CheckBox checkBox = new()
         {
@@ -1588,8 +1624,13 @@ public partial class MainWindow : Window
         int checkedCount = GetCheckedAssemblyNodes().Count;
         string suffix = checkedCount > 0 ? $"\uff0c\u5df2\u52fe\u9009 {checkedCount} \u4e2a" : "";
         SelectedAssemblyTextBlock.Text = string.IsNullOrWhiteSpace(selectedAssemblyNode.PartPath)
-            ? $"{selectedAssemblyNode.Name}{suffix}"
-            : $"{selectedAssemblyNode.Name} - {selectedAssemblyNode.PartPath}{suffix}";
+            ? $"{selectedAssemblyNode.Name}{QuantitySuffix(selectedAssemblyNode)}{suffix}"
+            : $"{selectedAssemblyNode.Name}{QuantitySuffix(selectedAssemblyNode)} - {selectedAssemblyNode.PartPath}{suffix}";
+    }
+
+    private static string QuantitySuffix(AssemblyNode node)
+    {
+        return node.Quantity > 1 ? $" x{node.Quantity}" : "";
     }
 
     private static string CleanAssemblyDisplayName(string name, string partStem)
@@ -1706,7 +1747,7 @@ public partial class MainWindow : Window
             .Where(IsRootAssemblyNode)
             .ToList();
         List<AssemblyNode> leafNodes = nodes
-            .Where(node => node.TreeItem == null || node.TreeItem.Items.Count == 0)
+            .Where(node => !node.HasChildren)
             .ToList();
         if (leafNodes.Count == 0)
         {
@@ -1721,8 +1762,140 @@ public partial class MainWindow : Window
 
     private static bool IsRootAssemblyNode(AssemblyNode node)
     {
-        return string.IsNullOrWhiteSpace(node.ParentOccurrenceTag) ||
-               string.Equals(node.ParentOccurrenceTag, "0", StringComparison.OrdinalIgnoreCase);
+        return IsRootOccurrenceTag(node.ParentOccurrenceTag);
+    }
+
+    private static bool IsRootOccurrenceTag(string? parentOccurrenceTag)
+    {
+        return string.IsNullOrWhiteSpace(parentOccurrenceTag) ||
+               string.Equals(parentOccurrenceTag, "0", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private List<AssemblyManifestRecord> ReadAssemblyManifestRecords(string manifestPath)
+    {
+        List<AssemblyManifestRecord> records = new();
+        foreach (string rawLine in File.ReadLines(manifestPath, Encoding.UTF8))
+        {
+            Dictionary<string, string> values = ReadTabbedKeyValueLine(rawLine);
+            if (!values.TryGetValue("id", out string? id) || string.IsNullOrWhiteSpace(id))
+            {
+                continue;
+            }
+
+            values.TryGetValue("parent", out string? parentId);
+            values.TryGetValue("name", out string? name);
+            values.TryGetValue("part", out string? part);
+            records.Add(new AssemblyManifestRecord(
+                id,
+                parentId ?? "",
+                string.IsNullOrWhiteSpace(name) ? $"零件 {id}" : name,
+                part ?? ""));
+        }
+
+        return records;
+    }
+
+    private void AddAggregatedAssemblyNodes(
+        Dictionary<string, List<AssemblyManifestRecord>> childrenByParent,
+        HashSet<string> parentIds,
+        string parentOccurrenceTag,
+        ItemCollection targetItems,
+        int parentQuantity)
+    {
+        if (!childrenByParent.TryGetValue(parentOccurrenceTag, out List<AssemblyManifestRecord>? children))
+        {
+            return;
+        }
+
+        IEnumerable<IGrouping<string, AssemblyManifestRecord>> groups = children
+            .GroupBy(child => BuildAssemblyPartIdentityKey(child.Name, child.PartPath), StringComparer.OrdinalIgnoreCase);
+        foreach (IGrouping<string, AssemblyManifestRecord> group in groups)
+        {
+            AssemblyManifestRecord representative = group.First();
+            int quantity = Math.Max(1, parentQuantity) * group.Count();
+            bool hasChildren = parentIds.Contains(representative.OccurrenceTag);
+            AssemblyNode node = new(
+                representative.OccurrenceTag,
+                representative.ParentOccurrenceTag,
+                representative.Name,
+                representative.PartPath,
+                quantity,
+                hasChildren);
+            TreeViewItem item = CreateAssemblyTreeItem(node);
+            targetItems.Add(item);
+            item.IsExpanded = true;
+
+            if (hasChildren)
+            {
+                AddAggregatedAssemblyNodes(
+                    childrenByParent,
+                    parentIds,
+                    representative.OccurrenceTag,
+                    item.Items,
+                    quantity);
+            }
+        }
+    }
+
+    private static HashSet<string> ReadAssemblyParentIds(string manifestPath)
+    {
+        HashSet<string> parentIds = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string rawLine in File.ReadLines(manifestPath, Encoding.UTF8))
+        {
+            Dictionary<string, string> values = ReadTabbedKeyValueLine(rawLine);
+            if (values.TryGetValue("parent", out string? parentId) &&
+                !string.IsNullOrWhiteSpace(parentId) &&
+                parentId != "0")
+            {
+                parentIds.Add(parentId);
+            }
+        }
+
+        return parentIds;
+    }
+
+    private static Dictionary<string, int> CountAssemblyLeafQuantities(string manifestPath)
+    {
+        List<Dictionary<string, string>> rows = File.ReadLines(manifestPath, Encoding.UTF8)
+            .Select(ReadTabbedKeyValueLine)
+            .Where(values => values.ContainsKey("id"))
+            .ToList();
+        HashSet<string> parentIds = rows
+            .Select(values => values.TryGetValue("parent", out string? parentId) ? parentId : "")
+            .Where(parentId => !string.IsNullOrWhiteSpace(parentId) && parentId != "0")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, int> quantities = new(StringComparer.OrdinalIgnoreCase);
+        foreach (Dictionary<string, string> values in rows)
+        {
+            string id = values.TryGetValue("id", out string? idText) ? idText : "";
+            string parentId = values.TryGetValue("parent", out string? parentText) ? parentText : "";
+            if (string.IsNullOrWhiteSpace(id) ||
+                parentIds.Contains(id) ||
+                IsRootOccurrenceTag(parentId))
+            {
+                continue;
+            }
+
+            values.TryGetValue("name", out string? name);
+            values.TryGetValue("part", out string? part);
+            string identityKey = BuildAssemblyPartIdentityKey(name ?? "", part ?? "");
+            quantities[identityKey] = quantities.TryGetValue(identityKey, out int quantity)
+                ? quantity + 1
+                : 1;
+        }
+
+        return quantities;
+    }
+
+    private static string BuildAssemblyPartIdentityKey(string name, string partPath)
+    {
+        string normalizedPart = (partPath ?? "").Trim().Replace('\\', '/');
+        if (!string.IsNullOrWhiteSpace(normalizedPart))
+        {
+            return "part:" + normalizedPart;
+        }
+
+        return "name:" + (name ?? "").Trim();
     }
 
     private void UpdateAssemblyParentCheckStates()
@@ -2453,7 +2626,12 @@ public partial class MainWindow : Window
 
     private static string GetSettingsPath()
     {
-        return Path.Combine(AppContext.BaseDirectory, "AutoCreateThreeViews.settings");
+        return Path.Combine(GetConfigDirectory(), "AutoCreateThreeViews.settings");
+    }
+
+    private static string GetConfigDirectory()
+    {
+        return @"D:\UG智辉钣金插件\config";
     }
 
     private sealed class TechnicalRequirementNode
@@ -2469,9 +2647,9 @@ public partial class MainWindow : Window
         public bool IsDetail { get; }
     }
 
-    private sealed class AssemblyNode
+    private sealed class AssemblyManifestRecord
     {
-        public AssemblyNode(string occurrenceTag, string parentOccurrenceTag, string name, string partPath)
+        public AssemblyManifestRecord(string occurrenceTag, string parentOccurrenceTag, string name, string partPath)
         {
             OccurrenceTag = occurrenceTag;
             ParentOccurrenceTag = parentOccurrenceTag;
@@ -2486,6 +2664,37 @@ public partial class MainWindow : Window
         public string Name { get; }
 
         public string PartPath { get; }
+    }
+
+    private sealed class AssemblyNode
+    {
+        public AssemblyNode(
+            string occurrenceTag,
+            string parentOccurrenceTag,
+            string name,
+            string partPath,
+            int quantity = 1,
+            bool hasChildren = false)
+        {
+            OccurrenceTag = occurrenceTag;
+            ParentOccurrenceTag = parentOccurrenceTag;
+            Name = name;
+            PartPath = partPath;
+            Quantity = Math.Max(1, quantity);
+            HasChildren = hasChildren;
+        }
+
+        public string OccurrenceTag { get; }
+
+        public string ParentOccurrenceTag { get; }
+
+        public string Name { get; }
+
+        public string PartPath { get; }
+
+        public int Quantity { get; }
+
+        public bool HasChildren { get; }
 
         public bool IsChecked { get; set; }
 

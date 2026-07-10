@@ -3187,7 +3187,7 @@ std::vector<HoleNoteRuleRecord> LoadHoleNoteRulesFromIni(const std::string& path
 std::vector<HoleNoteRuleRecord> GetHoleNoteRules()
 {
 	const std::vector<std::string> paths = {
-		PluginPath("config", "KonBiaoZuRules.ini")
+		"D:\\UG智辉钣金插件\\config\\KonBiaoZuRules.ini"
 	};
 	for (size_t i = 0; i < paths.size(); ++i)
 	{

@@ -37,9 +37,14 @@
 #include "ZiDonFenCen.hpp"
 #include "../../../common/ZhihuiEmbeddedDialog.hpp"
 #include "../embedded_dialog_resources.h"
+#include <algorithm>
+#include <cctype>
+#include <cwctype>
 #include <uf_part.h>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 #include <fstream>
 #include <sstream>
 #include <ctime>
@@ -63,6 +68,8 @@
 #include <NXOpen/Features_CurveFeatureCollection.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_FlatPattern.hxx>
+#include <NXOpen/Features_FlatSolid.hxx>
 #include <NXOpen/Features_ShadowCurveBuilder.hxx>
 #include <NXOpen/GeometricUtilities_CurveFitData.hxx>
 #include <NXOpen/Plane.hxx>
@@ -74,6 +81,7 @@
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
 using namespace NXOpen::Assemblies;
+using namespace NXOpen::Features;
 
 //------------------------------------------------------------------------------
 // Initialize static variables
@@ -1054,6 +1062,232 @@ void SetOrCreateIntegerExpression(NXOpen::Part* part, const char* expressionName
 	SetOrCreateIntegerExpression(part, NXString(expressionName), NXString(rightHandSide));
 }
 
+int ParseQuantityTextToInteger(const std::string& text, int fallbackValue)
+{
+	const std::string trimmed = TrimCopy(text);
+	if (trimmed.empty())
+	{
+		return fallbackValue;
+	}
+	char* endPtr = NULL;
+	const long value = strtol(trimmed.c_str(), &endPtr, 10);
+	if (endPtr == trimmed.c_str())
+	{
+		return fallbackValue;
+	}
+	return static_cast<int>(value);
+}
+
+bool IsPartQuantityAttributeExpression(NXOpen::Part* part, NXOpen::Expression* expression)
+{
+	if (part == NULL || expression == NULL)
+	{
+		return false;
+	}
+	try
+	{
+		NXOpen::Expression* attributeExpression = part->Expressions()->GetAttributeExpression(
+			part,
+			QuantityExpressionName(),
+			NXOpen::NXObject::AttributeTypeInteger,
+			-1);
+		if (attributeExpression != NULL && attributeExpression->Tag() == expression->Tag())
+		{
+			return true;
+		}
+	}
+	catch (NXOpen::NXException&)
+	{
+	}
+	try
+	{
+		if (expression->HasReferencedAttribute())
+		{
+			NXOpen::NXObject::AttributeInformation info = expression->GetReferencedAttribute();
+			return NormalizeUtf8Message(ToUtf8(info.Title)) == QuantityExpressionNameUtf8() &&
+				info.Type == NXOpen::NXObject::AttributeTypeInteger;
+		}
+	}
+	catch (NXOpen::NXException&)
+	{
+	}
+	return false;
+}
+
+void DeleteExpressionIfPresent(NXOpen::Part* part, NXOpen::Expression* expression)
+{
+	if (part == NULL || expression == NULL)
+	{
+		return;
+	}
+	try
+	{
+		part->Expressions()->Delete(expression);
+	}
+	catch (NXOpen::NXException&)
+	{
+	}
+}
+
+void DeletePartQuantityAttributeIfPresent(NXOpen::Part* part, NXOpen::NXObject::AttributeType type)
+{
+	if (part == NULL)
+	{
+		return;
+	}
+	try
+	{
+		if (part->HasUserAttribute(QuantityExpressionName(), type, -1))
+		{
+			try
+			{
+				part->SetUserAttributeLock(QuantityExpressionName(), type, false);
+			}
+			catch (NXOpen::NXException&)
+			{
+			}
+			part->DeleteUserAttribute(type, QuantityExpressionName(), true, NXOpen::Update::OptionNow);
+		}
+	}
+	catch (NXOpen::NXException&)
+	{
+	}
+}
+
+bool GetPartQuantityAttributeValue(NXOpen::Part* part, int& value, bool& isInteger, bool& hasValue)
+{
+	value = 0;
+	isInteger = false;
+	hasValue = false;
+	if (part == NULL)
+	{
+		return false;
+	}
+
+	try
+	{
+		std::vector<NXObject::AttributeInformation> attributes = part->GetUserAttributes();
+		for (size_t i = 0; i < attributes.size(); ++i)
+		{
+			const std::string title = TrimCopy(NormalizeUtf8Message(ToUtf8(attributes[i].Title)));
+			if (title != QuantityExpressionNameUtf8() || attributes[i].Unset)
+			{
+				continue;
+			}
+			if (attributes[i].Type == NXOpen::NXObject::AttributeTypeInteger)
+			{
+				value = attributes[i].IntegerValue;
+				isInteger = true;
+				hasValue = true;
+				return true;
+			}
+			if (attributes[i].Type == NXOpen::NXObject::AttributeTypeString)
+			{
+				const std::string text = TrimCopy(NormalizeUtf8Message(ToUtf8(attributes[i].StringValue)));
+				if (text.empty())
+				{
+					hasValue = false;
+					return true;
+				}
+				value = ParseQuantityTextToInteger(text, 0);
+				hasValue = true;
+				return true;
+			}
+			if (attributes[i].Type == NXOpen::NXObject::AttributeTypeReal)
+			{
+				value = static_cast<int>(attributes[i].RealValue);
+				hasValue = true;
+				return true;
+			}
+			if (attributes[i].Type == NXOpen::NXObject::AttributeTypeBoolean)
+			{
+				value = attributes[i].BooleanValue ? 1 : 0;
+				hasValue = true;
+				return true;
+			}
+			hasValue = false;
+			return true;
+		}
+	}
+	catch (NXOpen::NXException&)
+	{
+	}
+
+	return false;
+}
+
+void EnsurePartQuantityAttributeExpression(NXOpen::Part* part)
+{
+	if (part == NULL)
+	{
+		return;
+	}
+
+	NXOpen::Expression* namedExpression = FindExpressionIfExists(part, QuantityExpressionName());
+	if (IsPartQuantityAttributeExpression(part, namedExpression))
+	{
+		ZiDonFenCenDebugLog("quantityExpr ensure skip existing part attribute expression");
+		return;
+	}
+	if (namedExpression != NULL)
+	{
+		ZiDonFenCenDebugLog("quantityExpr delete non-attribute named expression");
+		DeleteExpressionIfPresent(part, namedExpression);
+	}
+
+	int quantityValue = 0;
+	bool quantityIsInteger = false;
+	bool quantityHasValue = false;
+	const bool quantityAttributeExists = GetPartQuantityAttributeValue(part, quantityValue, quantityIsInteger, quantityHasValue);
+	if (!quantityAttributeExists || !quantityHasValue)
+	{
+		ZiDonFenCenDebugLog("quantityExpr recreate missing-or-empty integer attribute value=0");
+		DeletePartQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeInteger);
+		DeletePartQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeReal);
+		DeletePartQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeString);
+		DeletePartQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeBoolean);
+		DeletePartQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeTime);
+		part->SetUserAttribute(QuantityExpressionName(), -1, 0, NXOpen::Update::OptionNow);
+	}
+	else if (!quantityIsInteger)
+	{
+		ZiDonFenCenDebugLog("quantityExpr convert non-integer attribute to integer");
+		DeletePartQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeReal);
+		DeletePartQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeString);
+		DeletePartQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeBoolean);
+		DeletePartQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeTime);
+		part->SetUserAttribute(QuantityExpressionName(), -1, quantityValue, NXOpen::Update::OptionNow);
+	}
+	else
+	{
+		ZiDonFenCenDebugLog("quantityExpr integer attribute exists");
+	}
+
+	NXOpen::Expression* attributeExpression = NULL;
+	try
+	{
+		attributeExpression = part->Expressions()->GetAttributeExpression(
+			part,
+			QuantityExpressionName(),
+			NXOpen::NXObject::AttributeTypeInteger,
+			-1);
+	}
+	catch (NXOpen::NXException&)
+	{
+	}
+	if (attributeExpression != NULL)
+	{
+		try
+		{
+			attributeExpression->SetName(QuantityExpressionName());
+		}
+		catch (NXOpen::NXException&)
+		{
+		}
+		ZiDonFenCenDebugLog("quantityExpr ensured part attribute expression");
+	}
+}
+
 void CopyStringAttributeIfPresent(NXOpen::Body* sourceBody, NXOpen::Body* targetBody, const char* title)
 {
 	if (sourceBody == NULL || targetBody == NULL || title == NULL || title[0] == '\0')
@@ -1095,6 +1329,167 @@ bool ContainsBodyPointer(const std::vector<Body*>& bodies, Body* body)
 	return body != NULL && std::find(bodies.begin(), bodies.end(), body) != bodies.end();
 }
 
+bool ContainsTextNoCase(const std::string& text, const std::string& needle)
+{
+	if (needle.empty())
+	{
+		return true;
+	}
+	std::string lowerText = text;
+	std::string lowerNeedle = needle;
+	std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+	std::transform(lowerNeedle.begin(), lowerNeedle.end(), lowerNeedle.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+	return lowerText.find(lowerNeedle) != std::string::npos;
+}
+
+bool IsFlatPatternLikeBody(Body* body)
+{
+	if (body == NULL)
+	{
+		return false;
+	}
+
+	auto isFlatFeature = [](NXOpen::Features::Feature* feature) -> bool
+	{
+		if (feature == NULL)
+		{
+			return false;
+		}
+		const std::string type = NxStringForLog(feature->FeatureType());
+		const std::string name = NxStringForLog(feature->GetFeatureName());
+		return ContainsTextNoCase(type, "flat pattern") ||
+			ContainsTextNoCase(type, "flatpattern") ||
+			ContainsTextNoCase(type, "flat solid") ||
+			ContainsTextNoCase(type, "flatsolid") ||
+			ContainsTextNoCase(type, "flat_solid") ||
+			ContainsTextNoCase(type, "sb flat") ||
+			ContainsTextNoCase(type, "unbend") ||
+			ContainsTextNoCase(name, "flat pattern") ||
+			ContainsTextNoCase(name, "flatpattern") ||
+			ContainsTextNoCase(name, "flat solid") ||
+			ContainsTextNoCase(name, "flatsolid") ||
+			ContainsTextNoCase(name, "flat_solid") ||
+			ContainsTextNoCase(name, "sb flat") ||
+			ContainsTextNoCase(name, "unbend") ||
+			ContainsTextNoCase(name, "\xE5\xB1\x95\xE5\xBC\x80\xE5\x9B\xBE\xE6\xA0\xB7") ||
+			dynamic_cast<NXOpen::Features::FlatPattern*>(feature) != NULL ||
+			dynamic_cast<NXOpen::Features::FlatSolid*>(feature) != NULL;
+	};
+
+	try
+	{
+		const std::string bodyName = NxStringForLog(body->Name());
+		if (ContainsTextNoCase(bodyName, "sb flat solid") ||
+			ContainsTextNoCase(bodyName, "flat solid") ||
+			ContainsTextNoCase(bodyName, "flatsolid") ||
+			ContainsTextNoCase(bodyName, "flat pattern") ||
+			ContainsTextNoCase(bodyName, "flatpattern") ||
+			ContainsTextNoCase(bodyName, "\xE5\xB1\x95\xE5\xBC\x80\xE5\x9B\xBE\xE6\xA0\xB7"))
+		{
+			return true;
+		}
+	}
+	catch (...)
+	{
+	}
+
+	try
+	{
+		std::vector<NXOpen::Features::Feature*> features = body->GetFeatures();
+		for (size_t i = 0; i < features.size(); ++i)
+		{
+			NXOpen::Features::Feature* feature = features[i];
+			if (isFlatFeature(feature))
+			{
+				return true;
+			}
+		}
+	}
+	catch (...)
+	{
+	}
+
+	try
+	{
+		NXOpen::BasePart* basePart = body->OwningPart();
+		NXOpen::Part* owningPart = dynamic_cast<NXOpen::Part*>(basePart);
+		if (owningPart != NULL && owningPart->Features() != NULL)
+		{
+			for (FeatureCollection::iterator it = owningPart->Features()->begin(); it != owningPart->Features()->end(); ++it)
+			{
+				NXOpen::Features::Feature* feature = *it;
+				if (!isFlatFeature(feature))
+				{
+					continue;
+				}
+
+				try
+				{
+					std::vector<Body*> featureBodies = feature->GetBodies();
+					for (size_t i = 0; i < featureBodies.size(); ++i)
+					{
+						if (featureBodies[i] == body || (featureBodies[i] != NULL && featureBodies[i]->Tag() == body->Tag()))
+						{
+							return true;
+						}
+					}
+				}
+				catch (...)
+				{
+				}
+			}
+		}
+	}
+	catch (...)
+	{
+	}
+
+	return false;
+}
+
+bool IsSameBodySearchCandidate(Body* body)
+{
+	if (body == NULL)
+	{
+		return false;
+	}
+	const int layer = body->Layer();
+	return layer >= 1 && layer <= 256 && !IsFlatPatternLikeBody(body);
+}
+
+std::string BodyFeatureSummaryForLog(Body* body)
+{
+	if (body == NULL)
+	{
+		return "<null>";
+	}
+
+	std::ostringstream oss;
+	try
+	{
+		std::vector<NXOpen::Features::Feature*> features = body->GetFeatures();
+		oss << "count=" << features.size();
+		const size_t limit = features.size() < 5 ? features.size() : 5;
+		for (size_t i = 0; i < limit; ++i)
+		{
+			NXOpen::Features::Feature* feature = features[i];
+			if (feature == NULL)
+			{
+				continue;
+			}
+			oss << "[" << i
+				<< ":type=" << NxStringForLog(feature->FeatureType())
+				<< ",name=" << NxStringForLog(feature->GetFeatureName())
+				<< "]";
+		}
+	}
+	catch (...)
+	{
+		oss << "<error>";
+	}
+	return oss.str();
+}
+
 bool FollowAuxiliaryBodiesForGroup(NXOpen::Part* part, const std::vector<Body*>& sourceBodies, std::vector<Body*>& candidateBodies, const char* logPrefix)
 {
 	if (part == NULL || logPrefix == NULL)
@@ -1116,6 +1511,21 @@ bool FollowAuxiliaryBodiesForGroup(NXOpen::Part* part, const std::vector<Body*>&
 			Body* candidateBody = candidateBodies[ia];
 			if (candidateBody == NULL || ContainsBodyPointer(sourceBodies, candidateBody))
 			{
+				candidateBodies.erase(candidateBodies.begin() + ia);
+				continue;
+			}
+			if (!IsSameBodySearchCandidate(candidateBody))
+			{
+				{
+					std::ostringstream oss;
+					oss << logPrefix
+						<< " reason=skipAuxCandidate"
+						<< " sourceTag=" << sourceBody->Tag()
+						<< " auxTag=" << candidateBody->Tag()
+						<< " auxLayer=" << candidateBody->Layer()
+						<< " flatPattern=" << (IsFlatPatternLikeBody(candidateBody) ? 1 : 0);
+					ZiDonFenCenDebugLog(oss.str());
+				}
 				candidateBodies.erase(candidateBodies.begin() + ia);
 				continue;
 			}
@@ -2449,6 +2859,9 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         std::string partName;
         std::string material;
         std::string quantity;
+        bool componentVisible;
+        bool hasSheetmetalFeature;
+        int componentLayer;
     };
 
     void CollectChildPrototypeParts(Component* component, std::vector<Part*>& parts, std::set<tag_t>& seenParts)
@@ -2554,6 +2967,125 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         return value;
     }
 
+    bool ContainsTextNoCaseAscii(const std::string& text, const char* token)
+    {
+        if (token == NULL || *token == '\0')
+        {
+            return true;
+        }
+
+        std::string left = text;
+        std::string right = token;
+        std::transform(left.begin(), left.end(), left.begin(), ::tolower);
+        std::transform(right.begin(), right.end(), right.begin(), ::tolower);
+        return left.find(right) != std::string::npos;
+    }
+
+    std::string BatchFeatureName(Feature* feature)
+    {
+        if (feature == NULL)
+        {
+            return std::string();
+        }
+
+        try
+        {
+            return NormalizeUtf8Message(ToUtf8(feature->GetFeatureName()));
+        }
+        catch (...)
+        {
+            return std::string();
+        }
+    }
+
+    std::string BatchFeatureTypeText(Feature* feature)
+    {
+        if (feature == NULL)
+        {
+            return std::string();
+        }
+
+        try
+        {
+            return NormalizeUtf8Message(ToUtf8(feature->FeatureType()));
+        }
+        catch (...)
+        {
+            return std::string();
+        }
+    }
+
+    bool IsBatchSheetmetalFeatureText(const std::string& text)
+    {
+        return ContainsTextNoCaseAscii(text, "Sheet Metal") ||
+            ContainsTextNoCaseAscii(text, "Sheetmetal") ||
+            ContainsTextNoCaseAscii(text, "SB_") ||
+            ContainsTextNoCaseAscii(text, "SB ");
+    }
+
+    bool PartHasBatchSheetmetalFeature(Part* part)
+    {
+        if (part == NULL || part->Features() == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            for (FeatureCollection::iterator it = part->Features()->begin(); it != part->Features()->end(); ++it)
+            {
+                Feature* feature = *it;
+                if (feature != NULL &&
+                    (IsBatchSheetmetalFeatureText(BatchFeatureName(feature)) ||
+                     IsBatchSheetmetalFeatureText(BatchFeatureTypeText(feature))))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return false;
+    }
+
+    bool IsComponentVisibleForBatchList(Component* component)
+    {
+        if (component == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            return !component->IsBlanked();
+        }
+        catch (...)
+        {
+        }
+
+        return true;
+    }
+
+    int ComponentLayerForBatchList(Component* component)
+    {
+        if (component == NULL)
+        {
+            return 0;
+        }
+
+        try
+        {
+            return component->Layer();
+        }
+        catch (...)
+        {
+        }
+
+        return 0;
+    }
+
     void CollectBatchPartCandidates(Component* component, std::vector<BatchPartCandidate>& candidates, std::set<tag_t>& seenParts)
     {
         if (component == NULL)
@@ -2606,6 +3138,9 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
                     }
                     candidate.material = ReadPartMaterialText(prototypePart);
                     candidate.quantity = ReadPartQuantityText(prototypePart);
+                    candidate.componentVisible = IsComponentVisibleForBatchList(child);
+                    candidate.hasSheetmetalFeature = PartHasBatchSheetmetalFeature(prototypePart);
+                    candidate.componentLayer = ComponentLayerForBatchList(child);
                     candidates.push_back(candidate);
                 }
             }
@@ -2817,8 +3352,8 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
     }
 
     const int BatchAttributeColumnCount = 4;
-    const int BatchPickerListWidth = 1008;
-    const int BatchPickerWindowWidth = 1052;
+    const int BatchPickerListWidth = 1208;
+    const int BatchPickerWindowWidth = 1252;
     const int BatchAttributeComboDropHeight = 260;
 
     struct BatchPartPickerPersistedState
@@ -2836,7 +3371,18 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         const BatchPartPickerPersistedState* persistedState;
         std::vector<std::string> selectedAttributes;
         std::vector<int> selectedIndices;
+        std::vector<size_t> visibleCandidateIndices;
+        std::vector<bool> checkedCandidates;
         HWND listView;
+        HWND filterEdit;
+        HWND filterClearButton;
+        HWND attributeFilterCombo;
+        HWND hasMaterialFilterCheck;
+        HWND hasQuantityFilterCheck;
+        HWND noSheetmetalFeatureFilterCheck;
+        HWND visibleComponentFilterCheck;
+        HWND layerModeCombo;
+        HWND layerFilterEdit;
         HWND comboBoxes[BatchAttributeColumnCount];
         int listX;
         int listY;
@@ -3018,14 +3564,296 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
             column.pszText = const_cast<wchar_t*>(title.c_str());
             ListView_SetColumn(state->listView, columnIndex, &column);
 
-            for (size_t row = 0; row < state->candidates->size(); ++row)
+            const int rowCount = ListView_GetItemCount(state->listView);
+            for (int row = 0; row < rowCount; ++row)
             {
-                const BatchPartCandidate& candidate = (*state->candidates)[row];
+                if (static_cast<size_t>(row) >= state->visibleCandidateIndices.size())
+                {
+                    continue;
+                }
+                const size_t candidateIndex = state->visibleCandidateIndices[static_cast<size_t>(row)];
+                if (candidateIndex >= state->candidates->size())
+                {
+                    continue;
+                }
+                const BatchPartCandidate& candidate = (*state->candidates)[candidateIndex];
                 SetListViewText(
                     state->listView,
-                    static_cast<int>(row),
+                    row,
                     columnIndex,
                     PathTextToWide(ReadPartListAttributeText(candidate.part, attributeName)));
+            }
+        }
+    }
+
+    std::wstring GetWindowTextWideString(HWND hwnd)
+    {
+        if (hwnd == NULL)
+        {
+            return std::wstring();
+        }
+
+        const int length = GetWindowTextLengthW(hwnd);
+        if (length <= 0)
+        {
+            return std::wstring();
+        }
+
+        std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+        GetWindowTextW(hwnd, &text[0], length + 1);
+        text.resize(static_cast<size_t>(length));
+        return text;
+    }
+
+    std::wstring LowerWideCopy(std::wstring text)
+    {
+        if (!text.empty())
+        {
+            CharLowerBuffW(&text[0], static_cast<DWORD>(text.size()));
+        }
+        return text;
+    }
+
+    bool ContainsIgnoreCaseWide(const std::wstring& text, const std::wstring& needle)
+    {
+        if (needle.empty())
+        {
+            return true;
+        }
+        return LowerWideCopy(text).find(LowerWideCopy(needle)) != std::wstring::npos;
+    }
+
+    bool ParseLayerValue(const std::wstring& text, int* value)
+    {
+        if (value == NULL || text.empty())
+        {
+            return false;
+        }
+
+        wchar_t* end = NULL;
+        long parsed = wcstol(text.c_str(), &end, 10);
+        if (end == text.c_str() || (end != NULL && *end != L'\0'))
+        {
+            return false;
+        }
+
+        if (parsed < 1) parsed = 1;
+        if (parsed > 256) parsed = 256;
+        *value = static_cast<int>(parsed);
+        return true;
+    }
+
+    bool ParseLayerFilterRanges(HWND edit, std::vector<std::pair<int, int> >* ranges)
+    {
+        if (edit == NULL || ranges == NULL)
+        {
+            return false;
+        }
+
+        std::wstring text = GetWindowTextWideString(edit);
+        text.erase(std::remove_if(text.begin(), text.end(), iswspace), text.end());
+        if (text.empty())
+        {
+            return false;
+        }
+
+        size_t start = 0;
+        while (start <= text.size())
+        {
+            size_t comma = text.find_first_of(L",，", start);
+            std::wstring token = text.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start);
+            if (!token.empty())
+            {
+                size_t dash = token.find_first_of(L"-－—");
+                int left = 0;
+                int right = 0;
+                if (dash == std::wstring::npos)
+                {
+                    if (ParseLayerValue(token, &left))
+                    {
+                        ranges->push_back(std::make_pair(left, left));
+                    }
+                }
+                else
+                {
+                    if (ParseLayerValue(token.substr(0, dash), &left) && ParseLayerValue(token.substr(dash + 1), &right))
+                    {
+                        if (left > right)
+                        {
+                            std::swap(left, right);
+                        }
+                        ranges->push_back(std::make_pair(left, right));
+                    }
+                }
+            }
+
+            if (comma == std::wstring::npos)
+            {
+                break;
+            }
+            start = comma + 1;
+        }
+
+        return !ranges->empty();
+    }
+
+    bool LayerInRanges(int layer, const std::vector<std::pair<int, int> >& ranges)
+    {
+        for (size_t i = 0; i < ranges.size(); ++i)
+        {
+            if (layer >= ranges[i].first && layer <= ranges[i].second)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool PartHasBodyInLayerRanges(Part* part, const std::vector<std::pair<int, int> >& ranges)
+    {
+        if (part == NULL || part->Bodies() == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            for (BodyCollection::iterator it = part->Bodies()->begin(); it != part->Bodies()->end(); ++it)
+            {
+                Body* body = *it;
+                if (body == NULL)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (!body->IsSolidBody())
+                    {
+                        continue;
+                    }
+
+                    if (LayerInRanges(body->Layer(), ranges))
+                    {
+                        return true;
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return false;
+    }
+
+    bool BatchPartCandidateMatchesFilter(const BatchPartPickerState* state, size_t candidateIndex, const std::wstring& filterText)
+    {
+        if (state == NULL || state->candidates == NULL || candidateIndex >= state->candidates->size())
+        {
+            return false;
+        }
+
+        const BatchPartCandidate& candidate = (*state->candidates)[candidateIndex];
+
+        std::vector<std::pair<int, int> > layerRanges;
+        if (ParseLayerFilterRanges(state->layerFilterEdit, &layerRanges))
+        {
+            const int layerMode = state->layerModeCombo != NULL ? static_cast<int>(SendMessageW(state->layerModeCombo, CB_GETCURSEL, 0, 0)) : 0;
+            if (layerMode == 1)
+            {
+                if (!LayerInRanges(candidate.componentLayer, layerRanges))
+                {
+                    return false;
+                }
+            }
+            else if (!PartHasBodyInLayerRanges(candidate.part, layerRanges))
+            {
+                return false;
+            }
+        }
+
+        if (state->hasMaterialFilterCheck != NULL &&
+            SendMessageW(state->hasMaterialFilterCheck, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+            TrimCopy(candidate.material).empty())
+        {
+            return false;
+        }
+        if (state->hasQuantityFilterCheck != NULL &&
+            SendMessageW(state->hasQuantityFilterCheck, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+            TrimCopy(candidate.quantity).empty())
+        {
+            return false;
+        }
+        if (state->noSheetmetalFeatureFilterCheck != NULL &&
+            SendMessageW(state->noSheetmetalFeatureFilterCheck, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+            candidate.hasSheetmetalFeature)
+        {
+            return false;
+        }
+        if (state->visibleComponentFilterCheck != NULL &&
+            SendMessageW(state->visibleComponentFilterCheck, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+            !candidate.componentVisible)
+        {
+            return false;
+        }
+
+        if (filterText.empty())
+        {
+            return true;
+        }
+
+        if (ContainsIgnoreCaseWide(PathTextToWide(candidate.partName), filterText))
+        {
+            return true;
+        }
+
+        for (size_t i = 0; i < state->selectedAttributes.size(); ++i)
+        {
+            if (ContainsIgnoreCaseWide(PathTextToWide(ReadPartListAttributeText(candidate.part, state->selectedAttributes[i])), filterText))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    int BatchPartListCandidateIndex(HWND listView, int row)
+    {
+        if (listView == NULL || row < 0)
+        {
+            return -1;
+        }
+
+        LVITEMW item = {};
+        item.mask = LVIF_PARAM;
+        item.iItem = row;
+        if (!ListView_GetItem(listView, &item))
+        {
+            return -1;
+        }
+
+        return static_cast<int>(item.lParam);
+    }
+
+    void SyncBatchPartVisibleChecksToModel(BatchPartPickerState* state)
+    {
+        if (state == NULL || state->listView == NULL)
+        {
+            return;
+        }
+
+        const int rowCount = ListView_GetItemCount(state->listView);
+        for (int row = 0; row < rowCount; ++row)
+        {
+            const int candidateIndex = BatchPartListCandidateIndex(state->listView, row);
+            if (candidateIndex >= 0 && static_cast<size_t>(candidateIndex) < state->checkedCandidates.size())
+            {
+                state->checkedCandidates[static_cast<size_t>(candidateIndex)] = ListView_GetCheckState(state->listView, row) ? true : false;
             }
         }
     }
@@ -3063,6 +3891,57 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
 
             SetListViewText(state->listView, static_cast<int>(i), 1, std::to_wstring(i + 1));
             SetListViewText(state->listView, static_cast<int>(i), 2, PathTextToWide(candidate.partName));
+        }
+
+        RefreshBatchPartListAttributeColumns(state);
+    }
+
+    void PopulateFilteredBatchPartListView(BatchPartPickerState* state)
+    {
+        if (state == NULL || state->listView == NULL || state->candidates == NULL)
+        {
+            return;
+        }
+
+        ListView_DeleteAllItems(state->listView);
+        state->visibleCandidateIndices.clear();
+
+        if (Header_GetItemCount(ListView_GetHeader(state->listView)) == 0)
+        {
+            AddListViewColumn(state->listView, 0, L"选择", 48);
+            AddListViewColumn(state->listView, 1, L"序号", 56);
+            AddListViewColumn(state->listView, 2, L"部件名", 220);
+            AddListViewColumn(state->listView, 3, L"材料", 170);
+            AddListViewColumn(state->listView, 4, L"数量", 170);
+            AddListViewColumn(state->listView, 5, L"空白", 170);
+            AddListViewColumn(state->listView, 6, L"空白", 154);
+        }
+
+        const std::wstring filterText = GetWindowTextWideString(state->filterEdit);
+        for (size_t i = 0; i < state->candidates->size(); ++i)
+        {
+            if (!BatchPartCandidateMatchesFilter(state, i, filterText))
+            {
+                continue;
+            }
+
+            const BatchPartCandidate& candidate = (*state->candidates)[i];
+            const int row = static_cast<int>(state->visibleCandidateIndices.size());
+            state->visibleCandidateIndices.push_back(i);
+
+            LVITEMW item = {};
+            item.mask = LVIF_TEXT | LVIF_PARAM;
+            item.iItem = row;
+            item.iSubItem = 0;
+            item.pszText = const_cast<wchar_t*>(L"");
+            item.lParam = static_cast<LPARAM>(i);
+            ListView_InsertItem(state->listView, &item);
+
+            const bool checked = i < state->checkedCandidates.size() ? state->checkedCandidates[i] : false;
+            ListView_SetCheckState(state->listView, row, checked ? TRUE : FALSE);
+
+            SetListViewText(state->listView, row, 1, std::to_wstring(i + 1));
+            SetListViewText(state->listView, row, 2, PathTextToWide(candidate.partName));
         }
 
         RefreshBatchPartListAttributeColumns(state);
@@ -3240,13 +4119,12 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         }
 
         int partIndex = 0;
-        const int count = ListView_GetItemCount(state->listView);
-        for (int i = 0; i < count && static_cast<size_t>(i) < state->candidates->size(); ++i)
+        for (size_t i = 0; i < state->candidates->size() && i < state->checkedCandidates.size(); ++i)
         {
-            if (ListView_GetCheckState(state->listView, i))
+            if (state->checkedCandidates[i])
             {
                 output << "part" << partIndex++ << "="
-                       << EncodePickerStateValue((*state->candidates)[static_cast<size_t>(i)].partName)
+                       << EncodePickerStateValue((*state->candidates)[i].partName)
                        << "\n";
             }
         }
@@ -3259,6 +4137,14 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         const int kIdList = 1001;
         const int kIdSelectAll = 1002;
         const int kIdClearAll = 1003;
+        const int kIdFilterEdit = 1004;
+        const int kIdFilterClear = 1005;
+        const int kIdLayerFilter = 1008;
+        const int kIdHasMaterialFilter = 1009;
+        const int kIdHasQuantityFilter = 1010;
+        const int kIdNoSheetmetalFeatureFilter = 1011;
+        const int kIdVisibleComponentFilter = 1012;
+        const int kIdLayerMode = 1013;
         const int kIdFirstCombo = 1100;
         const int kIdOk = IDOK;
         const int kIdCancel = IDCANCEL;
@@ -3286,10 +4172,32 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
             AddPickerControl(state, CreateWindowW(L"STATIC", L"选择要自动转钣金的部件：", WS_CHILD | WS_VISIBLE, 14, 12, 250, 22, hwnd, NULL, instance, NULL));
             if (state != NULL)
             {
+                AddPickerControl(state, CreateWindowW(L"STATIC", L"过滤:", WS_CHILD | WS_VISIBLE, 584, 12, 44, 22, hwnd, NULL, instance, NULL));
+                state->filterEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 628, 10, 190, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdFilterEdit)), instance, NULL);
+                AddPickerControl(state, state->filterEdit);
+                AddPickerControl(state, CreateWindowW(L"STATIC", L"层:", WS_CHILD | WS_VISIBLE, 878, 12, 20, 22, hwnd, NULL, instance, NULL));
+                state->layerModeCombo = CreateWindowW(WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 902, 10, 88, 120, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdLayerMode)), instance, NULL);
+                AddPickerControl(state, state->layerModeCombo);
+                SendMessageW(state->layerModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"部件图层"));
+                SendMessageW(state->layerModeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"装配图层"));
+                SendMessageW(state->layerModeCombo, CB_SETCURSEL, 0, 0);
+                state->layerFilterEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 994, 10, 92, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdLayerFilter)), instance, NULL);
+                AddPickerControl(state, state->layerFilterEdit);
+                AddPickerControl(state, CreateWindowW(L"STATIC", L"例:1-20,35,40", WS_CHILD | WS_VISIBLE, 1090, 12, 92, 22, hwnd, NULL, instance, NULL));
+                state->filterClearButton = CreateWindowW(L"BUTTON", L"清空", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 1184, 10, 42, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdFilterClear)), instance, NULL);
+                AddPickerControl(state, state->filterClearButton);
+                state->hasMaterialFilterCheck = CreateWindowW(L"BUTTON", L"有材料属性值", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 584, 40, 116, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdHasMaterialFilter)), instance, NULL);
+                AddPickerControl(state, state->hasMaterialFilterCheck);
+                state->hasQuantityFilterCheck = CreateWindowW(L"BUTTON", L"有数量属性值", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 708, 40, 116, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdHasQuantityFilter)), instance, NULL);
+                AddPickerControl(state, state->hasQuantityFilterCheck);
+                state->noSheetmetalFeatureFilterCheck = CreateWindowW(L"BUTTON", L"部件不含钣金特征", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 832, 40, 146, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdNoSheetmetalFeatureFilter)), instance, NULL);
+                AddPickerControl(state, state->noSheetmetalFeatureFilterCheck);
+                state->visibleComponentFilterCheck = CreateWindowW(L"BUTTON", L"显示的部件", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 986, 40, 120, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdVisibleComponentFilter)), instance, NULL);
+                AddPickerControl(state, state->visibleComponentFilterCheck);
                 state->listX = 14;
-                state->listY = 40;
+                state->listY = 68;
                 state->listWidth = BatchPickerListWidth;
-                state->listHeight = 326;
+                state->listHeight = 298;
             }
             state->listView = CreateWindowExW(
                 WS_EX_CLIENTEDGE,
@@ -3306,7 +4214,7 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
                 NULL);
             AddPickerControl(state, state->listView);
             ApplyNxLikeListViewStyle(state->listView);
-            PopulateBatchPartListView(state);
+            PopulateFilteredBatchPartListView(state);
             for (int i = 0; i < BatchAttributeColumnCount; ++i)
             {
                 state->comboBoxes[i] = CreateWindowW(
@@ -3392,9 +4300,53 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
                     static_cast<size_t>(selectedIndex) < state->attributeNames->size() &&
                     comboIndex < static_cast<int>(state->selectedAttributes.size()))
                 {
+                    SyncBatchPartVisibleChecksToModel(state);
                     state->selectedAttributes[static_cast<size_t>(comboIndex)] = (*state->attributeNames)[static_cast<size_t>(selectedIndex)];
-                    RefreshBatchPartListAttributeColumns(state);
+                    PopulateFilteredBatchPartListView(state);
                 }
+                return 0;
+            }
+
+            if ((commandId == kIdFilterEdit || commandId == kIdLayerFilter) && notifyCode == EN_CHANGE)
+            {
+                SyncBatchPartVisibleChecksToModel(state);
+                PopulateFilteredBatchPartListView(state);
+                RepositionHeaderCombos(state);
+                return 0;
+            }
+
+            if (commandId == kIdLayerMode && notifyCode == CBN_SELCHANGE)
+            {
+                SyncBatchPartVisibleChecksToModel(state);
+                PopulateFilteredBatchPartListView(state);
+                RepositionHeaderCombos(state);
+                return 0;
+            }
+
+            if ((commandId == kIdHasMaterialFilter ||
+                 commandId == kIdHasQuantityFilter ||
+                 commandId == kIdNoSheetmetalFeatureFilter ||
+                 commandId == kIdVisibleComponentFilter) &&
+                notifyCode == BN_CLICKED)
+            {
+                SyncBatchPartVisibleChecksToModel(state);
+                PopulateFilteredBatchPartListView(state);
+                RepositionHeaderCombos(state);
+                return 0;
+            }
+
+            if (commandId == kIdFilterClear)
+            {
+                SyncBatchPartVisibleChecksToModel(state);
+                SetWindowTextW(state->filterEdit, L"");
+                SetWindowTextW(state->layerFilterEdit, L"");
+                if (state->layerModeCombo != NULL) SendMessageW(state->layerModeCombo, CB_SETCURSEL, 0, 0);
+                if (state->hasMaterialFilterCheck != NULL) SendMessageW(state->hasMaterialFilterCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                if (state->hasQuantityFilterCheck != NULL) SendMessageW(state->hasQuantityFilterCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                if (state->noSheetmetalFeatureFilterCheck != NULL) SendMessageW(state->noSheetmetalFeatureFilterCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                if (state->visibleComponentFilterCheck != NULL) SendMessageW(state->visibleComponentFilterCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                PopulateFilteredBatchPartListView(state);
+                RepositionHeaderCombos(state);
                 return 0;
             }
 
@@ -3405,19 +4357,24 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
                 for (int i = 0; i < count; ++i)
                 {
                     ListView_SetCheckState(state->listView, i, checked);
+                    const int candidateIndex = BatchPartListCandidateIndex(state->listView, i);
+                    if (candidateIndex >= 0 && static_cast<size_t>(candidateIndex) < state->checkedCandidates.size())
+                    {
+                        state->checkedCandidates[static_cast<size_t>(candidateIndex)] = checked ? true : false;
+                    }
                 }
                 return 0;
             }
 
             if (commandId == kIdOk)
             {
+                SyncBatchPartVisibleChecksToModel(state);
                 state->selectedIndices.clear();
-                const int count = ListView_GetItemCount(state->listView);
-                for (int i = 0; i < count; ++i)
+                for (size_t i = 0; i < state->checkedCandidates.size(); ++i)
                 {
-                    if (ListView_GetCheckState(state->listView, i))
+                    if (state->checkedCandidates[i])
                     {
-                        state->selectedIndices.push_back(i);
+                        state->selectedIndices.push_back(static_cast<int>(i));
                     }
                 }
                 SaveBatchPartPickerState(state);
@@ -3517,7 +4474,17 @@ void CollectBatchPrototypeParts(NXOpen::Part* assemblyPart, std::vector<NXOpen::
         state.selectedAttributes[1] = persistedState.hasAttributes ? persistedState.attributes[1] : AttributeDefaultIfPresent(attributeNames, "\xE6\x95\xB0\xE9\x87\x8F");
         state.selectedAttributes[2] = persistedState.hasAttributes ? persistedState.attributes[2] : std::string();
         state.selectedAttributes[3] = persistedState.hasAttributes ? persistedState.attributes[3] : std::string();
+        state.checkedCandidates.resize(candidates.size(), false);
         state.listView = NULL;
+        state.filterEdit = NULL;
+        state.filterClearButton = NULL;
+        state.attributeFilterCombo = NULL;
+        state.hasMaterialFilterCheck = NULL;
+        state.hasQuantityFilterCheck = NULL;
+        state.noSheetmetalFeatureFilterCheck = NULL;
+        state.visibleComponentFilterCheck = NULL;
+        state.layerModeCombo = NULL;
+        state.layerFilterEdit = NULL;
         for (int i = 0; i < BatchAttributeColumnCount; ++i)
         {
             state.comboBoxes[i] = NULL;
@@ -5218,10 +6185,7 @@ int ProcessBatchBodyQuantityInPart(
 		return 0;
 	}
 
-	if (FindExpressionIfExists(processPart, quantityExpressionName) == NULL)
-	{
-		SetOrCreateIntegerExpression(processPart, quantityExpressionName, NXString("1"));
-	}
+	EnsurePartQuantityAttributeExpression(processPart);
 
 	std::vector<Body*> batchBodies;
 	CollectBodiesFromPart(processPart, batchBodies);
@@ -5293,7 +6257,7 @@ int ProcessBatchBodyQuantityInPart(
 	for (size_t bodyIndex = 0; bodyIndex < batchBodies.size(); ++bodyIndex)
 	{
 		Body* body = batchBodies[bodyIndex];
-		if (body == NULL)
+		if (!IsSameBodySearchCandidate(body))
 		{
 			continue;
 		}
@@ -5715,10 +6679,7 @@ int ZiDonFenCen::apply_cb()
 			const unsigned long long batchTotalStartMs = ZiDonFenCenNowMs();
 			ZiDonFenCenDebugLog("batch begin");
 			const NXString quantityExpressionName = QuantityExpressionName();
-			if (FindExpressionIfExists(workPart, quantityExpressionName) == NULL)
-			{
-				SetOrCreateIntegerExpression(workPart, quantityExpressionName, NXString("1"));
-			}
+			EnsurePartQuantityAttributeExpression(workPart);
 
 			bool useLayerFilter = toggleBatchLayerFilter != NULL && toggleBatchLayerFilter->Value();
 			int layerStart = integerBatchLayerStart != NULL ? integerBatchLayerStart->Value() : 1;
@@ -5994,7 +6955,7 @@ int ZiDonFenCen::apply_cb()
 			for (size_t bodyIndex = 0; bodyIndex < batchBodies.size(); ++bodyIndex)
 			{
 				Body* body = batchBodies[bodyIndex];
-				if (body == NULL)
+				if (!IsSameBodySearchCandidate(body))
 				{
 					continue;
 				}
@@ -6299,6 +7260,26 @@ int ZiDonFenCen::apply_cb()
 			{
 				for (size_t ia = 0; ia < VBody.size(); )
 				{
+					if (VBody[ia] == NULL)
+					{
+						VBody.erase(VBody.begin() + ia);
+						continue;
+					}
+					if (!IsSameBodySearchCandidate(VBody[ia]))
+					{
+						{
+							std::ostringstream oss;
+							oss << "apply followAux"
+								<< " reason=skipAuxCandidate"
+								<< " sourceTag=" << VBody_1[i]->Tag()
+								<< " auxTag=" << VBody[ia]->Tag()
+								<< " auxLayer=" << VBody[ia]->Layer()
+								<< " flatPattern=" << (IsFlatPatternLikeBody(VBody[ia]) ? 1 : 0);
+							ZiDonFenCenDebugLog(oss.str());
+						}
+						VBody.erase(VBody.begin() + ia);
+						continue;
+					}
 					MeasureDistance* measureDistance1;
 					measureDistance1 = workPart->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, VBody_1[i], VBody[ia]);
 					double distance1 = measureDistance1->Value();//锟斤拷取锟斤拷锟斤拷锟斤拷值
@@ -6453,10 +7434,7 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 		else if (block == selection0)     
         {
 			const NXString quantityExpressionName = QuantityExpressionName();
-			if (FindExpressionIfExists(workPart, quantityExpressionName) == NULL)
-			{
-				SetOrCreateIntegerExpression(workPart, quantityExpressionName, NXString("1"));
-			}
+			EnsurePartQuantityAttributeExpression(workPart);
 
 			UF_initialize();
 			ufInitialized = true;
@@ -6772,6 +7750,10 @@ int ZiDonFenCen::ask_xiantonti(Body* body1,vector<Body*> &VBody, std::vector<int
 		ufInitialized = true;
 		sulian = 1;
 		VBody_1.push_back(body1);
+		if (!IsSameBodySearchCandidate(body1))
+		{
+			return 0;
+		}
 
 		const bool colorMatchedBodies = BlockLogicalValue(toggle01);
 		const int colorID = colorMatchedBodies ? PickSameBodyColor(color) : 0;
@@ -6784,6 +7766,11 @@ int ZiDonFenCen::ask_xiantonti(Body* body1,vector<Body*> &VBody, std::vector<int
 		SameBodyFingerprint referenceFingerprint = {};
 		for (size_t i = 0; i < VBody.size(); )
 		{
+			if (!IsSameBodySearchCandidate(VBody[i]))
+			{
+				++i;
+				continue;
+			}
 			bool linsi = VBody[i]->HasUserAttribute("linsi", NXObject::AttributeType::AttributeTypeString, -1);
 			if (linsi)
 			{

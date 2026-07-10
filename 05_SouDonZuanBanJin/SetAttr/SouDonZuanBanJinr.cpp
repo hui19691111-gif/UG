@@ -324,19 +324,13 @@ namespace
 
     std::string FindBendFactorConfigPath()
     {
-        std::string path = CombinePath2(CombinePath2(ModuleDirectory2(), "..\\config"), BendFactorConfigFileName);
+        std::string path = std::string("D:\\UG智辉钣金插件\\config\\") + BendFactorConfigFileName;
         return FileExists2(path) ? path : std::string();
     }
 
     std::wstring FindBendFactorConfigPathW()
     {
-        std::wstring path = CombinePathW2(CombinePathW2(ModuleDirectoryW2(), L"..\\config"), L"PiLianZuanBanJin_bend_factor_rules.ini");
-        if (FileExistsW2(path))
-        {
-            return path;
-        }
-
-        path = L"D:\\UG智辉钣金插件\\config\\PiLianZuanBanJin_bend_factor_rules.ini";
+        std::wstring path = L"D:\\UG智辉钣金插件\\config\\PiLianZuanBanJin_bend_factor_rules.ini";
         return FileExistsW2(path) ? path : std::wstring();
     }
 
@@ -3326,59 +3320,6 @@ int SouDonZuanBanJin::apply_cb()
         {
             Body1->SetUserAttribute("焊接", -1, "", Update::OptionNow);
         }
-
-        int Body1ID = 0;
-        //Body1->GetReferenceAttribute("BodyID");
-
-        char ExName1Y[256];
-        char ExName1YY[256];
-        char ExName1[256];
-        char ExName1X[256];
-        char ExName1XX[256];
-        char ExName2[256];
-        char SuLian[256];
-        
-        if (Body1->HasUserAttribute("BodyID", NXObject::AttributeType::AttributeTypeInteger, -1))
-        {
-            Body1ID = Body1->GetIntegerAttribute("BodyID");
-
-            sprintf(ExName1Y, "Y_%d", Body1ID);
-            sprintf(ExName1YY, "YY_%d", Body1ID);
-            sprintf(ExName1X, "X_%d", Body1ID);
-            sprintf(ExName1XX, "XX_%d", Body1ID);
-            sprintf(SuLian, "SuLian_%d", Body1ID);
-
-        }
-
-            srand(static_cast<unsigned int>(time(0)));
-            Body1ID = (rand() % 9001) + 999;//生成4位随机数
-            Body1->SetUserAttribute("BodyID", -1, Body1ID, Update::Option::OptionNow);
-        NXOpen::Expression* expression1Y;
-        NXOpen::Expression* expression1YY;
-        NXOpen::Expression* expression1X;
-        NXOpen::Expression* expression1XX;
-        NXOpen::Expression* expsuLian;
-        NXOpen::Unit* nullNXOpen_Unit(NULL);
-
-        sprintf(ExName1Y, "Y_%d", Body1ID);
-        sprintf(ExName1YY, "YY_%d", Body1ID);
-        sprintf(ExName1X, "X_%d", Body1ID);
-        sprintf(ExName1XX, "XX_%d", Body1ID);
-        sprintf(SuLian, "SuLian_%d", Body1ID);
-
-        expression1Y = workPart->Expressions()->GetAttributeExpression(feature3, "Minimum Y", NXOpen::NXObject::AttributeTypeReal, -1);
-
-        sprintf(ExName1, "YY_%d=ROUND(%s)", Body1ID, ExName1Y);
-        expression1Y->SetName(ExName1Y);
-        expression1YY = workPart->Expressions()->CreateExpressionWithUnit("Integer", ExName1, nullNXOpen_Unit);
-
-        expression1X = workPart->Expressions()->GetAttributeExpression(feature3, "Minimum X", NXOpen::NXObject::AttributeTypeReal, -1);
-        sprintf(ExName2, "XX_%d=ROUND(%s)", Body1ID, ExName1X);
-        expression1X->SetName(ExName1X);
-        expression1XX = workPart->Expressions()->CreateExpressionWithUnit("Integer", ExName2, nullNXOpen_Unit);
-        expsuLian = workPart->Expressions()->GetAttributeExpression(Body1, "sulian", NXOpen::NXObject::AttributeTypeInteger, -1);
-
-        expsuLian->SetName(SuLian);
 
     }
     catch(exception& ex)

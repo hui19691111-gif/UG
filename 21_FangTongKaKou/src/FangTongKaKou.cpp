@@ -3,6 +3,7 @@
 #include <NXOpen/BlockStyler_Button.hxx>
 #include <NXOpen/BlockStyler_DoubleBlock.hxx>
 #include <NXOpen/BlockStyler_Enumeration.hxx>
+#include <NXOpen/BlockStyler_ObjectColorPicker.hxx>
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_SelectObject.hxx>
 #include <NXOpen/BlockStyler_Toggle.hxx>
@@ -527,12 +528,6 @@ const std::set<std::pair<int, int> >& GetTubeSpecs()
 
     loaded = true;
     LoadSpecsFromFile(WideToSystemString(L"D:\\UG智辉钣金插件\\config\\FangTongKaKou_specs.txt"), specs);
-    const std::string moduleDirectory = GetModuleDirectory();
-    if (!moduleDirectory.empty())
-    {
-        LoadSpecsFromFile(moduleDirectory + "\\config\\FangTongKaKou_specs.txt", specs);
-        LoadSpecsFromFile(moduleDirectory + "\\FangTongKaKou_specs.txt", specs);
-    }
 
     if (specs.empty())
     {
@@ -545,25 +540,6 @@ void OpenSpecTable()
 {
     wchar_t widePath[MAX_PATH] = L"D:\\UG智辉钣金插件\\config\\FangTongKaKou_specs.txt";
     DWORD attributes = GetFileAttributesW(widePath);
-    if (attributes == INVALID_FILE_ATTRIBUTES)
-    {
-        const std::string moduleDirectory = GetModuleDirectory();
-        if (!moduleDirectory.empty())
-        {
-            const std::string fallbackPath = moduleDirectory + "\\FangTongKaKou_specs.txt";
-            std::wstring fallbackWidePath(MAX_PATH, L'\0');
-            const int converted = MultiByteToWideChar(CP_ACP, 0, fallbackPath.c_str(), -1, &fallbackWidePath[0], MAX_PATH);
-            if (converted > 0)
-            {
-                fallbackWidePath.resize(static_cast<size_t>(converted - 1));
-                if (GetFileAttributesW(fallbackWidePath.c_str()) != INVALID_FILE_ATTRIBUTES)
-                {
-                    wcsncpy_s(widePath, fallbackWidePath.c_str(), _TRUNCATE);
-                    attributes = GetFileAttributesW(widePath);
-                }
-            }
-        }
-    }
 
     if (attributes == INVALID_FILE_ATTRIBUTES)
     {
@@ -892,6 +868,7 @@ bool TryReadPortEndCoordFromAttributeName(const std::string& attributeName, doub
 struct SelectedFaceInfo
 {
     NXOpen::Face* face;
+    tag_t faceTag;
     double pickPoint[3];
 };
 
@@ -3804,7 +3781,8 @@ bool FindTouchingTubeAtEnd(
 
 std::vector<tag_t> CollectTouchCandidateBodyTags(
     const FacePlacement& referencePlacement,
-    std::map<tag_t, SquareTubeCandidate>* candidateCache = NULL)
+    std::map<tag_t, SquareTubeCandidate>* candidateCache = NULL,
+    bool excludeLengthAxisAlignedWithFaceNormal = true)
 {
     std::vector<tag_t> candidateBodyTags;
     std::vector<tag_t> bodyTags = AskSolidBodiesInDisplayPart();
@@ -3824,7 +3802,8 @@ std::vector<tag_t> CollectTouchCandidateBodyTags(
                     candidate.width > 1.0e-6 &&
                     candidate.length > 1.0e-6;
                 double lengthAxis[3] = {0.0, 0.0, 0.0};
-                if (hasTubeLikeDimensions &&
+                if (excludeLengthAxisAlignedWithFaceNormal &&
+                    hasTubeLikeDimensions &&
                     FindLengthAxisFromEdges(bodyTags[bodyIndex], candidate.length, lengthAxis))
                 {
                     const double lengthNormalDot = std::fabs(Dot3(lengthAxis, referencePlacement.normal));
@@ -3973,7 +3952,7 @@ bool HasCreatedPortMarker(const TouchingPortPlacement& portPlacement)
                portPlacement.malePlacement);
 }
 
-void MarkCreatedPortFace(tag_t faceTag, const std::string& attributeName, bool updateColor)
+void MarkCreatedPortFace(tag_t faceTag, const std::string& attributeName, bool updateColor, int colorNumber)
 {
     NXOpen::Face* face = FaceFromTag(faceTag);
     if (face == NULL)
@@ -3993,20 +3972,39 @@ void MarkCreatedPortFace(tag_t faceTag, const std::string& attributeName, bool u
     {
     }
 
-    const int greenColor = 36;
-    if (updateColor && UF_OBJ_set_color(faceTag, greenColor) == 0)
+    if (updateColor && UF_OBJ_set_color(faceTag, colorNumber) == 0)
     {
         RedisplayTag(faceTag);
     }
 }
 
-void MarkCreatedPortFaces(const FacePlacement& placement, const std::vector<tag_t>& faceTags, bool updateColor)
+void MarkCreatedPortFaces(
+    const FacePlacement& placement,
+    const std::vector<tag_t>& faceTags,
+    bool updateColor,
+    int colorNumber = 36)
 {
     const std::string attributeName = CreatedPortPlacementAttributeName(placement);
     for (std::size_t index = 0; index < faceTags.size(); ++index)
     {
-        MarkCreatedPortFace(faceTags[index], attributeName, updateColor);
+        MarkCreatedPortFace(faceTags[index], attributeName, updateColor, colorNumber);
     }
+}
+
+void MarkMalePortFacesWithPlacementFace(
+    const FacePlacement& placement,
+    const std::vector<tag_t>& faceTags,
+    bool updateColor,
+    int colorNumber = 36)
+{
+    std::vector<tag_t> allFaceTags = faceTags;
+    std::set<tag_t> seenFaceTags(allFaceTags.begin(), allFaceTags.end());
+    if (placement.faceTag != NULL_TAG && seenFaceTags.insert(placement.faceTag).second)
+    {
+        allFaceTags.push_back(placement.faceTag);
+    }
+
+    MarkCreatedPortFaces(placement, allFaceTags, updateColor, colorNumber);
 }
 
 std::vector<TouchingPortPlacement> FilterUnmarkedPortPlacements(const std::vector<TouchingPortPlacement>& placements)
@@ -4441,9 +4439,13 @@ public:
           femaleDepthValueBlock(NULL),
           clearanceValueBlock(NULL),
           angleValueBlock(NULL),
+          selectionColorToggle(NULL),
+          selectionColorPicker(NULL),
           autoRecognizeTubeRToggle(NULL),
           mistakeProofToggle(NULL),
-          specButton(NULL)
+          specButton(NULL),
+          clearingMaleFaceSelection(false),
+          creatingFromSelectionUpdate(false)
     {
         ui = NXOpen::UI::GetUI();
         const std::string dlxPath =
@@ -4488,10 +4490,15 @@ private:
     NXOpen::BlockStyler::DoubleBlock* femaleDepthValueBlock;
     NXOpen::BlockStyler::DoubleBlock* clearanceValueBlock;
     NXOpen::BlockStyler::DoubleBlock* angleValueBlock;
+    NXOpen::BlockStyler::Toggle* selectionColorToggle;
+    NXOpen::BlockStyler::ObjectColorPicker* selectionColorPicker;
     NXOpen::BlockStyler::Toggle* autoRecognizeTubeRToggle;
     NXOpen::BlockStyler::Toggle* mistakeProofToggle;
     NXOpen::BlockStyler::Button* specButton;
     std::map<tag_t, SquareTubeCandidate> tubeCandidateCache;
+    std::vector<SelectedFaceInfo> maleFaceSelections;
+    bool clearingMaleFaceSelection;
+    bool creatingFromSelectionUpdate;
 
     void SetFaceSelectionFilter(NXOpen::BlockStyler::SelectObject* selection)
     {
@@ -4510,6 +4517,57 @@ private:
         NXOpen::BlockStyler::PropertyList* properties = selection->GetProperties();
         properties->SetSelectionFilter("SelectionFilter", action, masks);
         delete properties;
+    }
+
+    void SetFaceSelectionMode(NXOpen::BlockStyler::SelectObject* selection, bool multiple)
+    {
+        if (selection == NULL)
+        {
+            return;
+        }
+
+        try
+        {
+            selection->SetSelectModeAsString(multiple ? "Multiple" : "Single");
+        }
+        catch (...)
+        {
+            NXOpen::BlockStyler::PropertyList* properties = NULL;
+            try
+            {
+                properties = selection->GetProperties();
+                properties->SetEnum("SelectMode", multiple ? 1 : 0);
+            }
+            catch (...)
+            {
+            }
+            if (properties != NULL)
+            {
+                delete properties;
+            }
+        }
+    }
+
+    void SetSelectionStepStatus(NXOpen::BlockStyler::SelectObject* selection, int stepStatus)
+    {
+        if (selection == NULL)
+        {
+            return;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties = NULL;
+        try
+        {
+            properties = selection->GetProperties();
+            properties->SetEnum("StepStatus", stepStatus);
+        }
+        catch (...)
+        {
+        }
+        if (properties != NULL)
+        {
+            delete properties;
+        }
     }
 
     void SetBlockVisible(NXOpen::BlockStyler::UIBlock* block, bool visible)
@@ -4733,6 +4791,82 @@ private:
         }
     }
 
+    int GetSelectionColorValue()
+    {
+        int colorNumber = 36;
+        if (selectionColorPicker != NULL)
+        {
+            try
+            {
+                std::vector<int> values = selectionColorPicker->GetValue();
+                if (!values.empty())
+                {
+                    colorNumber = values.front();
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+        if (colorNumber < 1)
+        {
+            colorNumber = 1;
+        }
+        if (colorNumber > 216)
+        {
+            colorNumber = 216;
+        }
+
+        return colorNumber;
+    }
+
+    void SetSelectionColorValue(int colorNumber)
+    {
+        if (selectionColorPicker == NULL)
+        {
+            return;
+        }
+        if (colorNumber < 1)
+        {
+            colorNumber = 1;
+        }
+        if (colorNumber > 216)
+        {
+            colorNumber = 216;
+        }
+        try
+        {
+            selectionColorPicker->SetValue(std::vector<int>(1, colorNumber));
+        }
+        catch (...)
+        {
+        }
+    }
+
+    bool IsSelectionColorEnabled()
+    {
+        return selectionColorToggle != NULL && selectionColorToggle->Value();
+    }
+
+    void UpdateSelectionColorControls()
+    {
+        SetBlockEnabled(selectionColorPicker, IsSelectionColorEnabled());
+    }
+
+    void ApplySelectionFaceColor(tag_t faceTag)
+    {
+        if (faceTag == NULL_TAG || !IsSelectionColorEnabled())
+        {
+            return;
+        }
+
+        const int colorNumber = GetSelectionColorValue();
+        if (UF_OBJ_set_color(faceTag, colorNumber) == 0)
+        {
+            RedisplayTag(faceTag);
+        }
+    }
+
     void SetToggleValue(NXOpen::BlockStyler::Toggle* block, bool value)
     {
         if (block == NULL)
@@ -4758,6 +4892,7 @@ private:
     void LoadDialogState()
     {
         const std::map<std::string, std::string> values = LoadKeyValueFile(FangTongKaKouStatePath());
+        SetSelectionColorValue(36);
         if (values.empty())
         {
             return;
@@ -4773,6 +4908,7 @@ private:
             ReadStateDouble(values, "femaleDepth", femaleDepthValueBlock != NULL ? femaleDepthValueBlock->Value() : 1.0));
         SetDoubleValue(clearanceValueBlock, ReadStateDouble(values, "clearance", clearanceValueBlock != NULL ? clearanceValueBlock->Value() : 0.2));
         SetDoubleValue(angleValueBlock, ReadStateDouble(values, "angle", angleValueBlock != NULL ? angleValueBlock->Value() : 10.0));
+        SetSelectionColorValue(ReadStateInt(values, "selectionColor", GetSelectionColorValue()));
 
         SetToggleValue(
             autoRecognizeTubeRToggle,
@@ -4786,6 +4922,12 @@ private:
                 values,
                 "mistakeProof",
                 mistakeProofToggle != NULL && mistakeProofToggle->Value()));
+        SetToggleValue(
+            selectionColorToggle,
+            ReadStateBool(
+                values,
+                "selectionColorEnabled",
+                selectionColorToggle == NULL || selectionColorToggle->Value()));
     }
 
     void SaveDialogState()
@@ -4801,6 +4943,8 @@ private:
         output << "angle=" << FormatDouble(angleValueBlock != NULL ? angleValueBlock->Value() : 0.0) << "\n";
         output << "autoRecognizeTubeR=" << (autoRecognizeTubeRToggle != NULL && autoRecognizeTubeRToggle->Value() ? 1 : 0) << "\n";
         output << "mistakeProof=" << (mistakeProofToggle != NULL && mistakeProofToggle->Value() ? 1 : 0) << "\n";
+        output << "selectionColorEnabled=" << (IsSelectionColorEnabled() ? 1 : 0) << "\n";
+        output << "selectionColor=" << GetSelectionColorValue() << "\n";
 
         WriteTextFileWide(FangTongKaKouStatePath(), output.str());
     }
@@ -4815,9 +4959,15 @@ private:
     void UpdateCreateModeControls()
     {
         const bool manualMode = GetCreateModeValue() == 0;
-        SetBlockVisible(femaleFaceBlock, manualMode);
-        SetBlockEnabled(femaleFaceBlock, manualMode);
+        SetFaceSelectionMode(maleFaceBlock, manualMode);
+        SetSelectionStepStatus(maleFaceBlock, manualMode ? 1 : 0);
+        SetBlockVisible(femaleFaceBlock, false);
+        SetBlockEnabled(femaleFaceBlock, false);
         SetBlockEnabled(mistakeProofToggle, !manualMode);
+        if (!manualMode)
+        {
+            maleFaceSelections.clear();
+        }
     }
 
     int GetCreateModeValue()
@@ -4901,6 +5051,7 @@ private:
     {
         SelectedFaceInfo result = {};
         result.face = NULL;
+        result.faceTag = NULL_TAG;
         result.pickPoint[0] = 0.0;
         result.pickPoint[1] = 0.0;
         result.pickPoint[2] = 0.0;
@@ -4921,10 +5072,96 @@ private:
         }
 
         result.face = dynamic_cast<NXOpen::Face*>(selectedObjects.front());
+        result.faceTag = result.face != NULL ? result.face->Tag() : NULL_TAG;
         result.pickPoint[0] = pickPoint.X;
         result.pickPoint[1] = pickPoint.Y;
         result.pickPoint[2] = pickPoint.Z;
         return result;
+    }
+
+    void ClearMaleFaceBlockSelection()
+    {
+        if (maleFaceBlock == NULL || clearingMaleFaceSelection)
+        {
+            return;
+        }
+
+        clearingMaleFaceSelection = true;
+        try
+        {
+            std::vector<NXOpen::TaggedObject*> emptySelection;
+            maleFaceBlock->SetSelectedObjects(emptySelection);
+        }
+        catch (...)
+        {
+        }
+        clearingMaleFaceSelection = false;
+    }
+
+    std::vector<SelectedFaceInfo> TrackMaleFaceClickSelection()
+    {
+        std::vector<SelectedFaceInfo> newSelections;
+        if (maleFaceBlock == NULL || clearingMaleFaceSelection)
+        {
+            return newSelections;
+        }
+
+        NXOpen::Point3d pickPoint = maleFaceBlock->PickPoint();
+        std::vector<NXOpen::TaggedObject*> selectedObjects = maleFaceBlock->GetLastSelectedObjects();
+        for (std::size_t index = 0; index < selectedObjects.size(); ++index)
+        {
+            NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(selectedObjects[index]);
+            if (face != NULL)
+            {
+                SelectedFaceInfo info = {};
+                info.face = face;
+                info.faceTag = face->Tag();
+                info.pickPoint[0] = pickPoint.X;
+                info.pickPoint[1] = pickPoint.Y;
+                info.pickPoint[2] = pickPoint.Z;
+                maleFaceSelections.push_back(info);
+                newSelections.push_back(info);
+                ApplySelectionFaceColor(info.faceTag);
+            }
+        }
+
+        std::vector<NXOpen::TaggedObject*> deselectedObjects = maleFaceBlock->GetLastDeselectedObjects();
+        if (selectedObjects.empty() && !deselectedObjects.empty())
+        {
+            maleFaceSelections.clear();
+        }
+
+        if (!selectedObjects.empty())
+        {
+            ClearMaleFaceBlockSelection();
+        }
+
+        return newSelections;
+    }
+
+    std::vector<SelectedFaceInfo> GetRecordedMaleFaces()
+    {
+        std::vector<SelectedFaceInfo> faces = maleFaceSelections;
+        if (maleFaceBlock != NULL)
+        {
+            std::vector<NXOpen::TaggedObject*> selectedObjects = maleFaceBlock->GetSelectedObjects();
+            NXOpen::Point3d pickPoint = maleFaceBlock->PickPoint();
+            for (std::size_t index = 0; index < selectedObjects.size(); ++index)
+            {
+                NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(selectedObjects[index]);
+                if (face != NULL)
+                {
+                    SelectedFaceInfo info = {};
+                    info.face = face;
+                    info.faceTag = face->Tag();
+                    info.pickPoint[0] = pickPoint.X;
+                    info.pickPoint[1] = pickPoint.Y;
+                    info.pickPoint[2] = pickPoint.Z;
+                    faces.push_back(info);
+                }
+            }
+        }
+        return faces;
     }
 
     void Initialize()
@@ -4948,6 +5185,10 @@ private:
             dialog->TopBlock()->FindBlock("clearanceValue"));
         angleValueBlock = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(
             dialog->TopBlock()->FindBlock("angleValue"));
+        selectionColorToggle = dynamic_cast<NXOpen::BlockStyler::Toggle*>(
+            dialog->TopBlock()->FindBlock("selectionColorToggle"));
+        selectionColorPicker = dynamic_cast<NXOpen::BlockStyler::ObjectColorPicker*>(
+            dialog->TopBlock()->FindBlock("selectionColorPicker"));
         autoRecognizeTubeRToggle = dynamic_cast<NXOpen::BlockStyler::Toggle*>(
             dialog->TopBlock()->FindBlock("autoRecognizeTubeRToggle"));
         mistakeProofToggle = dynamic_cast<NXOpen::BlockStyler::Toggle*>(
@@ -4957,9 +5198,19 @@ private:
 
         SetCreateModeMembers();
         SetPortTypeMembers();
+        SetFaceSelectionMode(maleFaceBlock, true);
+        SetFaceSelectionMode(femaleFaceBlock, false);
         SetFaceSelectionFilter(maleFaceBlock);
         SetFaceSelectionFilter(femaleFaceBlock);
+        SetBlockLabel(
+            selectionColorToggle,
+            "\xE5\x8D\xA1\xE5\x8F\xA3\xE9\x9D\xA2\xE6\x94\xB9\xE8\x89\xB2");
+        SetBlockLabel(
+            selectionColorPicker,
+            "\xE9\xA2\x9C\xE8\x89\xB2");
+        SetSelectionColorValue(36);
         LoadDialogState();
+        UpdateSelectionColorControls();
         UpdateCreateModeControls();
         UpdatePortTypeControls();
         UpdateDimensionTitles();
@@ -4974,6 +5225,25 @@ private:
 
     int Update(NXOpen::BlockStyler::UIBlock* block)
     {
+        if (block == maleFaceBlock)
+        {
+            if (GetCreateModeValue() == 0)
+            {
+                std::vector<SelectedFaceInfo> newSelections = TrackMaleFaceClickSelection();
+                if (!newSelections.empty())
+                {
+                    maleFaceSelections = newSelections;
+                    creatingFromSelectionUpdate = true;
+                    Ok();
+                    creatingFromSelectionUpdate = false;
+                    maleFaceSelections.clear();
+                }
+            }
+        }
+        if (block == selectionColorToggle || block == selectionColorPicker)
+        {
+            UpdateSelectionColorControls();
+        }
         if (block == createModeBlock)
         {
             UpdateCreateModeControls();
@@ -4997,17 +5267,46 @@ private:
     {
         try
         {
-            SelectedFaceInfo maleFace = GetSelectedFace(maleFaceBlock);
-            if (maleFace.face == NULL)
+            const int createMode = GetCreateModeValue();
+            if (!creatingFromSelectionUpdate && createMode == 0)
             {
-                ui->NXMessageBox()->Show(
-                    "FangTongKaKou",
-                    NXOpen::NXMessageBox::DialogTypeInformation,
-                    "Please select male face.");
-                return 1;
+                SaveDialogState();
+                return 0;
             }
 
-            const int createMode = GetCreateModeValue();
+            SelectedFaceInfo autoMaleFace = {};
+            autoMaleFace.face = NULL;
+            autoMaleFace.faceTag = NULL_TAG;
+            autoMaleFace.pickPoint[0] = 0.0;
+            autoMaleFace.pickPoint[1] = 0.0;
+            autoMaleFace.pickPoint[2] = 0.0;
+            std::vector<SelectedFaceInfo> manualMaleFaces;
+
+            if (createMode == 0)
+            {
+                manualMaleFaces = GetRecordedMaleFaces();
+                if (manualMaleFaces.empty())
+                {
+                    ui->NXMessageBox()->Show(
+                        "FangTongKaKou",
+                        NXOpen::NXMessageBox::DialogTypeInformation,
+                        "Please select one or more male faces.");
+                    return 1;
+                }
+            }
+            else
+            {
+                autoMaleFace = GetSelectedFace(maleFaceBlock);
+                if (autoMaleFace.face == NULL)
+                {
+                    ui->NXMessageBox()->Show(
+                        "FangTongKaKou",
+                        NXOpen::NXMessageBox::DialogTypeInformation,
+                        "Please select male face.");
+                    return 1;
+                }
+            }
+
             const int portType = GetPortTypeValue();
             const double width = widthValueBlock != NULL ? widthValueBlock->Value() : 0.0;
             const double height = heightValueBlock != NULL ? heightValueBlock->Value() : 0.0;
@@ -5040,47 +5339,51 @@ private:
                 return 1;
             }
 
-            FacePlacement malePlacement = {};
-            if (!AskPlanarFacePlacement(maleFace.face, maleFace.pickPoint, malePlacement, createMode != 0))
-            {
-                ui->NXMessageBox()->Show(
-                    "FangTongKaKou",
-                    NXOpen::NXMessageBox::DialogTypeInformation,
-                    "The selected face must be a planar face.");
-                return 1;
-            }
-
             std::vector<TouchingPortPlacement> touchingEndPlacements;
             if (createMode == 0)
             {
-                SelectedFaceInfo femaleFace = GetSelectedFace(femaleFaceBlock);
-                if (femaleFace.face == NULL)
+                for (std::size_t faceIndex = 0; faceIndex < manualMaleFaces.size(); ++faceIndex)
                 {
-                    ui->NXMessageBox()->Show(
-                        "FangTongKaKou",
-                        NXOpen::NXMessageBox::DialogTypeInformation,
-                        "Please select female face.");
-                    return 1;
-                }
+                    FacePlacement malePlacement = {};
+                    if (!AskPlanarFacePlacement(
+                            manualMaleFaces[faceIndex].face,
+                            manualMaleFaces[faceIndex].pickPoint,
+                            malePlacement,
+                            false))
+                    {
+                        ui->NXMessageBox()->Show(
+                            "FangTongKaKou",
+                            NXOpen::NXMessageBox::DialogTypeInformation,
+                            "The selected faces must be planar faces.");
+                        return 1;
+                    }
 
-                tag_t femaleBodyTag = NULL_TAG;
-                ThrowUfError(UF_MODL_ask_face_body(femaleFace.face->Tag(), &femaleBodyTag), "UF_MODL_ask_face_body");
-                if (femaleBodyTag == NULL_TAG)
-                {
-                    ui->NXMessageBox()->Show(
-                        "FangTongKaKou",
-                        NXOpen::NXMessageBox::DialogTypeInformation,
-                        "Could not resolve the female body.");
-                    return 1;
-                }
+                    tag_t femaleBodyTag = NULL_TAG;
+                    std::vector<tag_t> touchingCandidateBodyTags =
+                        CollectTouchCandidateBodyTags(malePlacement, &tubeCandidateCache, false);
+                    if (!FindTouchingTubeAtEnd(malePlacement, touchingCandidateBodyTags, &femaleBodyTag))
+                    {
+                        continue;
+                    }
 
-                TouchingPortPlacement portPlacement = {};
-                portPlacement.malePlacement = malePlacement;
-                portPlacement.femaleBodyTag = femaleBodyTag;
-                touchingEndPlacements.push_back(portPlacement);
+                    TouchingPortPlacement portPlacement = {};
+                    portPlacement.malePlacement = malePlacement;
+                    portPlacement.femaleBodyTag = femaleBodyTag;
+                    touchingEndPlacements.push_back(portPlacement);
+                }
             }
             else
             {
+                FacePlacement malePlacement = {};
+                if (!AskPlanarFacePlacement(autoMaleFace.face, autoMaleFace.pickPoint, malePlacement, true))
+                {
+                    ui->NXMessageBox()->Show(
+                        "FangTongKaKou",
+                        NXOpen::NXMessageBox::DialogTypeInformation,
+                        "The selected face must be a planar face.");
+                    return 1;
+                }
+
                 DisplaySuppressionGuard autoRecognitionDisplayGuard;
 
                 std::vector<FacePlacement> coplanarPlacements =
@@ -5089,7 +5392,8 @@ private:
                 {
                     coplanarPlacements.push_back(malePlacement);
                 }
-                std::vector<tag_t> touchingCandidateBodyTags = CollectTouchCandidateBodyTags(malePlacement, &tubeCandidateCache);
+                std::vector<tag_t> touchingCandidateBodyTags =
+                    CollectTouchCandidateBodyTags(malePlacement, &tubeCandidateCache);
 
                 for (std::size_t index = 0; index < coplanarPlacements.size(); ++index)
                 {
@@ -5114,6 +5418,15 @@ private:
                 }
 
                 touchingEndPlacements = FilterUnmarkedPortPlacements(touchingEndPlacements);
+            }
+
+            if (createMode == 0 && touchingEndPlacements.empty())
+            {
+                ui->NXMessageBox()->Show(
+                    "FangTongKaKou",
+                    NXOpen::NXMessageBox::DialogTypeInformation,
+                    "Could not find touching female tubes from the selected male faces.");
+                return 1;
             }
 
             std::vector<double> resolvedWidths(touchingEndPlacements.size(), width);
@@ -5257,10 +5570,11 @@ private:
                             touchingEndPlacements[index].malePlacement,
                             femaleCreatedFaces[index],
                             false);
-                        MarkCreatedPortFaces(
+                        MarkMalePortFacesWithPlacementFace(
                             touchingEndPlacements[index].malePlacement,
                             maleCreatedFaces[index],
-                            true);
+                            IsSelectionColorEnabled(),
+                            GetSelectionColorValue());
                         createdPortPlacements.push_back(touchingEndPlacements[index]);
                     }
                     else

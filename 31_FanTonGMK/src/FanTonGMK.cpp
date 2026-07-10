@@ -6413,25 +6413,11 @@ private:
 
     {
 
-        wchar_t appDataPath[MAX_PATH] = {0};
+        CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
 
-        DWORD length = GetEnvironmentVariableW(L"APPDATA", appDataPath, MAX_PATH);
+        CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
 
-        if (length == 0 || length >= MAX_PATH)
-
-        {
-
-            return L"";
-
-        }
-
-        std::wstring folder(appDataPath);
-
-        folder += L"\\UGZhiHui";
-
-        CreateDirectoryW(folder.c_str(), NULL);
-
-        return folder + L"\\FanTonGMK.ini";
+        return L"D:\\UG智辉钣金插件\\config\\FanTonGMK.ini";
 
     }
 

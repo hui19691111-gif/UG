@@ -582,7 +582,7 @@ std::filesystem::path PluginDirectory()
 
 std::filesystem::path ConfigFilePath()
 {
-    return PluginDirectory().parent_path() / L"config" / L"KeZi.ini";
+    return std::filesystem::path(L"D:\\UG智辉钣金插件\\config\\KeZi.ini");
 }
 
 void EnsureDefaultConfigFile(const std::filesystem::path& path)

@@ -3018,27 +3018,79 @@ NXOpen::Annotations::BalloonTypes SettingValueToBalloonType(int value)
     }
 }
 
-std::string BianHao_GetSettingsPath()
+std::wstring BianHao_GetSettingsDirectory()
 {
-    wchar_t appDataPath[MAX_PATH] = { 0 };
-    DWORD length = GetEnvironmentVariableW(L"APPDATA", appDataPath, MAX_PATH);
-    std::wstring directory;
-    if (length > 0 && length < MAX_PATH)
-    {
-        directory.assign(appDataPath);
-        directory += L"\\UGZhihui";
-    }
-    else
-    {
-        directory = L"C:\\UGZhihui";
-    }
-
+    CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+    std::wstring directory = L"D:\\UG智辉钣金插件\\config";
     CreateDirectoryW(directory.c_str(), NULL);
-    std::wstring filePath = directory + L"\\BianHao.settings";
+    return directory;
+}
 
-    char utf8Path[MAX_PATH * 3] = { 0 };
-    WideCharToMultiByte(CP_UTF8, 0, filePath.c_str(), -1, utf8Path, sizeof(utf8Path), NULL, NULL);
-    return std::string(utf8Path);
+std::wstring BianHao_GetSettingsPath()
+{
+    return BianHao_GetSettingsDirectory() + L"\\BianHao.ini";
+}
+
+bool BianHao_ReadSettingsText(std::string& text)
+{
+    text.clear();
+    HANDLE file = CreateFileW(BianHao_GetSettingsPath().c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > 1024 * 1024)
+    {
+        CloseHandle(file);
+        return size.QuadPart == 0;
+    }
+
+    text.resize(static_cast<size_t>(size.QuadPart));
+    DWORD bytesRead = 0;
+    const BOOL ok = ReadFile(file, &text[0], static_cast<DWORD>(text.size()), &bytesRead, NULL);
+    CloseHandle(file);
+    if (!ok)
+    {
+        text.clear();
+        return false;
+    }
+
+    text.resize(bytesRead);
+    return true;
+}
+
+bool BianHao_WriteSettingsText(const std::string& text)
+{
+    HANDLE file = CreateFileW(BianHao_GetSettingsPath().c_str(), GENERIC_WRITE, 0,
+        NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    DWORD bytesWritten = 0;
+    const BOOL ok = WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &bytesWritten, NULL);
+    CloseHandle(file);
+    return ok && bytesWritten == text.size();
+}
+
+std::string BianHao_BuildSettingsText(NXOpen::Annotations::BalloonTypes selectedType,
+    NXOpen::BlockStyler::DoubleBlock* sizeBlock,
+    NXOpen::BlockStyler::DoubleBlock* textHeightBlock,
+    int textSourceValue,
+    const std::string& attributeNameValue)
+{
+    std::ostringstream output;
+    output << "[BianHao]\n";
+    output << "style=" << BalloonTypeToSettingValue(selectedType) << "\n";
+    output << "balloonSize=" << GetSelectedBalloonSize(sizeBlock) << "\n";
+    output << "textHeight=" << GetSelectedTextHeight(textHeightBlock) << "\n";
+    output << "textSource=" << std::max(0, std::min(3, textSourceValue)) << "\n";
+    output << "attributeName=" << (attributeNameValue.empty() ? "名称" : attributeNameValue) << "\n";
+    return output.str();
 }
 
 void BianHao_LoadSettings(NXOpen::Annotations::BalloonTypes& selectedType,
@@ -3047,15 +3099,28 @@ void BianHao_LoadSettings(NXOpen::Annotations::BalloonTypes& selectedType,
     int* textSourceValue = NULL,
     std::string* attributeNameValue = NULL)
 {
-    std::ifstream input(BianHao_GetSettingsPath().c_str());
-    if (!input.is_open())
+    std::string settingsText;
+    if (!BianHao_ReadSettingsText(settingsText))
     {
+        BianHao_WriteSettingsText(BianHao_BuildSettingsText(selectedType, sizeBlock, textHeightBlock,
+            textSourceValue != NULL ? *textSourceValue : 0,
+            attributeNameValue != NULL ? *attributeNameValue : "名称"));
         return;
     }
 
     std::string line;
+    std::istringstream input(settingsText);
     while (std::getline(input, line))
     {
+        if (!line.empty() && line.back() == '\r')
+        {
+            line.pop_back();
+        }
+        if (line.empty() || line[0] == ';' || line[0] == '#' || line[0] == '[')
+        {
+            continue;
+        }
+
         const std::string::size_type equalPos = line.find('=');
         if (equalPos == std::string::npos)
         {
@@ -3111,17 +3176,8 @@ void BianHao_SaveSettings(NXOpen::Annotations::BalloonTypes selectedType,
     int textSourceValue = 0,
     const std::string& attributeNameValue = "名称")
 {
-    std::ofstream output(BianHao_GetSettingsPath().c_str(), std::ios::trunc);
-    if (!output.is_open())
-    {
-        return;
-    }
-
-    output << "style=" << BalloonTypeToSettingValue(selectedType) << "\n";
-    output << "balloonSize=" << GetSelectedBalloonSize(sizeBlock) << "\n";
-    output << "textHeight=" << GetSelectedTextHeight(textHeightBlock) << "\n";
-    output << "textSource=" << std::max(0, std::min(3, textSourceValue)) << "\n";
-    output << "attributeName=" << (attributeNameValue.empty() ? "名称" : attributeNameValue) << "\n";
+    BianHao_WriteSettingsText(BianHao_BuildSettingsText(selectedType, sizeBlock, textHeightBlock,
+        textSourceValue, attributeNameValue));
 }
 
 void ApplyIdSymbolStyle(NXOpen::Annotations::IdSymbolBuilder* builder,

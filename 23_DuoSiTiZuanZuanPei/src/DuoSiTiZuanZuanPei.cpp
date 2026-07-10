@@ -96,7 +96,7 @@ const double kMassTolerance = 0.05;
 const double kDistanceTolerance = 0.05;
 const double kFaceAreaAbsoluteTolerance = 0.05;
 const double kFaceAreaRelativeTolerance = 0.0001;
-const bool kDebugLogEnabled = false;
+const bool kDebugLogEnabled = true;
 const bool kCoordinateDebugPauseEnabled = false;
 const bool kShowCompletionMessageBox = false;
 const bool kWriteResultToListingWindow = false;
@@ -184,13 +184,9 @@ std::string GetPreviewDebugLogPath()
 
 std::string GetNameConfigPath()
 {
-    const std::string moduleDirectory = GetCurrentModuleDirectory();
-    if (moduleDirectory.empty())
-    {
-        return kNameConfigFileName;
-    }
-
-    return moduleDirectory + kNameConfigFileName;
+    CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+    CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
+    return std::string("D:\\UG智辉钣金插件\\config\\") + kNameConfigFileName;
 }
 
 void ResetPreviewDebugLog()
@@ -4426,6 +4422,38 @@ SameBodySearchData BuildSameBodySearchData(
     return data;
 }
 
+void OpenMatchDebugLog(
+    std::ofstream& debugLog,
+    const char* phase,
+    std::size_t selectedBodyCount)
+{
+    if (kDebugLogEnabled)
+    {
+        debugLog.open(GetMatchDebugLogPath().c_str(), std::ios::out | std::ios::trunc);
+    }
+    if (debugLog.is_open())
+    {
+        debugLog << "DuoSiTiZuanZuanPei match debug log" << std::endl;
+        debugLog << "Phase=" << phase << std::endl;
+        debugLog << "Tolerance: length=" << FormatDouble(kLengthTolerance)
+                 << ", mass=" << FormatDouble(kMassTolerance)
+                 << ", distance=" << FormatDouble(kDistanceTolerance)
+                 << ", faceAreaAbs=" << FormatDouble(kFaceAreaAbsoluteTolerance)
+                 << ", faceAreaRel=" << FormatDouble(kFaceAreaRelativeTolerance)
+                 << std::endl;
+        debugLog << "Selected bodies=" << selectedBodyCount << std::endl;
+        debugLog << "Coordinate debug pause is "
+                 << (kCoordinateDebugPauseEnabled ? "enabled" : "disabled")
+                 << ", axisLength=" << FormatDouble(kCoordinateDebugAxisLength)
+                 << std::endl;
+        debugLog << "Z rotation variants only: "
+                 << FormatCoordinateVariantName(0) << "; "
+                 << FormatCoordinateVariantName(3) << "; "
+                 << FormatCoordinateVariantName(5) << "; "
+                 << FormatCoordinateVariantName(6) << std::endl;
+    }
+}
+
 class DuoSiTiZuanZuanPeiDialog
 {
 public:
@@ -5231,7 +5259,9 @@ private:
             return;
         }
 
-        SameBodySearchData data = BuildSameBodySearchData(selectedBodies, NULL);
+        std::ofstream debugLog;
+        OpenMatchDebugLog(debugLog, "RefreshAssemblyPreview", selectedBodies.size());
+        SameBodySearchData data = BuildSameBodySearchData(selectedBodies, &debugLog);
         {
             std::ostringstream line;
             line << "RefreshAssemblyPreview groups="
@@ -5292,7 +5322,9 @@ private:
             return;
         }
 
-        SameBodySearchData data = BuildSameBodySearchData(selectedBodies, NULL);
+        std::ofstream debugLog;
+        OpenMatchDebugLog(debugLog, "BuildAssemblyPreviewFromSelection", selectedBodies.size());
+        SameBodySearchData data = BuildSameBodySearchData(selectedBodies, &debugLog);
         {
             std::ostringstream line;
             line << "BuildAssemblyPreviewFromSelection search groups="
@@ -5596,30 +5628,7 @@ private:
         }
 
         std::ofstream debugLog;
-        if (kDebugLogEnabled)
-        {
-            debugLog.open(GetMatchDebugLogPath().c_str(), std::ios::out | std::ios::trunc);
-        }
-        if (debugLog.is_open())
-        {
-            debugLog << "DuoSiTiZuanZuanPei match debug log" << std::endl;
-            debugLog << "Tolerance: length=" << FormatDouble(kLengthTolerance)
-                     << ", mass=" << FormatDouble(kMassTolerance)
-                     << ", distance=" << FormatDouble(kDistanceTolerance)
-                     << ", faceAreaAbs=" << FormatDouble(kFaceAreaAbsoluteTolerance)
-                     << ", faceAreaRel=" << FormatDouble(kFaceAreaRelativeTolerance)
-                     << std::endl;
-            debugLog << "Selected bodies=" << selectedBodies.size() << std::endl;
-            debugLog << "Coordinate debug pause is "
-                     << (kCoordinateDebugPauseEnabled ? "enabled" : "disabled")
-                     << ", axisLength=" << FormatDouble(kCoordinateDebugAxisLength)
-                     << std::endl;
-            debugLog << "Z rotation variants only: "
-                     << FormatCoordinateVariantName(0) << "; "
-                     << FormatCoordinateVariantName(3) << "; "
-                     << FormatCoordinateVariantName(5) << "; "
-                     << FormatCoordinateVariantName(6) << std::endl;
-        }
+        OpenMatchDebugLog(debugLog, "RunSameBodySearch", selectedBodies.size());
 
         SameBodySearchData searchData = BuildSameBodySearchData(selectedBodies, &debugLog);
         {

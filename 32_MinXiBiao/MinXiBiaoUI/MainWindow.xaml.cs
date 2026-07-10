@@ -41,8 +41,8 @@ public partial class MainWindow : Window
     private List<string> HeaderTitles { get; set; } = DefaultHeaderTitles();
 
     private static string SettingsPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "UGZhihui",
+        @"D:\UG智辉钣金插件",
+        "config",
         "MinXiBiaoUI.settings.json");
 
     private static List<string> DefaultHeaderTitles()
