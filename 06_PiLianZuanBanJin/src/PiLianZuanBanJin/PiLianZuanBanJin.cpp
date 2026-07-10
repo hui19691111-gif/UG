@@ -2580,7 +2580,32 @@ namespace
 
     void AppendMarkerLineDebugLog(const std::string& text)
     {
-        (void)text;
+        const wchar_t* logDir = L"D:\\UG智辉钣金插件\\logs";
+        const wchar_t* logPath = L"D:\\UG智辉钣金插件\\logs\\PiLianZuanBanJin_base_score.log";
+        CreateDirectoryW(logDir, NULL);
+        FILE* file = NULL;
+        if (_wfopen_s(&file, logPath, L"ab") != 0 || file == NULL)
+        {
+            return;
+        }
+
+        SYSTEMTIME time = {};
+        GetLocalTime(&time);
+        char prefix[64] = { 0 };
+        sprintf_s(prefix,
+            "[%04d-%02d-%02d %02d:%02d:%02d.%03d] ",
+            time.wYear,
+            time.wMonth,
+            time.wDay,
+            time.wHour,
+            time.wMinute,
+            time.wSecond,
+            time.wMilliseconds);
+
+        fwrite(prefix, 1, strlen(prefix), file);
+        fwrite(text.c_str(), 1, text.size(), file);
+        fwrite("\r\n", 1, 2, file);
+        fclose(file);
     }
 
     std::string ModuleDirectory()
@@ -4496,8 +4521,12 @@ namespace
         return CrossLength3(delta, a.direction) <= axisDistanceTolerance;
     }
 
-    double AdjacentCylinderScore(Face* face, const std::map<tag_t, bool>& sameSideTags)
+    double AdjacentCylinderScore(Face* face, int* cylinderCountOut)
     {
+        if (cylinderCountOut != NULL)
+        {
+            *cylinderCountOut = 0;
+        }
         if (face == NULL)
         {
             return 0.0;
@@ -4510,11 +4539,6 @@ namespace
             std::vector<Face*> adjacent = AdjacentFacesByEdge(edges[i], face);
             for (size_t j = 0; j < adjacent.size(); ++j)
             {
-                if (!sameSideTags.empty() && !sameSideTags.count(adjacent[j]->Tag()))
-                {
-                    continue;
-                }
-
                 CylinderAxisRecord axis;
                 if (!AskCylinderAxis(adjacent[j], &axis))
                 {
@@ -4539,6 +4563,10 @@ namespace
         }
 
         int count = static_cast<int>(bendAxes.size());
+        if (cylinderCountOut != NULL)
+        {
+            *cylinderCountOut = count;
+        }
         if (count <= 1) return 0.0;
         if (count == 2) return 2.0;
         if (count == 3) return 4.0;
@@ -4716,6 +4744,7 @@ namespace
         FaceInfo result;
         if (candidates.empty())
         {
+            AppendMarkerLineDebugLog("score base face: no candidates");
             return result;
         }
 
@@ -4733,13 +4762,34 @@ namespace
         }
 
         std::map<tag_t, double> position = ChainPositionScores(candidates);
+        {
+            std::ostringstream log;
+            log << "score base face begin candidates=" << candidates.size()
+                << " scoringChainFaces=" << scoringChainTags.size()
+                << " minArea=" << minArea;
+            AppendMarkerLineDebugLog(log.str());
+        }
         for (size_t i = 0; i < candidates.size(); ++i)
         {
+            tag_t faceTag = candidates[i].face == NULL ? 0 : candidates[i].face->Tag();
             double areaScore = std::max(1.0, candidates[i].area / std::max(minArea, 1e-9));
-            double positionScore = position.count(candidates[i].face->Tag()) ? position[candidates[i].face->Tag()] : 0.0;
+            double positionScore = position.count(faceTag) ? position[faceTag] : 0.0;
             double innerLoopScore = HasInnerLoopScore(candidates[i].face) ? 1.0 : 0.0;
-            double cylinderScore = AdjacentCylinderScore(candidates[i].face, scoringChainTags);
+            int cylinderCount = 0;
+            double cylinderScore = AdjacentCylinderScore(candidates[i].face, &cylinderCount);
             candidates[i].score = areaScore + positionScore + innerLoopScore + cylinderScore;
+            {
+                std::ostringstream log;
+                log << "score base face candidate face=" << faceTag
+                    << " area=" << candidates[i].area
+                    << " areaScore=" << areaScore
+                    << " positionScore=" << positionScore
+                    << " innerLoopScore=" << innerLoopScore
+                    << " cylinderCount=" << cylinderCount
+                    << " cylinderScore=" << cylinderScore
+                    << " totalScore=" << candidates[i].score;
+                AppendMarkerLineDebugLog(log.str());
+            }
             if (candidates[i].score > result.totalScore ||
                 (std::fabs(candidates[i].score - result.totalScore) <= 1e-9 && candidates[i].area > result.areaScore))
             {
@@ -4750,6 +4800,13 @@ namespace
             }
         }
 
+        {
+            std::ostringstream log;
+            log << "score base face selected face=" << (result.face == NULL ? 0 : result.face->Tag())
+                << " selectedArea=" << result.areaScore
+                << " selectedScore=" << result.totalScore;
+            AppendMarkerLineDebugLog(log.str());
+        }
         return result;
     }
 
@@ -5180,7 +5237,8 @@ namespace
             double areaScore = std::max(1.0, candidates[i].area / std::max(minArea, 1e-9));
             double positionScore = position.count(faceTag) ? position[faceTag] : 0.0;
             double innerLoopScore = HasInnerLoopScore(candidates[i].face) ? 1.0 : 0.0;
-            double cylinderScore = AdjacentCylinderScore(candidates[i].face, scoringChainTags);
+            int cylinderCount = 0;
+            double cylinderScore = AdjacentCylinderScore(candidates[i].face, &cylinderCount);
             candidates[i].score = areaScore + positionScore + innerLoopScore + cylinderScore;
 
             if (candidates[i].score > result.totalScore ||
