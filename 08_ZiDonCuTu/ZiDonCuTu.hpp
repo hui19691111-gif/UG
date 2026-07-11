@@ -143,6 +143,7 @@ private:
     NXOpen::BlockStyler::Button* button0;// Block type: Button
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineUpKeepLength1;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineDownKeepLength1;// Block type: Double
+    NXOpen::BlockStyler::Toggle* toggleIndependentDrawingPart;// Block type: Toggle
     NXOpen::BlockStyler::Toggle* toggleManualTemplate;// Block type: Toggle
     NXOpen::BlockStyler::StringBlock* stringManualTemplatePath;// Block type: String
     NXOpen::BlockStyler::Button* buttonBrowseTemplate;// Block type: Button

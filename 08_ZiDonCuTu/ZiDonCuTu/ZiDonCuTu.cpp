@@ -82,6 +82,10 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 NXOpen::Session* theSession = NXOpen::Session::GetSession();
 NXOpen::Part* workPart(theSession->Parts()->Work());
 NXOpen::Part* displayPart(theSession->Parts()->Display());
+static NXOpen::Part* g_drawingModelPart = NULL;
+static bool g_independentDrawingPartActive = false;
+static bool g_independentDrawingActionCompleted = false;
+static std::vector<tag_t> g_independentShellSheetTags;
 NXString StrZKname;
 double doubleX = 0.0;
 double doubleY = 0.0;
@@ -137,6 +141,121 @@ static void ApplySideViewLayerIsolationForBody(
 	NXOpen::Body* body,
 	const std::vector<NXOpen::Drawings::BaseView*>& sideViews);
 static void ResetZiDonCuTuRuntimeState(bool clearDialogPointer);
+
+static NXOpen::Part* DrawingModelPart()
+{
+	return g_drawingModelPart != NULL ? g_drawingModelPart : workPart;
+}
+
+static NXOpen::Assemblies::Component* FindComponentForPrototypePart(
+	NXOpen::Assemblies::Component* component,
+	NXOpen::Part* prototypePart)
+{
+	if (component == NULL || prototypePart == NULL)
+	{
+		return NULL;
+	}
+	try
+	{
+		NXOpen::Part* componentPrototype = dynamic_cast<NXOpen::Part*>(component->Prototype());
+		if (componentPrototype != NULL && componentPrototype->Tag() == prototypePart->Tag())
+		{
+			return component;
+		}
+		const std::vector<NXOpen::Assemblies::Component*> children = component->GetChildren();
+		for (size_t i = 0; i < children.size(); ++i)
+		{
+			NXOpen::Assemblies::Component* match = FindComponentForPrototypePart(children[i], prototypePart);
+			if (match != NULL)
+			{
+				return match;
+			}
+		}
+	}
+	catch (...)
+	{
+	}
+	return NULL;
+}
+
+static NXOpen::Assemblies::Component* DrawingModelComponent()
+{
+	if (!g_independentDrawingPartActive || workPart == NULL || workPart->ComponentAssembly() == NULL)
+	{
+		return NULL;
+	}
+	NXOpen::Assemblies::Component* rootComponent = workPart->ComponentAssembly()->RootComponent();
+	NXOpen::Assemblies::Component* match = FindComponentForPrototypePart(
+		rootComponent,
+		DrawingModelPart());
+	if (match != NULL)
+	{
+		return match;
+	}
+	try
+	{
+		const std::vector<NXOpen::Assemblies::Component*> children = rootComponent->GetChildren();
+		if (children.size() == 1)
+		{
+			return children[0];
+		}
+	}
+	catch (...)
+	{
+	}
+	return NULL;
+}
+
+static NXOpen::NXObject* FindObjectOccurrence(
+	NXOpen::Assemblies::Component* component,
+	NXOpen::NXObject* prototypeObject)
+{
+	if (component == NULL || prototypeObject == NULL)
+	{
+		return NULL;
+	}
+	try
+	{
+		NXOpen::NXObject* occurrence = component->FindOccurrence(prototypeObject);
+		if (occurrence != NULL)
+		{
+			return occurrence;
+		}
+	}
+	catch (...)
+	{
+	}
+	try
+	{
+		const std::string identifier =
+			std::string("PROTO#") + prototypeObject->JournalIdentifier().GetUTF8Text();
+		return dynamic_cast<NXOpen::NXObject*>(component->FindObject(identifier.c_str()));
+	}
+	catch (...)
+	{
+	}
+	return NULL;
+}
+
+static void ConfigureBaseViewForDrawingModel(NXOpen::Drawings::BaseViewBuilder* builder)
+{
+	if (!g_independentDrawingPartActive || builder == NULL)
+	{
+		return;
+	}
+	NXOpen::Part* modelPart = DrawingModelPart();
+	if (modelPart == NULL)
+	{
+		return;
+	}
+	builder->Style()->ViewStyleBase()->SetPart(modelPart);
+	const std::string modelPath = modelPart->FullPath().GetUTF8Text();
+	if (!modelPath.empty())
+	{
+		builder->Style()->ViewStyleBase()->SetPartName(
+			NXOpen::NXString(modelPath.c_str(), NXOpen::NXString::UTF8));
+	}
+}
 
 namespace
 {
@@ -311,7 +430,7 @@ static void ApplyDraftingDimensionStartupPreferences(NXOpen::Part* part)
 	}
 }
 
-static const bool kEnableLayoutDebug = false;
+static const bool kEnableLayoutDebug = true;
 
 static bool IsLayoutDebugEnabled()
 {
@@ -360,8 +479,6 @@ static void AppendLayoutDebug(const std::string& line)
 
 static void SideDimensionDebugLog(const std::string& message)
 {
-	(void)message;
-	return;
 	try
 	{
 		std::ofstream out("D:\\ZiDonCuTu_side_dim_debug.log", std::ios::out | std::ios::app);
@@ -496,6 +613,11 @@ static void RefreshSessionPartGlobals()
 
 static void SyncSessionPartGlobalsToObject(NXOpen::NXObject* object)
 {
+	if (g_independentDrawingPartActive)
+	{
+		RefreshSessionPartGlobals();
+		return;
+	}
 	if (object == NULL)
 	{
 		RefreshSessionPartGlobals();
@@ -819,10 +941,9 @@ static const char* FaceGroupNameForLog(int group)
 
 static void ResetSideDimensionDebugLog()
 {
-	return;
 	try
 	{
-		std::ofstream out("D:\\ZiDonCuTu_side_dim_debug.log", std::ios::out | std::ios::trunc);
+		std::ofstream out("D:\\ZiDonCuTu_side_dim_debug.log", std::ios::out | std::ios::app);
 		if (out.is_open())
 		{
 			SYSTEMTIME now{};
@@ -1301,6 +1422,7 @@ static void SaveZiDonCuTuDialogState(
 	NXOpen::BlockStyler::DoubleBlock* bendLineDownNotchDiameterBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineUpKeepLengthBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineDownKeepLengthBlock,
+	NXOpen::BlockStyler::Toggle* independentDrawingPartToggleBlock,
 	NXOpen::BlockStyler::Toggle* manualTemplateToggleBlock,
 	NXOpen::BlockStyler::StringBlock* manualTemplatePathBlock,
 	NXOpen::BlockStyler::Enumeration* hiddenLineEnumBlock,
@@ -1337,6 +1459,7 @@ static void SaveZiDonCuTuDialogState(
 		file << "bend_line_down_notch_diameter=" << GetDoubleBlockValue(bendLineDownNotchDiameterBlock, 1.0) << "\r\n";
 		file << "bend_line_up_keep_length=" << GetDoubleBlockValue(bendLineUpKeepLengthBlock, 5.0) << "\r\n";
 		file << "bend_line_down_keep_length=" << GetDoubleBlockValue(bendLineDownKeepLengthBlock, 5.0) << "\r\n";
+		file << "independent_drawing_part=" << (GetToggleBlockValue(independentDrawingPartToggleBlock, false) ? 1 : 0) << "\r\n";
 		file << "manual_template=" << (GetToggleBlockValue(manualTemplateToggleBlock, false) ? 1 : 0) << "\r\n";
 		file << "manual_template_path=" << EncodeConfigEscapes(GetStringBlockUtf8Value(manualTemplatePathBlock, "")) << "\r\n";
 		file << "hidden_line=" << EncodeConfigEscapes(GetEnumBlockUtf8Value(hiddenLineEnumBlock, "\xE6\x97\xA0")) << "\r\n";
@@ -1367,6 +1490,7 @@ static void RestoreZiDonCuTuDialogState(
 	NXOpen::BlockStyler::DoubleBlock* bendLineDownNotchDiameterBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineUpKeepLengthBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineDownKeepLengthBlock,
+	NXOpen::BlockStyler::Toggle* independentDrawingPartToggleBlock,
 	NXOpen::BlockStyler::Toggle* manualTemplateToggleBlock,
 	NXOpen::BlockStyler::StringBlock* manualTemplatePathBlock,
 	NXOpen::BlockStyler::Enumeration* hiddenLineEnumBlock,
@@ -1438,6 +1562,10 @@ static void RestoreZiDonCuTuDialogState(
 		if (bendLineDownKeepLengthBlock != NULL)
 		{
 			bendLineDownKeepLengthBlock->SetValue(std::max(0.1, ConfigReadDouble(path, "bend_line_down_keep_length", bendLineDownKeepLengthBlock->Value())));
+		}
+		if (independentDrawingPartToggleBlock != NULL)
+		{
+			independentDrawingPartToggleBlock->SetValue(ConfigReadBool(path, "independent_drawing_part", GetToggleBlockValue(independentDrawingPartToggleBlock, false)));
 		}
 		if (manualTemplateToggleBlock != NULL)
 		{
@@ -1697,7 +1825,13 @@ static void KeepOnlyObjectsInPart(std::vector<NXOpen::TaggedObject*>& objects, N
 		{
 			objectPart = NULL;
 		}
-		if (objectPart != NULL && objectPart->Tag() == part->Tag())
+		const bool belongsToDrawingPart = objectPart != NULL && objectPart->Tag() == part->Tag();
+		const bool belongsToIndependentModel =
+			g_independentDrawingPartActive &&
+			g_drawingModelPart != NULL &&
+			objectPart != NULL &&
+			objectPart->Tag() == g_drawingModelPart->Tag();
+		if (belongsToDrawingPart || belongsToIndependentModel)
 		{
 			filteredObjects.push_back(objects[i]);
 		}
@@ -1821,7 +1955,21 @@ double MeasureMinimumDistance(NXOpen::Part* part, NXOpen::NXObject* first, NXOpe
 		return cached->second;
 	}
 
-	MeasureDistance* measureDistance = part->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, first, second);
+	NXOpen::Part* measurementPart = part;
+	try
+	{
+		NXOpen::Part* firstPart = dynamic_cast<NXOpen::Part*>(first->OwningPart());
+		NXOpen::Part* secondPart = dynamic_cast<NXOpen::Part*>(second->OwningPart());
+		if (firstPart != NULL && secondPart != NULL && firstPart->Tag() == secondPart->Tag())
+		{
+			measurementPart = firstPart;
+		}
+	}
+	catch (...)
+	{
+	}
+
+	MeasureDistance* measureDistance = measurementPart->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, first, second);
 	if (measureDistance == NULL)
 	{
 		return 0.0;
@@ -1829,7 +1977,7 @@ double MeasureMinimumDistance(NXOpen::Part* part, NXOpen::NXObject* first, NXOpe
 	const double value = measureDistance->Value();
 	delete measureDistance;
 	measureDistance = NULL;
-	part->MeasureManager()->ClearPartTransientModification();
+	measurementPart->MeasureManager()->ClearPartTransientModification();
 	g_minDistanceCache[cacheKey] = value;
 	return value;
 }
@@ -2291,10 +2439,14 @@ static bool RotateIsoViewOnSheetIfNeeded(NXOpen::Drawings::BaseView* isoView, co
 	try
 	{
 		baseViewBuilder = workPart->DraftingViews()->CreateBaseViewBuilder(isoView);
+		ConfigureBaseViewForDrawingModel(baseViewBuilder);
 		NXOpen::ModelingView* modelingView = NULL;
 		try
 		{
-			modelingView = dynamic_cast<NXOpen::ModelingView*>(workPart->ModelingViews()->FindObject("Trimetric"));
+			NXOpen::Part* modelPart = DrawingModelPart();
+			modelingView = modelPart != NULL
+				? dynamic_cast<NXOpen::ModelingView*>(modelPart->ModelingViews()->FindObject("Trimetric"))
+				: NULL;
 		}
 		catch (...)
 		{
@@ -2456,7 +2608,8 @@ static bool IsSheetMetalBody(NXOpen::Body* body)
 	}
 	try
 	{
-		const double thickness = workPart->Features()->SheetmetalManager()->GetBodyThickness(body);
+		NXOpen::Part* modelPart = DrawingModelPart();
+		const double thickness = modelPart->Features()->SheetmetalManager()->GetBodyThickness(body);
 		return thickness > 1.0e-6;
 	}
 	catch (const NXOpen::NXException&)
@@ -2883,6 +3036,182 @@ static bool BrowseManualTemplateFile(NXOpen::BlockStyler::StringBlock* manualTem
 
 	SetStringBlockValue(manualTemplatePathBlock, WideFilePathToUtf8(fileName));
 	return true;
+}
+
+static std::string ResolveDrawingTemplatePathUtf8(
+	NXOpen::Part* modelPart,
+	NXOpen::BlockStyler::Toggle* manualTemplateToggle,
+	NXOpen::BlockStyler::StringBlock* manualTemplatePath,
+	NXOpen::BlockStyler::Enumeration* projectionBlock)
+{
+	if (GetToggleBlockValue(manualTemplateToggle, false))
+	{
+		const std::string selected = GetStringBlockUtf8Value(manualTemplatePath, "");
+		if (selected.empty() || !FileExistsUtf8(selected))
+		{
+			throw std::runtime_error("已启用手动选择模板，请选择有效的图纸模板文件。");
+		}
+		return selected;
+	}
+
+	const std::string projection = GetEnumBlockUtf8Value(projectionBlock, "\xE7\xAC\xAC\xE4\xB8\x80\xE8\xA7\x92\xE6\xB3\x95");
+	const bool thirdAngle = projection == "\xE7\xAC\xAC\xE4\xB8\x89\xE8\xA7\x92\xE6\xB3\x95";
+	bool hasName = false;
+	try
+	{
+		hasName = modelPart != NULL &&
+			modelPart->HasUserAttribute("名称", NXObject::AttributeType::AttributeTypeString, -1) &&
+			!NxStringToUtf8(modelPart->GetStringAttribute("名称")).empty();
+	}
+	catch (...)
+	{
+		hasName = false;
+	}
+
+	const wchar_t* fileName = thirdAngle
+		? (hasName ? L"A4-noviews-template.prt" : L"A4-noviews-template-.prt")
+		: (hasName ? L"A4-noviews-template1.prt" : L"A4-noviews-template2.prt");
+	const std::wstring path = DefaultTemplateDirectory() + L"\\" + fileName;
+	const std::string utf8Path = WideFilePathToUtf8(path);
+	if (!FileExistsUtf8(utf8Path))
+	{
+		throw std::runtime_error("自动出图模板文件不存在，请检查插件 DATA 目录。");
+	}
+	return utf8Path;
+}
+
+static std::wstring CreateUniqueIndependentDrawingPath(NXOpen::Part* modelPart)
+{
+	if (modelPart == NULL)
+	{
+		throw std::runtime_error("当前模型无效，无法创建独立图纸部件。");
+	}
+	const std::string modelPathUtf8 = modelPart->FullPath().GetUTF8Text();
+	const std::wstring modelPath = Utf8ToWideFilePath(modelPathUtf8);
+	if (modelPath.empty() || GetFileAttributesW(modelPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+	{
+		throw std::runtime_error("当前模型尚未保存，请先保存模型后再创建独立图纸部件。");
+	}
+
+	const size_t dot = modelPath.find_last_of(L'.');
+	const size_t slash = modelPath.find_last_of(L"\\/");
+	const std::wstring stem = dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)
+		? modelPath.substr(0, dot)
+		: modelPath;
+	const std::wstring base = stem + L"_\x5DE5\x7A0B\x56FE";
+	for (int index = 0; index < 10000; ++index)
+	{
+		const std::wstring candidate = base + (index == 0 ? L"" : L"_" + std::to_wstring(index)) + L".prt";
+		if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES)
+		{
+			return candidate;
+		}
+	}
+	throw std::runtime_error("无法生成可用的独立图纸部件文件名。");
+}
+
+static NXOpen::Part* CreateIndependentDrawingPart(
+	NXOpen::Part* modelPart)
+{
+	const std::wstring outputPath = CreateUniqueIndependentDrawingPath(modelPart);
+	const std::string outputPathUtf8 = WideFilePathToUtf8(outputPath);
+	const std::string modelPathUtf8 = modelPart->FullPath().GetUTF8Text();
+	NXOpen::FileNew* fileNew = theSession->Parts()->FileNew();
+	if (fileNew == NULL)
+	{
+		throw std::runtime_error("NX 无法创建新图纸部件生成器。");
+	}
+	try
+	{
+		fileNew->SetTemplateFileName("A4-noviews-template.prt");
+		fileNew->SetUseBlankTemplate(false);
+		fileNew->SetApplicationName("DrawingTemplate");
+		fileNew->SetUnits(NXOpen::Part::UnitsMillimeters);
+		fileNew->SetRelationType("");
+		fileNew->SetUsesMasterModel("Yes");
+		fileNew->SetTemplateType(NXOpen::FileNewTemplateTypeItem);
+		fileNew->SetTemplatePresentationName(
+			NXOpen::NXString("A4 - \xE6\x97\xA0\xE8\xA7\x86\xE5\x9B\xBE", NXOpen::NXString::UTF8));
+		fileNew->SetItemType("");
+		fileNew->SetSpecialization("");
+		fileNew->SetCanCreateAltrep(false);
+		fileNew->SetNewFileName(NXOpen::NXString(outputPathUtf8.c_str(), NXOpen::NXString::UTF8));
+		fileNew->SetMasterFileName(NXOpen::NXString(modelPathUtf8.c_str(), NXOpen::NXString::UTF8));
+		fileNew->SetMakeDisplayedPart(true);
+		fileNew->SetDisplayPartOption(NXOpen::DisplayPartOptionAllowAdditional);
+		NXOpen::NXObject* committed = fileNew->Commit();
+		NXOpen::Part* createdPart = dynamic_cast<NXOpen::Part*>(committed);
+		fileNew->Destroy();
+		fileNew = NULL;
+		if (createdPart == NULL)
+		{
+			throw std::runtime_error("NX 创建独立图纸部件后没有返回有效部件。");
+		}
+		theSession->ApplicationSwitchImmediate("UG_APP_DRAFTING");
+		createdPart->Drafting()->EnterDraftingApplication();
+		createdPart->Views()->WorkView()->UpdateCustomSymbols();
+		createdPart->Drafting()->SetTemplateInstantiationIsComplete(true);
+	}
+	catch (...)
+	{
+		if (fileNew != NULL)
+		{
+			fileNew->Destroy();
+		}
+		throw;
+	}
+
+	RefreshSessionPartGlobals();
+	if (workPart == NULL || workPart->Tag() == modelPart->Tag())
+	{
+		throw std::runtime_error("NX 未切换到新建的独立图纸部件。");
+	}
+	g_independentShellSheetTags.clear();
+	if (workPart->DrawingSheets() != NULL)
+	{
+		for (NXOpen::Drawings::DrawingSheetCollection::iterator it = workPart->DrawingSheets()->begin();
+			it != workPart->DrawingSheets()->end();
+			++it)
+		{
+			if (*it != NULL)
+			{
+				g_independentShellSheetTags.push_back((*it)->Tag());
+			}
+		}
+	}
+	return workPart;
+}
+static void DeleteIndependentShellSheets()
+{
+	if (workPart == NULL || g_independentShellSheetTags.empty())
+	{
+		return;
+	}
+	std::vector<NXOpen::TaggedObject*> objectsToDelete;
+	for (size_t i = 0; i < g_independentShellSheetTags.size(); ++i)
+	{
+		try
+		{
+			NXOpen::TaggedObject* object = NXOpen::NXObjectManager::Get(g_independentShellSheetTags[i]);
+			if (object != NULL)
+			{
+				objectsToDelete.push_back(object);
+			}
+		}
+		catch (...)
+		{
+		}
+	}
+	if (!objectsToDelete.empty())
+	{
+		NXOpen::Session::UndoMarkId mark = theSession->SetUndoMark(
+			NXOpen::Session::MarkVisibilityInvisible,
+			"Remove temporary drawing sheet");
+		theSession->UpdateManager()->AddObjectsToDeleteList(objectsToDelete);
+		theSession->UpdateManager()->DoUpdate(mark);
+		theSession->DeleteUndoMark(mark, NULL);
+	}
+	g_independentShellSheetTags.clear();
 }
 
 static std::string ReadAttributeText(NXOpen::NXObject* object, const char* title)
@@ -5540,6 +5869,8 @@ static bool ExpandRectWithCurveInDrawing(tag_t viewTag, tag_t curveTag, LayoutRe
 	return expanded;
 }
 
+static NXOpen::NXObject* PrototypeObjectOrSelf(NXOpen::NXObject* object);
+
 static bool CurveBelongsToBody(NXOpen::Drawings::DraftingCurve* draftingCurve, NXOpen::Body* targetBody)
 {
 	if (draftingCurve == NULL || targetBody == NULL)
@@ -5556,7 +5887,7 @@ static bool CurveBelongsToBody(NXOpen::Drawings::DraftingCurve* draftingCurve, N
 	std::vector<NXOpen::NXObject*> parents = curveInfo->GetParents();
 	for (size_t i = 0; i < parents.size(); ++i)
 	{
-		NXOpen::NXObject* parent = parents[i];
+		NXOpen::NXObject* parent = PrototypeObjectOrSelf(parents[i]);
 		if (parent == NULL)
 		{
 			continue;
@@ -5589,18 +5920,60 @@ static bool CurveBelongsToBody(NXOpen::Drawings::DraftingCurve* draftingCurve, N
 	return false;
 }
 
+static NXOpen::NXObject* PrototypeObjectOrSelf(NXOpen::NXObject* object)
+{
+	if (object == NULL)
+	{
+		return NULL;
+	}
+	try
+	{
+		NXOpen::NXObject* prototype = dynamic_cast<NXOpen::NXObject*>(object->Prototype());
+		if (prototype != NULL)
+		{
+			return prototype;
+		}
+	}
+	catch (...)
+	{
+	}
+	return object;
+}
+
 static bool BodyMatchesTargetOrDraftingSource(NXOpen::Body* candidateBody, NXOpen::Body* targetBody)
 {
 	if (candidateBody == NULL || targetBody == NULL)
 	{
 		return false;
 	}
-	if (candidateBody->Tag() == targetBody->Tag())
+	auto prototypeBodyTag = [](NXOpen::Body* body) -> tag_t
+	{
+		if (body == NULL)
+		{
+			return NULL_TAG;
+		}
+		try
+		{
+			NXOpen::Body* prototypeBody = dynamic_cast<NXOpen::Body*>(body->Prototype());
+			if (prototypeBody != NULL)
+			{
+				return prototypeBody->Tag();
+			}
+		}
+		catch (...)
+		{
+		}
+		return body->Tag();
+	};
+	const tag_t candidatePrototypeTag = prototypeBodyTag(candidateBody);
+	const tag_t targetPrototypeTag = prototypeBodyTag(targetBody);
+	if (candidateBody->Tag() == targetBody->Tag() || candidatePrototypeTag == targetPrototypeTag)
 	{
 		return true;
 	}
 	std::unordered_map<tag_t, NXOpen::Body*>::const_iterator it = g_bodyDraftingSourceBodies.find(targetBody->Tag());
-	if (it != g_bodyDraftingSourceBodies.end() && it->second != NULL && candidateBody->Tag() == it->second->Tag())
+	if (it != g_bodyDraftingSourceBodies.end() && it->second != NULL &&
+		(candidateBody->Tag() == it->second->Tag() || candidatePrototypeTag == prototypeBodyTag(it->second)))
 	{
 		return true;
 	}
@@ -5673,7 +6046,7 @@ static NXOpen::Drawings::DraftingBody* FindDraftingBodyForTargetBody(
 			}
 			for (size_t parentIndex = 0; parentIndex < parents.size(); ++parentIndex)
 			{
-				NXOpen::NXObject* parent = parents[parentIndex];
+				NXOpen::NXObject* parent = PrototypeObjectOrSelf(parents[parentIndex]);
 				if (parent == NULL)
 				{
 					if (IsLayoutDebugEnabled())
@@ -6974,6 +7347,7 @@ static NXOpen::NXObject* TryRepositionBaseView(
 	try
 	{
 		baseViewBuilder = workPart->DraftingViews()->CreateBaseViewBuilder(existingView);
+		ConfigureBaseViewForDrawingModel(baseViewBuilder);
 		if (useStyleScale)
 		{
 			baseViewBuilder->Style()->ViewStyleGeneral()->Scale()->SetNumerator(styleScaleNumerator);
@@ -7009,7 +7383,8 @@ static NXOpen::NXObject* TryRepositionBaseView(
 
 static NXOpen::ModelingView* FindModelingViewSafe(NXOpen::Part* workPart, const char* preferredName, const char* fallbackName = "Top")
 {
-	if (workPart == NULL)
+	NXOpen::Part* modelPart = g_independentDrawingPartActive ? DrawingModelPart() : workPart;
+	if (modelPart == NULL)
 	{
 		return NULL;
 	}
@@ -7022,7 +7397,7 @@ static NXOpen::ModelingView* FindModelingViewSafe(NXOpen::Part* workPart, const 
 			}
 			try
 			{
-				return dynamic_cast<NXOpen::ModelingView*>(workPart->ModelingViews()->FindObject(viewName));
+				return dynamic_cast<NXOpen::ModelingView*>(modelPart->ModelingViews()->FindObject(viewName));
 			}
 			catch (...)
 			{
@@ -7044,7 +7419,7 @@ static NXOpen::ModelingView* FindModelingViewSafe(NXOpen::Part* workPart, const 
 
 	try
 	{
-		return dynamic_cast<NXOpen::ModelingView*>(workPart->Views()->WorkView());
+		return dynamic_cast<NXOpen::ModelingView*>(modelPart->Views()->WorkView());
 	}
 	catch (...)
 	{
@@ -9789,6 +10164,7 @@ void ZiDonCuTu::initialize_cb()
 		doubleBendLineDownNotchDiameter = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineDownNotchDiameter"));
 		doubleBendLineUpKeepLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineUpKeepLength1"));
 		doubleBendLineDownKeepLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineDownKeepLength1"));
+		toggleIndependentDrawingPart = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleIndependentDrawingPart"));
 		toggleManualTemplate = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleManualTemplate"));
 		stringManualTemplatePath = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("stringManualTemplatePath"));
 		buttonBrowseTemplate = dynamic_cast<NXOpen::BlockStyler::Button*>(theDialog->TopBlock()->FindBlock("buttonBrowseTemplate"));
@@ -9912,6 +10288,7 @@ void ZiDonCuTu::dialogShown_cb()
 			doubleBendLineDownNotchDiameter,
 			doubleBendLineUpKeepLength,
 			doubleBendLineDownKeepLength,
+			toggleIndependentDrawingPart,
 			toggleManualTemplate,
 			stringManualTemplatePath,
 			enum01,
@@ -10001,6 +10378,7 @@ int ZiDonCuTu::apply_cb()
 			doubleBendLineDownNotchDiameter,
 			doubleBendLineUpKeepLength,
 			doubleBendLineDownKeepLength,
+			toggleIndependentDrawingPart,
 			toggleManualTemplate,
 			stringManualTemplatePath,
 			enum01,
@@ -10012,6 +10390,19 @@ int ZiDonCuTu::apply_cb()
 		RefreshSessionPartGlobals();
 		LogPartContextForDrawingDebug("apply.afterSwitchDrafting");
 		const bool manualMode = IsManualDrawingMode(enumDrawingMode);
+		const bool independentDrawingPart = GetToggleBlockValue(toggleIndependentDrawingPart, false);
+		if (independentDrawingPart && g_independentDrawingActionCompleted)
+		{
+			return 0;
+		}
+		if (independentDrawingPart && workPart != NULL && workPart->ComponentAssembly() != NULL)
+		{
+			NXOpen::Assemblies::Component* rootComponent = workPart->ComponentAssembly()->RootComponent();
+			if (rootComponent != NULL && !rootComponent->GetChildren().empty())
+			{
+				throw std::runtime_error("独立图纸部件模式当前仅支持单个模型，不支持装配批量出图。");
+			}
+		}
 		const bool hasDrawingSheet = HasAnyDrawingSheet(workPart);
 		if (manualMode && g_manualActionCompleted)
 		{
@@ -10067,12 +10458,16 @@ int ZiDonCuTu::apply_cb()
 			RefreshSessionPartGlobals();
 			LogPartContextForDrawingDebug("processSelectedObjects.begin");
 			DeduplicateTaggedObjectsByTag(objectsToProcess);
-			KeepOnlyObjectsInPart(objectsToProcess, workPart);
+			NXOpen::Part* selectionPart = g_independentDrawingPartActive
+				? DrawingModelPart()
+				: workPart;
+			KeepOnlyObjectsInPart(objectsToProcess, selectionPart);
 			{
 				std::ostringstream log;
 				log << "[process.selection]"
 					<< " beforeFilter=" << objectCountBeforeProcessFilter
 					<< " afterFilter=" << objectsToProcess.size()
+					<< " selectionPart=" << PartIdentityForLog(selectionPart)
 					<< " workPart=" << PartIdentityForLog(workPart);
 				SideDimensionDebugLog(log.str());
 			}
@@ -10221,7 +10616,10 @@ int ZiDonCuTu::apply_cb()
 					}
 
 					SyncSessionPartGlobalsToObject(currentBody);
-					toggle0->SetValue(manualUseExistingSheet ? false : (bodyIndex == batchStart));
+					toggle0->SetValue(
+						manualUseExistingSheet
+							? false
+							: (bodyIndex == batchStart));
 					unsigned long long aaaaStart = PerfNowMs();
 					aaaa_cb();
 					{
@@ -10491,7 +10889,27 @@ int ZiDonCuTu::apply_cb()
 			}
 		}
 
+		if (independentDrawingPart)
+		{
+			NXOpen::Part* sourceModelPart = workPart;
+			const std::string selectedSheetTemplatePath = ResolveDrawingTemplatePathUtf8(
+				sourceModelPart,
+				toggleManualTemplate,
+				stringManualTemplatePath,
+				enumProjection);
+			(void)selectedSheetTemplatePath;
+			g_drawingModelPart = sourceModelPart;
+			CreateIndependentDrawingPart(sourceModelPart);
+			g_independentDrawingPartActive = true;
+			LogPartContextForDrawingDebug("apply.independentDrawingPart.created");
+		}
+
 		processSelectedObjects(selectedObjects);
+		if (independentDrawingPart)
+		{
+			DeleteIndependentShellSheets();
+			g_independentDrawingActionCompleted = true;
+		}
 
 	}
 	catch (exception& ex)
@@ -10576,6 +10994,10 @@ static void ResetZiDonCuTuRuntimeState(bool clearDialogPointer)
 		g_deferPageLayout = false;
 		g_reuseExistingViews = false;
 		g_manualPlacementNoRefit = false;
+		g_independentDrawingPartActive = false;
+		g_independentDrawingActionCompleted = false;
+		g_drawingModelPart = NULL;
+		g_independentShellSheetTags.clear();
 		WorkSheet = NULL;
 		Body1 = NULL;
 		BaseView1A = NULL;
@@ -10769,7 +11191,8 @@ static bool PrepareBodyDraftingContext(NXOpen::Body* targetBody, NXOpen::BlockSt
 	NXOpen::Point3d origin5;
 	preparePhase = "GetFlatPatternDraftingInfos";
 	logPreparePhase(preparePhase);
-	const std::vector<FlatPatternDraftingInfo>& flatPatternInfos = GetFlatPatternDraftingInfos(workPart);
+	NXOpen::Part* modelPart = DrawingModelPart();
+	const std::vector<FlatPatternDraftingInfo>& flatPatternInfos = GetFlatPatternDraftingInfos(modelPart);
 	{
 		std::ostringstream oss;
 		oss << "[PrepareBodyDraftingContext.flatInfos]"
@@ -10783,7 +11206,7 @@ static bool PrepareBodyDraftingContext(NXOpen::Body* targetBody, NXOpen::BlockSt
 	std::vector<NXOpen::Features::SheetMetal::SheetmetalBendState> cdcd;
 	preparePhase = "GetInnerBendFaces";
 	logPreparePhase(preparePhase);
-	workPart->Features()->SheetmetalManager()->GetInnerBendFaces(Body1, vFaces, cdcd);
+	modelPart->Features()->SheetmetalManager()->GetInnerBendFaces(Body1, vFaces, cdcd);
 	{
 		std::ostringstream oss;
 		oss << "[PrepareBodyDraftingContext.innerBends]"
@@ -12038,85 +12461,31 @@ int ZiDonCuTu::aaaa_cb()
 				isThirdAngleProjection ?
 				NXOpen::Drawings::DrawingSheetBuilder::SheetProjectionAngleThird :
 				NXOpen::Drawings::DrawingSheetBuilder::SheetProjectionAngleFirst);
-			char path2[] = "D:\\UG智辉钣金插件\\DATA\\A4-noviews-template.prt";//模板文件
-			char path3[] = "D:\\UG智辉钣金插件\\DATA\\A4-noviews-template-.prt";//模板文件
-			char path4[] = "D:\\UG智辉钣金插件\\DATA\\A4-noviews-template1.prt";//模板文件
-			char path5[] = "D:\\UG智辉钣金插件\\DATA\\A4-noviews-template2.prt";//模板文件
-			string str2 = (path2); string str3 = (path3); string str4 = (path4); string str5 = (path5);
-			string str12 = str2; string str13 =str3; string str14 =str4; string str15 =str5;
-			const char* path12 = str12.c_str();
-			const char* path13 = str13.c_str();
-			const char* path14 = str14.c_str();
-			const char* path15 = str15.c_str();
-
-			int ee = 0;
+			NXOpen::Part* modelPart = DrawingModelPart();
 			bool hasNameAttribute = false;
 			std::string nameAttributeText;
-			const char* selectedTemplatePath = NULL;
-			std::string selectedTemplatePathUtf8;
-			bool selectedTemplatePathIsUtf8 = false;
-			if (isThirdAngleProjection)
+			try
 			{
-				hasNameAttribute = workPart->HasUserAttribute("名称", NXObject::AttributeType::AttributeTypeString, -1);
+				hasNameAttribute = modelPart != NULL &&
+					modelPart->HasUserAttribute("名称", NXObject::AttributeType::AttributeTypeString, -1);
 				if (hasNameAttribute)
 				{
-
-					NXString mincen = workPart->GetStringAttribute("名称");
-					string strMincen = mincen.GetLocaleText();
-					nameAttributeText = strMincen;
-					if (strMincen.length() > 0)
-					{
-						ee = 1;
-						selectedTemplatePath = path12;
-						draftingDrawingSheetBuilder1->SetMetricSheetTemplateLocation(path12);//模板文件
-					}
-				}
-
-				if (ee == 0)
-				{
-					selectedTemplatePath = path13;
-					draftingDrawingSheetBuilder1->SetMetricSheetTemplateLocation(path13);//模板文件
+					nameAttributeText = NxStringToUtf8(modelPart->GetStringAttribute("名称"));
 				}
 			}
-			else
+			catch (...)
 			{
-
-				hasNameAttribute = workPart->HasUserAttribute("名称", NXObject::AttributeType::AttributeTypeString, -1);
-				if (hasNameAttribute)
-				{
-
-					NXString mincen = workPart->GetStringAttribute("名称");
-					string strMincen = mincen.GetLocaleText();
-					nameAttributeText = strMincen;
-					if (strMincen.length() > 0)
-					{
-						ee = 1;
-						selectedTemplatePath = path14;
-						draftingDrawingSheetBuilder1->SetMetricSheetTemplateLocation(path14);//模板文件
-					}
-				}
-
-				if (ee == 0)
-				{
-					selectedTemplatePath = path15;
-					draftingDrawingSheetBuilder1->SetMetricSheetTemplateLocation(path15);//模板文件
-				}
+				hasNameAttribute = false;
+				nameAttributeText.clear();
 			}
-			if (GetToggleBlockValue(toggleManualTemplate, false))
-			{
-				selectedTemplatePathUtf8 = GetStringBlockUtf8Value(stringManualTemplatePath, "");
-				if (selectedTemplatePathUtf8.empty())
-				{
-					throw std::runtime_error("已启用手动选择模板，请先选择图纸模板文件。");
-				}
-				selectedTemplatePath = selectedTemplatePathUtf8.c_str();
-				selectedTemplatePathIsUtf8 = true;
-				draftingDrawingSheetBuilder1->SetMetricSheetTemplateLocation(
-					NXOpen::NXString(selectedTemplatePathUtf8.c_str(), NXOpen::NXString::UTF8));
-			}
-			const bool selectedTemplateExists = selectedTemplatePathIsUtf8
-				? FileExistsUtf8(selectedTemplatePathUtf8)
-				: FileExistsA(selectedTemplatePath);
+			const bool manualTemplate = GetToggleBlockValue(toggleManualTemplate, false);
+			const std::string selectedTemplatePathUtf8 = ResolveDrawingTemplatePathUtf8(
+				modelPart,
+				toggleManualTemplate,
+				stringManualTemplatePath,
+				enumProjection);
+			draftingDrawingSheetBuilder1->SetMetricSheetTemplateLocation(
+				NXOpen::NXString(selectedTemplatePathUtf8.c_str(), NXOpen::NXString::UTF8));
 			{
 				std::ostringstream sheetLog;
 				sheetLog << "[sheet.setup]"
@@ -12126,18 +12495,10 @@ int ZiDonCuTu::aaaa_cb()
 					<< " sheetNumber=" << newSheetNumber
 					<< " hasName=" << (hasNameAttribute ? 1 : 0)
 					<< " nameLen=" << nameAttributeText.length()
-					<< " manualTemplate=" << (selectedTemplatePathIsUtf8 ? 1 : 0)
-					<< " template=" << (selectedTemplatePath != NULL ? selectedTemplatePath : "<null>")
-					<< " exists=" << (selectedTemplateExists ? 1 : 0);
+					<< " manualTemplate=" << (manualTemplate ? 1 : 0)
+					<< " template=" << selectedTemplatePathUtf8
+					<< " exists=1";
 				SideDimensionDebugLog(sheetLog.str());
-			}
-			if (!selectedTemplateExists)
-			{
-				if (selectedTemplatePathIsUtf8)
-				{
-					throw std::runtime_error("手动选择的图纸模板文件不存在，请重新选择模板文件。");
-				}
-				throw std::runtime_error("自动出图模板文件不存在，请检查 D:\\UG智辉钣金插件\\DATA。");
 			}
 			phase = "aaaa_cb.sheet.commit";
 			ObjSheet = draftingDrawingSheetBuilder1->Commit();
@@ -12315,6 +12676,7 @@ int ZiDonCuTu::aaaa_cb()
 			phase = "aaaa_cb.views.main.builder";
 			NXOpen::Drawings::BaseViewBuilder* baseViewBuilder1;
 			baseViewBuilder1 = workPart->DraftingViews()->CreateBaseViewBuilder(nullNXOpen_Drawings_BaseView);
+			ConfigureBaseViewForDrawingModel(baseViewBuilder1);
 			baseViewBuilder1->Scale()->SetNumerator(viewScaleNumerator);
 			baseViewBuilder1->Scale()->SetDenominator(viewScaleDenominator);
 			std::string flatPatternViewName = StrZKname.GetLocaleText();
@@ -12337,6 +12699,7 @@ int ZiDonCuTu::aaaa_cb()
 				phase = "aaaa_cb.views.left.builder";
 				NXOpen::Drawings::BaseViewBuilder* baseViewBuilder2;
 				baseViewBuilder2 = workPart->DraftingViews()->CreateBaseViewBuilder(nullNXOpen_Drawings_BaseView);
+				ConfigureBaseViewForDrawingModel(baseViewBuilder2);
 				baseViewBuilder2->Scale()->SetNumerator(viewScaleNumerator);
 				baseViewBuilder2->Scale()->SetDenominator(viewScaleDenominator);
 
@@ -12404,6 +12767,7 @@ int ZiDonCuTu::aaaa_cb()
 				phase = "aaaa_cb.views.bottom.builder";
 				NXOpen::Drawings::BaseViewBuilder* baseViewBuilder2;
 				baseViewBuilder2 = workPart->DraftingViews()->CreateBaseViewBuilder(nullNXOpen_Drawings_BaseView);
+				ConfigureBaseViewForDrawingModel(baseViewBuilder2);
 				baseViewBuilder2->Scale()->SetNumerator(viewScaleNumerator);
 				baseViewBuilder2->Scale()->SetDenominator(viewScaleDenominator);
 
@@ -12457,6 +12821,7 @@ int ZiDonCuTu::aaaa_cb()
 				phase = "aaaa_cb.views.iso.builder";
 				NXOpen::Drawings::BaseViewBuilder* baseViewBuilder1A;
 				baseViewBuilder1A = workPart->DraftingViews()->CreateBaseViewBuilder(nullNXOpen_Drawings_BaseView);
+				ConfigureBaseViewForDrawingModel(baseViewBuilder1A);
 				baseViewBuilder1A->Scale()->SetNumerator(viewScaleNumerator);
 				baseViewBuilder1A->Scale()->SetDenominator(viewScaleDenominator);
 				baseViewBuilder1A->Style()->ViewStyleHiddenLines()->SetFont(NXOpen::Preferences::FontInvisible);
@@ -12540,8 +12905,9 @@ int ZiDonCuTu::aaaa_cb()
 		std::vector<Face*> RFaceVecotor;
 		AllFaceVecotor = Body1->GetFaces();
 		std::vector<NXOpen::Features::SheetMetal::SheetmetalBendState> cdcd;
-		workPart->Features()->SheetmetalManager()->GetInnerBendFaces(Body1, NeiWaiRFace1, cdcd);//获得折弯的内R面
-		BodyThicknes1 = workPart->Features()->SheetmetalManager()->GetBodyThickness(Body1);//获得钣金厚度
+		NXOpen::Part* modelPart = DrawingModelPart();
+		modelPart->Features()->SheetmetalManager()->GetInnerBendFaces(Body1, NeiWaiRFace1, cdcd);//获得折弯的内R面
+		BodyThicknes1 = modelPart->Features()->SheetmetalManager()->GetBodyThickness(Body1);//获得钣金厚度
 		const double radialInnerRThreshold = GetDoubleBlockValue(doubleRInnerThreshold, 0.5);
 
 		if (g_deferPageRefit && !annotationOnly)
@@ -12690,12 +13056,17 @@ int ZiDonCuTu::aaaa_cb()
 					{
 						continue;
 					}
+					NXOpen::NXObject* parentObject = PrototypeObjectOrSelf(NXObject1aa[0]);
+					if (parentObject == NULL)
+					{
+						continue;
+					}
 					int type, subtype;
-					UF_OBJ_ask_type_and_subtype(NXObject1aa[0]->Tag(), &type, &subtype);
+					UF_OBJ_ask_type_and_subtype(parentObject->Tag(), &type, &subtype);
 					if (subtype == UF_solid_face_subtype)
 					{
-						NXOpen::Face* Face1a(dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(NXObject1aa[0]->Tag())));
-						if (Body1 == Face1a->GetBody())
+						NXOpen::Face* Face1a(dynamic_cast<NXOpen::Face*>(parentObject));
+						if (Face1a != NULL && BodyMatchesTargetOrDraftingSource(Face1a->GetBody(), Body1))
 						{
 							DraftingBody1 = DraftingBodyVector[i];//得到要标尺寸的视图BODY
 							i = DraftingBodyVector.size();
@@ -12703,8 +13074,8 @@ int ZiDonCuTu::aaaa_cb()
 					}
 					if (subtype == UF_solid_edge_subtype)
 					{
-						NXOpen::Edge* edge1a(dynamic_cast<NXOpen::Edge*>(NXOpen::NXObjectManager::Get(NXObject1aa[0]->Tag())));
-						if (Body1 == edge1a->GetBody())
+						NXOpen::Edge* edge1a(dynamic_cast<NXOpen::Edge*>(parentObject));
+						if (edge1a != NULL && BodyMatchesTargetOrDraftingSource(edge1a->GetBody(), Body1))
 						{
 							DraftingBody1 = DraftingBodyVector[i];//得到要标尺寸的视图BODY
 							i = DraftingBodyVector.size();
@@ -12729,13 +13100,93 @@ int ZiDonCuTu::aaaa_cb()
 					SideDimensionDebugLog(sideLog.str());
 				}
 
-				//循环把所有的面放到显示对象容器里，删除这些面在视图是的显示
-				std::vector<NXOpen::DisplayableObject*> objects1;//声明一个显示对象容器
-				for (size_t i = 0; i < AllFaceVecotor.size(); i++)
+				// 独立图纸必须使用主模型组件下的 occurrence Face，不能直接传 prototype Face。
+				std::vector<NXOpen::DisplayableObject*> objects1;
+				if (g_independentDrawingPartActive)
 				{
-					objects1.push_back(AllFaceVecotor[i]);
+					std::unordered_set<tag_t> occurrenceParentTags;
+					tag_t owningComponentTag = NULL_TAG;
+					size_t parentCount = 0;
+					size_t prototypeBodyMatchCount = 0;
+					Drawings::DraftingCurveCollection* targetCurves = DraftingBody1->DraftingCurves();
+					if (targetCurves != NULL)
+					{
+						for (Drawings::DraftingCurveCollection::iterator curveIt = targetCurves->begin();
+							curveIt != targetCurves->end(); ++curveIt)
+						{
+							if (*curveIt == NULL || (*curveIt)->GetDraftingCurveInfo() == NULL)
+							{
+								continue;
+							}
+							const std::vector<NXOpen::NXObject*> parents =
+								(*curveIt)->GetDraftingCurveInfo()->GetParents();
+							parentCount += parents.size();
+							for (size_t parentIndex = 0; parentIndex < parents.size(); ++parentIndex)
+							{
+								NXOpen::NXObject* occurrenceParent = parents[parentIndex];
+								NXOpen::NXObject* prototypeParent = PrototypeObjectOrSelf(occurrenceParent);
+								if (occurrenceParent == NULL || prototypeParent == NULL)
+								{
+									continue;
+								}
+								NXOpen::Body* parentBody = dynamic_cast<NXOpen::Body*>(prototypeParent);
+								NXOpen::Face* parentFace = dynamic_cast<NXOpen::Face*>(prototypeParent);
+								NXOpen::Edge* parentEdge = dynamic_cast<NXOpen::Edge*>(prototypeParent);
+								if (parentFace != NULL)
+								{
+									parentBody = parentFace->GetBody();
+								}
+								else if (parentEdge != NULL)
+								{
+									parentBody = parentEdge->GetBody();
+								}
+								if (!BodyMatchesTargetOrDraftingSource(parentBody, Body1))
+								{
+									continue;
+								}
+								++prototypeBodyMatchCount;
+								NXOpen::DisplayableObject* displayParent =
+									dynamic_cast<NXOpen::DisplayableObject*>(occurrenceParent);
+								if (displayParent != NULL && occurrenceParentTags.insert(displayParent->Tag()).second)
+								{
+									objects1.push_back(displayParent);
+									try
+									{
+										NXOpen::Assemblies::Component* owningComponent = occurrenceParent->OwningComponent();
+										if (owningComponent != NULL)
+										{
+											owningComponentTag = owningComponent->Tag();
+										}
+									}
+									catch (...)
+									{
+									}
+								}
+							}
+						}
+					}
+					std::ostringstream occurrenceLog;
+					occurrenceLog << "[side.eraseOccurrenceParents]"
+						<< " index=" << p
+						<< " owningComponentTag=" << owningComponentTag
+						<< " modelPartTag=" << ObjectTagOrNull(DrawingModelPart())
+						<< " sourceFaceCount=" << AllFaceVecotor.size()
+						<< " parentCount=" << parentCount
+						<< " prototypeBodyMatchCount=" << prototypeBodyMatchCount
+						<< " uniqueOccurrenceParentCount=" << objects1.size();
+					SideDimensionDebugLog(occurrenceLog.str());
 				}
-				BaseViewvector[p]->DependentDisplay()->Erase(objects1);
+				else
+				{
+					for (size_t i = 0; i < AllFaceVecotor.size(); i++)
+					{
+						objects1.push_back(AllFaceVecotor[i]);
+					}
+				}
+				if (!objects1.empty())
+				{
+					BaseViewvector[p]->DependentDisplay()->Erase(objects1);
+				}
 				{
 					std::ostringstream sideLog;
 					sideLog << "[side.eraseFaces]"
@@ -12758,7 +13209,7 @@ int ZiDonCuTu::aaaa_cb()
 					{
 						continue;
 					}
-					double distance1 = MeasureMinimumDistance(workPart, NeiWaiRFace[0], AllFaceVecotor[i]);//获取测量的值
+					double distance1 = MeasureMinimumDistance(modelPart, NeiWaiRFace[0], AllFaceVecotor[i]);//获取测量的值
 					if (fabs(radius2 - innerRadius - BodyThicknes1) < 0.01 && fabs(distance1 - BodyThicknes1) < 0.01)//跟内R圆心比较
 					{
 						if (p==0)
@@ -12774,10 +13225,10 @@ int ZiDonCuTu::aaaa_cb()
 				{
 					std::vector<NXOpen::Face*> boundaryFaces1(0);//定义面容器
 					NXOpen::FaceTangentRule* faceTangentRule1;//定义面相切规则
-					faceTangentRule1 = workPart->ScRuleFactory()->CreateRuleFaceTangent(NeiWaiRFace[i], boundaryFaces1, 0.05);//创建跟NeiWaiRFace[0]相切的规则
+					faceTangentRule1 = modelPart->ScRuleFactory()->CreateRuleFaceTangent(NeiWaiRFace[i], boundaryFaces1, 0.05);//创建跟NeiWaiRFace[0]相切的规则
 					std::vector<NXOpen::SelectionIntentRule*> rules1(1);//定义选择规则容器
 					rules1[0] = faceTangentRule1;//把面相切规则放到选择规则容器里
-					NXOpen::ScCollector* scCollector1 = workPart->ScCollectors()->CreateCollector();//创建收集器
+					NXOpen::ScCollector* scCollector1 = modelPart->ScCollectors()->CreateCollector();//创建收集器
 					scCollector1->ReplaceRules(rules1, false);//把符合相切规则的所有面放到收集器里
 					std::vector<NXOpen::TaggedObject*> BB = scCollector1->GetObjects();//把收集器里的对象转到容器里
 
@@ -12912,7 +13363,7 @@ int ZiDonCuTu::aaaa_cb()
 				{
 					for (size_t h = 0; h < AllRFaceVecotor.size(); h++)
 					{
-						double distance1 = MeasureMinimumDistance(workPart, AllRFaceVecotor[h], AllPFaceVecotor[p][i]);//获取测量的值
+						double distance1 = MeasureMinimumDistance(modelPart, AllRFaceVecotor[h], AllPFaceVecotor[p][i]);//获取测量的值
 						if (distance1 < 0.01)//面跟圆柱面距离为零的视为相邻面
 						{
 							XingLinFace2.push_back(AllPFaceVecotor[p][i]);//垂直视图的相连面
@@ -12940,16 +13391,18 @@ int ZiDonCuTu::aaaa_cb()
 					}
 				}
 
-				Drawings::DraftingCurve* DraftingCurve;
-				Drawings::DraftingCurveCollection* DraftingCurveCollection1 = DraftingBody1->DraftingCurves();
-				Drawings::DraftingCurveCollection::iterator Ite2 = DraftingCurveCollection1->begin();
-
-				//得到标注尺寸实体的所有CURVE
-				for (; Ite2 != DraftingCurveCollection1->end(); ++Ite2)
+				Drawings::DraftingCurveCollection* draftingCurveCollection = DraftingBody1->DraftingCurves();
+				if (draftingCurveCollection != NULL)
 				{
-					DraftingCurve = (*Ite2);
-					DraftingCurvevector1a.push_back(DraftingCurve);
-
+					for (Drawings::DraftingCurveCollection::iterator curveIt = draftingCurveCollection->begin();
+						curveIt != draftingCurveCollection->end();
+						++curveIt)
+					{
+						if (*curveIt != NULL)
+						{
+							DraftingCurvevector1a.push_back(*curveIt);
+						}
+					}
 				}
 				{
 					std::ostringstream sideLog;
@@ -12963,11 +13416,20 @@ int ZiDonCuTu::aaaa_cb()
 					std::vector<NXObject*>	acad = DraftingCurvevector1a[i]->GetDraftingCurveInfo()->GetParents();
 					for (size_t ib = 0; ib < acad.size(); ib++)
 					{
+						NXOpen::NXObject* parentObject = PrototypeObjectOrSelf(acad[ib]);
+						if (parentObject == NULL)
+						{
+							continue;
+						}
 						int type, subtype;
-						UF_OBJ_ask_type_and_subtype(acad[ib]->Tag(), &type, &subtype);
+						UF_OBJ_ask_type_and_subtype(parentObject->Tag(), &type, &subtype);
 						if (subtype == UF_solid_face_subtype)
 						{
-							NXOpen::Face* Face1a(dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(acad[ib]->Tag())));
+							NXOpen::Face* Face1a(dynamic_cast<NXOpen::Face*>(parentObject));
+							if (Face1a == NULL || !BodyMatchesTargetOrDraftingSource(Face1a->GetBody(), Body1))
+							{
+								continue;
+							}
 							double point[3], dir[3], box[6], radius1, rad_data;
 							int type1, norm_dir;
 							UF_MODL_ask_face_data(Face1a->Tag(), &type1, point, dir, box, &radius1, &rad_data, &norm_dir);//得到R的数据
@@ -12987,7 +13449,7 @@ int ZiDonCuTu::aaaa_cb()
 						}
 						if (subtype == UF_solid_edge_subtype)
 						{
-							NXOpen::Edge* Edge1a(dynamic_cast<NXOpen::Edge*>(NXOpen::NXObjectManager::Get(acad[ib]->Tag())));
+							NXOpen::Edge* Edge1a(dynamic_cast<NXOpen::Edge*>(parentObject));
 							if (allEdgeTags.find(Edge1a->Tag()) != allEdgeTags.end())
 							{
 								DraftingCurvevector1[p].push_back(DraftingCurvevector1a[i]);
@@ -13008,7 +13470,7 @@ int ZiDonCuTu::aaaa_cb()
 						std::vector <Face*> DuanMianRFace;
 						for (size_t a = 0; a < WaiRFace[p].size(); a++)
 						{
-							double distance1 = MeasureMinimumDistance(workPart, XingLinFace1[p][i], WaiRFace[p][a]);//获取测量的值
+							double distance1 = MeasureMinimumDistance(modelPart, XingLinFace1[p][i], WaiRFace[p][a]);//获取测量的值
 							if (distance1 < 0.01)
 							{
 								DuanMianRFace.push_back(WaiRFace[p][a]);
@@ -13016,7 +13478,7 @@ int ZiDonCuTu::aaaa_cb()
 						}
 						for (size_t a = 0; a < AllLeiRFace1[p].size(); a++)
 						{
-							double distance1 = MeasureMinimumDistance(workPart, XingLinFace1[p][i], AllLeiRFace1[p][a]);//获取测量的值
+							double distance1 = MeasureMinimumDistance(modelPart, XingLinFace1[p][i], AllLeiRFace1[p][a]);//获取测量的值
 							if (distance1 < 0.01)
 							{
 								DuanMianRFace.push_back(AllLeiRFace1[p][a]);
@@ -13138,12 +13600,21 @@ int ZiDonCuTu::aaaa_cb()
 						std::vector<NXObject*>	acad = DraftingCurvevector1[p][ic]->GetDraftingCurveInfo()->GetParents();
 						for (size_t ib = 0; ib < acad.size(); ib++)
 						{
+							NXOpen::NXObject* parentObject = PrototypeObjectOrSelf(acad[ib]);
+							if (parentObject == NULL)
+							{
+								continue;
+							}
 							int type, subtype;
-							UF_OBJ_ask_type_and_subtype(acad[ib]->Tag(), &type, &subtype);
+							UF_OBJ_ask_type_and_subtype(parentObject->Tag(), &type, &subtype);
 							if (subtype == UF_solid_face_subtype)
 							{
-								NXOpen::Face* Face1a(dynamic_cast<NXOpen::Face*>(acad[ib]));
-								double distance1a = MeasureMinimumDistance(workPart, Face1a, PFaceVecotor2[p][i]);//获取测量的值
+								NXOpen::Face* Face1a(dynamic_cast<NXOpen::Face*>(parentObject));
+								if (Face1a == NULL)
+								{
+									continue;
+								}
+								double distance1a = MeasureMinimumDistance(modelPart, Face1a, PFaceVecotor2[p][i]);//获取测量的值
 								if (distance1a < 0.01)//面跟圆柱面距离为零的视为相邻面
 								{
 									UF_EVAL_p_t evaluator;
@@ -13247,7 +13718,8 @@ int ZiDonCuTu::aaaa_cb()
 								{
 									std::vector<NXObject* >OBCurv = DraftingCurvevector1a[ih]->GetDraftingCurveInfo()->GetParents();
 
-									if (OBCurv[0]->Tag() == Edge1[h]->Tag())
+									NXOpen::NXObject* parentObject = OBCurv.empty() ? NULL : PrototypeObjectOrSelf(OBCurv[0]);
+									if (parentObject != NULL && parentObject->Tag() == Edge1[h]->Tag())
 									{
 										SecondDimCurve1[p].push_back(DraftingCurvevector1a[ih]);
 										objects2.push_back(DraftingCurvevector1a[ih]);
@@ -13274,8 +13746,9 @@ int ZiDonCuTu::aaaa_cb()
 									{
 										for (size_t ih = 0; ih < DraftingCurvevector1a.size(); ih++)
 										{
-											std::vector<NXObject* >OBCurv = DraftingCurvevector1a[ih]->GetDraftingCurveInfo()->GetParents();
-											if (OBCurv[0]->Tag() == Edge1[h]->Tag())
+										std::vector<NXObject* >OBCurv = DraftingCurvevector1a[ih]->GetDraftingCurveInfo()->GetParents();
+										NXOpen::NXObject* parentObject = OBCurv.empty() ? NULL : PrototypeObjectOrSelf(OBCurv[0]);
+										if (parentObject != NULL && parentObject->Tag() == Edge1[h]->Tag())
 											{
 												SecondDimCurve1[p].push_back(DraftingCurvevector1a[ih]);
 												objects2.push_back(DraftingCurvevector1a[ih]);

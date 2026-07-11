@@ -74,6 +74,8 @@
 #include <NXOpen/NXObject.hxx>
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
+#include <NXOpen/FileNew.hxx>
+#include <NXOpen/Update.hxx>
 
 // Std C++ Includes
 #include <sstream>
@@ -272,6 +274,7 @@ private:
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineDownNotchDiameter;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineUpKeepLength;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineDownKeepLength;// Block type: Double
+    NXOpen::BlockStyler::Toggle* toggleIndependentDrawingPart;// Block type: Toggle
     NXOpen::BlockStyler::Toggle* toggleManualTemplate;// Block type: Toggle
     NXOpen::BlockStyler::StringBlock* stringManualTemplatePath;// Block type: String
     NXOpen::BlockStyler::Button* buttonBrowseTemplate;// Block type: Button
