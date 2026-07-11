@@ -4521,6 +4521,50 @@ namespace
         return CrossLength3(delta, a.direction) <= axisDistanceTolerance;
     }
 
+    std::vector<Edge*> FacePeripheralEdges(Face* face)
+    {
+        std::vector<Edge*> edges;
+        if (face == NULL)
+        {
+            return edges;
+        }
+
+        uf_loop_p_t loopList = NULL;
+        if (UF_MODL_ask_face_loops(face->Tag(), &loopList) != 0 || loopList == NULL)
+        {
+            return edges;
+        }
+
+        for (uf_loop_p_t loop = loopList; loop != NULL; loop = loop->next)
+        {
+            if (loop->type != 1 || loop->edge_list == NULL)
+            {
+                continue;
+            }
+
+            int edgeCount = 0;
+            UF_MODL_ask_list_count(loop->edge_list, &edgeCount);
+            for (int i = 0; i < edgeCount; ++i)
+            {
+                tag_t edgeTag = NULL_TAG;
+                if (UF_MODL_ask_list_item(loop->edge_list, i, &edgeTag) != 0 || edgeTag == NULL_TAG)
+                {
+                    continue;
+                }
+
+                Edge* edge = dynamic_cast<Edge*>(ObjectFromTag(edgeTag));
+                if (edge != NULL)
+                {
+                    edges.push_back(edge);
+                }
+            }
+            break;
+        }
+
+        UF_MODL_delete_loop_list(&loopList);
+        return edges;
+    }
+
     double AdjacentCylinderScore(Face* face, int* cylinderCountOut)
     {
         if (cylinderCountOut != NULL)
@@ -4532,13 +4576,19 @@ namespace
             return 0.0;
         }
 
+        std::map<tag_t, bool> tangentChainTags = FaceTagMap(CollectContinuousTangentFaces(face));
         std::vector<CylinderAxisRecord> bendAxes;
-        std::vector<Edge*> edges = FaceEdgesByUf(face);
+        std::vector<Edge*> edges = FacePeripheralEdges(face);
         for (size_t i = 0; i < edges.size(); ++i)
         {
             std::vector<Face*> adjacent = AdjacentFacesByEdge(edges[i], face);
             for (size_t j = 0; j < adjacent.size(); ++j)
             {
+                if (adjacent[j] == NULL || !tangentChainTags.count(adjacent[j]->Tag()))
+                {
+                    continue;
+                }
+
                 CylinderAxisRecord axis;
                 if (!AskCylinderAxis(adjacent[j], &axis))
                 {
