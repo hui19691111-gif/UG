@@ -39,9 +39,11 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #undef CreateDialog
 #pragma comment(lib, "Shell32.lib")
 #pragma comment(lib, "Comctl32.lib")
+#pragma comment(lib, "Comdlg32.lib")
 
 #include "ZiDonCuTu.hpp"
 #include "../../../common/ZhihuiEmbeddedDialog.hpp"
@@ -98,6 +100,7 @@ double SheelScale = 0.0;
 double SheelScale1 = 0.0;
 bool g_hasAutoPlacementOverride = false;
 NXOpen::Point3d g_autoPlacementPoint = { 0.0, 0.0, 0.0 };
+bool g_autoPlacementUseSheetCenter = false;
 bool g_hasPageScaleOverride = false;
 double g_pageScaleOverride = 20.0;
 bool g_deferPageLayout = false;
@@ -391,6 +394,78 @@ static bool FileExistsA(const char* path)
 	}
 
 	const DWORD attributes = GetFileAttributesA(path);
+	return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+static std::wstring Utf8ToWideFilePath(const std::string& text)
+{
+	if (text.empty())
+	{
+		return L"";
+	}
+
+	const int wideLength = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, NULL, 0);
+	if (wideLength > 0)
+	{
+		std::wstring wideText(static_cast<size_t>(wideLength), L'\0');
+		if (MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &wideText[0], wideLength) > 0)
+		{
+			if (!wideText.empty() && wideText[wideText.size() - 1] == L'\0')
+			{
+				wideText.erase(wideText.size() - 1);
+			}
+			return wideText;
+		}
+	}
+
+	const int acpLength = MultiByteToWideChar(CP_ACP, 0, text.c_str(), -1, NULL, 0);
+	if (acpLength <= 0)
+	{
+		return L"";
+	}
+	std::wstring wideText(static_cast<size_t>(acpLength), L'\0');
+	if (MultiByteToWideChar(CP_ACP, 0, text.c_str(), -1, &wideText[0], acpLength) <= 0)
+	{
+		return L"";
+	}
+	if (!wideText.empty() && wideText[wideText.size() - 1] == L'\0')
+	{
+		wideText.erase(wideText.size() - 1);
+	}
+	return wideText;
+}
+
+static std::string WideFilePathToUtf8(const std::wstring& text)
+{
+	if (text.empty())
+	{
+		return "";
+	}
+	const int utf8Length = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, NULL, 0, NULL, NULL);
+	if (utf8Length <= 0)
+	{
+		return "";
+	}
+	std::string utf8Text(static_cast<size_t>(utf8Length), '\0');
+	if (WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &utf8Text[0], utf8Length, NULL, NULL) <= 0)
+	{
+		return "";
+	}
+	if (!utf8Text.empty() && utf8Text[utf8Text.size() - 1] == '\0')
+	{
+		utf8Text.erase(utf8Text.size() - 1);
+	}
+	return utf8Text;
+}
+
+static bool FileExistsUtf8(const std::string& path)
+{
+	const std::wstring widePath = Utf8ToWideFilePath(path);
+	if (widePath.empty())
+	{
+		return false;
+	}
+	const DWORD attributes = GetFileAttributesW(widePath.c_str());
 	return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
@@ -1071,6 +1146,26 @@ static std::string GetStringBlockValue(NXOpen::BlockStyler::StringBlock* stringB
 	return value.empty() ? fallback : value;
 }
 
+static std::string GetStringBlockUtf8Value(NXOpen::BlockStyler::StringBlock* stringBlock, const std::string& fallback)
+{
+	if (stringBlock == NULL)
+	{
+		return fallback;
+	}
+
+	PropertyList* stringProps = stringBlock->GetProperties();
+	if (stringProps == NULL)
+	{
+		return fallback;
+	}
+
+	const NXString nxValue = stringProps->GetString("Value");
+	delete stringProps;
+	stringProps = NULL;
+	std::string value = NxStringToUtf8(nxValue);
+	return value.empty() ? fallback : value;
+}
+
 static double GetDoubleBlockValue(NXOpen::BlockStyler::DoubleBlock* doubleBlock, double fallback)
 {
 	if (doubleBlock == NULL)
@@ -1206,6 +1301,8 @@ static void SaveZiDonCuTuDialogState(
 	NXOpen::BlockStyler::DoubleBlock* bendLineDownNotchDiameterBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineUpKeepLengthBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineDownKeepLengthBlock,
+	NXOpen::BlockStyler::Toggle* manualTemplateToggleBlock,
+	NXOpen::BlockStyler::StringBlock* manualTemplatePathBlock,
 	NXOpen::BlockStyler::Enumeration* hiddenLineEnumBlock,
 	NXOpen::BlockStyler::Enumeration* projectionEnumBlock,
 	NXOpen::BlockStyler::Enumeration* flatPatternPositionEnumBlock)
@@ -1240,6 +1337,8 @@ static void SaveZiDonCuTuDialogState(
 		file << "bend_line_down_notch_diameter=" << GetDoubleBlockValue(bendLineDownNotchDiameterBlock, 1.0) << "\r\n";
 		file << "bend_line_up_keep_length=" << GetDoubleBlockValue(bendLineUpKeepLengthBlock, 5.0) << "\r\n";
 		file << "bend_line_down_keep_length=" << GetDoubleBlockValue(bendLineDownKeepLengthBlock, 5.0) << "\r\n";
+		file << "manual_template=" << (GetToggleBlockValue(manualTemplateToggleBlock, false) ? 1 : 0) << "\r\n";
+		file << "manual_template_path=" << EncodeConfigEscapes(GetStringBlockUtf8Value(manualTemplatePathBlock, "")) << "\r\n";
 		file << "hidden_line=" << EncodeConfigEscapes(GetEnumBlockUtf8Value(hiddenLineEnumBlock, "\xE6\x97\xA0")) << "\r\n";
 		file << "projection=" << EncodeConfigEscapes(GetEnumBlockUtf8Value(projectionEnumBlock, "\xE7\xAC\xAC\xE4\xB8\x80\xE8\xA7\x92\xE6\xB3\x95")) << "\r\n";
 		file << "flat_position=" << EncodeConfigEscapes(GetEnumBlockUtf8Value(flatPatternPositionEnumBlock, "\xE5\xB7\xA6")) << "\r\n";
@@ -1268,6 +1367,8 @@ static void RestoreZiDonCuTuDialogState(
 	NXOpen::BlockStyler::DoubleBlock* bendLineDownNotchDiameterBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineUpKeepLengthBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineDownKeepLengthBlock,
+	NXOpen::BlockStyler::Toggle* manualTemplateToggleBlock,
+	NXOpen::BlockStyler::StringBlock* manualTemplatePathBlock,
 	NXOpen::BlockStyler::Enumeration* hiddenLineEnumBlock,
 	NXOpen::BlockStyler::Enumeration* projectionEnumBlock,
 	NXOpen::BlockStyler::Enumeration* flatPatternPositionEnumBlock)
@@ -1338,6 +1439,11 @@ static void RestoreZiDonCuTuDialogState(
 		{
 			bendLineDownKeepLengthBlock->SetValue(std::max(0.1, ConfigReadDouble(path, "bend_line_down_keep_length", bendLineDownKeepLengthBlock->Value())));
 		}
+		if (manualTemplateToggleBlock != NULL)
+		{
+			manualTemplateToggleBlock->SetValue(ConfigReadBool(path, "manual_template", GetToggleBlockValue(manualTemplateToggleBlock, false)));
+		}
+		SetStringBlockValue(manualTemplatePathBlock, ConfigReadString(path, "manual_template_path", GetStringBlockUtf8Value(manualTemplatePathBlock, "")));
 		SetEnumBlockUtf8Value(hiddenLineEnumBlock, ConfigReadString(path, "hidden_line", GetEnumBlockUtf8Value(hiddenLineEnumBlock, "\xE6\x97\xA0")));
 		SetEnumBlockUtf8Value(projectionEnumBlock, ConfigReadString(path, "projection", GetEnumBlockUtf8Value(projectionEnumBlock, "\xE7\xAC\xAC\xE4\xB8\x80\xE8\xA7\x92\xE6\xB3\x95")));
 		SetEnumBlockUtf8Value(flatPatternPositionEnumBlock, ConfigReadString(path, "flat_position", GetEnumBlockUtf8Value(flatPatternPositionEnumBlock, "\xE5\xB7\xA6")));
@@ -1371,6 +1477,24 @@ static void UpdateBendNoteControls(
 	const bool showTextHeight = GetToggleBlockValue(bendNoteToggle, false);
 	textHeightBlock->SetShow(showTextHeight);
 	textHeightBlock->SetEnable(showTextHeight);
+}
+
+static void UpdateManualTemplateControls(
+	NXOpen::BlockStyler::Toggle* manualTemplateToggle,
+	NXOpen::BlockStyler::StringBlock* manualTemplatePathBlock,
+	NXOpen::BlockStyler::Button* browseTemplateButton)
+{
+	const bool showTemplatePath = GetToggleBlockValue(manualTemplateToggle, false);
+	if (manualTemplatePathBlock != NULL)
+	{
+		manualTemplatePathBlock->SetShow(showTemplatePath);
+		manualTemplatePathBlock->SetEnable(showTemplatePath);
+	}
+	if (browseTemplateButton != NULL)
+	{
+		browseTemplateButton->SetShow(showTemplatePath);
+		browseTemplateButton->SetEnable(showTemplatePath);
+	}
 }
 
 static void UpdateBreakBendLineControls(
@@ -1614,6 +1738,46 @@ static bool HasAnyDrawingSheet(NXOpen::Part* part)
 	}
 	Drawings::DrawingSheetCollection::iterator sheetIt = part->DrawingSheets()->begin();
 	return sheetIt != part->DrawingSheets()->end();
+}
+
+struct SheetSizeMm
+{
+	double width;
+	double height;
+};
+
+static SheetSizeMm GetCurrentSheetSizeOrDefault(NXOpen::Part* part)
+{
+	SheetSizeMm size{ 297.0, 210.0 };
+	if (part == NULL || part->DrawingSheets() == NULL)
+	{
+		return size;
+	}
+
+	try
+	{
+		NXOpen::Drawings::DrawingSheet* currentSheet = part->DrawingSheets()->CurrentDrawingSheet();
+		if (currentSheet != NULL)
+		{
+			const double width = currentSheet->Length();
+			const double height = currentSheet->Height();
+			if (width > 1.0 && height > 1.0)
+			{
+				size.width = width;
+				size.height = height;
+			}
+		}
+	}
+	catch (...)
+	{
+	}
+	return size;
+}
+
+static NXOpen::Point3d GetCurrentSheetCenterOrDefault(NXOpen::Part* part)
+{
+	const SheetSizeMm size = GetCurrentSheetSizeOrDefault(part);
+	return NXOpen::Point3d(size.width / 2.0, size.height / 2.0, 0.0);
 }
 
 static void SetBodySelectionMode(NXOpen::BlockStyler::SelectObject* selectionBlock, bool singleSelect)
@@ -2072,6 +2236,21 @@ struct LayoutRect
 	double maxX;
 	double maxY;
 };
+
+static LayoutRect GetCurrentSheetSafeBounds(
+	NXOpen::Part* part,
+	double leftMargin,
+	double bottomMargin,
+	double rightMargin,
+	double topMargin)
+{
+	const SheetSizeMm size = GetCurrentSheetSizeOrDefault(part);
+	const double minX = std::max(0.0, leftMargin);
+	const double minY = std::max(0.0, bottomMargin);
+	const double maxX = std::max(minX + 10.0, size.width - std::max(0.0, rightMargin));
+	const double maxY = std::max(minY + 10.0, size.height - std::max(0.0, topMargin));
+	return LayoutRect{ minX, minY, maxX, maxY };
+}
 
 struct DraftingBodyCacheItem
 {
@@ -2646,6 +2825,64 @@ static std::wstring Utf8ToWideText(const std::string& text)
 static std::string NxStringToUtf8(const NXOpen::NXString& text)
 {
 	return TrimText(LocaleTextToUtf8(text.GetLocaleText()));
+}
+
+static std::wstring ParentPathOf(const std::wstring& path)
+{
+	const size_t pos = path.find_last_of(L"\\/");
+	return pos == std::wstring::npos ? L"" : path.substr(0, pos);
+}
+
+static std::wstring DefaultTemplateDirectory()
+{
+	try
+	{
+		std::wstring applicationDir = PluginDirectory();
+		std::wstring pluginRoot = ParentPathOf(applicationDir);
+		if (!pluginRoot.empty())
+		{
+			return pluginRoot + L"\\DATA";
+		}
+	}
+	catch (...)
+	{
+	}
+	return L"D:\\UG\x667A\x8F89\x94A3\x91D1\x63D2\x4EF6\\DATA";
+}
+
+static bool BrowseManualTemplateFile(NXOpen::BlockStyler::StringBlock* manualTemplatePathBlock)
+{
+	std::wstring currentPath = Utf8ToWideFilePath(GetStringBlockUtf8Value(manualTemplatePathBlock, ""));
+	std::wstring initialDir = ParentPathOf(currentPath);
+	if (initialDir.empty())
+	{
+		initialDir = DefaultTemplateDirectory();
+	}
+
+	wchar_t fileName[MAX_PATH * 4] = { 0 };
+	if (!currentPath.empty() && currentPath.size() < _countof(fileName))
+	{
+		wcsncpy_s(fileName, _countof(fileName), currentPath.c_str(), _TRUNCATE);
+	}
+
+	OPENFILENAMEW ofn{};
+	ofn.lStructSize = sizeof(ofn);
+	ofn.hwndOwner = NULL;
+	ofn.lpstrFilter = L"NX Part Template (*.prt)\0*.prt\0All Files (*.*)\0*.*\0";
+	ofn.lpstrFile = fileName;
+	ofn.nMaxFile = static_cast<DWORD>(_countof(fileName));
+	ofn.lpstrInitialDir = initialDir.empty() ? NULL : initialDir.c_str();
+	ofn.lpstrTitle = L"\x9009\x62E9\x56FE\x7EB8\x6A21\x677F\x6587\x4EF6";
+	ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_HIDEREADONLY;
+	ofn.lpstrDefExt = L"prt";
+
+	if (!GetOpenFileNameW(&ofn))
+	{
+		return false;
+	}
+
+	SetStringBlockValue(manualTemplatePathBlock, WideFilePathToUtf8(fileName));
+	return true;
 }
 
 static std::string ReadAttributeText(NXOpen::NXObject* object, const char* title)
@@ -6692,6 +6929,30 @@ static double RectHeight(const LayoutRect& rect)
 	return std::max(0.0, rect.maxY - rect.minY);
 }
 
+static void GetLayoutScaleAvailableSize(const char* layoutMode, double& availableWidth, double& availableHeight)
+{
+	const LayoutRect safeBounds = GetCurrentSheetSafeBounds(workPart, 18.0, 32.0, 18.0, 20.0);
+	const double safeWidth = RectWidth(safeBounds);
+	const double safeHeight = RectHeight(safeBounds);
+	const double a4SafeWidth = 297.0 - 18.0 - 18.0;
+	const double a4SafeHeight = 210.0 - 32.0 - 20.0;
+	double widthAtA4 = 200.0;
+	double heightAtA4 = 130.0;
+	if (layoutMode != NULL && strcmp(layoutMode, "下") == 0)
+	{
+		widthAtA4 = 220.0;
+		heightAtA4 = 110.0;
+	}
+	else if (layoutMode != NULL && strcmp(layoutMode, "左下") == 0)
+	{
+		widthAtA4 = 200.0;
+		heightAtA4 = 110.0;
+	}
+
+	availableWidth = std::max(10.0, safeWidth * widthAtA4 / a4SafeWidth);
+	availableHeight = std::max(10.0, safeHeight * heightAtA4 / a4SafeHeight);
+}
+
 
 static NXOpen::NXObject* TryRepositionBaseView(
 	NXOpen::Part* workPart,
@@ -6890,19 +7151,12 @@ static double EstimateBodySheetScale(NXOpen::BlockStyler::Enumeration* enum0Bloc
 		enum0Props = NULL;
 	}
 
-	double scaleX = doubleX / 200.0;
-	double scaleY = doubleY / 130.0;
 	const char* layoutText = layoutMode.GetLocaleText();
-	if (layoutText != NULL && strcmp(layoutText, "下") == 0)
-	{
-		scaleX = doubleX / 220.0;
-		scaleY = doubleY / 110.0;
-	}
-	else if (layoutText != NULL && strcmp(layoutText, "左下") == 0)
-	{
-		scaleX = doubleX / 200.0;
-		scaleY = doubleY / 110.0;
-	}
+	double availableWidth = 200.0;
+	double availableHeight = 130.0;
+	GetLayoutScaleAvailableSize(layoutText, availableWidth, availableHeight);
+	double scaleX = doubleX / availableWidth;
+	double scaleY = doubleY / availableHeight;
 
 	double scale = std::max(scaleX, scaleY);
 	if (scale > 0.5)
@@ -8273,7 +8527,7 @@ static void ArrangePendingGroupsOnSheet(
 		return;
 	}
 
-	const LayoutRect safeBounds{ 18.0, 32.0, 297.0 - 18.0, 210.0 - 20.0 };
+	const LayoutRect safeBounds = GetCurrentSheetSafeBounds(workPart, 18.0, 32.0, 18.0, 20.0);
 
 	struct SheetPlacementItem
 	{
@@ -8872,7 +9126,7 @@ static void FinalizePendingGroupScaleAndLayout(NXOpen::Part* workPart)
 		return;
 	}
 
-	const LayoutRect safeBounds{ 18.0, 32.0, 297.0 - 18.0, 210.0 - 20.0 };
+	const LayoutRect safeBounds = GetCurrentSheetSafeBounds(workPart, 18.0, 32.0, 18.0, 20.0);
 	const double baseDenominator = currentDenominator;
 	PendingGroupLayoutPlan plan = ChoosePendingGroupLayoutPlan(
 		metrics,
@@ -9535,6 +9789,9 @@ void ZiDonCuTu::initialize_cb()
 		doubleBendLineDownNotchDiameter = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineDownNotchDiameter"));
 		doubleBendLineUpKeepLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineUpKeepLength1"));
 		doubleBendLineDownKeepLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineDownKeepLength1"));
+		toggleManualTemplate = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleManualTemplate"));
+		stringManualTemplatePath = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("stringManualTemplatePath"));
+		buttonBrowseTemplate = dynamic_cast<NXOpen::BlockStyler::Button*>(theDialog->TopBlock()->FindBlock("buttonBrowseTemplate"));
 		buttonNoteFormatConfig = dynamic_cast<NXOpen::BlockStyler::Button*>(theDialog->TopBlock()->FindBlock("buttonNoteFormatConfig"));
 		enum01 = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(theDialog->TopBlock()->FindBlock("enum01"));
 		enumProjection = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(theDialog->TopBlock()->FindBlock("enumProjection"));
@@ -9655,6 +9912,8 @@ void ZiDonCuTu::dialogShown_cb()
 			doubleBendLineDownNotchDiameter,
 			doubleBendLineUpKeepLength,
 			doubleBendLineDownKeepLength,
+			toggleManualTemplate,
+			stringManualTemplatePath,
 			enum01,
 			enumProjection,
 			enum0);
@@ -9693,6 +9952,7 @@ void ZiDonCuTu::dialogShown_cb()
 		UpdateBreakBendLineControls(toggleBreakBendLine, doubleBendLineEdgeDistance, doubleBendLineUpKeepLength, doubleBendLineDownKeepLength);
 		UpdateBendLineNotchControls(toggleBendLineUpNotch, doubleBendLineUpNotchDiameter);
 		UpdateBendLineNotchControls(toggleBendLineDownNotch, doubleBendLineDownNotchDiameter);
+		UpdateManualTemplateControls(toggleManualTemplate, stringManualTemplatePath, buttonBrowseTemplate);
 		if (enum01 != NULL)
 		{
 			enum01->SetShow(false);
@@ -9741,6 +10001,8 @@ int ZiDonCuTu::apply_cb()
 			doubleBendLineDownNotchDiameter,
 			doubleBendLineUpKeepLength,
 			doubleBendLineDownKeepLength,
+			toggleManualTemplate,
+			stringManualTemplatePath,
 			enum01,
 			enumProjection,
 			enum0);
@@ -9856,7 +10118,7 @@ int ZiDonCuTu::apply_cb()
 			delete toggle0Props;
 			toggle0Props = NULL;
 
-			const NXOpen::Point3d sheetCenter(297.0 / 2.0, 210.0 / 2.0, 0.0);
+			const NXOpen::Point3d sheetCenter = GetCurrentSheetCenterOrDefault(workPart);
 			const bool manualUseExistingSheet = manualMode && currentHasDrawingSheet && originalCreateSheet == 0;
 			if (manualUseExistingSheet)
 			{
@@ -9876,6 +10138,7 @@ int ZiDonCuTu::apply_cb()
 			}
 			g_hasAutoPlacementOverride = !manualUseExistingSheet;
 			g_autoPlacementPoint = sheetCenter;
+			g_autoPlacementUseSheetCenter = !manualUseExistingSheet;
 			g_hasPageScaleOverride = !manualUseExistingSheet;
 			g_pageScaleOverride = 1000.0;
 			g_deferPageRefit = !manualUseExistingSheet;
@@ -9996,6 +10259,7 @@ int ZiDonCuTu::apply_cb()
 			toggle0->SetValue(originalCreateSheet != 0);
 			g_hasAutoPlacementOverride = false;
 			g_autoPlacementPoint = { 0.0, 0.0, 0.0 };
+			g_autoPlacementUseSheetCenter = false;
 			g_hasPageScaleOverride = false;
 			g_pageScaleOverride = 20.0;
 			g_manualPlacementNoRefit = false;
@@ -10238,6 +10502,7 @@ int ZiDonCuTu::apply_cb()
 		FlushPendingWorkViewRegenerate(workPart);
 		g_deferPageRefit = false;
 		g_hasAutoPlacementOverride = false;
+		g_autoPlacementUseSheetCenter = false;
 		g_hasPageScaleOverride = false;
 		g_manualPlacementNoRefit = false;
 		ZiDonCuTu::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
@@ -10305,6 +10570,7 @@ static void ResetZiDonCuTuRuntimeState(bool clearDialogPointer)
 		SheelScale1 = 0.0;
 		g_hasAutoPlacementOverride = false;
 		g_autoPlacementPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
+		g_autoPlacementUseSheetCenter = false;
 		g_hasPageScaleOverride = false;
 		g_pageScaleOverride = 20.0;
 		g_deferPageLayout = false;
@@ -11300,6 +11566,18 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				doubleBendLineDownKeepLength->SetValue(5.0);
 			}
 		}
+		else if (block == toggleManualTemplate)
+		{
+			blockName = "toggleManualTemplate";
+			phase = "toggleManualTemplate";
+			UpdateManualTemplateControls(toggleManualTemplate, stringManualTemplatePath, buttonBrowseTemplate);
+		}
+		else if (block == buttonBrowseTemplate)
+		{
+			blockName = "buttonBrowseTemplate";
+			phase = "buttonBrowseTemplate";
+			BrowseManualTemplateFile(stringManualTemplatePath);
+		}
 		else if (block == buttonNoteFormatConfig)
 		{
 			blockName = "buttonNoteFormatConfig";
@@ -11366,9 +11644,10 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				}
 				if (Thetoggle0 != 0)
 				{
-					const NXOpen::Point3d sheetCenter(297.0 / 2.0, 210.0 / 2.0, 0.0);
+					const NXOpen::Point3d sheetCenter = GetCurrentSheetCenterOrDefault(workPart);
 					g_hasAutoPlacementOverride = true;
 					g_autoPlacementPoint = sheetCenter;
+					g_autoPlacementUseSheetCenter = true;
 					g_hasPageScaleOverride = true;
 					g_pageScaleOverride = 1000.0;
 					g_deferPageRefit = true;
@@ -11389,6 +11668,7 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 						g_deferPageRefit = false;
 						g_hasAutoPlacementOverride = false;
 						g_autoPlacementPoint = { 0.0, 0.0, 0.0 };
+						g_autoPlacementUseSheetCenter = false;
 						g_hasPageScaleOverride = false;
 						g_manualPlacementNoRefit = false;
 						throw;
@@ -11398,6 +11678,7 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 					g_sheetIsoAlreadyCreated = false;
 					g_hasAutoPlacementOverride = false;
 					g_autoPlacementPoint = { 0.0, 0.0, 0.0 };
+					g_autoPlacementUseSheetCenter = false;
 					g_hasPageScaleOverride = false;
 					g_pageScaleOverride = 20.0;
 					g_manualPlacementNoRefit = false;
@@ -11437,10 +11718,11 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 					return 0;
 				}
 				Body1 = selectedBody;
-				NXOpen::Point3d manualPlacementPoint(297.0 / 2.0, 210.0 / 2.0, 0.0);
+				NXOpen::Point3d manualPlacementPoint = GetCurrentSheetCenterOrDefault(workPart);
 				TryReadSpecifyPoint(point0, manualPlacementPoint);
 				g_hasAutoPlacementOverride = true;
 				g_autoPlacementPoint = manualPlacementPoint;
+				g_autoPlacementUseSheetCenter = false;
 				g_hasPageScaleOverride = false;
 				g_deferPageRefit = false;
 				g_manualPlacementNoRefit = true;
@@ -11459,12 +11741,14 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 					RestoreLayerStates(layerSnapshot);
 					g_hasAutoPlacementOverride = false;
 					g_autoPlacementPoint = { 0.0, 0.0, 0.0 };
+					g_autoPlacementUseSheetCenter = false;
 					g_manualPlacementNoRefit = false;
 					throw;
 				}
 				RestoreLayerStates(layerSnapshot);
 				g_hasAutoPlacementOverride = false;
 				g_autoPlacementPoint = { 0.0, 0.0, 0.0 };
+				g_autoPlacementUseSheetCenter = false;
 				g_manualPlacementNoRefit = false;
 				g_manualActionCompleted = true;
 			}
@@ -11769,6 +12053,8 @@ int ZiDonCuTu::aaaa_cb()
 			bool hasNameAttribute = false;
 			std::string nameAttributeText;
 			const char* selectedTemplatePath = NULL;
+			std::string selectedTemplatePathUtf8;
+			bool selectedTemplatePathIsUtf8 = false;
 			if (isThirdAngleProjection)
 			{
 				hasNameAttribute = workPart->HasUserAttribute("名称", NXObject::AttributeType::AttributeTypeString, -1);
@@ -11816,6 +12102,21 @@ int ZiDonCuTu::aaaa_cb()
 					draftingDrawingSheetBuilder1->SetMetricSheetTemplateLocation(path15);//模板文件
 				}
 			}
+			if (GetToggleBlockValue(toggleManualTemplate, false))
+			{
+				selectedTemplatePathUtf8 = GetStringBlockUtf8Value(stringManualTemplatePath, "");
+				if (selectedTemplatePathUtf8.empty())
+				{
+					throw std::runtime_error("已启用手动选择模板，请先选择图纸模板文件。");
+				}
+				selectedTemplatePath = selectedTemplatePathUtf8.c_str();
+				selectedTemplatePathIsUtf8 = true;
+				draftingDrawingSheetBuilder1->SetMetricSheetTemplateLocation(
+					NXOpen::NXString(selectedTemplatePathUtf8.c_str(), NXOpen::NXString::UTF8));
+			}
+			const bool selectedTemplateExists = selectedTemplatePathIsUtf8
+				? FileExistsUtf8(selectedTemplatePathUtf8)
+				: FileExistsA(selectedTemplatePath);
 			{
 				std::ostringstream sheetLog;
 				sheetLog << "[sheet.setup]"
@@ -11825,12 +12126,17 @@ int ZiDonCuTu::aaaa_cb()
 					<< " sheetNumber=" << newSheetNumber
 					<< " hasName=" << (hasNameAttribute ? 1 : 0)
 					<< " nameLen=" << nameAttributeText.length()
+					<< " manualTemplate=" << (selectedTemplatePathIsUtf8 ? 1 : 0)
 					<< " template=" << (selectedTemplatePath != NULL ? selectedTemplatePath : "<null>")
-					<< " exists=" << (FileExistsA(selectedTemplatePath) ? 1 : 0);
+					<< " exists=" << (selectedTemplateExists ? 1 : 0);
 				SideDimensionDebugLog(sheetLog.str());
 			}
-			if (!FileExistsA(selectedTemplatePath))
+			if (!selectedTemplateExists)
 			{
+				if (selectedTemplatePathIsUtf8)
+				{
+					throw std::runtime_error("手动选择的图纸模板文件不存在，请重新选择模板文件。");
+				}
 				throw std::runtime_error("自动出图模板文件不存在，请检查 D:\\UG智辉钣金插件\\DATA。");
 			}
 			phase = "aaaa_cb.sheet.commit";
@@ -11942,9 +12248,11 @@ int ZiDonCuTu::aaaa_cb()
 
 		phase = "aaaa_cb.views.prepare";
 		NXOpen::Drawings::BaseView* nullNXOpen_Drawings_BaseView(NULL);
-		const NXOpen::Point3d initialViewPlacementPoint = g_hasAutoPlacementOverride
-			? g_autoPlacementPoint
-			: NXOpen::Point3d(297.0 / 2.0, 210.0 / 2.0, 0.0);
+		const NXOpen::Point3d initialViewPlacementPoint = g_autoPlacementUseSheetCenter
+			? GetCurrentSheetCenterOrDefault(workPart)
+			: (g_hasAutoPlacementOverride
+				? g_autoPlacementPoint
+				: GetCurrentSheetCenterOrDefault(workPart));
 		auto logViewCommitState = [&](const char* viewName, NXOpen::ModelingView* modelView)
 		{
 			NXOpen::Drawings::DrawingSheet* currentSheet = NULL;
@@ -13083,8 +13391,10 @@ int ZiDonCuTu::aaaa_cb()
 				else if (strcmp(CharWeiZi, "左") == 0)
 				{
 					double AAA, BBB;
-					AAA = (doubleX + (VMax_X[0] - VMin_X[0]) * 20) / 200;
-					BBB = doubleY / 130;
+					double availableWidth, availableHeight;
+					GetLayoutScaleAvailableSize(CharWeiZi, availableWidth, availableHeight);
+					AAA = (doubleX + (VMax_X[0] - VMin_X[0]) * 20) / availableWidth;
+					BBB = doubleY / availableHeight;
 					if (AAA >= BBB)
 					{
 						Scale1A = AAA;
@@ -13097,8 +13407,10 @@ int ZiDonCuTu::aaaa_cb()
 				else if (strcmp(CharWeiZi, "下") == 0)
 				{
 					double AAA, BBB;
-					AAA = doubleX / 220;
-					BBB = (doubleY + (VMax_Y[0] - VMin_Y[0]) * 20) / 110;
+					double availableWidth, availableHeight;
+					GetLayoutScaleAvailableSize(CharWeiZi, availableWidth, availableHeight);
+					AAA = doubleX / availableWidth;
+					BBB = (doubleY + (VMax_Y[0] - VMin_Y[0]) * 20) / availableHeight;
 					if (AAA >= BBB)
 					{
 						Scale1A = AAA;
@@ -13111,8 +13423,10 @@ int ZiDonCuTu::aaaa_cb()
 				else if (strcmp(CharWeiZi, "左下") == 0)
 				{
 					double AAA, BBB;
-					AAA = (doubleX + (VMax_X[0] - VMin_X[0]) * 20) / 200;
-					BBB = (doubleY + (VMax_Y[1] - VMin_Y[1]) * 20) / 110;
+					double availableWidth, availableHeight;
+					GetLayoutScaleAvailableSize(CharWeiZi, availableWidth, availableHeight);
+					AAA = (doubleX + (VMax_X[0] - VMin_X[0]) * 20) / availableWidth;
+					BBB = (doubleY + (VMax_Y[1] - VMin_Y[1]) * 20) / availableHeight;
 					if (AAA >= BBB)
 					{
 						Scale1A = AAA;
@@ -13930,6 +14244,7 @@ int ZiDonCuTu::aaaa_cb()
 					const size_t bottomIndex = strcmp(CharWeiZi, "左下") == 0 ? 1 : 0;
 					const double bottomWidth = cachedSideWidth(bottomIndex) * 20.0 / Scale1A;
 					const double bottomHeight = cachedSideHeight(bottomIndex) * 20.0 / Scale1A;
+					const SheetSizeMm sheetSize = GetCurrentSheetSizeOrDefault(workPart);
 					AutoViewLayout layout = ComputeAutomaticViewLayout(
 						CharWeiZi,
 						mainWidth,
@@ -13939,8 +14254,8 @@ int ZiDonCuTu::aaaa_cb()
 						bottomWidth,
 						bottomHeight,
 						Zen3DView != NULL,
-						297.0,
-						210.0);
+						sheetSize.width,
+						sheetSize.height);
 
 					View1BPoint3d = layout.mainPos;
 					View1Point3d = layout.rightPos;
@@ -14587,8 +14902,10 @@ int ZiDonCuTu::aabb_cb()
 				if (strcmp(CharWeiZi, "左") == 0)
 				{
 					double AAA, BBB;
-					AAA = doubleX / 200;
-					BBB = doubleY / 130;
+					double availableWidth, availableHeight;
+					GetLayoutScaleAvailableSize(CharWeiZi, availableWidth, availableHeight);
+					AAA = doubleX / availableWidth;
+					BBB = doubleY / availableHeight;
 					if (AAA >= BBB)
 					{
 
@@ -14602,8 +14919,10 @@ int ZiDonCuTu::aabb_cb()
 				if (strcmp(CharWeiZi, "下") == 0)
 				{
 					double AAA, BBB;
-					AAA = doubleX / 220;
-					BBB = doubleY / 110;
+					double availableWidth, availableHeight;
+					GetLayoutScaleAvailableSize(CharWeiZi, availableWidth, availableHeight);
+					AAA = doubleX / availableWidth;
+					BBB = doubleY / availableHeight;
 					if (AAA >= BBB)
 					{
 						Scale1A = AAA;
@@ -14617,8 +14936,10 @@ int ZiDonCuTu::aabb_cb()
 				if (strcmp(CharWeiZi, "左下") == 0)
 				{
 					double AAA, BBB;
-					AAA = doubleX / 200;
-					BBB = doubleY / 110;
+					double availableWidth, availableHeight;
+					GetLayoutScaleAvailableSize(CharWeiZi, availableWidth, availableHeight);
+					AAA = doubleX / availableWidth;
+					BBB = doubleY / availableHeight;
 					if (AAA >= BBB)
 					{
 						Scale1A = AAA;
@@ -14662,6 +14983,7 @@ int ZiDonCuTu::aabb_cb()
 				const double rightHeight = mainHeight * 0.85;
 				const double bottomWidth = mainWidth * 0.85;
 				const double bottomHeight = mainHeight * 0.55;
+				const SheetSizeMm sheetSize = GetCurrentSheetSizeOrDefault(workPart);
 				AutoViewLayout layout = ComputeAutomaticViewLayout(
 					CharWeiZi,
 					mainWidth,
@@ -14671,8 +14993,8 @@ int ZiDonCuTu::aabb_cb()
 					bottomWidth,
 					bottomHeight,
 					false,
-					297.0,
-					210.0);
+					sheetSize.width,
+					sheetSize.height);
 
 				View1BPoint3d = layout.mainPos;
 				View1Point3d = layout.rightPos;

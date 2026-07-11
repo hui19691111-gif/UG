@@ -213,6 +213,7 @@ extern NXOpen::NXObject* Zen3DView;
 extern double numerator, SheelScale, SheelScale1;
 extern bool g_hasAutoPlacementOverride;
 extern NXOpen::Point3d g_autoPlacementPoint;
+extern bool g_autoPlacementUseSheetCenter;
 extern bool g_hasPageScaleOverride;
 extern double g_pageScaleOverride;
 extern bool g_deferPageLayout;
@@ -271,6 +272,9 @@ private:
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineDownNotchDiameter;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineUpKeepLength;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineDownKeepLength;// Block type: Double
+    NXOpen::BlockStyler::Toggle* toggleManualTemplate;// Block type: Toggle
+    NXOpen::BlockStyler::StringBlock* stringManualTemplatePath;// Block type: String
+    NXOpen::BlockStyler::Button* buttonBrowseTemplate;// Block type: Button
     NXOpen::BlockStyler::Button* buttonNoteFormatConfig;// Block type: Button
     NXOpen::BlockStyler::Enumeration* enum01;// Block type: Enumeration
     NXOpen::BlockStyler::Enumeration* enumProjection;// Block type: Enumeration

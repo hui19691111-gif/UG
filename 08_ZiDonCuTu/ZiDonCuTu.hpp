@@ -143,6 +143,9 @@ private:
     NXOpen::BlockStyler::Button* button0;// Block type: Button
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineUpKeepLength1;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineDownKeepLength1;// Block type: Double
+    NXOpen::BlockStyler::Toggle* toggleManualTemplate;// Block type: Toggle
+    NXOpen::BlockStyler::StringBlock* stringManualTemplatePath;// Block type: String
+    NXOpen::BlockStyler::Button* buttonBrowseTemplate;// Block type: Button
     NXOpen::BlockStyler::Enumeration* enum01;// Block type: Enumeration
     NXOpen::BlockStyler::StringBlock* stringHoleMarker;// Block type: String
     NXOpen::BlockStyler::DoubleBlock* doubleRInnerThreshold;// Block type: Double
