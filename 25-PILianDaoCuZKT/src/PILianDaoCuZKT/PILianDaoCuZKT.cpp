@@ -245,7 +245,24 @@ static std::string LocaleText(const NXOpen::NXString& value)
 
 static void LogLine(const std::string& text)
 {
-    (void)text;
+    try
+    {
+        CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+        CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
+        FILE* file = _wfopen(L"D:\\UG智辉钣金插件\\logs\\PILianDaoCuZKT_debug.log", L"ab");
+        if (file == NULL)
+        {
+            return;
+        }
+        std::ostringstream line;
+        line << static_cast<long long>(std::time(NULL)) << " " << text << "\r\n";
+        const std::string value = line.str();
+        fwrite(value.c_str(), 1, value.size(), file);
+        fclose(file);
+    }
+    catch (...)
+    {
+    }
 }
 
 static long long ElapsedMilliseconds(const std::chrono::steady_clock::time_point& start)
@@ -375,6 +392,16 @@ static std::string Trim(const std::string& text)
     }
     const size_t last = text.find_last_not_of(" \t\r\n");
     return text.substr(first, last - first + 1);
+}
+
+static std::string StripSurroundingQuotes(const std::string& text)
+{
+    std::string value = Trim(text);
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
+    {
+        value = value.substr(1, value.size() - 2);
+    }
+    return Trim(value);
 }
 
 static void ReplaceAllText(std::string& text, const std::string& from, const std::string& to)
@@ -869,29 +896,132 @@ static std::string ReadPartFileName(NXOpen::Part* part)
     }
 }
 
+static std::string ReadBodyIdText(NXOpen::Body* body)
+{
+    std::string bodyId = ReadAttributeText(body, "BodyID");
+    if (!bodyId.empty())
+    {
+        LogLine("[ReadBodyIdText] bodyTag=" + std::to_string(static_cast<unsigned long long>(body != NULL ? body->Tag() : NULL_TAG))
+            + " BodyID(attributeText)=" + bodyId);
+        return bodyId;
+    }
+
+    try
+    {
+        if (body != NULL)
+        {
+            bodyId = std::to_string(body->GetIntegerAttribute("BodyID"));
+            LogLine("[ReadBodyIdText] bodyTag=" + std::to_string(static_cast<unsigned long long>(body->Tag()))
+                + " BodyID(integer)=" + bodyId);
+            return bodyId;
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[ReadBodyIdText] BodyID missing NXException bodyTag="
+            + std::to_string(static_cast<unsigned long long>(body != NULL ? body->Tag() : NULL_TAG))
+            + " code=" + std::to_string(ex.ErrorCode())
+            + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[ReadBodyIdText] BodyID missing exception bodyTag="
+            + std::to_string(static_cast<unsigned long long>(body != NULL ? body->Tag() : NULL_TAG)));
+    }
+    return "";
+}
+
+static std::string ReadQuantityExpressionText(NXOpen::Part* part, const std::string& expressionName)
+{
+    if (part == NULL || expressionName.empty())
+    {
+        LogLine("[ReadQuantityExpressionText] skip null part or empty expression name expression=" + expressionName);
+        return "";
+    }
+
+    try
+    {
+        NXOpen::Expression* expression = part->Expressions()->FindObject(expressionName);
+        if (expression != NULL)
+        {
+            const std::string type = LocaleText(expression->Type());
+            std::string value;
+            if (type == "Integer")
+            {
+                value = std::to_string(expression->IntegerValue());
+            }
+            else if (type == "String")
+            {
+                value = StripSurroundingQuotes(LocaleText(expression->StringValue()));
+            }
+            else if (type == "Number")
+            {
+                value = FormatReal(expression->Value());
+            }
+            else
+            {
+                try
+                {
+                    value = std::to_string(expression->IntegerValue());
+                }
+                catch (...)
+                {
+                    try
+                    {
+                        value = StripSurroundingQuotes(LocaleText(expression->StringValue()));
+                    }
+                    catch (...)
+                    {
+                        value = FormatReal(expression->Value());
+                    }
+                }
+            }
+            LogLine("[ReadQuantityExpressionText] found part=" + LocaleText(part->Name())
+                + " expression=" + expressionName
+                + " type=" + type
+                + " value=" + value);
+            return value;
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine("[ReadQuantityExpressionText] not found/NXException part=" + LocaleText(part->Name())
+            + " expression=" + expressionName
+            + " code=" + std::to_string(ex.ErrorCode())
+            + " message=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        LogLine("[ReadQuantityExpressionText] not found/exception part=" + LocaleText(part->Name())
+            + " expression=" + expressionName);
+    }
+    LogLine("[ReadQuantityExpressionText] not found part=" + LocaleText(part->Name())
+        + " expression=" + expressionName);
+    return "";
+}
+
 static std::string ReadQuantityText(NXOpen::Part* part, NXOpen::Body* body, int occurrenceQuantity)
 {
     (void)occurrenceQuantity;
 
-    try
+    LogLine("[ReadQuantityText] begin part=" + LocaleText(part != NULL ? part->Name() : NXOpen::NXString(""))
+        + " bodyTag=" + std::to_string(static_cast<unsigned long long>(body != NULL ? body->Tag() : NULL_TAG)));
+    const std::string bodyId = ReadBodyIdText(body);
+    if (bodyId.empty())
     {
-        if (part != NULL && body != NULL)
-        {
-            const int bodyId = body->GetIntegerAttribute("BodyID");
-            char expressionName[256] = {};
-            sprintf(expressionName, "ZSuLian_%d", bodyId);
-            NXOpen::Expression* expression = part->Expressions()->FindObject(expressionName);
-            if (expression != NULL)
-            {
-                return FormatReal(expression->Value());
-            }
-        }
-    }
-    catch (...)
-    {
+        LogLine("[ReadQuantityText] empty BodyID part=" + LocaleText(part != NULL ? part->Name() : NXOpen::NXString(""))
+            + " bodyTag=" + std::to_string(static_cast<unsigned long long>(body != NULL ? body->Tag() : NULL_TAG)));
+        return "";
     }
 
-    return "";
+    const std::string expressionName = "ZSuLian_" + bodyId;
+    const std::string quantity = ReadQuantityExpressionText(part, expressionName);
+    LogLine("[ReadQuantityText] done part=" + LocaleText(part != NULL ? part->Name() : NXOpen::NXString(""))
+        + " bodyTag=" + std::to_string(static_cast<unsigned long long>(body != NULL ? body->Tag() : NULL_TAG))
+        + " bodyId=" + bodyId
+        + " expression=" + expressionName
+        + " quantity=" + quantity);
+    return quantity;
 }
 
 static std::string LoadBodyNoteFormat()
@@ -1382,11 +1512,6 @@ static bool PrepareBodyNoteReference(
 
     if (token == "{\xE6\x95\xB0\xE9\x87\x8F}")
     {
-        if (FindQuantityExpression(part, body, insert.expressionName))
-        {
-            insert.kind = DraftNoteReferenceInsert::KindExpression;
-            return true;
-        }
         fallback = ReadQuantityText(part, body, occurrenceQuantity);
         return false;
     }
@@ -2893,8 +3018,8 @@ static void CreateBodyNote(NXOpen::Part* workPart, const FlatPatternItem& item, 
     {
         const std::chrono::steady_clock::time_point totalStart = std::chrono::steady_clock::now();
         std::chrono::steady_clock::time_point stepStart = totalStart;
-        std::string text = item.noteText.empty() ? BuildBodyNoteText(item.part, item.body, item.quantity) : item.noteText;
-        std::string ufInitialText = item.ufNoteText.empty() ? BuildBodyNoteTextForUf(item.part, item.body, item.quantity) : item.ufNoteText;
+        std::string text = BuildBodyNoteText(item.part, item.body, item.quantity);
+        std::string ufInitialText = BuildBodyNoteTextForUf(item.part, item.body, item.quantity);
         const NXOpen::Point3d adjustedPoint = AdjustBodyNotePointForLineCount(point, textSize);
         std::vector<std::string> lineTexts;
         std::string current;

@@ -38,3 +38,8 @@ Current local deployment target:
 - menu/toolbars updated in `D:\UG智辉钣金插件\startup\UGZH_design.men`, `.tbr`, and `.rtb`
 
 Release packaging adds the shared Zhihui native license guard and package hash verification.
+
+## Maintenance Notes
+
+- Windows plugin paths may contain Chinese characters. C++ file I/O for logs/configs/deployment paths must use wide-character APIs such as `_wfopen`, `CreateFileW`, or `CreateDirectoryW`; do not use narrow `std::ofstream`/`fopen` for those paths.
+- After writing to a non-ASCII path, verify the target file exists. A successful build is not enough to prove the path opened correctly at runtime.
