@@ -271,12 +271,24 @@ bool CurveReferencesFaceOrEdge(
 	const std::vector<NXOpen::NXObject*> parents = draftingCurve->GetDraftingCurveInfo()->GetParents();
 	for (size_t i = 0; i < parents.size(); ++i)
 	{
-		if (parents[i] == NULL)
+		NXOpen::NXObject* parent = parents[i];
+		if (parent == NULL)
 		{
 			continue;
 		}
+		try
+		{
+			NXOpen::NXObject* prototype = dynamic_cast<NXOpen::NXObject*>(parent->Prototype());
+			if (prototype != NULL)
+			{
+				parent = prototype;
+			}
+		}
+		catch (...)
+		{
+		}
 
-		const tag_t parentTag = parents[i]->Tag();
+		const tag_t parentTag = parent->Tag();
 		if (parentTag == faceTag || edgeTags.find(parentTag) != edgeTags.end())
 		{
 			return true;
