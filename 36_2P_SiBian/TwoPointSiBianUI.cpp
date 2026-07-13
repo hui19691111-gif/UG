@@ -18,6 +18,7 @@
 #include <NXOpen/Features_OffsetFaceBuilder.hxx>
 #include <NXOpen/Features_SheetMetal_EdgeRipBuilder.hxx>
 #include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
+#include <NXOpen/FaceDumbRule.hxx>
 #include <NXOpen/FaceFeatureRule.hxx>
 #include <NXOpen/MeasureDistance.hxx>
 #include <NXOpen/MeasureFaces.hxx>
@@ -77,6 +78,7 @@
 #include <set>
 #include <string>
 #include <ctime>
+#include <utility>
 #include <vector>
 
 using namespace NXOpen;
@@ -2542,45 +2544,178 @@ bool TwoPointSiBianUI::CreatePreview()
 
     std::vector<tag_t> allToolBodyTags;
     std::vector<tag_t> allReferenceTags;
+    std::vector<tag_t> deferredRightAngleRipTags;
+    std::vector<InferredInputs> deferredSecondUdfInputsList;
     if (inputs.inferredFromSingleClick)
     {
-        bool ripCreated = false;
-        tag_t secondUdfTag = NULL_TAG;
-        std::vector<tag_t> secondToolBodyTags;
-        std::vector<tag_t> secondReferenceTags;
-        std::string ripError;
-        if (!TryCreateSecondPointRip(inputs,
-                                     ripCreated,
-                                     secondUdfTag,
-                                     secondToolBodyTags,
-                                     secondReferenceTags,
-                                     ripError))
+        constexpr int kMaximumContinuationCount = 16;
+        std::vector<std::pair<Point3d, Point3d>> processedPointPairs;
+        InferredInputs iterationInputs = inputs;
+        bool allowContinuationInputs = false;
+        bool anyRipCreated = false;
+        for (int iteration = 0; iteration < kMaximumContinuationCount; ++iteration)
         {
-            UndoPreview();
-            ShowError(ripError);
-            return false;
+            processedPointPairs.push_back(
+                std::make_pair(iterationInputs.startPoint, iterationInputs.endPoint));
+            bool ripCreated = false;
+            tag_t secondUdfTag = NULL_TAG;
+            std::vector<tag_t> secondToolBodyTags;
+            std::vector<tag_t> secondReferenceTags;
+            bool continuationCreated = false;
+            InferredInputs continuationInputs;
+            bool deferredSecondUdfRequested = false;
+            InferredInputs deferredSecondUdfInputs;
+            tag_t deferredRightAngleRipTag = NULL_TAG;
+            std::string ripError;
+            AppendDebugLog("CreatePreview continuation iteration=" + std::to_string(iteration + 1) +
+                           ", start=" + FormatPoint(iterationInputs.startPoint) +
+                           ", end=" + FormatPoint(iterationInputs.endPoint));
+            if (!TryCreateSecondPointRip(iterationInputs,
+                                         allowContinuationInputs,
+                                         ripCreated,
+                                         secondUdfTag,
+                                         secondToolBodyTags,
+                                         secondReferenceTags,
+                                         continuationCreated,
+                                         continuationInputs,
+                                         deferredSecondUdfRequested,
+                                         deferredSecondUdfInputs,
+                                         deferredRightAngleRipTag,
+                                         ripError))
+            {
+                UndoPreview();
+                ShowError(ripError);
+                return false;
+            }
+            allToolBodyTags.insert(allToolBodyTags.end(),
+                                   secondToolBodyTags.begin(),
+                                   secondToolBodyTags.end());
+            allReferenceTags.insert(allReferenceTags.end(),
+                                    secondReferenceTags.begin(),
+                                    secondReferenceTags.end());
+            anyRipCreated = anyRipCreated || ripCreated;
+            if (deferredSecondUdfRequested)
+            {
+                bool alreadyDeferred = false;
+                for (const InferredInputs& existingDeferred : deferredSecondUdfInputsList)
+                {
+                    const bool sameDirection =
+                        Distance(existingDeferred.startPoint,
+                                 deferredSecondUdfInputs.startPoint) <= 0.01 &&
+                        Distance(existingDeferred.endPoint,
+                                 deferredSecondUdfInputs.endPoint) <= 0.01;
+                    const bool reverseDirection =
+                        Distance(existingDeferred.startPoint,
+                                 deferredSecondUdfInputs.endPoint) <= 0.01 &&
+                        Distance(existingDeferred.endPoint,
+                                 deferredSecondUdfInputs.startPoint) <= 0.01;
+                    if (sameDirection || reverseDirection)
+                    {
+                        alreadyDeferred = true;
+                        break;
+                    }
+                }
+                if (!alreadyDeferred)
+                {
+                    deferredSecondUdfInputsList.push_back(deferredSecondUdfInputs);
+                    AppendDebugLog("CreatePreview queued second UDF until continuation edge search completes"
+                                   ", start=" + FormatPoint(deferredSecondUdfInputs.startPoint) +
+                                   ", end=" + FormatPoint(deferredSecondUdfInputs.endPoint));
+                }
+            }
+            if (deferredRightAngleRipTag != NULL_TAG &&
+                std::find(deferredRightAngleRipTags.begin(),
+                          deferredRightAngleRipTags.end(),
+                          deferredRightAngleRipTag) == deferredRightAngleRipTags.end())
+            {
+                deferredRightAngleRipTags.push_back(deferredRightAngleRipTag);
+            }
+            if (!continuationCreated)
+            {
+                AppendDebugLog(secondUdfTag != NULL_TAG
+                                   ? "CreatePreview continuation stopped: the second UDF endpoint has a thickness-length edge."
+                                   : "CreatePreview continuation stopped: no further second UDF was created.");
+                break;
+            }
+
+            bool alreadyProcessed = false;
+            for (const auto& processedPair : processedPointPairs)
+            {
+                const bool sameDirection =
+                    Distance(processedPair.first, continuationInputs.startPoint) <= 0.01 &&
+                    Distance(processedPair.second, continuationInputs.endPoint) <= 0.01;
+                const bool reverseDirection =
+                    Distance(processedPair.first, continuationInputs.endPoint) <= 0.01 &&
+                    Distance(processedPair.second, continuationInputs.startPoint) <= 0.01;
+                if (sameDirection || reverseDirection)
+                {
+                    alreadyProcessed = true;
+                    break;
+                }
+            }
+            if (alreadyProcessed)
+            {
+                AppendDebugLog("CreatePreview continuation stopped: the next UDF point pair was already processed"
+                               ", start=" + FormatPoint(continuationInputs.startPoint) +
+                               ", end=" + FormatPoint(continuationInputs.endPoint));
+                break;
+            }
+            iterationInputs = continuationInputs;
+            allowContinuationInputs = true;
+            if (iteration == kMaximumContinuationCount - 1)
+            {
+                AppendDebugLog("CreatePreview continuation stopped at the safety limit=" +
+                               std::to_string(kMaximumContinuationCount));
+            }
         }
-        allToolBodyTags.insert(allToolBodyTags.end(),
-                               secondToolBodyTags.begin(),
-                               secondToolBodyTags.end());
-        allReferenceTags.insert(allReferenceTags.end(),
-                                secondReferenceTags.begin(),
-                                secondReferenceTags.end());
-        if (ripCreated)
+
+        if (anyRipCreated)
         {
-            AppendDebugLog("CreatePreview edge rip committed; recalculating P2 from the original selection click.");
+            AppendDebugLog("CreatePreview continuation rips committed; recalculating the original P2 from the selection click without recalculating sheet thickness.");
+            const double lockedSheetThickness = inputs.thickness;
             InferredInputs refreshedInputs;
+            refreshedInputs.thickness = lockedSheetThickness;
             if (!ReadInputs(refreshedInputs))
             {
                 UndoPreview();
-                ShowError("The second endpoint could not be recalculated after creating the sheet-metal rip.");
+                ShowError("The original second endpoint could not be recalculated after creating the sheet-metal rips.");
                 return false;
             }
+            AppendDebugLog("CreatePreview reused the one-time sheet thickness=" +
+                           FormatExpressionNumber(lockedSheetThickness) +
+                           " while refreshing endpoints.");
             inputs = refreshedInputs;
         }
     }
 
     std::string errorMessage;
+    for (const InferredInputs& deferredSecondInputs : deferredSecondUdfInputsList)
+    {
+        tag_t deferredSecondUdfTag = NULL_TAG;
+        std::vector<tag_t> deferredSecondReferenceTags;
+        std::vector<tag_t> deferredSecondToolBodyTags;
+        if (!CreateUserDefinedFeature(deferredSecondInputs,
+                                      errorMessage,
+                                      &deferredSecondUdfTag,
+                                      &deferredSecondReferenceTags,
+                                      &deferredSecondToolBodyTags))
+        {
+            UndoPreview();
+            ShowError(errorMessage);
+            return false;
+        }
+        allToolBodyTags.insert(allToolBodyTags.end(),
+                               deferredSecondToolBodyTags.begin(),
+                               deferredSecondToolBodyTags.end());
+        allReferenceTags.insert(allReferenceTags.end(),
+                                deferredSecondReferenceTags.begin(),
+                                deferredSecondReferenceTags.end());
+        AppendDebugLog("CreatePreview created deferred second UDF after edge search and before primary UDF/face offsets"
+                       ", tag=" + std::to_string(deferredSecondUdfTag) +
+                       ", start=" + FormatPoint(deferredSecondInputs.startPoint) +
+                       ", end=" + FormatPoint(deferredSecondInputs.endPoint));
+    }
+
     tag_t firstUdfTag = NULL_TAG;
     std::vector<tag_t> firstReferenceTags;
     std::vector<tag_t> firstToolBodyTags;
@@ -2612,7 +2747,32 @@ bool TwoPointSiBianUI::CreatePreview()
         return false;
     }
 
-    previewUdfTag_ = finalSubtractTag;
+    tag_t finalResultTag = finalSubtractTag;
+    for (tag_t deferredRightAngleRipTag : deferredRightAngleRipTags)
+    {
+        Features::Feature* ripFeature = dynamic_cast<Features::Feature*>(
+            NXObjectManager::Get(deferredRightAngleRipTag));
+        tag_t firstOffsetTag = NULL_TAG;
+        tag_t secondOffsetTag = NULL_TAG;
+        if (!OffsetRightAngleRipFeature(inputs,
+                                        ripFeature,
+                                        firstOffsetTag,
+                                        secondOffsetTag,
+                                        errorMessage))
+        {
+            UndoPreview();
+            ShowError(errorMessage);
+            return false;
+        }
+        finalResultTag = secondOffsetTag;
+        AppendDebugLog("CreatePreview applied deferred 90/270-degree offsets after final subtraction: rip=" +
+                       std::to_string(deferredRightAngleRipTag) +
+                       ", subtract=" + std::to_string(finalSubtractTag) +
+                       ", firstOffset=" + std::to_string(firstOffsetTag) +
+                       ", secondOffset=" + std::to_string(secondOffsetTag));
+    }
+
+    previewUdfTag_ = finalResultTag;
     previewReferenceTags_ = allReferenceTags;
     hasPreview_ = true;
     AppendDebugLog("CreatePreview OK, undoMark=" + std::to_string(static_cast<int>(previewUndoMark_)) +
@@ -2945,7 +3105,10 @@ bool TwoPointSiBianUI::InferEndpointsFromFaceClick(TaggedObject* selectedObject,
         return false;
     }
 
-    const double expectedThickness = EstimateSheetThickness(body, face);
+    const double expectedThickness =
+        inputs.thickness > kPointTolerance
+            ? inputs.thickness
+            : EstimateSheetThickness(body, face);
     std::vector<BoundaryPointCandidate> candidates;
     candidates.reserve(boundaryPoints.size());
     for (const Point3d& point : boundaryPoints)
@@ -3787,18 +3950,10 @@ bool TwoPointSiBianUI::BuildFallbackSecondInputs(const InferredInputs& sourceInp
     for (std::size_t index = 1; index < boundaryPoints.size(); ++index)
     {
         const double distance = Distance(q1, boundaryPoints[index]);
-        Edge* candidateThicknessEdge = nullptr;
-        if (distance > kPointTolerance && distance < q2Distance &&
-            PointHasThicknessLengthEdge(sourceInputs.targetBody,
-                                        boundaryPoints[index],
-                                        sourceInputs.thickness,
-                                        nullptr,
-                                        nullptr,
-                                        &candidateThicknessEdge))
+        if (distance > kPointTolerance && distance < q2Distance)
         {
             q2 = boundaryPoints[index];
             q2Distance = distance;
-            q2ThicknessEdge = candidateThicknessEdge;
             foundQ2 = true;
         }
     }
@@ -3806,6 +3961,12 @@ bool TwoPointSiBianUI::BuildFallbackSecondInputs(const InferredInputs& sourceInp
     {
         return false;
     }
+    PointHasThicknessLengthEdge(sourceInputs.targetBody,
+                                q2,
+                                sourceInputs.thickness,
+                                nullptr,
+                                nullptr,
+                                &q2ThicknessEdge);
 
     secondInputs = sourceInputs;
     secondInputs.inferredFromSingleClick = false;
@@ -3831,7 +3992,8 @@ bool TwoPointSiBianUI::BuildFallbackSecondInputs(const InferredInputs& sourceInp
                    ", Q1=" + FormatPoint(q1) +
                    ", Q2=" + FormatPoint(q2) +
                    ", Q2ThicknessEdge=" +
-                   std::to_string(q2ThicknessEdge != nullptr ? q2ThicknessEdge->Tag() : NULL_TAG));
+                   std::to_string(q2ThicknessEdge != nullptr ? q2ThicknessEdge->Tag() : NULL_TAG) +
+                   ", Q2Selection=nearest endpoint without thickness-edge requirement");
     return true;
 }
 
@@ -3992,20 +4154,13 @@ bool TwoPointSiBianUI::BuildConcaveStripPlan(const InferredInputs& sourceInputs,
         return false;
     }
     Edge* q3ThicknessEdge = nullptr;
-    if (!PointHasThicknessLengthEdge(sourceInputs.targetBody,
-                                     q3,
-                                     sourceInputs.thickness,
-                                     nullptr,
-                                     nullptr,
-                                     &q3ThicknessEdge))
-    {
-        AppendDebugLog("concave Q3/Q4 branch rejected: nearest Q3 has no thickness-length edge"
-                       ", commonFace=" + std::to_string(commonFace->Tag()) +
-                       ", interiorAngle=" + FormatExpressionNumber(interiorAngle) +
-                       ", Q=" + FormatPoint(qPoint) +
-                       ", Q3=" + FormatPoint(q3));
-        return false;
-    }
+    const bool q3HasThicknessEdge =
+        PointHasThicknessLengthEdge(sourceInputs.targetBody,
+                                    q3,
+                                    sourceInputs.thickness,
+                                    nullptr,
+                                    nullptr,
+                                    &q3ThicknessEdge);
 
     double nearestQ4Distance = std::numeric_limits<double>::max();
     bool foundQ4 = false;
@@ -4028,11 +4183,15 @@ bool TwoPointSiBianUI::BuildConcaveStripPlan(const InferredInputs& sourceInputs,
     AppendDebugLog("concave Q3/Q4 strip plan: commonFace=" + std::to_string(commonFace->Tag()) +
                    ", interiorAngle=" + FormatExpressionNumber(interiorAngle) +
                    ", Q=" + FormatPoint(qPoint) +
-                   ", Q3=" + FormatPoint(q3) +
-                   ", Q3DistanceFromQ=" + FormatExpressionNumber(q3DistanceFromQ) +
-                   ", Q3ThicknessEdge=" + std::to_string(q3ThicknessEdge->Tag()) +
-                   ", Q4=" + FormatPoint(q4) +
-                   ", normal=" + FormatVector(planeNormal));
+                    ", Q3=" + FormatPoint(q3) +
+                    ", Q3DistanceFromQ=" + FormatExpressionNumber(q3DistanceFromQ) +
+                    ", Q3ThicknessEdge=" +
+                    std::to_string(q3ThicknessEdge != nullptr ? q3ThicknessEdge->Tag() : NULL_TAG) +
+                     ", Q3HasThicknessEdge=" + (q3HasThicknessEdge ? "true" : "false") +
+                     ", Q4=" + FormatPoint(q4) +
+                     ", Q4DistanceFromQ3=" + FormatExpressionNumber(nearestQ4Distance) +
+                     ", Q4Selection=provisional nearest peripheral endpoint excluding only Q3" +
+                     ", normal=" + FormatVector(planeNormal));
     return true;
 }
 
@@ -4370,19 +4529,132 @@ bool TwoPointSiBianUI::CreateSheetMetalRip(const InferredInputs& inputs,
     }
 }
 
+bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
+                                                   Features::Feature* ripFeature,
+                                                   tag_t& firstOffsetTag,
+                                                   tag_t& secondOffsetTag,
+                                                   std::string& errorMessage) const
+{
+    firstOffsetTag = NULL_TAG;
+    secondOffsetTag = NULL_TAG;
+    Part* workPart = session_->Parts()->Work();
+    if (workPart == nullptr || ripFeature == nullptr)
+    {
+        errorMessage = "The right-angle rip feature is unavailable for face offset.";
+        return false;
+    }
+
+    Features::OffsetFaceBuilder* firstBuilder = nullptr;
+    Features::OffsetFaceBuilder* secondBuilder = nullptr;
+    try
+    {
+        firstBuilder = workPart->Features()->CreateOffsetFaceBuilder(nullptr);
+        const std::string clearanceFormula = "-(" + inputs.clearanceValue + ")";
+        firstBuilder->Distance()->SetFormula(clearanceFormula.c_str());
+        firstBuilder->SetDirection(false);
+        std::vector<Features::Feature*> ripFeatures(1, ripFeature);
+        FaceFeatureRule* ripFaceRule =
+            workPart->ScRuleFactory()->CreateRuleFaceFeature(ripFeatures);
+        std::vector<SelectionIntentRule*> ripRules(1, ripFaceRule);
+        firstBuilder->FaceCollector()->ReplaceRules(ripRules, false);
+        Features::Feature* firstOffsetFeature = firstBuilder->CommitFeature();
+        firstOffsetTag = firstOffsetFeature != nullptr ? firstOffsetFeature->Tag() : NULL_TAG;
+        firstBuilder->Destroy();
+        firstBuilder = nullptr;
+        if (firstOffsetFeature == nullptr)
+        {
+            errorMessage = "The 90/270-degree rip faces could not be offset by the clearance value.";
+            return false;
+        }
+
+        Face* largestFace = nullptr;
+        double largestArea = -1.0;
+        for (Face* face : firstOffsetFeature->GetFaces())
+        {
+            const double area = MeasureFaceArea(face);
+            if (face != nullptr && area > largestArea)
+            {
+                largestFace = face;
+                largestArea = area;
+            }
+        }
+        if (largestFace == nullptr)
+        {
+            errorMessage = "No feature face was available after the clearance offset.";
+            return false;
+        }
+
+        secondBuilder = workPart->Features()->CreateOffsetFaceBuilder(nullptr);
+        const std::string thicknessAndClearanceFormula =
+            "(" + FormatExpressionNumber(inputs.thickness) + "+(" +
+            inputs.clearanceValue + "))";
+        secondBuilder->Distance()->SetFormula(thicknessAndClearanceFormula.c_str());
+        secondBuilder->SetDirection(false);
+        std::vector<Face*> largestFaces(1, largestFace);
+        FaceDumbRule* largestFaceRule =
+            workPart->ScRuleFactory()->CreateRuleFaceDumb(largestFaces);
+        std::vector<SelectionIntentRule*> largestRules(1, largestFaceRule);
+        secondBuilder->FaceCollector()->ReplaceRules(largestRules, false);
+        Features::Feature* secondOffsetFeature = secondBuilder->CommitFeature();
+        secondOffsetTag = secondOffsetFeature != nullptr ? secondOffsetFeature->Tag() : NULL_TAG;
+        secondBuilder->Destroy();
+        secondBuilder = nullptr;
+        if (secondOffsetFeature == nullptr)
+        {
+            errorMessage = "The largest offset-feature face could not be offset by thickness plus clearance.";
+            return false;
+        }
+
+        AppendDebugLog("90/270-degree rip offsets completed: rip=" +
+                       std::to_string(ripFeature->Tag()) +
+                       ", firstOffset=" + std::to_string(firstOffsetTag) +
+                       ", firstDistance=" + clearanceFormula +
+                       ", largestFace=" + std::to_string(largestFace->Tag()) +
+                       ", largestArea=" + FormatExpressionNumber(largestArea) +
+                       ", secondOffset=" + std::to_string(secondOffsetTag) +
+                       ", secondDistance=" + thicknessAndClearanceFormula);
+        return true;
+    }
+    catch (const NXException& ex)
+    {
+        if (firstBuilder != nullptr) firstBuilder->Destroy();
+        if (secondBuilder != nullptr) secondBuilder->Destroy();
+        errorMessage = "Failed to offset the 90/270-degree rip feature.\n" + NxExceptionText(ex);
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+    catch (const std::exception& ex)
+    {
+        if (firstBuilder != nullptr) firstBuilder->Destroy();
+        if (secondBuilder != nullptr) secondBuilder->Destroy();
+        errorMessage = std::string("Failed to offset the 90/270-degree rip feature.\n") + ex.what();
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+}
+
 bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
+                                                bool allowContinuationInputs,
                                                 bool& ripCreated,
                                                 tag_t& secondUdfTag,
                                                 std::vector<tag_t>& secondToolBodyTags,
                                                 std::vector<tag_t>& secondReferenceTags,
-                                                std::string& errorMessage) const
+                                                 bool& continuationCreated,
+                                                 InferredInputs& continuationInputs,
+                                                 bool& deferredSecondUdfRequested,
+                                                 InferredInputs& deferredSecondUdfInputs,
+                                                 tag_t& deferredRightAngleRipTag,
+                                                 std::string& errorMessage) const
 {
     ripCreated = false;
     secondUdfTag = NULL_TAG;
     secondToolBodyTags.clear();
     secondReferenceTags.clear();
+    continuationCreated = false;
+    deferredSecondUdfRequested = false;
+    deferredRightAngleRipTag = NULL_TAG;
     errorMessage.clear();
-    if (!inputs.inferredFromSingleClick ||
+    if ((!inputs.inferredFromSingleClick && !allowContinuationInputs) ||
         inputs.targetBody == nullptr ||
         inputs.baseFace == nullptr ||
         inputs.thickness <= kPointTolerance)
@@ -4429,6 +4701,8 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
     Point3d concaveQ3;
     Point3d concaveQ4;
     Vector3d concavePlaneNormal;
+    bool concaveQ3HasThicknessEdge = false;
+    InferredInputs concaveSecondInputs;
     InferredInputs fallbackSecondInputs;
     const double lengthTolerance = std::max(kPlaneTolerance, inputs.thickness * 0.01);
 
@@ -4524,7 +4798,7 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                                                remainingEdgesAtQ[secondIndex],
                                                candidateFarEndpoint,
                                                candidateQFirstInputs);
-                    const bool candidateHasConcaveStripPlan =
+                    bool candidateHasConcaveStripPlan =
                         BuildConcaveStripPlan(inputs,
                                               remainingEdgesAtQ[firstIndex],
                                               remainingEdgesAtQ[secondIndex],
@@ -4532,6 +4806,44 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                                               candidateQ3,
                                               candidateQ4,
                                               candidatePlaneNormal);
+                    Edge* candidateQ3ThicknessEdge = nullptr;
+                    const bool candidateQ3HasThicknessEdge =
+                        candidateHasConcaveStripPlan &&
+                        PointHasThicknessLengthEdge(inputs.targetBody,
+                                                    candidateQ3,
+                                                    inputs.thickness,
+                                                    nullptr,
+                                                    nullptr,
+                                                    &candidateQ3ThicknessEdge);
+                    InferredInputs candidateConcaveSecondInputs;
+                    if (candidateHasConcaveStripPlan)
+                    {
+                        // Store only the Q3/face seed. Q4 is always resolved
+                        // after P2-Q is ripped, from the updated face boundary.
+                        candidateConcaveSecondInputs = inputs;
+                        candidateConcaveSecondInputs.inferredFromSingleClick = false;
+                        candidateConcaveSecondInputs.startObject = commonFace;
+                        candidateConcaveSecondInputs.endObject = commonFace;
+                        candidateConcaveSecondInputs.startPoint = candidateQ3;
+                        candidateConcaveSecondInputs.endPoint = candidateQ3;
+                        candidateConcaveSecondInputs.baseFace = commonFace;
+                        candidateConcaveSecondInputs.startEdge = nullptr;
+                        candidateConcaveSecondInputs.endEdge = nullptr;
+                        candidateConcaveSecondInputs.startPositiveYEdge = nullptr;
+                        candidateConcaveSecondInputs.startNegativeYEdge = nullptr;
+                        candidateConcaveSecondInputs.endPositiveYEdge = nullptr;
+                        candidateConcaveSecondInputs.endNegativeYEdge = nullptr;
+                        if (!candidateQ3HasThicknessEdge && !candidateHasQFirstInputs)
+                        {
+                            AppendDebugLog("concave Q3 continuation rejected: Q-to-Q3 search inputs are unavailable"
+                                           ", commonFace=" +
+                                           std::to_string(commonFace != nullptr
+                                                              ? commonFace->Tag()
+                                                              : NULL_TAG) +
+                                           ", Q3=" + FormatPoint(candidateQ3));
+                            candidateHasConcaveStripPlan = false;
+                        }
+                    }
                     if (candidateHasQFirstInputs || candidateHasConcaveStripPlan)
                     {
                         fallbackFirstEdge = remainingEdgesAtQ[firstIndex];
@@ -4546,6 +4858,8 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                             concaveQ3 = candidateQ3;
                             concaveQ4 = candidateQ4;
                             concavePlaneNormal = candidatePlaneNormal;
+                            concaveQ3HasThicknessEdge = candidateQ3HasThicknessEdge;
+                            concaveSecondInputs = candidateConcaveSecondInputs;
                             hasConcaveStripCandidate = true;
                         }
                         break;
@@ -4592,6 +4906,49 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         return true;
     }
 
+    bool qCornerRequiresRipOffsets = false;
+    double qCornerInteriorAngle = 0.0;
+    tag_t qCornerFirstEdgeTag = NULL_TAG;
+    tag_t qCornerSecondEdgeTag = NULL_TAG;
+    std::vector<Edge*> qConnectedEdges;
+    for (Edge* edge : inputs.targetBody->GetEdges())
+    {
+        if (edge != nullptr && edge != ripEdge && EdgeTouchesPoint(edge, farEndpoint))
+        {
+            qConnectedEdges.push_back(edge);
+        }
+    }
+    for (std::size_t firstIndex = 0;
+         firstIndex < qConnectedEdges.size() && !qCornerRequiresRipOffsets;
+         ++firstIndex)
+    {
+        for (std::size_t secondIndex = firstIndex + 1;
+             secondIndex < qConnectedEdges.size();
+             ++secondIndex)
+        {
+            Face* commonFace = FindPlanarFaceContainingEdges(inputs.targetBody,
+                                                             qConnectedEdges[firstIndex],
+                                                             qConnectedEdges[secondIndex]);
+            double candidateAngle = 0.0;
+            if (commonFace != nullptr &&
+                FaceInteriorCornerAngle(commonFace, farEndpoint, candidateAngle) &&
+                (std::fabs(candidateAngle - 90.0) <= 0.1 ||
+                 std::fabs(candidateAngle - 270.0) <= 0.1))
+            {
+                qCornerRequiresRipOffsets = true;
+                qCornerInteriorAngle = candidateAngle;
+                qCornerFirstEdgeTag = qConnectedEdges[firstIndex]->Tag();
+                qCornerSecondEdgeTag = qConnectedEdges[secondIndex]->Tag();
+                break;
+            }
+        }
+    }
+    AppendDebugLog("P2-Q rip 90/270-degree offset check: Q=" + FormatPoint(farEndpoint) +
+                   ", angle=" + FormatExpressionNumber(qCornerInteriorAngle) +
+                   ", B1=" + std::to_string(qCornerFirstEdgeTag) +
+                   ", B2=" + std::to_string(qCornerSecondEdgeTag) +
+                   ", execute=" + (qCornerRequiresRipOffsets ? "true" : "false"));
+
     // NX's edge-rip command expects both sheet-side edges of the open seam.
     // The Q edge and its parallel mate above only prove that this is a
     // thickness corner; they are not the pair passed to the rip builder.
@@ -4614,7 +4971,17 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
     double requiredPairedRipLength = ripEdgeLength;
     double requiredLengthTolerance = pairedLengthTolerance;
     std::string selectedLengthRule = "equal";
-    if (hasQFirstEqualCandidate || hasConcaveStripCandidate)
+    const bool confirmedByQThicknessPair =
+        confirmingEdge != nullptr && confirmingParallelEdge != nullptr;
+    if (confirmedByQThicknessPair)
+    {
+        // B1 or B2 already has an overlapping parallel mate whose minimum
+        // distance equals the sheet thickness.  That pair confirms the sheet
+        // corner, so P2-Q and its rip mate do not also need equal lengths.
+        requiredPairedRipLength = pairedRipEdgeLength;
+        selectedLengthRule = "Q-edge parallel at thickness: P2-Q equality not required";
+    }
+    else if (hasQFirstEqualCandidate || hasConcaveStripCandidate)
     {
         const bool equalLengthMatch =
             std::fabs(pairedRipEdgeLength - ripEdgeLength) <= pairedLengthTolerance;
@@ -4722,6 +5089,23 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         AppendDebugLog("TryCreateSecondPointRip created fallback second UDF before rip, tag=" +
                        std::to_string(secondUdfTag) +
                        ", toolBodies=" + std::to_string(secondToolBodyTags.size()));
+        continuationInputs = fallbackSecondInputs;
+        Edge* terminalThicknessEdge = nullptr;
+        const bool endpointHasThicknessEdge =
+            PointHasThicknessLengthEdge(inputs.targetBody,
+                                        fallbackSecondInputs.endPoint,
+                                        inputs.thickness,
+                                        nullptr,
+                                        nullptr,
+                                        &terminalThicknessEdge);
+        continuationCreated = !endpointHasThicknessEdge;
+        AppendDebugLog("TryCreateSecondPointRip continuation endpoint check: endpoint=" +
+                       FormatPoint(fallbackSecondInputs.endPoint) +
+                       ", thicknessEdge=" +
+                       std::to_string(terminalThicknessEdge != nullptr
+                                          ? terminalThicknessEdge->Tag()
+                                          : NULL_TAG) +
+                       ", continue=" + (continuationCreated ? "true" : "false"));
     }
 
     Features::SheetMetal::EdgeRipBuilder* builder = nullptr;
@@ -4765,20 +5149,104 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
             errorMessage = "NX did not return a feature after creating the sheet-metal rip.";
             return false;
         }
+        if (qCornerRequiresRipOffsets)
+        {
+            deferredRightAngleRipTag = createdRipTag;
+            AppendDebugLog("TryCreateSecondPointRip deferred 90/270-degree rip offsets until after final subtraction: angle=" +
+                           FormatExpressionNumber(qCornerInteriorAngle) +
+                           ", rip=" + std::to_string(deferredRightAngleRipTag));
+        }
         if (useConcaveStripBranch)
         {
-            tag_t stripSubtractTag = NULL_TAG;
-            if (!CreateConcaveStripCut(inputs,
-                                       concaveQ3,
-                                       concaveQ4,
-                                       concavePlaneNormal,
-                                       stripSubtractTag,
-                                       errorMessage))
+            // P2-Q has now been ripped. Resolve Q4 only from the updated
+            // peripheral endpoints. The only excluded point is Q3 itself.
+            std::vector<Point3d> updatedBoundaryPoints;
+            if (!FaceBoundaryPoints(concaveSecondInputs.baseFace,
+                                    updatedBoundaryPoints))
             {
+                errorMessage = "The Q3 plane boundary could not be read after the P2-Q rip.";
                 return false;
             }
-            AppendDebugLog("TryCreateSecondPointRip concave strip subtraction completed after P2-Q rip, feature=" +
-                           std::to_string(stripSubtractTag));
+            Point3d resolvedQ4;
+            double resolvedQ4Distance = std::numeric_limits<double>::max();
+            bool foundResolvedQ4 = false;
+            for (const Point3d& boundaryPoint : updatedBoundaryPoints)
+            {
+                const double distance = Distance(concaveQ3, boundaryPoint);
+                if (distance > kPointTolerance && distance < resolvedQ4Distance)
+                {
+                    resolvedQ4 = boundaryPoint;
+                    resolvedQ4Distance = distance;
+                    foundResolvedQ4 = true;
+                }
+            }
+            if (!foundResolvedQ4)
+            {
+                errorMessage = "No peripheral Q4 point could be found from Q3 after the P2-Q rip.";
+                return false;
+            }
+            concaveQ4 = resolvedQ4;
+            AppendDebugLog("TryCreateSecondPointRip resolved Q4 after P2-Q rip"
+                           ", Q3=" + FormatPoint(concaveQ3) +
+                           ", Q4=" + FormatPoint(concaveQ4) +
+                           ", Q4DistanceFromQ3=" +
+                           FormatExpressionNumber(resolvedQ4Distance) +
+                           ", selection=nearest updated peripheral endpoint excluding only Q3");
+            if (concaveQ3HasThicknessEdge)
+            {
+                tag_t stripSubtractTag = NULL_TAG;
+                if (!CreateConcaveStripCut(inputs,
+                                           concaveQ3,
+                                           concaveQ4,
+                                           concavePlaneNormal,
+                                           stripSubtractTag,
+                                           errorMessage))
+                {
+                    return false;
+                }
+                AppendDebugLog("TryCreateSecondPointRip concave strip subtraction completed after P2-Q rip, feature=" +
+                               std::to_string(stripSubtractTag));
+                AppendDebugLog("TryCreateSecondPointRip concave chain stopped at Q3: Q3 has a thickness-length edge"
+                               ", Q3=" + FormatPoint(concaveQ3));
+            }
+            else
+            {
+                AppendDebugLog("TryCreateSecondPointRip concave strip extrusion skipped: Q3 has no thickness-length edge"
+                               ", Q3=" + FormatPoint(concaveQ3) +
+                               ", deferSecondUdf=true");
+                concaveSecondInputs.startPoint = concaveQ3;
+                concaveSecondInputs.endPoint = resolvedQ4;
+                concaveSecondInputs.startEdge = nullptr;
+                concaveSecondInputs.endEdge = nullptr;
+                concaveSecondInputs.startPositiveYEdge = nullptr;
+                concaveSecondInputs.startNegativeYEdge = nullptr;
+                concaveSecondInputs.endPositiveYEdge = nullptr;
+                concaveSecondInputs.endNegativeYEdge = nullptr;
+                if (!CompleteInputsForEndpoints(concaveSecondInputs))
+                {
+                    errorMessage = "The deferred Q3-Q4 custom feature inputs could not be completed after the P2-Q rip.";
+                    AppendDebugLog("TryCreateSecondPointRip deferred Q3-Q4 inputs rejected after P2-Q rip"
+                                   ", Q3=" + FormatPoint(concaveQ3) +
+                                   ", Q4=" + FormatPoint(resolvedQ4) +
+                                   ", Q4DistanceFromQ3=" +
+                                   FormatExpressionNumber(resolvedQ4Distance));
+                    return false;
+                }
+                deferredSecondUdfRequested = true;
+                deferredSecondUdfInputs = concaveSecondInputs;
+
+                // The next iteration still evaluates Q3, not Q4.
+                continuationInputs = fallbackSecondInputs;
+                continuationCreated = true;
+                AppendDebugLog("TryCreateSecondPointRip concave continuation prepared without second UDF"
+                               ", Q3=" + FormatPoint(concaveQ3) +
+                               ", Q4=" + FormatPoint(resolvedQ4) +
+                               ", Q4DistanceFromQ3=" +
+                               FormatExpressionNumber(resolvedQ4Distance) +
+                               ", continuationStart=Q" +
+                               ", continuationSearchEndpoint=Q3" +
+                               ", continue=true");
+            }
         }
         ripCreated = true;
         AppendDebugLog("TryCreateSecondPointRip created edge-rip feature tag=" +

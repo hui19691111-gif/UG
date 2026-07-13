@@ -153,11 +153,22 @@ private:
                              bool offsetCreatedFaces,
                              tag_t& createdRipTag,
                              std::string& errorMessage) const;
+    bool OffsetRightAngleRipFeature(const InferredInputs& inputs,
+                                    NXOpen::Features::Feature* ripFeature,
+                                    tag_t& firstOffsetTag,
+                                    tag_t& secondOffsetTag,
+                                    std::string& errorMessage) const;
     bool TryCreateSecondPointRip(const InferredInputs& inputs,
+                                 bool allowContinuationInputs,
                                  bool& ripCreated,
                                  tag_t& secondUdfTag,
                                  std::vector<tag_t>& secondToolBodyTags,
                                  std::vector<tag_t>& secondReferenceTags,
+                                 bool& continuationCreated,
+                                 InferredInputs& continuationInputs,
+                                 bool& deferredSecondUdfRequested,
+                                 InferredInputs& deferredSecondUdfInputs,
+                                 tag_t& deferredRightAngleRipTag,
                                  std::string& errorMessage) const;
     bool CreateUserDefinedFeature(const InferredInputs& inputs,
                                   std::string& errorMessage,
