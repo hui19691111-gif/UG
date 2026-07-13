@@ -40,7 +40,9 @@
 
 #include <uf.h>
 #include <uf_assem.h>
+#include <uf_curve.h>
 #include <uf_modl.h>
+#include <uf_modl_sweep.h>
 #include <uf_modl_expressions_retiring.h>
 #include <uf_modl_udf.h>
 #include <uf_modl_utilities.h>
@@ -83,6 +85,7 @@ namespace
 {
 constexpr double kPointTolerance = 1.0e-4;
 constexpr double kPlaneTolerance = 1.0e-3;
+constexpr double kCornerExtensionDistance = 0.05;
 constexpr double kThicknessProjectionOverlapRatio = 0.60;
 constexpr double kThicknessProjectionAreaErrorRatio = 0.05;
 constexpr double kEndpointPairMinimumAngleDegrees = 150.0;
@@ -636,6 +639,42 @@ bool EdgeTouchesPoint(Edge* edge, const Point3d& point)
     return false;
 }
 
+bool PointHasThicknessLengthEdge(Body* body,
+                                 const Point3d& point,
+                                 double thickness,
+                                 Edge* excludedFirst = nullptr,
+                                 Edge* excludedSecond = nullptr,
+                                 Edge** matchedEdge = nullptr)
+{
+    if (matchedEdge != nullptr)
+    {
+        *matchedEdge = nullptr;
+    }
+    if (body == nullptr || thickness <= kPointTolerance)
+    {
+        return false;
+    }
+
+    const double tolerance = std::max(kPlaneTolerance, thickness * 0.01);
+    for (Edge* edge : body->GetEdges())
+    {
+        if (edge == nullptr || edge == excludedFirst || edge == excludedSecond ||
+            !EdgeTouchesPoint(edge, point))
+        {
+            continue;
+        }
+        if (std::fabs(edge->GetLength() - thickness) <= tolerance)
+        {
+            if (matchedEdge != nullptr)
+            {
+                *matchedEdge = edge;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 bool EdgeDirectionAwayFromPoint(Edge* edge, const Point3d& point, Vector3d& direction)
 {
     if (edge == nullptr)
@@ -1184,6 +1223,55 @@ bool PointContainmentOnFace(Face* face, const Point3d& point, int& status)
     return UF_MODL_ask_point_containment(coordinates, face->Tag(), &status) == 0;
 }
 
+bool CornerExtensionPointsOnBody(Body* body,
+                                 Edge* firstEdge,
+                                 Edge* secondEdge,
+                                 const Point3d& corner,
+                                 Point3d& firstExtension,
+                                 Point3d& secondExtension,
+                                 int& firstStatus,
+                                 int& secondStatus,
+                                 bool& bothOnOrInBody)
+{
+    firstStatus = 0;
+    secondStatus = 0;
+    bothOnOrInBody = false;
+    if (body == nullptr || firstEdge == nullptr || secondEdge == nullptr)
+    {
+        return false;
+    }
+
+    Vector3d firstDirection;
+    Vector3d secondDirection;
+    if (!EdgeDirectionAwayFromPoint(firstEdge, corner, firstDirection) ||
+        !EdgeDirectionAwayFromPoint(secondEdge, corner, secondDirection))
+    {
+        return false;
+    }
+
+    firstExtension = Point3d(corner.X - firstDirection.X * kCornerExtensionDistance,
+                             corner.Y - firstDirection.Y * kCornerExtensionDistance,
+                             corner.Z - firstDirection.Z * kCornerExtensionDistance);
+    secondExtension = Point3d(corner.X - secondDirection.X * kCornerExtensionDistance,
+                              corner.Y - secondDirection.Y * kCornerExtensionDistance,
+                              corner.Z - secondDirection.Z * kCornerExtensionDistance);
+    double firstCoordinates[3] = {firstExtension.X, firstExtension.Y, firstExtension.Z};
+    double secondCoordinates[3] = {secondExtension.X, secondExtension.Y, secondExtension.Z};
+    const int firstResult =
+        UF_MODL_ask_point_containment(firstCoordinates, body->Tag(), &firstStatus);
+    const int secondResult =
+        UF_MODL_ask_point_containment(secondCoordinates, body->Tag(), &secondStatus);
+    if (firstResult != 0 || secondResult != 0)
+    {
+        return false;
+    }
+
+    const bool firstOnOrInBody = firstStatus == 1 || firstStatus == 3;
+    const bool secondOnOrInBody = secondStatus == 1 || secondStatus == 3;
+    bothOnOrInBody = firstOnOrInBody && secondOnOrInBody;
+    return true;
+}
+
 bool FaceInteriorCornerAngle(Face* face, const Point3d& corner, double& interiorAngle)
 {
     interiorAngle = 0.0;
@@ -1250,66 +1338,39 @@ bool FaceInteriorCornerAngle(Face* face, const Point3d& corner, double& interior
         return false;
     }
 
-    Vector3d smallerBisector(first.X + second.X,
-                             first.Y + second.Y,
-                             first.Z + second.Z);
-    if (!Normalize(smallerBisector))
-    {
-        interiorAngle = 180.0;
-        return true;
-    }
-
-    const double shortestEdge = std::min(connectedDirections[0].edgeLength,
-                                         connectedDirections[1].edgeLength);
-    if (shortestEdge <= kPointTolerance)
-    {
-        return false;
-    }
-
-    const std::array<double, 3> sampleRatios = {0.02, 0.05, 0.10};
-    int smallerStatus = 0;
-    int oppositeStatus = 0;
-    bool smallerInside = false;
-    bool oppositeInside = false;
-    for (double ratio : sampleRatios)
-    {
-        const double sampleDistance = std::min(shortestEdge * 0.25,
-                                               std::max(kPlaneTolerance * 2.0, shortestEdge * ratio));
-        const Point3d smallerSample(corner.X + smallerBisector.X * sampleDistance,
-                                    corner.Y + smallerBisector.Y * sampleDistance,
-                                    corner.Z + smallerBisector.Z * sampleDistance);
-        const Point3d oppositeSample(corner.X - smallerBisector.X * sampleDistance,
-                                     corner.Y - smallerBisector.Y * sampleDistance,
-                                     corner.Z - smallerBisector.Z * sampleDistance);
-        if (PointContainmentOnFace(face, smallerSample, smallerStatus) && smallerStatus == 1)
-        {
-            smallerInside = true;
-        }
-        if (PointContainmentOnFace(face, oppositeSample, oppositeStatus) && oppositeStatus == 1)
-        {
-            oppositeInside = true;
-        }
-        if (smallerInside != oppositeInside)
-        {
-            break;
-        }
-    }
-
-    if (smallerInside == oppositeInside)
-    {
-        AppendDebugLog("FaceInteriorCornerAngle containment was ambiguous at corner=" +
-                       FormatPoint(corner) + ", smallerStatus=" + std::to_string(smallerStatus) +
-                       ", oppositeStatus=" + std::to_string(oppositeStatus));
-        return false;
-    }
-
-    interiorAngle = smallerInside ? smallerAngle : 360.0 - smallerAngle;
+    // Each direction points from Q toward the far endpoint of its edge.  Move
+    // 0.05 mm from Q in the opposite direction, which is the continuation of
+    // the far-end-to-Q line beyond Q.  At a reflex corner both continuation
+    // points lie in the trimmed face region; at a convex corner they do not.
+    const Point3d firstExtension(corner.X - first.X * kCornerExtensionDistance,
+                                 corner.Y - first.Y * kCornerExtensionDistance,
+                                 corner.Z - first.Z * kCornerExtensionDistance);
+    const Point3d secondExtension(corner.X - second.X * kCornerExtensionDistance,
+                                  corner.Y - second.Y * kCornerExtensionDistance,
+                                  corner.Z - second.Z * kCornerExtensionDistance);
+    int firstExtensionStatus = 0;
+    int secondExtensionStatus = 0;
+    const bool firstExtensionInside =
+        PointContainmentOnFace(face, firstExtension, firstExtensionStatus) &&
+        firstExtensionStatus == 1;
+    const bool secondExtensionInside =
+        PointContainmentOnFace(face, secondExtension, secondExtensionStatus) &&
+        secondExtensionStatus == 1;
+    const bool reflexCorner = firstExtensionInside && secondExtensionInside;
+    interiorAngle = reflexCorner ? 360.0 - smallerAngle : smallerAngle;
     std::ostringstream trace;
     trace << "FaceInteriorCornerAngle corner=" << FormatPoint(corner)
           << ", edges=(" << connectedDirections[0].edgeTag << ","
           << connectedDirections[1].edgeTag << ")"
           << ", smallerAngle=" << smallerAngle
-          << ", smallerInside=" << (smallerInside ? "true" : "false")
+          << ", extensionDistance=" << kCornerExtensionDistance
+          << ", firstExtension=" << FormatPoint(firstExtension)
+          << ", firstStatus=" << firstExtensionStatus
+          << ", firstInside=" << (firstExtensionInside ? "true" : "false")
+          << ", secondExtension=" << FormatPoint(secondExtension)
+          << ", secondStatus=" << secondExtensionStatus
+          << ", secondInside=" << (secondExtensionInside ? "true" : "false")
+          << ", reflex=" << (reflexCorner ? "true" : "false")
           << ", interiorAngle=" << interiorAngle;
     AppendDebugLog(trace.str());
     return true;
@@ -3656,6 +3717,51 @@ bool TwoPointSiBianUI::BuildFallbackSecondInputs(const InferredInputs& sourceInp
     Face* commonFace = FindPlanarFaceContainingEdges(sourceInputs.targetBody,
                                                      firstEdgeAtQ,
                                                      secondEdgeAtQ);
+    double commonFaceInteriorAngle = 0.0;
+    const bool commonCornerIsConvex =
+        commonFace != nullptr &&
+        FaceInteriorCornerAngle(commonFace, qPoint, commonFaceInteriorAngle) &&
+        commonFaceInteriorAngle < kConvexCornerMaximumAngleDegrees - 1.0e-6;
+    AppendDebugLog("P2 fallback common-face corner check: commonFace=" +
+                   std::to_string(commonFace != nullptr ? commonFace->Tag() : NULL_TAG) +
+                   ", B1=" + std::to_string(firstEdgeAtQ != nullptr ? firstEdgeAtQ->Tag() : NULL_TAG) +
+                   ", B2=" + std::to_string(secondEdgeAtQ != nullptr ? secondEdgeAtQ->Tag() : NULL_TAG) +
+                   ", Q=" + FormatPoint(qPoint) +
+                   ", interiorAngle=" + FormatExpressionNumber(commonFaceInteriorAngle) +
+                   ", convex=" + (commonCornerIsConvex ? "true" : "false"));
+    if (!commonCornerIsConvex)
+    {
+        return false;
+    }
+    Point3d firstExtension;
+    Point3d secondExtension;
+    int firstBodyStatus = 0;
+    int secondBodyStatus = 0;
+    bool bothExtensionsOnBody = false;
+    if (!CornerExtensionPointsOnBody(sourceInputs.targetBody,
+                                     firstEdgeAtQ,
+                                     secondEdgeAtQ,
+                                     qPoint,
+                                     firstExtension,
+                                     secondExtension,
+                                     firstBodyStatus,
+                                     secondBodyStatus,
+                                     bothExtensionsOnBody))
+    {
+        return false;
+    }
+    AppendDebugLog("P2 fallback branch-4 body containment: body=" +
+                   std::to_string(sourceInputs.targetBody->Tag()) +
+                   ", Q=" + FormatPoint(qPoint) +
+                   ", firstExtension=" + FormatPoint(firstExtension) +
+                   ", firstStatus=" + std::to_string(firstBodyStatus) +
+                   ", secondExtension=" + FormatPoint(secondExtension) +
+                   ", secondStatus=" + std::to_string(secondBodyStatus) +
+                   ", bothOnOrInBody=" + (bothExtensionsOnBody ? "true" : "false"));
+    if (!bothExtensionsOnBody)
+    {
+        return false;
+    }
     Face* parallelFace = FindParallelFaceAtThickness(sourceInputs.targetBody,
                                                       commonFace,
                                                       sourceInputs.thickness);
@@ -3677,13 +3783,22 @@ bool TwoPointSiBianUI::BuildFallbackSecondInputs(const InferredInputs& sourceInp
     Point3d q2;
     double q2Distance = std::numeric_limits<double>::max();
     bool foundQ2 = false;
+    Edge* q2ThicknessEdge = nullptr;
     for (std::size_t index = 1; index < boundaryPoints.size(); ++index)
     {
         const double distance = Distance(q1, boundaryPoints[index]);
-        if (distance > kPointTolerance && distance < q2Distance)
+        Edge* candidateThicknessEdge = nullptr;
+        if (distance > kPointTolerance && distance < q2Distance &&
+            PointHasThicknessLengthEdge(sourceInputs.targetBody,
+                                        boundaryPoints[index],
+                                        sourceInputs.thickness,
+                                        nullptr,
+                                        nullptr,
+                                        &candidateThicknessEdge))
         {
             q2 = boundaryPoints[index];
             q2Distance = distance;
+            q2ThicknessEdge = candidateThicknessEdge;
             foundQ2 = true;
         }
     }
@@ -3714,7 +3829,331 @@ bool TwoPointSiBianUI::BuildFallbackSecondInputs(const InferredInputs& sourceInp
                    ", parallelFace=" + std::to_string(parallelFace->Tag()) +
                    ", Q=" + FormatPoint(qPoint) +
                    ", Q1=" + FormatPoint(q1) +
-                   ", Q2=" + FormatPoint(q2));
+                   ", Q2=" + FormatPoint(q2) +
+                   ", Q2ThicknessEdge=" +
+                   std::to_string(q2ThicknessEdge != nullptr ? q2ThicknessEdge->Tag() : NULL_TAG));
+    return true;
+}
+
+bool TwoPointSiBianUI::BuildQFirstSecondInputs(const InferredInputs& sourceInputs,
+                                               Edge* firstEdgeAtQ,
+                                               Edge* secondEdgeAtQ,
+                                               const Point3d& qPoint,
+                                               InferredInputs& secondInputs) const
+{
+    Face* commonFace = FindPlanarFaceContainingEdges(sourceInputs.targetBody,
+                                                     firstEdgeAtQ,
+                                                     secondEdgeAtQ);
+    double interiorAngle = 0.0;
+    if (commonFace == nullptr ||
+        !FaceInteriorCornerAngle(commonFace, qPoint, interiorAngle))
+    {
+        return false;
+    }
+
+    bool qFirstRequired = interiorAngle > kConvexCornerMaximumAngleDegrees + 1.0e-6;
+    Point3d firstExtension;
+    Point3d secondExtension;
+    int firstBodyStatus = 0;
+    int secondBodyStatus = 0;
+    bool bothExtensionsOnBody = false;
+    if (!qFirstRequired)
+    {
+        if (!CornerExtensionPointsOnBody(sourceInputs.targetBody,
+                                         firstEdgeAtQ,
+                                         secondEdgeAtQ,
+                                         qPoint,
+                                         firstExtension,
+                                         secondExtension,
+                                         firstBodyStatus,
+                                         secondBodyStatus,
+                                         bothExtensionsOnBody))
+        {
+            return false;
+        }
+        qFirstRequired = !bothExtensionsOnBody;
+        AppendDebugLog("Q-first convex body containment: body=" +
+                       std::to_string(sourceInputs.targetBody->Tag()) +
+                       ", commonFace=" + std::to_string(commonFace->Tag()) +
+                       ", Q=" + FormatPoint(qPoint) +
+                       ", firstExtension=" + FormatPoint(firstExtension) +
+                       ", firstStatus=" + std::to_string(firstBodyStatus) +
+                       ", secondExtension=" + FormatPoint(secondExtension) +
+                       ", secondStatus=" + std::to_string(secondBodyStatus) +
+                       ", bothOnOrInBody=" + (bothExtensionsOnBody ? "true" : "false") +
+                       ", useQFirst=" + (qFirstRequired ? "true" : "false"));
+    }
+    if (!qFirstRequired)
+    {
+        return false;
+    }
+
+    std::vector<Point3d> boundaryPoints;
+    if (!FaceBoundaryPoints(commonFace, boundaryPoints) || boundaryPoints.size() < 2)
+    {
+        return false;
+    }
+
+    Point3d nearestPoint;
+    double nearestDistance = std::numeric_limits<double>::max();
+    bool foundNearestPoint = false;
+    for (const Point3d& boundaryPoint : boundaryPoints)
+    {
+        const double distance = Distance(qPoint, boundaryPoint);
+        if (distance > kPointTolerance && distance < nearestDistance)
+        {
+            nearestPoint = boundaryPoint;
+            nearestDistance = distance;
+            foundNearestPoint = true;
+        }
+    }
+    if (!foundNearestPoint)
+    {
+        return false;
+    }
+
+    secondInputs = sourceInputs;
+    secondInputs.inferredFromSingleClick = false;
+    secondInputs.startObject = commonFace;
+    secondInputs.endObject = commonFace;
+    secondInputs.startPoint = qPoint;
+    secondInputs.endPoint = nearestPoint;
+    secondInputs.baseFace = commonFace;
+    secondInputs.startEdge = nullptr;
+    secondInputs.endEdge = nullptr;
+    secondInputs.startPositiveYEdge = nullptr;
+    secondInputs.startNegativeYEdge = nullptr;
+    secondInputs.endPositiveYEdge = nullptr;
+    secondInputs.endNegativeYEdge = nullptr;
+    if (!CompleteInputsForEndpoints(secondInputs))
+    {
+        AppendDebugLog("Q-first second UDF rejected: endpoint inputs could not be completed"
+                       ", commonFace=" + std::to_string(commonFace->Tag()) +
+                       ", Q=" + FormatPoint(qPoint) +
+                       ", nearest=" + FormatPoint(nearestPoint));
+        return false;
+    }
+
+    AppendDebugLog("Q-first second UDF inputs: commonFace=" +
+                   std::to_string(commonFace->Tag()) +
+                   ", interiorAngle=" + FormatExpressionNumber(interiorAngle) +
+                   ", firstPointQ=" + FormatPoint(qPoint) +
+                   ", secondPoint=" + FormatPoint(nearestPoint) +
+                   ", distance=" + FormatExpressionNumber(nearestDistance));
+    return true;
+}
+
+bool TwoPointSiBianUI::BuildConcaveStripPlan(const InferredInputs& sourceInputs,
+                                              Edge* firstEdgeAtQ,
+                                              Edge* secondEdgeAtQ,
+                                              const Point3d& qPoint,
+                                              Point3d& q3,
+                                              Point3d& q4,
+                                              Vector3d& planeNormal) const
+{
+    Face* commonFace = FindPlanarFaceContainingEdges(sourceInputs.targetBody,
+                                                     firstEdgeAtQ,
+                                                     secondEdgeAtQ);
+    double interiorAngle = 0.0;
+    if (commonFace == nullptr ||
+        !FaceInteriorCornerAngle(commonFace, qPoint, interiorAngle) ||
+        interiorAngle <= kConvexCornerMaximumAngleDegrees + 1.0e-6)
+    {
+        return false;
+    }
+
+    std::vector<Point3d> boundaryPoints;
+    if (!FaceBoundaryPoints(commonFace, boundaryPoints) || boundaryPoints.size() < 2)
+    {
+        return false;
+    }
+    std::sort(boundaryPoints.begin(), boundaryPoints.end(), [&qPoint](const Point3d& first,
+                                                                      const Point3d& second) {
+        return Distance(first, qPoint) < Distance(second, qPoint);
+    });
+    bool foundQ3 = false;
+    double q3DistanceFromQ = std::numeric_limits<double>::max();
+    for (const Point3d& boundaryPoint : boundaryPoints)
+    {
+        const double distance = Distance(boundaryPoint, qPoint);
+        if (distance > kPointTolerance && distance < q3DistanceFromQ)
+        {
+            q3 = boundaryPoint;
+            q3DistanceFromQ = distance;
+            foundQ3 = true;
+        }
+    }
+    if (!foundQ3)
+    {
+        AppendDebugLog("concave Q3/Q4 branch rejected: no boundary endpoint distinct from Q"
+                       ", commonFace=" + std::to_string(commonFace->Tag()) +
+                       ", interiorAngle=" + FormatExpressionNumber(interiorAngle) +
+                       ", Q=" + FormatPoint(qPoint));
+        return false;
+    }
+    Edge* q3ThicknessEdge = nullptr;
+    if (!PointHasThicknessLengthEdge(sourceInputs.targetBody,
+                                     q3,
+                                     sourceInputs.thickness,
+                                     nullptr,
+                                     nullptr,
+                                     &q3ThicknessEdge))
+    {
+        AppendDebugLog("concave Q3/Q4 branch rejected: nearest Q3 has no thickness-length edge"
+                       ", commonFace=" + std::to_string(commonFace->Tag()) +
+                       ", interiorAngle=" + FormatExpressionNumber(interiorAngle) +
+                       ", Q=" + FormatPoint(qPoint) +
+                       ", Q3=" + FormatPoint(q3));
+        return false;
+    }
+
+    double nearestQ4Distance = std::numeric_limits<double>::max();
+    bool foundQ4 = false;
+    for (const Point3d& boundaryPoint : boundaryPoints)
+    {
+        const double distance = Distance(q3, boundaryPoint);
+        if (distance > kPointTolerance && distance < nearestQ4Distance)
+        {
+            q4 = boundaryPoint;
+            nearestQ4Distance = distance;
+            foundQ4 = true;
+        }
+    }
+
+    Point3d planePoint;
+    if (!foundQ4 || !FacePlaneData(commonFace, planePoint, planeNormal))
+    {
+        return false;
+    }
+    AppendDebugLog("concave Q3/Q4 strip plan: commonFace=" + std::to_string(commonFace->Tag()) +
+                   ", interiorAngle=" + FormatExpressionNumber(interiorAngle) +
+                   ", Q=" + FormatPoint(qPoint) +
+                   ", Q3=" + FormatPoint(q3) +
+                   ", Q3DistanceFromQ=" + FormatExpressionNumber(q3DistanceFromQ) +
+                   ", Q3ThicknessEdge=" + std::to_string(q3ThicknessEdge->Tag()) +
+                   ", Q4=" + FormatPoint(q4) +
+                   ", normal=" + FormatVector(planeNormal));
+    return true;
+}
+
+bool TwoPointSiBianUI::CreateConcaveStripCut(const InferredInputs& inputs,
+                                              const Point3d& q3,
+                                              const Point3d& q4,
+                                              const Vector3d& inputPlaneNormal,
+                                              tag_t& subtractFeatureTag,
+                                              std::string& errorMessage) const
+{
+    subtractFeatureTag = NULL_TAG;
+    Vector3d lineDirection = Subtract(q4, q3);
+    Vector3d planeNormal = inputPlaneNormal;
+    if (!Normalize(lineDirection) || !Normalize(planeNormal))
+    {
+        errorMessage = "The Q3-Q4 strip direction or plane normal is invalid.";
+        return false;
+    }
+    Vector3d sideDirection = Cross(planeNormal, lineDirection);
+    if (!Normalize(sideDirection))
+    {
+        errorMessage = "The symmetric Q3-Q4 strip offset direction is invalid.";
+        return false;
+    }
+
+    const Point3d extendedStart(q3.X - lineDirection.X,
+                                q3.Y - lineDirection.Y,
+                                q3.Z - lineDirection.Z);
+    const Point3d extendedEnd(q4.X + lineDirection.X,
+                              q4.Y + lineDirection.Y,
+                              q4.Z + lineDirection.Z);
+    constexpr double halfWidth = 0.1;
+    const Point3d corners[] = {
+        Point3d(extendedStart.X + sideDirection.X * halfWidth,
+                extendedStart.Y + sideDirection.Y * halfWidth,
+                extendedStart.Z + sideDirection.Z * halfWidth),
+        Point3d(extendedEnd.X + sideDirection.X * halfWidth,
+                extendedEnd.Y + sideDirection.Y * halfWidth,
+                extendedEnd.Z + sideDirection.Z * halfWidth),
+        Point3d(extendedEnd.X - sideDirection.X * halfWidth,
+                extendedEnd.Y - sideDirection.Y * halfWidth,
+                extendedEnd.Z - sideDirection.Z * halfWidth),
+        Point3d(extendedStart.X - sideDirection.X * halfWidth,
+                extendedStart.Y - sideDirection.Y * halfWidth,
+                extendedStart.Z - sideDirection.Z * halfWidth)};
+
+    std::vector<tag_t> curveTags;
+    uf_list_p_t curveList = nullptr;
+    uf_list_p_t featureList = nullptr;
+    auto cleanupLists = [&]() {
+        if (curveList != nullptr) UF_MODL_delete_list(&curveList);
+        if (featureList != nullptr) UF_MODL_delete_list(&featureList);
+    };
+    for (int index = 0; index < 4; ++index)
+    {
+        UF_CURVE_line_t lineData;
+        const Point3d& start = corners[index];
+        const Point3d& end = corners[(index + 1) % 4];
+        lineData.start_point[0] = start.X; lineData.start_point[1] = start.Y; lineData.start_point[2] = start.Z;
+        lineData.end_point[0] = end.X; lineData.end_point[1] = end.Y; lineData.end_point[2] = end.Z;
+        tag_t lineTag = NULL_TAG;
+        const int lineResult = UF_CURVE_create_line(&lineData, &lineTag);
+        if (lineResult != 0 || lineTag == NULL_TAG)
+        {
+            errorMessage = "Failed to create the symmetric Q3-Q4 strip profile.\n" + UfMessage(lineResult);
+            cleanupLists();
+            return false;
+        }
+        curveTags.push_back(lineTag);
+    }
+    if (UF_MODL_create_list(&curveList) != 0 || curveList == nullptr)
+    {
+        errorMessage = "Failed to allocate the Q3-Q4 strip profile list.";
+        return false;
+    }
+    for (tag_t curveTag : curveTags) UF_MODL_put_list_item(curveList, curveTag);
+
+    std::string startLimit = "-" + FormatExpressionNumber(inputs.thickness);
+    std::string endLimit = FormatExpressionNumber(inputs.thickness);
+    char taper[] = "0.0";
+    char* limits[2] = {const_cast<char*>(startLimit.c_str()), const_cast<char*>(endLimit.c_str())};
+    double origin[3] = {q3.X, q3.Y, q3.Z};
+    double direction[3] = {planeNormal.X, planeNormal.Y, planeNormal.Z};
+    const int extrudeResult = UF_MODL_create_extruded(curveList,
+                                                       taper,
+                                                       limits,
+                                                       origin,
+                                                       direction,
+                                                       UF_NULLSIGN,
+                                                       &featureList);
+    tag_t extrudeFeatureTag = NULL_TAG;
+    tag_t toolBodyTag = NULL_TAG;
+    int featureCount = 0;
+    if (extrudeResult == 0 && featureList != nullptr &&
+        UF_MODL_ask_list_count(featureList, &featureCount) == 0 && featureCount > 0)
+    {
+        UF_MODL_ask_list_item(featureList, 0, &extrudeFeatureTag);
+        UF_MODL_ask_feat_body(extrudeFeatureTag, &toolBodyTag);
+    }
+    cleanupLists();
+    if (extrudeResult != 0 || toolBodyTag == NULL_TAG)
+    {
+        errorMessage = "Failed to extrude the Q3-Q4 strip from -thickness to +thickness.\n" +
+                       UfMessage(extrudeResult);
+        return false;
+    }
+
+    if (!SubtractToolBodies(inputs.targetBody,
+                            std::vector<tag_t>{toolBodyTag},
+                            subtractFeatureTag,
+                            errorMessage))
+    {
+        return false;
+    }
+    AppendDebugLog("concave Q3/Q4 strip cut completed: Q3=" + FormatPoint(q3) +
+                   ", Q4=" + FormatPoint(q4) +
+                   ", extensionEachEnd=1, symmetricHalfWidth=0.1"
+                   ", startLimit=" + startLimit +
+                   ", endLimit=" + endLimit +
+                   ", extrudeFeature=" + std::to_string(extrudeFeatureTag) +
+                   ", subtractFeature=" + std::to_string(subtractFeatureTag));
     return true;
 }
 
@@ -3722,6 +4161,7 @@ bool TwoPointSiBianUI::FindAuxiliaryRipPair(Body* body,
                                              Face* commonFace,
                                              Edge* b1,
                                              Edge* b2,
+                                             double thickness,
                                              Edge*& edgeToRip,
                                              Edge*& parallelRipEdge) const
 {
@@ -3774,6 +4214,7 @@ bool TwoPointSiBianUI::FindAuxiliaryRipPair(Body* body,
     }
 
     Edge* matchedPeripheral = nullptr;
+    Edge* matchedThicknessEdge = nullptr;
     for (Edge* candidate : commonFace->GetEdges())
     {
         if (candidate == nullptr || candidate == b1 || candidate == b2)
@@ -3794,16 +4235,31 @@ bool TwoPointSiBianUI::FindAuxiliaryRipPair(Body* body,
 
         const bool parallelB1 = std::fabs(Dot(candidateDirection, b1Direction)) >= 0.999;
         const bool parallelB2 = std::fabs(Dot(candidateDirection, b2Direction)) >= 0.999;
-        if (parallelB1 && EdgeTouchesPoint(candidate, b2Other))
+        Edge* thicknessEdgeAtCommonPoint = nullptr;
+        if (parallelB1 && EdgeTouchesPoint(candidate, b2Other) &&
+            PointHasThicknessLengthEdge(body,
+                                        b2Other,
+                                        thickness,
+                                        candidate,
+                                        b2,
+                                        &thicknessEdgeAtCommonPoint))
         {
             edgeToRip = b2;
             matchedPeripheral = candidate;
+            matchedThicknessEdge = thicknessEdgeAtCommonPoint;
             break;
         }
-        if (parallelB2 && EdgeTouchesPoint(candidate, b1Other))
+        if (parallelB2 && EdgeTouchesPoint(candidate, b1Other) &&
+            PointHasThicknessLengthEdge(body,
+                                        b1Other,
+                                        thickness,
+                                        candidate,
+                                        b1,
+                                        &thicknessEdgeAtCommonPoint))
         {
             edgeToRip = b1;
             matchedPeripheral = candidate;
+            matchedThicknessEdge = thicknessEdgeAtCommonPoint;
             break;
         }
     }
@@ -3827,6 +4283,8 @@ bool TwoPointSiBianUI::FindAuxiliaryRipPair(Body* body,
                    ", B1=" + std::to_string(b1->Tag()) +
                    ", B2=" + std::to_string(b2->Tag()) +
                    ", matchedPeripheral=" + std::to_string(matchedPeripheral->Tag()) +
+                   ", commonPointThicknessEdge=" +
+                   std::to_string(matchedThicknessEdge != nullptr ? matchedThicknessEdge->Tag() : NULL_TAG) +
                    ", edgeToRip=" + std::to_string(edgeToRip->Tag()) +
                    ", parallelRipEdge=" + std::to_string(parallelRipEdge->Tag()) +
                    ", parallelDistance=" + FormatExpressionNumber(parallelDistance));
@@ -3932,6 +4390,28 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         return true;
     }
 
+    const double directCreateTolerance =
+        std::max(kPlaneTolerance, inputs.thickness * 0.01);
+    for (Edge* edgeAtP2 : inputs.targetBody->GetEdges())
+    {
+        if (edgeAtP2 == nullptr ||
+            !EdgeTouchesPoint(edgeAtP2, inputs.endPoint) ||
+            FaceHasEdge(inputs.baseFace, edgeAtP2))
+        {
+            continue;
+        }
+        const double p2QCandidateLength = edgeAtP2->GetLength();
+        if (std::fabs(p2QCandidateLength - inputs.thickness) <= directCreateTolerance)
+        {
+            AppendDebugLog("TryCreateSecondPointRip direct-create branch: P2-Q length equals thickness"
+                           ", edge=" + std::to_string(edgeAtP2->Tag()) +
+                           ", edgeLength=" + FormatExpressionNumber(p2QCandidateLength) +
+                           ", thickness=" + FormatExpressionNumber(inputs.thickness) +
+                           ", tolerance=" + FormatExpressionNumber(directCreateTolerance));
+            return true;
+        }
+    }
+
     Edge* ripEdge = nullptr;
     Edge* confirmingEdge = nullptr;
     Edge* confirmingParallelEdge = nullptr;
@@ -3941,8 +4421,14 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
     double pairedRipDistance = 0.0;
     bool useFallbackSecondUdf = false;
     bool useAuxiliaryRipBranch = false;
+    bool useConcaveStripBranch = false;
+    bool hasQFirstEqualCandidate = false;
+    bool hasConcaveStripCandidate = false;
     Edge* auxiliaryRipEdge = nullptr;
     Edge* auxiliaryParallelRipEdge = nullptr;
+    Point3d concaveQ3;
+    Point3d concaveQ4;
+    Vector3d concavePlaneNormal;
     InferredInputs fallbackSecondInputs;
     const double lengthTolerance = std::max(kPlaneTolerance, inputs.thickness * 0.01);
 
@@ -4017,6 +4503,7 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                                              commonFace,
                                              remainingEdgesAtQ[firstIndex],
                                              remainingEdgesAtQ[secondIndex],
+                                             inputs.thickness,
                                              candidateAuxiliaryRip,
                                              candidateAuxiliaryParallel))
                     {
@@ -4025,6 +4512,42 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                         auxiliaryRipEdge = candidateAuxiliaryRip;
                         auxiliaryParallelRipEdge = candidateAuxiliaryParallel;
                         useAuxiliaryRipBranch = true;
+                        break;
+                    }
+                    Point3d candidateQ3;
+                    Point3d candidateQ4;
+                    Vector3d candidatePlaneNormal;
+                    InferredInputs candidateQFirstInputs;
+                    const bool candidateHasQFirstInputs =
+                        BuildQFirstSecondInputs(inputs,
+                                               remainingEdgesAtQ[firstIndex],
+                                               remainingEdgesAtQ[secondIndex],
+                                               candidateFarEndpoint,
+                                               candidateQFirstInputs);
+                    const bool candidateHasConcaveStripPlan =
+                        BuildConcaveStripPlan(inputs,
+                                              remainingEdgesAtQ[firstIndex],
+                                              remainingEdgesAtQ[secondIndex],
+                                              candidateFarEndpoint,
+                                              candidateQ3,
+                                              candidateQ4,
+                                              candidatePlaneNormal);
+                    if (candidateHasQFirstInputs || candidateHasConcaveStripPlan)
+                    {
+                        fallbackFirstEdge = remainingEdgesAtQ[firstIndex];
+                        fallbackSecondEdge = remainingEdgesAtQ[secondIndex];
+                        if (candidateHasQFirstInputs)
+                        {
+                            fallbackSecondInputs = candidateQFirstInputs;
+                            hasQFirstEqualCandidate = true;
+                        }
+                        if (candidateHasConcaveStripPlan)
+                        {
+                            concaveQ3 = candidateQ3;
+                            concaveQ4 = candidateQ4;
+                            concavePlaneNormal = candidatePlaneNormal;
+                            hasConcaveStripCandidate = true;
+                        }
                         break;
                     }
                     if (BuildFallbackSecondInputs(inputs,
@@ -4045,7 +4568,9 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
             ripEdge = candidateRipEdge;
             confirmingEdge = fallbackFirstEdge;
             farEndpoint = candidateFarEndpoint;
-            if (!useAuxiliaryRipBranch)
+            if (!useAuxiliaryRipBranch &&
+                !hasQFirstEqualCandidate &&
+                !hasConcaveStripCandidate)
             {
                 fallbackSecondInputs = candidateFallbackInputs;
                 useFallbackSecondUdf = true;
@@ -4086,15 +4611,56 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
     const double pairedRipEdgeLength = pairedRipEdge->GetLength();
     const double pairedLengthTolerance =
         std::max(kPlaneTolerance, std::max(ripEdgeLength, pairedRipEdgeLength) * 1.0e-4);
-    if (std::fabs(ripEdgeLength - pairedRipEdgeLength) > pairedLengthTolerance)
+    double requiredPairedRipLength = ripEdgeLength;
+    double requiredLengthTolerance = pairedLengthTolerance;
+    std::string selectedLengthRule = "equal";
+    if (hasQFirstEqualCandidate || hasConcaveStripCandidate)
+    {
+        const bool equalLengthMatch =
+            std::fabs(pairedRipEdgeLength - ripEdgeLength) <= pairedLengthTolerance;
+        const double stripRequiredLength = ripEdgeLength + 2.0 * inputs.thickness;
+        const double stripLengthTolerance =
+            std::max(pairedLengthTolerance, inputs.thickness * 0.01);
+        const bool stripLengthMatch =
+            std::fabs(pairedRipEdgeLength - stripRequiredLength) <= stripLengthTolerance;
+        if (equalLengthMatch && hasQFirstEqualCandidate)
+        {
+            useFallbackSecondUdf = true;
+            selectedLengthRule = "Q-first-equal: second-UDF(Q,nearest), rip, primary-UDF";
+        }
+        else if (stripLengthMatch && hasConcaveStripCandidate)
+        {
+            useConcaveStripBranch = true;
+            requiredPairedRipLength = stripRequiredLength;
+            requiredLengthTolerance = stripLengthTolerance;
+            selectedLengthRule = "concave-strip: P2Q+2*thickness";
+        }
+        else
+        {
+            std::ostringstream mismatchTrace;
+            mismatchTrace << "TryCreateSecondPointRip skipped: concave P2-Q length matched no available branch"
+                          << ", P2QEdge=" << ripEdge->Tag()
+                          << ", P2QLength=" << ripEdgeLength
+                          << ", nearestParallelEdge=" << pairedRipEdge->Tag()
+                          << ", nearestParallelLength=" << pairedRipEdgeLength
+                          << ", qFirstEqualCandidate=" << (hasQFirstEqualCandidate ? "true" : "false")
+                          << ", stripCandidate=" << (hasConcaveStripCandidate ? "true" : "false")
+                          << ", stripRequiredParallelLength=" << stripRequiredLength;
+            AppendDebugLog(mismatchTrace.str());
+            return true;
+        }
+    }
+    if (std::fabs(pairedRipEdgeLength - requiredPairedRipLength) > requiredLengthTolerance)
     {
         std::ostringstream mismatchTrace;
-        mismatchTrace << "TryCreateSecondPointRip skipped: P2-Q edge and nearest parallel edge lengths differ"
+        mismatchTrace << "TryCreateSecondPointRip skipped: P2-Q and parallel edge lengths do not satisfy branch rule"
                       << ", P2QEdge=" << ripEdge->Tag()
                       << ", P2QLength=" << ripEdgeLength
                       << ", nearestParallelEdge=" << pairedRipEdge->Tag()
                       << ", nearestParallelLength=" << pairedRipEdgeLength
-                      << ", tolerance=" << pairedLengthTolerance;
+                      << ", requiredParallelLength=" << requiredPairedRipLength
+                      << ", lengthRule=" << selectedLengthRule
+                      << ", tolerance=" << requiredLengthTolerance;
         AppendDebugLog(mismatchTrace.str());
         return true;
     }
@@ -4105,6 +4671,8 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
           << ", ripEdgeLength=" << ripEdgeLength
           << ", pairedRipEdge=" << pairedRipEdge->Tag()
           << ", pairedRipEdgeLength=" << pairedRipEdgeLength
+          << ", requiredPairedRipEdgeLength=" << requiredPairedRipLength
+          << ", lengthRule=" << selectedLengthRule
           << ", pairedRipDistance=" << pairedRipDistance
           << ", farEndpoint=" << FormatPoint(farEndpoint)
           << ", confirmingEdge=" << (confirmingEdge != nullptr ? confirmingEdge->Tag() : NULL_TAG)
@@ -4196,6 +4764,21 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         {
             errorMessage = "NX did not return a feature after creating the sheet-metal rip.";
             return false;
+        }
+        if (useConcaveStripBranch)
+        {
+            tag_t stripSubtractTag = NULL_TAG;
+            if (!CreateConcaveStripCut(inputs,
+                                       concaveQ3,
+                                       concaveQ4,
+                                       concavePlaneNormal,
+                                       stripSubtractTag,
+                                       errorMessage))
+            {
+                return false;
+            }
+            AppendDebugLog("TryCreateSecondPointRip concave strip subtraction completed after P2-Q rip, feature=" +
+                           std::to_string(stripSubtractTag));
         }
         ripCreated = true;
         AppendDebugLog("TryCreateSecondPointRip created edge-rip feature tag=" +

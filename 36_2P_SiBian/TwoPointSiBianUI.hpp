@@ -122,10 +122,29 @@ private:
                                    NXOpen::Edge* secondEdgeAtQ,
                                    const NXOpen::Point3d& qPoint,
                                    InferredInputs& secondInputs) const;
+    bool BuildQFirstSecondInputs(const InferredInputs& sourceInputs,
+                                 NXOpen::Edge* firstEdgeAtQ,
+                                 NXOpen::Edge* secondEdgeAtQ,
+                                 const NXOpen::Point3d& qPoint,
+                                 InferredInputs& secondInputs) const;
+    bool BuildConcaveStripPlan(const InferredInputs& sourceInputs,
+                               NXOpen::Edge* firstEdgeAtQ,
+                               NXOpen::Edge* secondEdgeAtQ,
+                               const NXOpen::Point3d& qPoint,
+                               NXOpen::Point3d& q3,
+                               NXOpen::Point3d& q4,
+                               NXOpen::Vector3d& planeNormal) const;
+    bool CreateConcaveStripCut(const InferredInputs& inputs,
+                               const NXOpen::Point3d& q3,
+                               const NXOpen::Point3d& q4,
+                               const NXOpen::Vector3d& planeNormal,
+                               tag_t& subtractFeatureTag,
+                               std::string& errorMessage) const;
     bool FindAuxiliaryRipPair(NXOpen::Body* body,
                               NXOpen::Face* commonFace,
                               NXOpen::Edge* b1,
                               NXOpen::Edge* b2,
+                              double thickness,
                               NXOpen::Edge*& edgeToRip,
                               NXOpen::Edge*& parallelRipEdge) const;
     bool CreateSheetMetalRip(const InferredInputs& inputs,
