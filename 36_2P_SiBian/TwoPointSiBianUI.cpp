@@ -15,8 +15,10 @@
 #include <NXOpen/Features_CustomTagAttribute.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_OffsetFaceBuilder.hxx>
 #include <NXOpen/Features_SheetMetal_EdgeRipBuilder.hxx>
 #include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
+#include <NXOpen/FaceFeatureRule.hxx>
 #include <NXOpen/MeasureDistance.hxx>
 #include <NXOpen/MeasureFaces.hxx>
 #include <NXOpen/MeasureManager.hxx>
@@ -30,6 +32,8 @@
 #include <NXOpen/PointCollection.hxx>
 #include <NXOpen/Section.hxx>
 #include <NXOpen/SectionCollection.hxx>
+#include <NXOpen/ScRuleFactory.hxx>
+#include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/TaggedObject.hxx>
 #include <NXOpen/Unit.hxx>
 #include <NXOpen/UnitCollection.hxx>
@@ -2475,16 +2479,32 @@ bool TwoPointSiBianUI::CreatePreview()
         return false;
     }
 
+    std::vector<tag_t> allToolBodyTags;
+    std::vector<tag_t> allReferenceTags;
     if (inputs.inferredFromSingleClick)
     {
         bool ripCreated = false;
+        tag_t secondUdfTag = NULL_TAG;
+        std::vector<tag_t> secondToolBodyTags;
+        std::vector<tag_t> secondReferenceTags;
         std::string ripError;
-        if (!TryCreateSecondPointRip(inputs, ripCreated, ripError))
+        if (!TryCreateSecondPointRip(inputs,
+                                     ripCreated,
+                                     secondUdfTag,
+                                     secondToolBodyTags,
+                                     secondReferenceTags,
+                                     ripError))
         {
             UndoPreview();
             ShowError(ripError);
             return false;
         }
+        allToolBodyTags.insert(allToolBodyTags.end(),
+                               secondToolBodyTags.begin(),
+                               secondToolBodyTags.end());
+        allReferenceTags.insert(allReferenceTags.end(),
+                                secondReferenceTags.begin(),
+                                secondReferenceTags.end());
         if (ripCreated)
         {
             AppendDebugLog("CreatePreview edge rip committed; recalculating P2 from the original selection click.");
@@ -2500,17 +2520,39 @@ bool TwoPointSiBianUI::CreatePreview()
     }
 
     std::string errorMessage;
-    tag_t createdUdfTag = NULL_TAG;
-    std::vector<tag_t> createdReferenceTags;
-    if (!CreateUserDefinedFeature(inputs, errorMessage, &createdUdfTag, &createdReferenceTags))
+    tag_t firstUdfTag = NULL_TAG;
+    std::vector<tag_t> firstReferenceTags;
+    std::vector<tag_t> firstToolBodyTags;
+    if (!CreateUserDefinedFeature(inputs,
+                                  errorMessage,
+                                  &firstUdfTag,
+                                  &firstReferenceTags,
+                                  &firstToolBodyTags))
+    {
+        UndoPreview();
+        ShowError(errorMessage);
+        return false;
+    }
+    allToolBodyTags.insert(allToolBodyTags.end(),
+                           firstToolBodyTags.begin(),
+                           firstToolBodyTags.end());
+    allReferenceTags.insert(allReferenceTags.end(),
+                            firstReferenceTags.begin(),
+                            firstReferenceTags.end());
+
+    tag_t finalSubtractTag = NULL_TAG;
+    if (!SubtractToolBodies(inputs.targetBody,
+                            allToolBodyTags,
+                            finalSubtractTag,
+                            errorMessage))
     {
         UndoPreview();
         ShowError(errorMessage);
         return false;
     }
 
-    previewUdfTag_ = createdUdfTag;
-    previewReferenceTags_ = createdReferenceTags;
+    previewUdfTag_ = finalSubtractTag;
+    previewReferenceTags_ = allReferenceTags;
     hasPreview_ = true;
     AppendDebugLog("CreatePreview OK, undoMark=" + std::to_string(static_cast<int>(previewUndoMark_)) +
                    ", previewUdfTag=" + std::to_string(previewUdfTag_) +
@@ -2747,6 +2789,58 @@ bool TwoPointSiBianUI::ReadSelectedPoint(NXOpen::BlockStyler::SelectObject* bloc
     selectedObject = selected.front();
     point = block->PickPoint();
     return true;
+}
+
+bool TwoPointSiBianUI::CompleteInputsForEndpoints(InferredInputs& inputs) const
+{
+    if (inputs.targetBody == nullptr || inputs.baseFace == nullptr ||
+        Distance(inputs.startPoint, inputs.endPoint) <= kPointTolerance)
+    {
+        return false;
+    }
+
+    Vector3d xDirection = Subtract(inputs.endPoint, inputs.startPoint);
+    const Point3d normalPoint((inputs.startPoint.X + inputs.endPoint.X) * 0.5,
+                              (inputs.startPoint.Y + inputs.endPoint.Y) * 0.5,
+                              (inputs.startPoint.Z + inputs.endPoint.Z) * 0.5);
+    Vector3d faceNormalVector;
+    if (!Normalize(xDirection) ||
+        !FaceNormalAtPoint(inputs.baseFace, normalPoint, faceNormalVector))
+    {
+        return false;
+    }
+    OrientNormalAwayFromOppositeFace(inputs.targetBody,
+                                     inputs.baseFace,
+                                     normalPoint,
+                                     faceNormalVector);
+    Vector3d yDirection = Cross(faceNormalVector, xDirection);
+    if (!Normalize(yDirection) ||
+        !FindSignedEdgesAtPoint(inputs.targetBody,
+                                inputs.startPoint,
+                                xDirection,
+                                yDirection,
+                                faceNormalVector,
+                                inputs.startPositiveYEdge,
+                                inputs.startNegativeYEdge) ||
+        !FindSignedEdgesAtPoint(inputs.targetBody,
+                                inputs.endPoint,
+                                xDirection,
+                                yDirection,
+                                faceNormalVector,
+                                inputs.endPositiveYEdge,
+                                inputs.endNegativeYEdge))
+    {
+        return false;
+    }
+
+    inputs.startEdge = inputs.startPositiveYEdge;
+    inputs.endEdge = inputs.endPositiveYEdge;
+    if (inputs.thickness <= kPointTolerance)
+    {
+        inputs.thickness = EstimateSheetThickness(inputs.targetBody, inputs.baseFace);
+    }
+    inputs.spanLength = Distance(inputs.startPoint, inputs.endPoint);
+    return inputs.thickness > kPointTolerance;
 }
 
 bool TwoPointSiBianUI::InferEndpointsFromFaceClick(TaggedObject* selectedObject,
@@ -3399,6 +3493,7 @@ bool TwoPointSiBianUI::EdgeHasParallelMateAtThickness(Body* body,
         return false;
     }
     Vector3d edgeDirection = Subtract(edgeEnd, edgeStart);
+    const double edgeLength = Length(edgeDirection);
     if (!Normalize(edgeDirection))
     {
         return false;
@@ -3410,6 +3505,8 @@ bool TwoPointSiBianUI::EdgeHasParallelMateAtThickness(Body* body,
         return false;
     }
 
+    double selectedOverlapLength = 0.0;
+    int parallelWithoutOverlapCount = 0;
     for (Edge* candidate : body->GetEdges())
     {
         if (candidate == nullptr || candidate == edge)
@@ -3426,6 +3523,19 @@ bool TwoPointSiBianUI::EdgeHasParallelMateAtThickness(Body* body,
         Vector3d candidateDirection = Subtract(candidateEnd, candidateStart);
         if (!Normalize(candidateDirection) || std::fabs(Dot(edgeDirection, candidateDirection)) < 0.999)
         {
+            continue;
+        }
+
+        const double candidateProjectionStart = Dot(Subtract(candidateStart, edgeStart), edgeDirection);
+        const double candidateProjectionEnd = Dot(Subtract(candidateEnd, edgeStart), edgeDirection);
+        const double candidateMinimum = std::min(candidateProjectionStart, candidateProjectionEnd);
+        const double candidateMaximum = std::max(candidateProjectionStart, candidateProjectionEnd);
+        const double overlapStart = std::max(0.0, candidateMinimum);
+        const double overlapEnd = std::min(edgeLength, candidateMaximum);
+        const double overlapLength = overlapEnd - overlapStart;
+        if (overlapLength <= kPlaneTolerance)
+        {
+            ++parallelWithoutOverlapCount;
             continue;
         }
 
@@ -3448,6 +3558,7 @@ bool TwoPointSiBianUI::EdgeHasParallelMateAtThickness(Body* body,
             }
             minimumDistance = distance;
             parallelEdge = candidate;
+            selectedOverlapLength = overlapLength;
         }
         catch (...)
         {
@@ -3463,17 +3574,355 @@ bool TwoPointSiBianUI::EdgeHasParallelMateAtThickness(Body* body,
           << ", minimumDistance="
           << (minimumDistance < std::numeric_limits<double>::max() ? minimumDistance : -1.0)
           << ", thickness=" << thickness
+          << ", overlapLength=" << selectedOverlapLength
+          << ", parallelWithoutOverlapCount=" << parallelWithoutOverlapCount
           << ", tolerance=" << tolerance
           << ", matched=" << (matched ? "true" : "false");
     AppendDebugLog(trace.str());
     return matched;
 }
 
+Face* TwoPointSiBianUI::FindPlanarFaceContainingEdges(Body* body,
+                                                       Edge* first,
+                                                       Edge* second) const
+{
+    if (body == nullptr || first == nullptr || second == nullptr)
+    {
+        return nullptr;
+    }
+    for (Face* face : body->GetFaces())
+    {
+        if (face != nullptr && face->SolidFaceType() == Face::FaceTypePlanar &&
+            FaceHasEdge(face, first) && FaceHasEdge(face, second))
+        {
+            return face;
+        }
+    }
+    return nullptr;
+}
+
+Face* TwoPointSiBianUI::FindParallelFaceAtThickness(Body* body,
+                                                     Face* sourceFace,
+                                                     double thickness) const
+{
+    if (body == nullptr || sourceFace == nullptr || thickness <= kPointTolerance)
+    {
+        return nullptr;
+    }
+
+    Point3d sourcePoint;
+    Vector3d sourceNormal;
+    if (!FacePlaneData(sourceFace, sourcePoint, sourceNormal))
+    {
+        return nullptr;
+    }
+
+    const double tolerance = std::max(0.02, thickness * 0.10);
+    Face* best = nullptr;
+    double bestError = std::numeric_limits<double>::max();
+    for (Face* candidate : body->GetFaces())
+    {
+        if (candidate == nullptr || candidate == sourceFace ||
+            candidate->SolidFaceType() != Face::FaceTypePlanar)
+        {
+            continue;
+        }
+        Point3d candidatePoint;
+        Vector3d candidateNormal;
+        if (!FacePlaneData(candidate, candidatePoint, candidateNormal) ||
+            std::fabs(Dot(sourceNormal, candidateNormal)) < 0.999)
+        {
+            continue;
+        }
+        const double distance = std::fabs(Dot(Subtract(candidatePoint, sourcePoint), sourceNormal));
+        const double error = std::fabs(distance - thickness);
+        if (error <= tolerance && error < bestError)
+        {
+            best = candidate;
+            bestError = error;
+        }
+    }
+    return best;
+}
+
+bool TwoPointSiBianUI::BuildFallbackSecondInputs(const InferredInputs& sourceInputs,
+                                                  Edge* firstEdgeAtQ,
+                                                  Edge* secondEdgeAtQ,
+                                                  const Point3d& qPoint,
+                                                  InferredInputs& secondInputs) const
+{
+    // P2-Q only locates Q.  The fallback common face is defined by the two
+    // remaining edges at Q, explicitly excluding the P2-Q rip edge.
+    Face* commonFace = FindPlanarFaceContainingEdges(sourceInputs.targetBody,
+                                                     firstEdgeAtQ,
+                                                     secondEdgeAtQ);
+    Face* parallelFace = FindParallelFaceAtThickness(sourceInputs.targetBody,
+                                                      commonFace,
+                                                      sourceInputs.thickness);
+    if (commonFace == nullptr || parallelFace == nullptr)
+    {
+        return false;
+    }
+
+    std::vector<Point3d> boundaryPoints;
+    if (!FaceBoundaryPoints(parallelFace, boundaryPoints) || boundaryPoints.size() < 2)
+    {
+        return false;
+    }
+    std::sort(boundaryPoints.begin(), boundaryPoints.end(), [&qPoint](const Point3d& first,
+                                                                      const Point3d& second) {
+        return Distance(first, qPoint) < Distance(second, qPoint);
+    });
+    const Point3d q1 = boundaryPoints.front();
+    Point3d q2;
+    double q2Distance = std::numeric_limits<double>::max();
+    bool foundQ2 = false;
+    for (std::size_t index = 1; index < boundaryPoints.size(); ++index)
+    {
+        const double distance = Distance(q1, boundaryPoints[index]);
+        if (distance > kPointTolerance && distance < q2Distance)
+        {
+            q2 = boundaryPoints[index];
+            q2Distance = distance;
+            foundQ2 = true;
+        }
+    }
+    if (!foundQ2)
+    {
+        return false;
+    }
+
+    secondInputs = sourceInputs;
+    secondInputs.inferredFromSingleClick = false;
+    secondInputs.startObject = parallelFace;
+    secondInputs.endObject = parallelFace;
+    secondInputs.startPoint = q1;
+    secondInputs.endPoint = q2;
+    secondInputs.baseFace = parallelFace;
+    secondInputs.startEdge = nullptr;
+    secondInputs.endEdge = nullptr;
+    secondInputs.startPositiveYEdge = nullptr;
+    secondInputs.startNegativeYEdge = nullptr;
+    secondInputs.endPositiveYEdge = nullptr;
+    secondInputs.endNegativeYEdge = nullptr;
+    if (!CompleteInputsForEndpoints(secondInputs))
+    {
+        return false;
+    }
+
+    AppendDebugLog("P2 fallback second UDF inputs: commonFace=" + std::to_string(commonFace->Tag()) +
+                   ", parallelFace=" + std::to_string(parallelFace->Tag()) +
+                   ", Q=" + FormatPoint(qPoint) +
+                   ", Q1=" + FormatPoint(q1) +
+                   ", Q2=" + FormatPoint(q2));
+    return true;
+}
+
+bool TwoPointSiBianUI::FindAuxiliaryRipPair(Body* body,
+                                             Face* commonFace,
+                                             Edge* b1,
+                                             Edge* b2,
+                                             Edge*& edgeToRip,
+                                             Edge*& parallelRipEdge) const
+{
+    edgeToRip = nullptr;
+    parallelRipEdge = nullptr;
+    if (body == nullptr || commonFace == nullptr || b1 == nullptr || b2 == nullptr)
+    {
+        return false;
+    }
+
+    Point3d b1Start;
+    Point3d b1End;
+    Point3d b2Start;
+    Point3d b2End;
+    if (!EdgeNaturalStartEnd(b1, b1Start, b1End) ||
+        !EdgeNaturalStartEnd(b2, b2Start, b2End))
+    {
+        return false;
+    }
+
+    Point3d q;
+    Point3d b1Other;
+    Point3d b2Other;
+    if (AlmostSamePoint(b1Start, b2Start))
+    {
+        q = b1Start; b1Other = b1End; b2Other = b2End;
+    }
+    else if (AlmostSamePoint(b1Start, b2End))
+    {
+        q = b1Start; b1Other = b1End; b2Other = b2Start;
+    }
+    else if (AlmostSamePoint(b1End, b2Start))
+    {
+        q = b1End; b1Other = b1Start; b2Other = b2End;
+    }
+    else if (AlmostSamePoint(b1End, b2End))
+    {
+        q = b1End; b1Other = b1Start; b2Other = b2Start;
+    }
+    else
+    {
+        return false;
+    }
+
+    Vector3d b1Direction = Subtract(b1Other, q);
+    Vector3d b2Direction = Subtract(b2Other, q);
+    if (!Normalize(b1Direction) || !Normalize(b2Direction))
+    {
+        return false;
+    }
+
+    Edge* matchedPeripheral = nullptr;
+    for (Edge* candidate : commonFace->GetEdges())
+    {
+        if (candidate == nullptr || candidate == b1 || candidate == b2)
+        {
+            continue;
+        }
+        Point3d candidateStart;
+        Point3d candidateEnd;
+        if (!EdgeNaturalStartEnd(candidate, candidateStart, candidateEnd))
+        {
+            continue;
+        }
+        Vector3d candidateDirection = Subtract(candidateEnd, candidateStart);
+        if (!Normalize(candidateDirection))
+        {
+            continue;
+        }
+
+        const bool parallelB1 = std::fabs(Dot(candidateDirection, b1Direction)) >= 0.999;
+        const bool parallelB2 = std::fabs(Dot(candidateDirection, b2Direction)) >= 0.999;
+        if (parallelB1 && EdgeTouchesPoint(candidate, b2Other))
+        {
+            edgeToRip = b2;
+            matchedPeripheral = candidate;
+            break;
+        }
+        if (parallelB2 && EdgeTouchesPoint(candidate, b1Other))
+        {
+            edgeToRip = b1;
+            matchedPeripheral = candidate;
+            break;
+        }
+    }
+    if (edgeToRip == nullptr)
+    {
+        return false;
+    }
+
+    double parallelDistance = 0.0;
+    EdgeHasParallelMateAtThickness(body,
+                                   edgeToRip,
+                                   1.0,
+                                   parallelRipEdge,
+                                   parallelDistance);
+    if (parallelRipEdge == nullptr)
+    {
+        return false;
+    }
+
+    AppendDebugLog("auxiliary rip topology matched: commonFace=" + std::to_string(commonFace->Tag()) +
+                   ", B1=" + std::to_string(b1->Tag()) +
+                   ", B2=" + std::to_string(b2->Tag()) +
+                   ", matchedPeripheral=" + std::to_string(matchedPeripheral->Tag()) +
+                   ", edgeToRip=" + std::to_string(edgeToRip->Tag()) +
+                   ", parallelRipEdge=" + std::to_string(parallelRipEdge->Tag()) +
+                   ", parallelDistance=" + FormatExpressionNumber(parallelDistance));
+    return true;
+}
+
+bool TwoPointSiBianUI::CreateSheetMetalRip(const InferredInputs& inputs,
+                                            Edge* firstEdge,
+                                            Edge* secondEdge,
+                                            bool offsetCreatedFaces,
+                                            tag_t& createdRipTag,
+                                            std::string& errorMessage) const
+{
+    createdRipTag = NULL_TAG;
+    Part* workPart = session_->Parts()->Work();
+    if (workPart == nullptr || firstEdge == nullptr || secondEdge == nullptr)
+    {
+        errorMessage = "The sheet-metal rip input edges are unavailable.";
+        return false;
+    }
+
+    Features::SheetMetal::EdgeRipBuilder* ripBuilder = nullptr;
+    Section* section = nullptr;
+    try
+    {
+        ripBuilder = workPart->Features()->SheetmetalManager()->CreateEdgeRipFeatureBuilder(nullptr);
+        ripBuilder->SetApplicationContext(Features::SheetMetal::ApplicationContextNxSheetMetal);
+        ripBuilder->Width()->SetFormula(inputs.clearanceValue);
+        ripBuilder->BlendRadius()->SetFormula(inputs.bendRadiusValue);
+        ripBuilder->SetEndCapShape(Features::SheetMetal::EdgeRipBuilder::EndCapShapeOptionsRound);
+        ripBuilder->SetSketch(nullptr);
+        section = workPart->Sections()->CreateSection(9.5e-05, 0.0001, 0.5);
+        ripBuilder->SetSection(section);
+        ripBuilder->SetRipEdges(std::vector<Edge*>{firstEdge, secondEdge});
+        ripBuilder->SetUseSystemWidth(false);
+        ripBuilder->SetBlendSharpCorners(false);
+        ripBuilder->SetSymmetric(true);
+        ripBuilder->SetReverseWidthDirection(false);
+        ripBuilder->SetParentFeatureInternal(false);
+        Features::Feature* ripFeature = ripBuilder->CommitFeature();
+        createdRipTag = ripFeature != nullptr ? ripFeature->Tag() : NULL_TAG;
+        ripBuilder->Destroy();
+        ripBuilder = nullptr;
+        section->Destroy();
+        section = nullptr;
+        if (ripFeature == nullptr)
+        {
+            errorMessage = "NX did not create the requested sheet-metal rip.";
+            return false;
+        }
+
+        if (offsetCreatedFaces)
+        {
+            Features::OffsetFaceBuilder* offsetBuilder =
+                workPart->Features()->CreateOffsetFaceBuilder(nullptr);
+            offsetBuilder->Distance()->SetFormula(("-(" + inputs.clearanceValue + ")").c_str());
+            offsetBuilder->SetDirection(false);
+            std::vector<Features::Feature*> featureList(1, ripFeature);
+            FaceFeatureRule* faceRule = workPart->ScRuleFactory()->CreateRuleFaceFeature(featureList);
+            std::vector<SelectionIntentRule*> rules(1, faceRule);
+            offsetBuilder->FaceCollector()->ReplaceRules(rules, false);
+            Features::Feature* offsetFeature = offsetBuilder->CommitFeature();
+            const tag_t offsetTag = offsetFeature != nullptr ? offsetFeature->Tag() : NULL_TAG;
+            offsetBuilder->Destroy();
+            if (offsetTag == NULL_TAG)
+            {
+                errorMessage = "The auxiliary rip was created, but its faces could not be offset by the clearance value.";
+                return false;
+            }
+            AppendDebugLog("auxiliary rip face offset created: rip=" + std::to_string(createdRipTag) +
+                           ", offset=" + std::to_string(offsetTag) +
+                           ", clearance=-" + inputs.clearanceValue);
+        }
+        return true;
+    }
+    catch (const NXException& ex)
+    {
+        if (ripBuilder != nullptr) ripBuilder->Destroy();
+        if (section != nullptr) section->Destroy();
+        errorMessage = "Failed to create or offset the sheet-metal rip.\n" + NxExceptionText(ex);
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+}
+
 bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                                                 bool& ripCreated,
+                                                tag_t& secondUdfTag,
+                                                std::vector<tag_t>& secondToolBodyTags,
+                                                std::vector<tag_t>& secondReferenceTags,
                                                 std::string& errorMessage) const
 {
     ripCreated = false;
+    secondUdfTag = NULL_TAG;
+    secondToolBodyTags.clear();
+    secondReferenceTags.clear();
     errorMessage.clear();
     if (!inputs.inferredFromSingleClick ||
         inputs.targetBody == nullptr ||
@@ -3490,6 +3939,11 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
     Point3d farEndpoint;
     double confirmingDistance = 0.0;
     double pairedRipDistance = 0.0;
+    bool useFallbackSecondUdf = false;
+    bool useAuxiliaryRipBranch = false;
+    Edge* auxiliaryRipEdge = nullptr;
+    Edge* auxiliaryParallelRipEdge = nullptr;
+    InferredInputs fallbackSecondInputs;
     const double lengthTolerance = std::max(kPlaneTolerance, inputs.thickness * 0.01);
 
     for (Edge* candidateRipEdge : inputs.targetBody->GetEdges())
@@ -3508,6 +3962,7 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
             continue;
         }
 
+        std::vector<Edge*> remainingEdgesAtQ;
         for (Edge* edgeAtFarEndpoint : inputs.targetBody->GetEdges())
         {
             if (edgeAtFarEndpoint == nullptr ||
@@ -3517,23 +3972,88 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                 continue;
             }
 
+            remainingEdgesAtQ.push_back(edgeAtFarEndpoint);
+        }
+
+        for (Edge* edgeAtFarEndpoint : remainingEdgesAtQ)
+        {
             Edge* parallelEdge = nullptr;
             double minimumDistance = 0.0;
-            if (!EdgeHasParallelMateAtThickness(inputs.targetBody,
-                                                edgeAtFarEndpoint,
-                                                inputs.thickness,
-                                                parallelEdge,
-                                                minimumDistance))
+            if (EdgeHasParallelMateAtThickness(inputs.targetBody,
+                                               edgeAtFarEndpoint,
+                                               inputs.thickness,
+                                               parallelEdge,
+                                               minimumDistance))
             {
-                continue;
+                ripEdge = candidateRipEdge;
+                confirmingEdge = edgeAtFarEndpoint;
+                confirmingParallelEdge = parallelEdge;
+                farEndpoint = candidateFarEndpoint;
+                confirmingDistance = minimumDistance;
+                break;
             }
+        }
 
+        InferredInputs candidateFallbackInputs;
+        Edge* fallbackFirstEdge = nullptr;
+        Edge* fallbackSecondEdge = nullptr;
+        if (ripEdge == nullptr)
+        {
+            for (std::size_t firstIndex = 0;
+                 firstIndex < remainingEdgesAtQ.size() && fallbackFirstEdge == nullptr;
+                 ++firstIndex)
+            {
+                for (std::size_t secondIndex = firstIndex + 1;
+                     secondIndex < remainingEdgesAtQ.size();
+                     ++secondIndex)
+                {
+                    Face* commonFace = FindPlanarFaceContainingEdges(
+                        inputs.targetBody,
+                        remainingEdgesAtQ[firstIndex],
+                        remainingEdgesAtQ[secondIndex]);
+                    Edge* candidateAuxiliaryRip = nullptr;
+                    Edge* candidateAuxiliaryParallel = nullptr;
+                    if (FindAuxiliaryRipPair(inputs.targetBody,
+                                             commonFace,
+                                             remainingEdgesAtQ[firstIndex],
+                                             remainingEdgesAtQ[secondIndex],
+                                             candidateAuxiliaryRip,
+                                             candidateAuxiliaryParallel))
+                    {
+                        fallbackFirstEdge = remainingEdgesAtQ[firstIndex];
+                        fallbackSecondEdge = remainingEdgesAtQ[secondIndex];
+                        auxiliaryRipEdge = candidateAuxiliaryRip;
+                        auxiliaryParallelRipEdge = candidateAuxiliaryParallel;
+                        useAuxiliaryRipBranch = true;
+                        break;
+                    }
+                    if (BuildFallbackSecondInputs(inputs,
+                                                  remainingEdgesAtQ[firstIndex],
+                                                  remainingEdgesAtQ[secondIndex],
+                                                  candidateFarEndpoint,
+                                                  candidateFallbackInputs))
+                    {
+                        fallbackFirstEdge = remainingEdgesAtQ[firstIndex];
+                        fallbackSecondEdge = remainingEdgesAtQ[secondIndex];
+                        break;
+                    }
+                }
+            }
+        }
+        if (ripEdge == nullptr && fallbackFirstEdge != nullptr && fallbackSecondEdge != nullptr)
+        {
             ripEdge = candidateRipEdge;
-            confirmingEdge = edgeAtFarEndpoint;
-            confirmingParallelEdge = parallelEdge;
+            confirmingEdge = fallbackFirstEdge;
             farEndpoint = candidateFarEndpoint;
-            confirmingDistance = minimumDistance;
-            break;
+            if (!useAuxiliaryRipBranch)
+            {
+                fallbackSecondInputs = candidateFallbackInputs;
+                useFallbackSecondUdf = true;
+            }
+            AppendDebugLog("TryCreateSecondPointRip fallback Q edges: first=" +
+                           std::to_string(fallbackFirstEdge->Tag()) +
+                           ", second=" + std::to_string(fallbackSecondEdge->Tag()) +
+                           ", excludedP2Q=" + std::to_string(candidateRipEdge->Tag()));
         }
         if (ripEdge != nullptr)
         {
@@ -3562,11 +4082,29 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         return false;
     }
 
+    const double ripEdgeLength = ripEdge->GetLength();
+    const double pairedRipEdgeLength = pairedRipEdge->GetLength();
+    const double pairedLengthTolerance =
+        std::max(kPlaneTolerance, std::max(ripEdgeLength, pairedRipEdgeLength) * 1.0e-4);
+    if (std::fabs(ripEdgeLength - pairedRipEdgeLength) > pairedLengthTolerance)
+    {
+        std::ostringstream mismatchTrace;
+        mismatchTrace << "TryCreateSecondPointRip skipped: P2-Q edge and nearest parallel edge lengths differ"
+                      << ", P2QEdge=" << ripEdge->Tag()
+                      << ", P2QLength=" << ripEdgeLength
+                      << ", nearestParallelEdge=" << pairedRipEdge->Tag()
+                      << ", nearestParallelLength=" << pairedRipEdgeLength
+                      << ", tolerance=" << pairedLengthTolerance;
+        AppendDebugLog(mismatchTrace.str());
+        return true;
+    }
+
     std::ostringstream trace;
     trace << "TryCreateSecondPointRip qualified: P2=" << FormatPoint(inputs.endPoint)
           << ", ripEdge=" << ripEdge->Tag()
-          << ", ripEdgeLength=" << ripEdge->GetLength()
+          << ", ripEdgeLength=" << ripEdgeLength
           << ", pairedRipEdge=" << pairedRipEdge->Tag()
+          << ", pairedRipEdgeLength=" << pairedRipEdgeLength
           << ", pairedRipDistance=" << pairedRipDistance
           << ", farEndpoint=" << FormatPoint(farEndpoint)
           << ", confirmingEdge=" << (confirmingEdge != nullptr ? confirmingEdge->Tag() : NULL_TAG)
@@ -3575,6 +4113,48 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
           << ", minimumParallelDistance=" << confirmingDistance
           << ", thickness=" << inputs.thickness;
     AppendDebugLog(trace.str());
+
+    if (useAuxiliaryRipBranch)
+    {
+        tag_t auxiliaryRipTag = NULL_TAG;
+        if (!CreateSheetMetalRip(inputs,
+                                 auxiliaryRipEdge,
+                                 auxiliaryParallelRipEdge,
+                                 true,
+                                 auxiliaryRipTag,
+                                 errorMessage))
+        {
+            return false;
+        }
+
+        // The auxiliary rip and offset alter the lengths of the P2-Q edges,
+        // but NX preserves these edge objects in this workflow.  Keep the
+        // original identifiers instead of attempting to rediscover them from
+        // endpoints that have moved because of the offset.
+        AppendDebugLog("auxiliary rip branch completed before P2-Q rip: auxiliaryRip=" +
+                       std::to_string(auxiliaryRipTag) +
+                       ", retainedP2Q=" + std::to_string(ripEdge->Tag()) +
+                       ", retainedP2QLength=" + FormatExpressionNumber(ripEdge->GetLength()) +
+                       ", retainedParallel=" + std::to_string(pairedRipEdge->Tag()) +
+                       ", retainedParallelLength=" + FormatExpressionNumber(pairedRipEdge->GetLength()));
+    }
+
+    // Required operation order for the no-parallel-edge fallback:
+    // second UDF first, then edge rip, then the refreshed primary UDF.
+    if (useFallbackSecondUdf)
+    {
+        if (!CreateUserDefinedFeature(fallbackSecondInputs,
+                                      errorMessage,
+                                      &secondUdfTag,
+                                      &secondReferenceTags,
+                                      &secondToolBodyTags))
+        {
+            return false;
+        }
+        AppendDebugLog("TryCreateSecondPointRip created fallback second UDF before rip, tag=" +
+                       std::to_string(secondUdfTag) +
+                       ", toolBodies=" + std::to_string(secondToolBodyTags.size()));
+    }
 
     Features::SheetMetal::EdgeRipBuilder* builder = nullptr;
     Section* section = nullptr;
@@ -3830,7 +4410,8 @@ double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) cons
 bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
                                                 std::string& errorMessage,
                                                 tag_t* createdUdfTag,
-                                                std::vector<tag_t>* createdReferenceTags) const
+                                                std::vector<tag_t>* createdReferenceTags,
+                                                std::vector<tag_t>* createdToolBodyTags) const
 {
     if (inputs.featureMode == FeatureMode::NinetyRight)
     {
@@ -3846,6 +4427,10 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
     if (createdReferenceTags != nullptr)
     {
         createdReferenceTags->clear();
+    }
+    if (createdToolBodyTags != nullptr)
+    {
+        createdToolBodyTags->clear();
     }
 
     Part* workPart = session_->Parts()->Work();
@@ -4280,82 +4865,93 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
     {
         UF_OBJ_delete_object(newUdf);
         deleteCreatedRefsOnFailure();
-        errorMessage = "The UDF was created, but its independent tool body could not be found for subtraction.";
-        AppendDebugLog(errorMessage);
-        return false;
-    }
-
-    tag_t finalResultFeature = NULL_TAG;
-    try
-    {
-        for (Body* toolBody : createdToolBodies)
-        {
-            if (toolBody == nullptr || toolBody->Tag() == inputs.targetBody->Tag())
-            {
-                continue;
-            }
-
-            Features::BooleanBuilder* booleanBuilder = workPart->Features()->CreateBooleanBuilder(nullptr);
-            booleanBuilder->SetOperation(Features::Feature::BooleanTypeSubtract);
-            booleanBuilder->SetTarget(inputs.targetBody);
-#pragma warning(push)
-#pragma warning(disable : 4996)
-            booleanBuilder->SetTool(toolBody);
-#pragma warning(pop)
-            booleanBuilder->SetRetainTarget(false);
-            booleanBuilder->SetRetainTool(false);
-            const tag_t toolTag = toolBody->Tag();
-            NXObject* booleanResult = booleanBuilder->Commit();
-            finalResultFeature = booleanResult != nullptr ? booleanResult->Tag() : NULL_TAG;
-            booleanBuilder->Destroy();
-            AppendDebugLog("UDF body subtraction: target=" + std::to_string(inputs.targetBody->Tag()) +
-                           ", tool=" + std::to_string(toolTag) +
-                           ", resultFeature=" + std::to_string(finalResultFeature));
-            if (finalResultFeature == NULL_TAG)
-            {
-                throw std::runtime_error("NX returned no Boolean Subtract feature.");
-            }
-        }
-    }
-    catch (const NXException& ex)
-    {
-        UF_OBJ_delete_object(newUdf);
-        deleteCreatedRefsOnFailure();
-        errorMessage = "The UDF body was created, but subtraction from the selected-face body failed.\n" +
-                       NxExceptionText(ex);
-        AppendDebugLog(errorMessage);
-        return false;
-    }
-    catch (const std::exception& ex)
-    {
-        UF_OBJ_delete_object(newUdf);
-        deleteCreatedRefsOnFailure();
-        errorMessage = std::string("The UDF body was created, but subtraction from the selected-face body failed.\n") +
-                       ex.what();
-        AppendDebugLog(errorMessage);
-        return false;
-    }
-
-    if (finalResultFeature == NULL_TAG)
-    {
-        UF_OBJ_delete_object(newUdf);
-        deleteCreatedRefsOnFailure();
-        errorMessage = "No Boolean Subtract feature was created from the UDF tool body.";
+        errorMessage = "The UDF was created, but its independent tool body could not be found.";
         AppendDebugLog(errorMessage);
         return false;
     }
 
     if (createdUdfTag != nullptr)
     {
-        *createdUdfTag = finalResultFeature;
+        *createdUdfTag = newUdf;
     }
     if (createdReferenceTags != nullptr)
     {
         *createdReferenceTags = createdRefs;
     }
+    if (createdToolBodyTags != nullptr)
+    {
+        for (Body* toolBody : createdToolBodies)
+        {
+            if (toolBody != nullptr)
+            {
+                createdToolBodyTags->push_back(toolBody->Tag());
+            }
+        }
+    }
     AppendDebugLog("created UDF instance tag=" + std::to_string(newUdf) +
-                   ", final subtract feature tag=" + std::to_string(finalResultFeature));
+                   ", deferred tool body count=" + std::to_string(createdToolBodies.size()));
     return true;
+}
+
+bool TwoPointSiBianUI::SubtractToolBodies(Body* targetBody,
+                                           const std::vector<tag_t>& toolBodyTags,
+                                           tag_t& resultFeatureTag,
+                                           std::string& errorMessage) const
+{
+    resultFeatureTag = NULL_TAG;
+    if (targetBody == nullptr || toolBodyTags.empty())
+    {
+        errorMessage = "No target body or UDF tool body is available for the final subtraction.";
+        return false;
+    }
+
+    Part* workPart = session_->Parts()->Work();
+    if (workPart == nullptr)
+    {
+        errorMessage = "No work part is active during the final subtraction.";
+        return false;
+    }
+
+    try
+    {
+        for (tag_t toolTag : toolBodyTags)
+        {
+            Body* toolBody = dynamic_cast<Body*>(NXObjectManager::Get(toolTag));
+            if (toolBody == nullptr || toolBody == targetBody)
+            {
+                errorMessage = "A deferred UDF tool body is no longer available for subtraction.";
+                return false;
+            }
+
+            Features::BooleanBuilder* builder = workPart->Features()->CreateBooleanBuilder(nullptr);
+            builder->SetOperation(Features::Feature::BooleanTypeSubtract);
+            builder->SetTarget(targetBody);
+#pragma warning(push)
+#pragma warning(disable : 4996)
+            builder->SetTool(toolBody);
+#pragma warning(pop)
+            builder->SetRetainTarget(false);
+            builder->SetRetainTool(false);
+            NXObject* result = builder->Commit();
+            resultFeatureTag = result != nullptr ? result->Tag() : NULL_TAG;
+            builder->Destroy();
+            if (resultFeatureTag == NULL_TAG)
+            {
+                errorMessage = "NX returned no feature from the final Boolean Subtract.";
+                return false;
+            }
+            AppendDebugLog("final deferred subtraction: target=" + std::to_string(targetBody->Tag()) +
+                           ", tool=" + std::to_string(toolTag) +
+                           ", resultFeature=" + std::to_string(resultFeatureTag));
+        }
+    }
+    catch (const NXException& ex)
+    {
+        errorMessage = "Final subtraction of the UDF tool bodies failed.\n" + NxExceptionText(ex);
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+    return resultFeatureTag != NULL_TAG;
 }
 
 void TwoPointSiBianUI::ConfigurePointSelection(NXOpen::BlockStyler::SelectObject* block) const

@@ -77,6 +77,7 @@ private:
     bool InferEndpointsFromFaceClick(NXOpen::TaggedObject* selectedObject,
                                      const NXOpen::Point3d& clickPoint,
                                      InferredInputs& inputs) const;
+    bool CompleteInputsForEndpoints(InferredInputs& inputs) const;
     NXOpen::Body* FindBody(NXOpen::TaggedObject* object) const;
     NXOpen::Body* FindBodyAndFaceContainingPoints(const NXOpen::Point3d& first,
                                                   const NXOpen::Point3d& second,
@@ -110,13 +111,44 @@ private:
                                         double thickness,
                                         NXOpen::Edge*& parallelEdge,
                                         double& minimumDistance) const;
+    NXOpen::Face* FindPlanarFaceContainingEdges(NXOpen::Body* body,
+                                                NXOpen::Edge* first,
+                                                NXOpen::Edge* second) const;
+    NXOpen::Face* FindParallelFaceAtThickness(NXOpen::Body* body,
+                                              NXOpen::Face* sourceFace,
+                                              double thickness) const;
+    bool BuildFallbackSecondInputs(const InferredInputs& sourceInputs,
+                                   NXOpen::Edge* firstEdgeAtQ,
+                                   NXOpen::Edge* secondEdgeAtQ,
+                                   const NXOpen::Point3d& qPoint,
+                                   InferredInputs& secondInputs) const;
+    bool FindAuxiliaryRipPair(NXOpen::Body* body,
+                              NXOpen::Face* commonFace,
+                              NXOpen::Edge* b1,
+                              NXOpen::Edge* b2,
+                              NXOpen::Edge*& edgeToRip,
+                              NXOpen::Edge*& parallelRipEdge) const;
+    bool CreateSheetMetalRip(const InferredInputs& inputs,
+                             NXOpen::Edge* firstEdge,
+                             NXOpen::Edge* secondEdge,
+                             bool offsetCreatedFaces,
+                             tag_t& createdRipTag,
+                             std::string& errorMessage) const;
     bool TryCreateSecondPointRip(const InferredInputs& inputs,
                                  bool& ripCreated,
+                                 tag_t& secondUdfTag,
+                                 std::vector<tag_t>& secondToolBodyTags,
+                                 std::vector<tag_t>& secondReferenceTags,
                                  std::string& errorMessage) const;
     bool CreateUserDefinedFeature(const InferredInputs& inputs,
                                   std::string& errorMessage,
                                   tag_t* createdUdfTag = nullptr,
-                                  std::vector<tag_t>* createdReferenceTags = nullptr) const;
+                                  std::vector<tag_t>* createdReferenceTags = nullptr,
+                                  std::vector<tag_t>* createdToolBodyTags = nullptr) const;
+    bool SubtractToolBodies(NXOpen::Body* targetBody,
+                            const std::vector<tag_t>& toolBodyTags,
+                            tag_t& resultFeatureTag,
+                            std::string& errorMessage) const;
     bool CreatePreview();
     void UndoPreview();
     void CommitPreview();
