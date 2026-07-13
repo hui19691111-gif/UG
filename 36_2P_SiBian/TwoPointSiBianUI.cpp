@@ -1,4 +1,4 @@
-#include "TwoPointSiBianUI.hpp"
+﻿#include "TwoPointSiBianUI.hpp"
 
 #include <NXOpen/BlockStyler_Enumeration.hxx>
 #include <NXOpen/BlockStyler_PropertyList.hxx>
@@ -8,21 +8,28 @@
 #include <NXOpen/Features_CustomAttribute.hxx>
 #include <NXOpen/Features_CustomAttributeCollection.hxx>
 #include <NXOpen/Features_CustomDoubleAttribute.hxx>
+#include <NXOpen/Features_BooleanBuilder.hxx>
 #include <NXOpen/Features_CustomFeatureBuilder.hxx>
 #include <NXOpen/Features_CustomFeatureData.hxx>
 #include <NXOpen/Features_CustomFeatureDataCollection.hxx>
 #include <NXOpen/Features_CustomTagAttribute.hxx>
+#include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_SheetMetal_EdgeRipBuilder.hxx>
+#include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
 #include <NXOpen/MeasureDistance.hxx>
 #include <NXOpen/MeasureFaces.hxx>
 #include <NXOpen/MeasureManager.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
+#include <NXOpen/NXObjectManager.hxx>
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/Point.hxx>
 #include <NXOpen/PointCollection.hxx>
+#include <NXOpen/Section.hxx>
+#include <NXOpen/SectionCollection.hxx>
 #include <NXOpen/TaggedObject.hxx>
 #include <NXOpen/Unit.hxx>
 #include <NXOpen/UnitCollection.hxx>
@@ -32,6 +39,7 @@
 #include <uf_modl.h>
 #include <uf_modl_expressions_retiring.h>
 #include <uf_modl_udf.h>
+#include <uf_modl_utilities.h>
 #include <uf_obj.h>
 #include <uf_object_types.h>
 #include <uf_part.h>
@@ -60,6 +68,7 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <set>
 #include <string>
 #include <ctime>
 #include <vector>
@@ -70,9 +79,34 @@ namespace
 {
 constexpr double kPointTolerance = 1.0e-4;
 constexpr double kPlaneTolerance = 1.0e-3;
+constexpr double kThicknessProjectionOverlapRatio = 0.60;
+constexpr double kThicknessProjectionAreaErrorRatio = 0.05;
+constexpr double kEndpointPairMinimumAngleDegrees = 150.0;
+constexpr double kEndpointPairMaximumAngleDegrees = 180.0;
+constexpr double kConvexCornerMaximumAngleDegrees = 180.0;
 constexpr const char* kTemplatePartName = "2p_SiBian_1.prt";
 constexpr const char* kTemplate90LeftPartName = "2P_SiBian_90R.prt";
 constexpr const wchar_t* kTempTemplateRoot = L"ZhihuiSheetMetal\\UDF\\36_2P_SiBian";
+
+struct ProjectionPoint2d
+{
+    double x = 0.0;
+    double y = 0.0;
+};
+
+struct ThicknessCandidate
+{
+    Face* face = nullptr;
+    double planeDistance = 0.0;
+    double signedPlaneDistance = 0.0;
+};
+
+struct BoundaryPointCandidate
+{
+    Point3d point;
+    double distance = 0.0;
+    double thicknessScore = 0.0;
+};
 
 struct UdfTemplateSpec
 {
@@ -892,6 +926,666 @@ bool FaceNormal(Face* face, Vector3d& normal)
     return false;
 }
 
+bool FacePlanePoint(Face* face, Point3d& point)
+{
+    if (face == nullptr || face->SolidFaceType() != Face::FaceTypePlanar)
+    {
+        return false;
+    }
+
+    int faceType = 0;
+    double facePoint[3] = {0.0, 0.0, 0.0};
+    double faceDirection[3] = {0.0, 0.0, 0.0};
+    double faceBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double faceRadius = 0.0;
+    double faceRadData = 0.0;
+    int normalDirection = 1;
+    const int result = UF_MODL_ask_face_data(face->Tag(),
+                                             &faceType,
+                                             facePoint,
+                                             faceDirection,
+                                             faceBox,
+                                             &faceRadius,
+                                             &faceRadData,
+                                             &normalDirection);
+    if (result == 0)
+    {
+        point = Point3d(facePoint[0], facePoint[1], facePoint[2]);
+        return true;
+    }
+
+    std::vector<Edge*> edges = face->GetEdges();
+    if (edges.empty())
+    {
+        AppendDebugLog("FacePlanePoint failed: " + std::to_string(result) + " " + UfMessage(result));
+        return false;
+    }
+
+    Point3d unused;
+    try
+    {
+        edges.front()->GetVertices(&point, &unused);
+        AppendDebugLog("FacePlanePoint used edge vertex fallback after UF failure: " +
+                       std::to_string(result) + " " + UfMessage(result));
+        return true;
+    }
+    catch (...)
+    {
+        AppendDebugLog("FacePlanePoint failed to read fallback edge vertex.");
+        return false;
+    }
+}
+
+bool FacePlaneData(Face* face, Point3d& point, Vector3d& normal)
+{
+    if (face == nullptr || face->SolidFaceType() != Face::FaceTypePlanar)
+    {
+        return false;
+    }
+
+    int faceType = 0;
+    double facePoint[3] = {0.0, 0.0, 0.0};
+    double faceDirection[3] = {0.0, 0.0, 0.0};
+    double faceBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double faceRadius = 0.0;
+    double faceRadData = 0.0;
+    int normalDirection = 1;
+    const int result = UF_MODL_ask_face_data(face->Tag(),
+                                             &faceType,
+                                             facePoint,
+                                             faceDirection,
+                                             faceBox,
+                                             &faceRadius,
+                                             &faceRadData,
+                                             &normalDirection);
+    if (result != 0)
+    {
+        return false;
+    }
+
+    point = Point3d(facePoint[0], facePoint[1], facePoint[2]);
+    normal = Vector3d(faceDirection[0] * normalDirection,
+                      faceDirection[1] * normalDirection,
+                      faceDirection[2] * normalDirection);
+    return Normalize(normal);
+}
+
+bool AlmostSamePoint(const Point3d& first, const Point3d& second)
+{
+    return Distance(first, second) <= kPlaneTolerance;
+}
+
+bool FaceBoundaryPoints(Face* face, std::vector<Point3d>& points)
+{
+    points.clear();
+    if (face == nullptr)
+    {
+        return false;
+    }
+
+    auto addUniquePoint = [&points](const Point3d& point) {
+        for (const Point3d& existing : points)
+        {
+            if (AlmostSamePoint(existing, point))
+            {
+                return;
+            }
+        }
+        points.push_back(point);
+    };
+
+    try
+    {
+        uf_loop_p_t loopList = nullptr;
+        const int loopResult = UF_MODL_ask_face_loops(face->Tag(), &loopList);
+        if (loopResult == 0 && loopList != nullptr)
+        {
+            int loopCount = 0;
+            UF_MODL_ask_loop_list_count(loopList, &loopCount);
+            for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)
+            {
+                int loopType = 0;
+                uf_list_p_t edgeList = nullptr;
+                if (UF_MODL_ask_loop_list_item(loopList, loopIndex, &loopType, &edgeList) != 0 ||
+                    loopType != 1 ||
+                    edgeList == nullptr)
+                {
+                    continue;
+                }
+
+                int edgeCount = 0;
+                UF_MODL_ask_list_count(edgeList, &edgeCount);
+                for (int edgeIndex = 0; edgeIndex < edgeCount; ++edgeIndex)
+                {
+                    tag_t edgeTag = NULL_TAG;
+                    if (UF_MODL_ask_list_item(edgeList, edgeIndex, &edgeTag) != 0 || edgeTag == NULL_TAG)
+                    {
+                        continue;
+                    }
+
+                    Edge* edge = dynamic_cast<Edge*>(NXOpen::NXObjectManager::Get(edgeTag));
+                    if (edge == nullptr)
+                    {
+                        continue;
+                    }
+
+                    Point3d first;
+                    Point3d second;
+                    edge->GetVertices(&first, &second);
+                    addUniquePoint(first);
+                    addUniquePoint(second);
+                }
+            }
+
+            UF_MODL_delete_loop_list(&loopList);
+            if (points.size() >= 2)
+            {
+                AppendDebugLog("FaceBoundaryPoints used peripheral loop points=" + std::to_string(points.size()) +
+                               " face=" + std::to_string(face->Tag()));
+                return true;
+            }
+        }
+
+        if (loopList != nullptr)
+        {
+            UF_MODL_delete_loop_list(&loopList);
+        }
+        AppendDebugLog("FaceBoundaryPoints peripheral loop unavailable; falling back to all face edges. result=" +
+                       std::to_string(loopResult));
+    }
+    catch (const NXException& ex)
+    {
+        AppendDebugLog("FaceBoundaryPoints peripheral loop NXException: " + UfMessage(ex.ErrorCode()));
+        points.clear();
+    }
+    catch (...)
+    {
+        AppendDebugLog("FaceBoundaryPoints peripheral loop unknown exception.");
+        points.clear();
+    }
+
+    try
+    {
+        for (Edge* edge : face->GetEdges())
+        {
+            if (edge == nullptr)
+            {
+                continue;
+            }
+
+            Point3d first;
+            Point3d second;
+            edge->GetVertices(&first, &second);
+            addUniquePoint(first);
+            addUniquePoint(second);
+        }
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    AppendDebugLog("FaceBoundaryPoints used fallback edge points=" + std::to_string(points.size()) +
+                   " face=" + std::to_string(face->Tag()));
+    return points.size() >= 2;
+}
+
+bool FaceHasEdge(Face* face, Edge* edge)
+{
+    if (face == nullptr || edge == nullptr)
+    {
+        return false;
+    }
+
+    try
+    {
+        const tag_t edgeTag = edge->Tag();
+        for (Edge* faceEdge : face->GetEdges())
+        {
+            if (faceEdge != nullptr && faceEdge->Tag() == edgeTag)
+            {
+                return true;
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+
+    return false;
+}
+
+double AngleDegrees(const Vector3d& first, const Vector3d& second)
+{
+    Vector3d firstDirection = first;
+    Vector3d secondDirection = second;
+    if (!Normalize(firstDirection) || !Normalize(secondDirection))
+    {
+        return -1.0;
+    }
+
+    const double cosine = std::max(-1.0, std::min(1.0, Dot(firstDirection, secondDirection)));
+    return std::acos(cosine) * 180.0 / 3.14159265358979323846;
+}
+
+bool PointContainmentOnFace(Face* face, const Point3d& point, int& status)
+{
+    status = 0;
+    if (face == nullptr)
+    {
+        return false;
+    }
+
+    double coordinates[3] = {point.X, point.Y, point.Z};
+    return UF_MODL_ask_point_containment(coordinates, face->Tag(), &status) == 0;
+}
+
+bool FaceInteriorCornerAngle(Face* face, const Point3d& corner, double& interiorAngle)
+{
+    interiorAngle = 0.0;
+    if (face == nullptr)
+    {
+        return false;
+    }
+
+    struct ConnectedDirection
+    {
+        Vector3d direction;
+        double edgeLength = 0.0;
+        tag_t edgeTag = NULL_TAG;
+    };
+
+    std::vector<ConnectedDirection> connectedDirections;
+    try
+    {
+        for (Edge* edge : face->GetEdges())
+        {
+            if (edge == nullptr || !EdgeTouchesPoint(edge, corner))
+            {
+                continue;
+            }
+
+            Vector3d direction;
+            if (!EdgeDirectionAwayFromPoint(edge, corner, direction))
+            {
+                continue;
+            }
+
+            bool duplicate = false;
+            for (const ConnectedDirection& existing : connectedDirections)
+            {
+                if (std::fabs(Dot(existing.direction, direction)) > 1.0 - 1.0e-6)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate)
+            {
+                connectedDirections.push_back({direction, edge->GetLength(), edge->Tag()});
+            }
+        }
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    if (connectedDirections.size() != 2)
+    {
+        AppendDebugLog("FaceInteriorCornerAngle requires exactly two face edges at corner=" +
+                       FormatPoint(corner) + ", actual=" + std::to_string(connectedDirections.size()));
+        return false;
+    }
+
+    const Vector3d& first = connectedDirections[0].direction;
+    const Vector3d& second = connectedDirections[1].direction;
+    const double smallerAngle = AngleDegrees(first, second);
+    if (smallerAngle < 0.0)
+    {
+        return false;
+    }
+
+    Vector3d smallerBisector(first.X + second.X,
+                             first.Y + second.Y,
+                             first.Z + second.Z);
+    if (!Normalize(smallerBisector))
+    {
+        interiorAngle = 180.0;
+        return true;
+    }
+
+    const double shortestEdge = std::min(connectedDirections[0].edgeLength,
+                                         connectedDirections[1].edgeLength);
+    if (shortestEdge <= kPointTolerance)
+    {
+        return false;
+    }
+
+    const std::array<double, 3> sampleRatios = {0.02, 0.05, 0.10};
+    int smallerStatus = 0;
+    int oppositeStatus = 0;
+    bool smallerInside = false;
+    bool oppositeInside = false;
+    for (double ratio : sampleRatios)
+    {
+        const double sampleDistance = std::min(shortestEdge * 0.25,
+                                               std::max(kPlaneTolerance * 2.0, shortestEdge * ratio));
+        const Point3d smallerSample(corner.X + smallerBisector.X * sampleDistance,
+                                    corner.Y + smallerBisector.Y * sampleDistance,
+                                    corner.Z + smallerBisector.Z * sampleDistance);
+        const Point3d oppositeSample(corner.X - smallerBisector.X * sampleDistance,
+                                     corner.Y - smallerBisector.Y * sampleDistance,
+                                     corner.Z - smallerBisector.Z * sampleDistance);
+        if (PointContainmentOnFace(face, smallerSample, smallerStatus) && smallerStatus == 1)
+        {
+            smallerInside = true;
+        }
+        if (PointContainmentOnFace(face, oppositeSample, oppositeStatus) && oppositeStatus == 1)
+        {
+            oppositeInside = true;
+        }
+        if (smallerInside != oppositeInside)
+        {
+            break;
+        }
+    }
+
+    if (smallerInside == oppositeInside)
+    {
+        AppendDebugLog("FaceInteriorCornerAngle containment was ambiguous at corner=" +
+                       FormatPoint(corner) + ", smallerStatus=" + std::to_string(smallerStatus) +
+                       ", oppositeStatus=" + std::to_string(oppositeStatus));
+        return false;
+    }
+
+    interiorAngle = smallerInside ? smallerAngle : 360.0 - smallerAngle;
+    std::ostringstream trace;
+    trace << "FaceInteriorCornerAngle corner=" << FormatPoint(corner)
+          << ", edges=(" << connectedDirections[0].edgeTag << ","
+          << connectedDirections[1].edgeTag << ")"
+          << ", smallerAngle=" << smallerAngle
+          << ", smallerInside=" << (smallerInside ? "true" : "false")
+          << ", interiorAngle=" << interiorAngle;
+    AppendDebugLog(trace.str());
+    return true;
+}
+
+ProjectionPoint2d ProjectToPlane2d(const Point3d& point,
+                         const Point3d& origin,
+                         const Vector3d& xAxis,
+                         const Vector3d& yAxis)
+{
+    const Vector3d vector = Subtract(point, origin);
+    return {Dot(vector, xAxis), Dot(vector, yAxis)};
+}
+
+double SignedPolygonArea(const std::vector<ProjectionPoint2d>& polygon)
+{
+    if (polygon.size() < 3)
+    {
+        return 0.0;
+    }
+
+    double area = 0.0;
+    for (std::size_t i = 0; i < polygon.size(); ++i)
+    {
+        const ProjectionPoint2d& a = polygon[i];
+        const ProjectionPoint2d& b = polygon[(i + 1) % polygon.size()];
+        area += a.x * b.y - b.x * a.y;
+    }
+    return area * 0.5;
+}
+
+double PolygonArea(const std::vector<ProjectionPoint2d>& polygon)
+{
+    return std::fabs(SignedPolygonArea(polygon));
+}
+
+std::vector<ProjectionPoint2d> SortPolygonByAngle(std::vector<ProjectionPoint2d> polygon)
+{
+    if (polygon.size() < 3)
+    {
+        return polygon;
+    }
+
+    ProjectionPoint2d centroid;
+    for (const ProjectionPoint2d& point : polygon)
+    {
+        centroid.x += point.x;
+        centroid.y += point.y;
+    }
+    centroid.x /= static_cast<double>(polygon.size());
+    centroid.y /= static_cast<double>(polygon.size());
+
+    std::sort(polygon.begin(), polygon.end(), [centroid](const ProjectionPoint2d& first, const ProjectionPoint2d& second) {
+        const double firstAngle = std::atan2(first.y - centroid.y, first.x - centroid.x);
+        const double secondAngle = std::atan2(second.y - centroid.y, second.x - centroid.x);
+        return firstAngle < secondAngle;
+    });
+
+    if (SignedPolygonArea(polygon) < 0.0)
+    {
+        std::reverse(polygon.begin(), polygon.end());
+    }
+    return polygon;
+}
+
+double Cross2d(const ProjectionPoint2d& origin, const ProjectionPoint2d& first, const ProjectionPoint2d& second)
+{
+    return (first.x - origin.x) * (second.y - origin.y) -
+           (first.y - origin.y) * (second.x - origin.x);
+}
+
+ProjectionPoint2d IntersectLines2d(const ProjectionPoint2d& firstStart,
+                         const ProjectionPoint2d& firstEnd,
+                         const ProjectionPoint2d& secondStart,
+                         const ProjectionPoint2d& secondEnd)
+{
+    const double x1 = firstStart.x;
+    const double y1 = firstStart.y;
+    const double x2 = firstEnd.x;
+    const double y2 = firstEnd.y;
+    const double x3 = secondStart.x;
+    const double y3 = secondStart.y;
+    const double x4 = secondEnd.x;
+    const double y4 = secondEnd.y;
+    const double denominator = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+    if (std::fabs(denominator) <= 1.0e-9)
+    {
+        return firstEnd;
+    }
+
+    const double firstDet = x1 * y2 - y1 * x2;
+    const double secondDet = x3 * y4 - y3 * x4;
+    return {
+        (firstDet * (x3 - x4) - (x1 - x2) * secondDet) / denominator,
+        (firstDet * (y3 - y4) - (y1 - y2) * secondDet) / denominator};
+}
+
+std::vector<ProjectionPoint2d> ClipPolygonByConvexPolygon(std::vector<ProjectionPoint2d> subject,
+                                                const std::vector<ProjectionPoint2d>& clip)
+{
+    if (subject.size() < 3 || clip.size() < 3)
+    {
+        return {};
+    }
+
+    std::vector<ProjectionPoint2d> output = std::move(subject);
+    for (std::size_t i = 0; i < clip.size(); ++i)
+    {
+        const ProjectionPoint2d clipStart = clip[i];
+        const ProjectionPoint2d clipEnd = clip[(i + 1) % clip.size()];
+        const std::vector<ProjectionPoint2d> input = output;
+        output.clear();
+        if (input.empty())
+        {
+            break;
+        }
+
+        auto inside = [clipStart, clipEnd](const ProjectionPoint2d& point) {
+            return Cross2d(clipStart, clipEnd, point) >= -1.0e-6;
+        };
+
+        ProjectionPoint2d previous = input.back();
+        bool previousInside = inside(previous);
+        for (const ProjectionPoint2d& current : input)
+        {
+            const bool currentInside = inside(current);
+            if (currentInside)
+            {
+                if (!previousInside)
+                {
+                    output.push_back(IntersectLines2d(previous, current, clipStart, clipEnd));
+                }
+                output.push_back(current);
+            }
+            else if (previousInside)
+            {
+                output.push_back(IntersectLines2d(previous, current, clipStart, clipEnd));
+            }
+
+            previous = current;
+            previousInside = currentInside;
+        }
+    }
+
+    return output;
+}
+
+bool FaceProjectionPolygon(Face* face,
+                           const Point3d& origin,
+                           const Vector3d& xAxis,
+                           const Vector3d& yAxis,
+                           std::vector<ProjectionPoint2d>& polygon)
+{
+    std::vector<Point3d> boundaryPoints;
+    if (!FaceBoundaryPoints(face, boundaryPoints))
+    {
+        return false;
+    }
+
+    polygon.clear();
+    for (const Point3d& point : boundaryPoints)
+    {
+        polygon.push_back(ProjectToPlane2d(point, origin, xAxis, yAxis));
+    }
+    polygon = SortPolygonByAngle(std::move(polygon));
+    return PolygonArea(polygon) > kPointTolerance;
+}
+
+bool FaceProjectionAxes(Face* face, const Vector3d& normal, Vector3d& xAxis, Vector3d& yAxis)
+{
+    std::vector<Edge*> edges = face != nullptr ? face->GetEdges() : std::vector<Edge*>();
+    for (Edge* edge : edges)
+    {
+        if (edge == nullptr)
+        {
+            continue;
+        }
+
+        Point3d first;
+        Point3d second;
+        try
+        {
+            edge->GetVertices(&first, &second);
+        }
+        catch (...)
+        {
+            continue;
+        }
+
+        xAxis = Subtract(second, first);
+        const double normalComponent = Dot(xAxis, normal);
+        xAxis.X -= normal.X * normalComponent;
+        xAxis.Y -= normal.Y * normalComponent;
+        xAxis.Z -= normal.Z * normalComponent;
+        if (Normalize(xAxis))
+        {
+            yAxis = Cross(normal, xAxis);
+            return Normalize(yAxis);
+        }
+    }
+
+    Vector3d seed(std::fabs(normal.X) < 0.9 ? 1.0 : 0.0,
+                  std::fabs(normal.X) < 0.9 ? 0.0 : 1.0,
+                  0.0);
+    xAxis = Cross(seed, normal);
+    if (!Normalize(xAxis))
+    {
+        return false;
+    }
+
+    yAxis = Cross(normal, xAxis);
+    return Normalize(yAxis);
+}
+
+double ProjectedOverlapRatio(Face* baseFace,
+                             Face* candidateFace,
+                             const Point3d& origin,
+                             const Vector3d& xAxis,
+                             const Vector3d& yAxis,
+                             double& overlapArea,
+                             double& baseProjectedArea,
+                             double& candidateProjectedArea)
+{
+    overlapArea = 0.0;
+    baseProjectedArea = 0.0;
+    candidateProjectedArea = 0.0;
+
+    std::vector<ProjectionPoint2d> basePolygon;
+    std::vector<ProjectionPoint2d> candidatePolygon;
+    if (!FaceProjectionPolygon(baseFace, origin, xAxis, yAxis, basePolygon) ||
+        !FaceProjectionPolygon(candidateFace, origin, xAxis, yAxis, candidatePolygon))
+    {
+        return 0.0;
+    }
+
+    baseProjectedArea = PolygonArea(basePolygon);
+    candidateProjectedArea = PolygonArea(candidatePolygon);
+    if (baseProjectedArea <= kPointTolerance || candidateProjectedArea <= kPointTolerance)
+    {
+        return 0.0;
+    }
+
+    const std::vector<ProjectionPoint2d> intersection = ClipPolygonByConvexPolygon(candidatePolygon, basePolygon);
+    overlapArea = PolygonArea(intersection);
+    return overlapArea / baseProjectedArea;
+}
+
+double ProjectedOverlapRatioWithBase(const std::vector<ProjectionPoint2d>& basePolygon,
+                                     double baseProjectedArea,
+                                     Face* candidateFace,
+                                     const Point3d& origin,
+                                     const Vector3d& xAxis,
+                                     const Vector3d& yAxis,
+                                     double& overlapArea,
+                                     double& candidateProjectedArea)
+{
+    overlapArea = 0.0;
+    candidateProjectedArea = 0.0;
+    if (basePolygon.size() < 3 || baseProjectedArea <= kPointTolerance)
+    {
+        return 0.0;
+    }
+
+    std::vector<ProjectionPoint2d> candidatePolygon;
+    if (!FaceProjectionPolygon(candidateFace, origin, xAxis, yAxis, candidatePolygon))
+    {
+        return 0.0;
+    }
+
+    candidateProjectedArea = PolygonArea(candidatePolygon);
+    if (candidateProjectedArea <= kPointTolerance)
+    {
+        return 0.0;
+    }
+
+    const std::vector<ProjectionPoint2d> intersection = ClipPolygonByConvexPolygon(candidatePolygon, basePolygon);
+    overlapArea = PolygonArea(intersection);
+    return overlapArea / baseProjectedArea;
+}
+
 bool PointOnFacePlane(Face* face, const Point3d& point)
 {
     if (face == nullptr)
@@ -1249,15 +1943,15 @@ bool AllocateUdfExpressionValues(UF_MODL_udf_exp_data_t& expData,
             value = clearanceValue;
         }
         else
-        if (ContainsAny(expressionName, {"板厚", "banhou", "thickness", "sheet"}))
+        if (ContainsAny(expressionName, {"鏉垮帤", "banhou", "thickness", "sheet"}))
         {
             value = sheetThicknessValue;
         }
-        else if (ContainsAny(expressionName, {"折弯r", "折弯R", "bend", "radius", "r"}))
+        else if (ContainsAny(expressionName, {"鎶樺集r", "鎶樺集R", "bend", "radius", "r"}))
         {
             value = bendRadiusValue;
         }
-        else if (ContainsAny(expressionName, {"间隙", "gap", "clearance"}))
+        else if (ContainsAny(expressionName, {"闂撮殭", "gap", "clearance"}))
         {
             value = clearanceValue;
         }
@@ -1621,11 +2315,11 @@ void TwoPointSiBianUI::initialize_cb()
     if (featureModeBlock_ != nullptr)
     {
         std::vector<NXString> members;
-        members.emplace_back("斜角", NXString::UTF8);
-        members.emplace_back("90度左", NXString::UTF8);
-        members.emplace_back("90度右", NXString::UTF8);
+        members.emplace_back("鏂滆", NXString::UTF8);
+        members.emplace_back("90搴﹀乏", NXString::UTF8);
+        members.emplace_back("90搴﹀彸", NXString::UTF8);
         featureModeBlock_->SetEnumMembers(members);
-        featureModeBlock_->SetValueAsString(NXString("斜角", NXString::UTF8));
+        featureModeBlock_->SetValueAsString(NXString("鏂滆", NXString::UTF8));
         AppendDebugLog("feature mode enum initialized.");
     }
     else
@@ -1650,11 +2344,11 @@ TwoPointSiBianUI::FeatureMode TwoPointSiBianUI::ReadFeatureMode() const
         const char* text = value.GetUTF8Text();
         const std::string mode = text != nullptr ? text : "";
         AppendDebugLog("read feature mode=" + mode);
-        if (mode == "90度左")
+        if (mode == "90搴﹀乏")
         {
             return FeatureMode::NinetyLeft;
         }
-        if (mode == "90度右")
+        if (mode == "90搴﹀彸")
         {
             return FeatureMode::NinetyRight;
         }
@@ -1681,9 +2375,14 @@ bool TwoPointSiBianUI::enable_ok_cb()
     TaggedObject* endObject = nullptr;
     Point3d startPoint;
     Point3d endPoint;
-    return ReadSelectedPoint(startPointBlock_, startObject, startPoint) &&
-           ReadSelectedPoint(endPointBlock_, endObject, endPoint) &&
-           Distance(startPoint, endPoint) > kPointTolerance;
+    const bool hasStart = ReadSelectedPoint(startPointBlock_, startObject, startPoint);
+    const bool hasEnd = ReadSelectedPoint(endPointBlock_, endObject, endPoint);
+    if (hasStart && hasEnd && Distance(startPoint, endPoint) > kPointTolerance)
+    {
+        return true;
+    }
+
+    return hasEnd || hasStart;
 }
 
 int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
@@ -1696,7 +2395,10 @@ int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
             isUpdatingPreview_ = true;
             const bool ok = CreatePreview();
             isUpdatingPreview_ = false;
-            return ok ? 0 : 1;
+            if (!ok)
+            {
+                AppendDebugLog("update_cb preview failed; keeping dialog input accepted.");
+            }
         }
     }
     else
@@ -1763,14 +2465,40 @@ bool TwoPointSiBianUI::CreatePreview()
     AppendDebugLog("CreatePreview entered");
     UndoPreview();
 
+    previewUndoMark_ = session_->SetUndoMark(Session::MarkVisibilityInvisible, "2P_SiBian Preview");
+
     InferredInputs inputs;
     if (!ReadInputs(inputs))
     {
         AppendDebugLog("CreatePreview ReadInputs failed.");
+        UndoPreview();
         return false;
     }
 
-    previewUndoMark_ = session_->SetUndoMark(Session::MarkVisibilityInvisible, "2P_SiBian Preview");
+    if (inputs.inferredFromSingleClick)
+    {
+        bool ripCreated = false;
+        std::string ripError;
+        if (!TryCreateSecondPointRip(inputs, ripCreated, ripError))
+        {
+            UndoPreview();
+            ShowError(ripError);
+            return false;
+        }
+        if (ripCreated)
+        {
+            AppendDebugLog("CreatePreview edge rip committed; recalculating P2 from the original selection click.");
+            InferredInputs refreshedInputs;
+            if (!ReadInputs(refreshedInputs))
+            {
+                UndoPreview();
+                ShowError("The second endpoint could not be recalculated after creating the sheet-metal rip.");
+                return false;
+            }
+            inputs = refreshedInputs;
+        }
+    }
+
     std::string errorMessage;
     tag_t createdUdfTag = NULL_TAG;
     std::vector<tag_t> createdReferenceTags;
@@ -1800,34 +2528,16 @@ void TwoPointSiBianUI::UndoPreview()
         return;
     }
 
-    if (previewUdfTag_ != NULL_TAG)
-    {
-        const int deleteResult = UF_OBJ_delete_object(previewUdfTag_);
-        AppendDebugLog("UndoPreview delete udf tag=" + std::to_string(previewUdfTag_) +
-                       ", result=" + std::to_string(deleteResult) +
-                       " " + UfMessage(deleteResult));
-        previewUdfTag_ = NULL_TAG;
-    }
-
-    for (tag_t referenceTag : previewReferenceTags_)
-    {
-        if (referenceTag == NULL_TAG)
-        {
-            continue;
-        }
-
-        const int deleteResult = UF_OBJ_delete_object(referenceTag);
-        AppendDebugLog("UndoPreview delete reference tag=" + std::to_string(referenceTag) +
-                       ", result=" + std::to_string(deleteResult) +
-                       " " + UfMessage(deleteResult));
-    }
-    previewReferenceTags_.clear();
-
+    bool undoSucceeded = false;
     try
     {
-        AppendDebugLog("UndoPreview undoing mark=" + std::to_string(static_cast<int>(previewUndoMark_)));
-        session_->UndoToMark(previewUndoMark_, "2P_SiBian Preview");
-        session_->DeleteUndoMark(previewUndoMark_, "2P_SiBian Preview");
+        if (previewUndoMark_ != static_cast<Session::UndoMarkId>(0))
+        {
+            AppendDebugLog("UndoPreview undoing mark=" + std::to_string(static_cast<int>(previewUndoMark_)));
+            session_->UndoToMark(previewUndoMark_, "2P_SiBian Preview");
+            session_->DeleteUndoMark(previewUndoMark_, "2P_SiBian Preview");
+            undoSucceeded = true;
+        }
     }
     catch (const NXException& ex)
     {
@@ -1836,6 +2546,29 @@ void TwoPointSiBianUI::UndoPreview()
     catch (...)
     {
         AppendDebugLog("UndoPreview unknown exception");
+    }
+
+    if (!undoSucceeded)
+    {
+        if (previewUdfTag_ != NULL_TAG)
+        {
+            const int deleteResult = UF_OBJ_delete_object(previewUdfTag_);
+            AppendDebugLog("UndoPreview fallback delete result feature tag=" + std::to_string(previewUdfTag_) +
+                           ", result=" + std::to_string(deleteResult) +
+                           " " + UfMessage(deleteResult));
+        }
+
+        for (tag_t referenceTag : previewReferenceTags_)
+        {
+            if (referenceTag == NULL_TAG)
+            {
+                continue;
+            }
+            const int deleteResult = UF_OBJ_delete_object(referenceTag);
+            AppendDebugLog("UndoPreview fallback delete reference tag=" + std::to_string(referenceTag) +
+                           ", result=" + std::to_string(deleteResult) +
+                           " " + UfMessage(deleteResult));
+        }
     }
 
     hasPreview_ = false;
@@ -1874,24 +2607,42 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs) const
 {
     inputs.featureMode = ReadFeatureMode();
 
-    if (!ReadSelectedPoint(startPointBlock_, inputs.startObject, inputs.startPoint) ||
-        !ReadSelectedPoint(endPointBlock_, inputs.endObject, inputs.endPoint))
+    TaggedObject* selectedStartObject = nullptr;
+    TaggedObject* selectedEndObject = nullptr;
+    Point3d selectedStartPoint;
+    Point3d selectedEndPoint;
+    const bool hasStart = ReadSelectedPoint(startPointBlock_, selectedStartObject, selectedStartPoint);
+    const bool hasEnd = ReadSelectedPoint(endPointBlock_, selectedEndObject, selectedEndPoint);
+
+    if (hasStart && hasEnd && Distance(selectedStartPoint, selectedEndPoint) > kPointTolerance)
     {
-        return false;
+        inputs.startObject = selectedStartObject;
+        inputs.endObject = selectedEndObject;
+        inputs.startPoint = selectedStartPoint;
+        inputs.endPoint = selectedEndPoint;
+    }
+    else
+    {
+        TaggedObject* clickObject = hasEnd ? selectedEndObject : selectedStartObject;
+        const Point3d clickPoint = hasEnd ? selectedEndPoint : selectedStartPoint;
+        inputs.inferredFromSingleClick = true;
+        inputs.selectionClickPoint = clickPoint;
+        if (!InferEndpointsFromFaceClick(clickObject, clickPoint, inputs))
+        {
+            return false;
+        }
     }
 
-    if (Distance(inputs.startPoint, inputs.endPoint) <= kPointTolerance)
+    if (inputs.targetBody == nullptr)
     {
-        return false;
+        inputs.targetBody = FindBody(inputs.startObject);
     }
-
-    inputs.targetBody = FindBody(inputs.startObject);
     if (inputs.targetBody == nullptr)
     {
         inputs.targetBody = FindBody(inputs.endObject);
     }
 
-    if (inputs.targetBody != nullptr)
+    if (inputs.targetBody != nullptr && inputs.baseFace == nullptr)
     {
         inputs.baseFace = FindPlanarFaceContainingPoints(inputs.targetBody, inputs.startPoint, inputs.endPoint);
     }
@@ -1948,7 +2699,10 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs) const
     }
     inputs.startEdge = inputs.startPositiveYEdge;
     inputs.endEdge = inputs.endPositiveYEdge;
-    inputs.thickness = EstimateSheetThickness(inputs.targetBody, inputs.baseFace);
+    if (inputs.thickness <= kPointTolerance)
+    {
+        inputs.thickness = EstimateSheetThickness(inputs.targetBody, inputs.baseFace);
+    }
     inputs.spanLength = Distance(inputs.startPoint, inputs.endPoint);
     inputs.clearanceValue = ReadStringBlockValue(clearanceBlock_, "string0", "0.2");
     inputs.bendRadiusValue = ReadStringBlockValue(bendRadiusBlock_, "string01", "0.2");
@@ -1993,6 +2747,184 @@ bool TwoPointSiBianUI::ReadSelectedPoint(NXOpen::BlockStyler::SelectObject* bloc
     selectedObject = selected.front();
     point = block->PickPoint();
     return true;
+}
+
+bool TwoPointSiBianUI::InferEndpointsFromFaceClick(TaggedObject* selectedObject,
+                                                   const Point3d& clickPoint,
+                                                   InferredInputs& inputs) const
+{
+    if (selectedObject == nullptr)
+    {
+        return false;
+    }
+
+    Body* body = FindBody(selectedObject);
+    Face* face = dynamic_cast<Face*>(selectedObject);
+    if (body == nullptr)
+    {
+        return false;
+    }
+    if (face == nullptr || face->SolidFaceType() != Face::FaceTypePlanar)
+    {
+        face = FindPlanarFaceAtPoint(body, clickPoint);
+    }
+    if (face == nullptr || face->SolidFaceType() != Face::FaceTypePlanar)
+    {
+        AppendDebugLog("InferEndpointsFromFaceClick failed: no planar face at click point.");
+        return false;
+    }
+
+    Vector3d faceNormal;
+    Point3d facePlanePoint;
+    if (!FacePlaneData(face, facePlanePoint, faceNormal))
+    {
+        AppendDebugLog("InferEndpointsFromFaceClick failed: no face plane data.");
+        return false;
+    }
+    OrientNormalAwayFromOppositeFace(body, face, clickPoint, faceNormal);
+
+    std::vector<Point3d> boundaryPoints;
+    if (!FaceBoundaryPoints(face, boundaryPoints) || boundaryPoints.size() < 2)
+    {
+        AppendDebugLog("InferEndpointsFromFaceClick failed: not enough face boundary points.");
+        return false;
+    }
+
+    const double expectedThickness = EstimateSheetThickness(body, face);
+    std::vector<BoundaryPointCandidate> candidates;
+    candidates.reserve(boundaryPoints.size());
+    for (const Point3d& point : boundaryPoints)
+    {
+        BoundaryPointCandidate candidate;
+        candidate.point = point;
+        candidate.distance = Distance(point, clickPoint);
+        candidate.thicknessScore = ThicknessEdgeScoreAtPoint(body, face, point, faceNormal, expectedThickness);
+        candidates.push_back(candidate);
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const BoundaryPointCandidate& first,
+                                                        const BoundaryPointCandidate& second) {
+        return first.distance < second.distance;
+    });
+
+    BoundaryPointCandidate first;
+    BoundaryPointCandidate second;
+    double selectedPairAngle = 0.0;
+    double bestDistanceSum = std::numeric_limits<double>::max();
+    double bestMaximumDistance = std::numeric_limits<double>::max();
+    bool foundPair = false;
+    for (std::size_t firstIndex = 0; firstIndex < candidates.size(); ++firstIndex)
+    {
+        const Vector3d firstFromClick = Subtract(candidates[firstIndex].point, clickPoint);
+        if (Length(firstFromClick) <= kPointTolerance)
+        {
+            continue;
+        }
+
+        for (std::size_t secondIndex = firstIndex + 1; secondIndex < candidates.size(); ++secondIndex)
+        {
+            if (Distance(candidates[firstIndex].point, candidates[secondIndex].point) <= kPointTolerance)
+            {
+                continue;
+            }
+
+            const Vector3d secondFromClick = Subtract(candidates[secondIndex].point, clickPoint);
+            const double pairAngle = AngleDegrees(firstFromClick, secondFromClick);
+            if (pairAngle + 1.0e-6 < kEndpointPairMinimumAngleDegrees ||
+                pairAngle - 1.0e-6 > kEndpointPairMaximumAngleDegrees)
+            {
+                continue;
+            }
+
+            const double distanceSum = candidates[firstIndex].distance + candidates[secondIndex].distance;
+            const double maximumDistance = std::max(candidates[firstIndex].distance,
+                                                    candidates[secondIndex].distance);
+            if (!foundPair ||
+                distanceSum < bestDistanceSum - kPointTolerance ||
+                (std::fabs(distanceSum - bestDistanceSum) <= kPointTolerance &&
+                 maximumDistance < bestMaximumDistance))
+            {
+                first = candidates[firstIndex];
+                second = candidates[secondIndex];
+                selectedPairAngle = pairAngle;
+                bestDistanceSum = distanceSum;
+                bestMaximumDistance = maximumDistance;
+                foundPair = true;
+            }
+        }
+    }
+    if (!foundPair)
+    {
+        AppendDebugLog("InferEndpointsFromFaceClick failed: no nearest boundary point pair has a click angle in [150,180] degrees.");
+        return false;
+    }
+
+    const BoundaryPointCandidate* p1 = &first;
+    const BoundaryPointCandidate* p2 = &second;
+    double firstInteriorAngle = 0.0;
+    double secondInteriorAngle = 0.0;
+    const bool hasFirstInteriorAngle = FaceInteriorCornerAngle(face, first.point, firstInteriorAngle);
+    const bool hasSecondInteriorAngle = FaceInteriorCornerAngle(face, second.point, secondInteriorAngle);
+    const bool firstIsConvex = hasFirstInteriorAngle &&
+                               firstInteriorAngle < kConvexCornerMaximumAngleDegrees - 1.0e-6;
+    const bool secondIsConvex = hasSecondInteriorAngle &&
+                                secondInteriorAngle < kConvexCornerMaximumAngleDegrees - 1.0e-6;
+    if (firstIsConvex)
+    {
+        // The nearer member of the selected pair is already a convex face corner.
+    }
+    else if (secondIsConvex)
+    {
+        p1 = &second;
+        p2 = &first;
+    }
+    else if (hasFirstInteriorAngle && hasSecondInteriorAngle)
+    {
+        AppendDebugLog("InferEndpointsFromFaceClick failed: neither selected boundary point has a face-interior angle below 180 degrees.");
+        return false;
+    }
+    else if (first.thicknessScore > second.thicknessScore + 1.0e-6)
+    {
+        p1 = &second;
+        p2 = &first;
+        AppendDebugLog("InferEndpointsFromFaceClick: corner classification unavailable; used thickness-edge score for P1 ordering.");
+    }
+    else
+    {
+        AppendDebugLog("InferEndpointsFromFaceClick warning: one or both face-interior corner angles could not be classified.");
+    }
+
+    inputs.startObject = selectedObject;
+    inputs.endObject = selectedObject;
+    inputs.startPoint = p1->point;
+    inputs.endPoint = p2->point;
+    inputs.targetBody = body;
+    inputs.baseFace = face;
+    inputs.thickness = expectedThickness;
+
+    std::ostringstream trace;
+    trace << "InferEndpointsFromFaceClick OK:"
+          << "\n  click=" << FormatPoint(clickPoint)
+          << "\n  body=" << body->Tag()
+          << ", face=" << face->Tag()
+          << "\n  expectedThickness=" << expectedThickness
+          << "\n  selectedPairAngle=" << selectedPairAngle
+          << " (required " << kEndpointPairMinimumAngleDegrees << "-"
+          << kEndpointPairMaximumAngleDegrees << ")"
+          << "\n  nearestPair[0]=" << FormatPoint(first.point)
+          << " distance=" << first.distance
+          << " thicknessScore=" << first.thicknessScore
+          << " interiorAngle=" << (hasFirstInteriorAngle ? firstInteriorAngle : -1.0)
+          << " convex=" << (firstIsConvex ? "true" : "false")
+          << "\n  nearestPair[1]=" << FormatPoint(second.point)
+          << " distance=" << second.distance
+          << " thicknessScore=" << second.thicknessScore
+          << " interiorAngle=" << (hasSecondInteriorAngle ? secondInteriorAngle : -1.0)
+          << " convex=" << (secondIsConvex ? "true" : "false")
+          << "\n  inferred P1=" << FormatPoint(inputs.startPoint)
+          << ", P2=" << FormatPoint(inputs.endPoint);
+    AppendDebugLog(trace.str());
+    return Distance(inputs.startPoint, inputs.endPoint) > kPointTolerance;
 }
 
 Body* TwoPointSiBianUI::FindBody(TaggedObject* object) const
@@ -2087,6 +3019,124 @@ Edge* TwoPointSiBianUI::FindEdgeAtPoint(Body* body, const Point3d& point) const
         }
     }
     return best;
+}
+
+Face* TwoPointSiBianUI::FindPlanarFaceAtPoint(Body* body, const Point3d& point) const
+{
+    if (body == nullptr)
+    {
+        return nullptr;
+    }
+
+    Face* bestFace = nullptr;
+    double bestDistance = std::numeric_limits<double>::max();
+    for (Face* face : body->GetFaces())
+    {
+        if (face == nullptr || face->SolidFaceType() != Face::FaceTypePlanar)
+        {
+            continue;
+        }
+
+        Point3d planePoint;
+        Vector3d normal;
+        if (!FacePlaneData(face, planePoint, normal))
+        {
+            continue;
+        }
+
+        const double distance = std::fabs(Dot(Subtract(point, planePoint), normal));
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            bestFace = face;
+        }
+    }
+
+    return bestDistance <= kPlaneTolerance ? bestFace : nullptr;
+}
+
+double TwoPointSiBianUI::ThicknessEdgeScoreAtPoint(Body* body,
+                                                   Face* baseFace,
+                                                   const Point3d& point,
+                                                   const Vector3d& faceNormal,
+                                                   double expectedThickness) const
+{
+    if (body == nullptr || baseFace == nullptr)
+    {
+        return 0.0;
+    }
+
+    double bestScore = 0.0;
+    for (Edge* edge : body->GetEdges())
+    {
+        if (edge == nullptr || !EdgeTouchesPoint(edge, point) || FaceHasEdge(baseFace, edge))
+        {
+            continue;
+        }
+
+        Point3d first;
+        Point3d second;
+        try
+        {
+            edge->GetVertices(&first, &second);
+        }
+        catch (...)
+        {
+            continue;
+        }
+
+        const Point3d other = Distance(first, point) <= Distance(second, point) ? second : first;
+        const Vector3d edgeVector = Subtract(other, point);
+        const double edgeLength = Distance(other, point);
+        const double normalDistance = std::fabs(Dot(edgeVector, faceNormal));
+        if (normalDistance <= kPlaneTolerance || edgeLength <= kPointTolerance)
+        {
+            continue;
+        }
+
+        double score = 0.0;
+        if (expectedThickness > kPointTolerance)
+        {
+            const double thicknessTolerance = std::max(0.2, expectedThickness * 0.30);
+            const double lengthLimit = std::max(expectedThickness * 2.5, expectedThickness + 0.5);
+            const double tangentialSquared = std::max(0.0, edgeLength * edgeLength - normalDistance * normalDistance);
+            const double tangentialDistance = std::sqrt(tangentialSquared);
+            const double tangentialLimit = std::max(0.2, expectedThickness * 0.35);
+            if (std::fabs(normalDistance - expectedThickness) > thicknessTolerance ||
+                edgeLength > lengthLimit ||
+                tangentialDistance > tangentialLimit)
+            {
+                std::ostringstream trace;
+                trace << "ThicknessEdgeScoreAtPoint reject edge=" << edge->Tag()
+                      << " point=" << FormatPoint(point)
+                      << " other=" << FormatPoint(other)
+                      << " edgeLength=" << edgeLength
+                      << " normalDistance=" << normalDistance
+                      << " tangentialDistance=" << tangentialDistance
+                      << " expectedThickness=" << expectedThickness;
+                AppendDebugLog(trace.str());
+                continue;
+            }
+
+            score = 1.0 + (thicknessTolerance - std::fabs(normalDistance - expectedThickness)) / thicknessTolerance;
+        }
+        else
+        {
+            Vector3d direction = edgeVector;
+            if (!Normalize(direction))
+            {
+                continue;
+            }
+            score = std::fabs(Dot(direction, faceNormal));
+        }
+
+        if (score > bestScore)
+        {
+            bestScore = score;
+        }
+    }
+
+    return bestScore >= 0.65 ? bestScore : 0.0;
 }
 
 bool TwoPointSiBianUI::FindSignedEdgesAtPoint(Body* body,
@@ -2184,12 +3234,6 @@ void TwoPointSiBianUI::OrientNormalAwayFromOppositeFace(Body* body,
         return;
     }
 
-    Part* workPart = session_->Parts()->Work();
-    if (workPart == nullptr)
-    {
-        return;
-    }
-
     try
     {
         const double baseArea = MeasureFaceArea(baseFace);
@@ -2212,7 +3256,8 @@ void TwoPointSiBianUI::OrientNormalAwayFromOppositeFace(Body* body,
             }
 
             Vector3d faceNormal;
-            if (!FaceNormal(face, faceNormal))
+            Point3d facePlanePoint;
+            if (!FacePlaneData(face, facePlanePoint, faceNormal))
             {
                 continue;
             }
@@ -2232,55 +3277,20 @@ void TwoPointSiBianUI::OrientNormalAwayFromOppositeFace(Body* body,
                 continue;
             }
 
-            MeasureDistance* distance = workPart->MeasureManager()->NewDistance(
-                nullptr,
-                MeasureManager::MeasureTypeMinimum,
-                baseFace,
-                face);
-            if (distance == nullptr)
-            {
-                continue;
-            }
-
-            const double value = distance->Value();
-            delete distance;
+            const double value = std::fabs(Dot(Subtract(facePlanePoint, pointOnFace), normal));
             if (value <= kPointTolerance || value >= bestDistance)
             {
                 continue;
             }
 
-            double facePoint[3] = {0.0, 0.0, 0.0};
-            int faceType = 0;
-            double faceDirection[3] = {0.0, 0.0, 0.0};
-            double faceBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-            double faceRadius = 0.0;
-            double faceRadData = 0.0;
-            int normalDirection = 1;
-            const int faceDataResult = UF_MODL_ask_face_data(face->Tag(),
-                                                             &faceType,
-                                                             facePoint,
-                                                             faceDirection,
-                                                             faceBox,
-                                                             &faceRadius,
-                                                             &faceRadData,
-                                                             &normalDirection);
-            if (faceDataResult != 0)
-            {
-                AppendDebugLog("OrientNormalAwayFromOppositeFace UF_MODL_ask_face_data failed for candidate: " +
-                               std::to_string(faceDataResult) + " " + UfMessage(faceDataResult));
-                continue;
-            }
-
             bestFace = face;
             bestDistance = value;
-            bestVector = Vector3d(facePoint[0] - pointOnFace.X,
-                                  facePoint[1] - pointOnFace.Y,
-                                  facePoint[2] - pointOnFace.Z);
+            bestVector = Subtract(facePlanePoint, pointOnFace);
             trace << "\n  candidate opposite face=" << face->Tag()
                   << " area=" << area
                   << " parallel=" << parallel
                   << " distance=" << value
-                  << " facePoint=" << FormatTriple(facePoint)
+                  << " facePoint=" << FormatPoint(facePlanePoint)
                   << " vectorToFace=" << FormatVector(bestVector);
         }
 
@@ -2369,6 +3379,279 @@ double TwoPointSiBianUI::MeasureFaceArea(Face* face) const
     return 0.0;
 }
 
+bool TwoPointSiBianUI::EdgeHasParallelMateAtThickness(Body* body,
+                                                       Edge* edge,
+                                                       double thickness,
+                                                       Edge*& parallelEdge,
+                                                       double& minimumDistance) const
+{
+    parallelEdge = nullptr;
+    minimumDistance = std::numeric_limits<double>::max();
+    if (body == nullptr || edge == nullptr || thickness <= kPointTolerance)
+    {
+        return false;
+    }
+
+    Point3d edgeStart;
+    Point3d edgeEnd;
+    if (!EdgeNaturalStartEnd(edge, edgeStart, edgeEnd))
+    {
+        return false;
+    }
+    Vector3d edgeDirection = Subtract(edgeEnd, edgeStart);
+    if (!Normalize(edgeDirection))
+    {
+        return false;
+    }
+
+    Part* workPart = session_->Parts()->Work();
+    if (workPart == nullptr)
+    {
+        return false;
+    }
+
+    for (Edge* candidate : body->GetEdges())
+    {
+        if (candidate == nullptr || candidate == edge)
+        {
+            continue;
+        }
+
+        Point3d candidateStart;
+        Point3d candidateEnd;
+        if (!EdgeNaturalStartEnd(candidate, candidateStart, candidateEnd))
+        {
+            continue;
+        }
+        Vector3d candidateDirection = Subtract(candidateEnd, candidateStart);
+        if (!Normalize(candidateDirection) || std::fabs(Dot(edgeDirection, candidateDirection)) < 0.999)
+        {
+            continue;
+        }
+
+        try
+        {
+            MeasureDistance* measurement = workPart->MeasureManager()->NewDistance(
+                nullptr,
+                MeasureManager::MeasureTypeMinimum,
+                edge,
+                candidate);
+            if (measurement == nullptr)
+            {
+                continue;
+            }
+            const double distance = measurement->Value();
+            delete measurement;
+            if (distance <= kPlaneTolerance || distance >= minimumDistance)
+            {
+                continue;
+            }
+            minimumDistance = distance;
+            parallelEdge = candidate;
+        }
+        catch (...)
+        {
+        }
+    }
+
+    const double tolerance = std::max(0.02, thickness * 0.10);
+    const bool matched = parallelEdge != nullptr &&
+                         std::fabs(minimumDistance - thickness) <= tolerance;
+    std::ostringstream trace;
+    trace << "EdgeHasParallelMateAtThickness edge=" << edge->Tag()
+          << ", nearestParallel=" << (parallelEdge != nullptr ? parallelEdge->Tag() : NULL_TAG)
+          << ", minimumDistance="
+          << (minimumDistance < std::numeric_limits<double>::max() ? minimumDistance : -1.0)
+          << ", thickness=" << thickness
+          << ", tolerance=" << tolerance
+          << ", matched=" << (matched ? "true" : "false");
+    AppendDebugLog(trace.str());
+    return matched;
+}
+
+bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
+                                                bool& ripCreated,
+                                                std::string& errorMessage) const
+{
+    ripCreated = false;
+    errorMessage.clear();
+    if (!inputs.inferredFromSingleClick ||
+        inputs.targetBody == nullptr ||
+        inputs.baseFace == nullptr ||
+        inputs.thickness <= kPointTolerance)
+    {
+        return true;
+    }
+
+    Edge* ripEdge = nullptr;
+    Edge* confirmingEdge = nullptr;
+    Edge* confirmingParallelEdge = nullptr;
+    Edge* pairedRipEdge = nullptr;
+    Point3d farEndpoint;
+    double confirmingDistance = 0.0;
+    double pairedRipDistance = 0.0;
+    const double lengthTolerance = std::max(kPlaneTolerance, inputs.thickness * 0.01);
+
+    for (Edge* candidateRipEdge : inputs.targetBody->GetEdges())
+    {
+        if (candidateRipEdge == nullptr ||
+            !EdgeTouchesPoint(candidateRipEdge, inputs.endPoint) ||
+            FaceHasEdge(inputs.baseFace, candidateRipEdge) ||
+            candidateRipEdge->GetLength() <= inputs.thickness + lengthTolerance)
+        {
+            continue;
+        }
+
+        Point3d candidateFarEndpoint;
+        if (!EdgeOtherPoint(candidateRipEdge, inputs.endPoint, candidateFarEndpoint))
+        {
+            continue;
+        }
+
+        for (Edge* edgeAtFarEndpoint : inputs.targetBody->GetEdges())
+        {
+            if (edgeAtFarEndpoint == nullptr ||
+                edgeAtFarEndpoint == candidateRipEdge ||
+                !EdgeTouchesPoint(edgeAtFarEndpoint, candidateFarEndpoint))
+            {
+                continue;
+            }
+
+            Edge* parallelEdge = nullptr;
+            double minimumDistance = 0.0;
+            if (!EdgeHasParallelMateAtThickness(inputs.targetBody,
+                                                edgeAtFarEndpoint,
+                                                inputs.thickness,
+                                                parallelEdge,
+                                                minimumDistance))
+            {
+                continue;
+            }
+
+            ripEdge = candidateRipEdge;
+            confirmingEdge = edgeAtFarEndpoint;
+            confirmingParallelEdge = parallelEdge;
+            farEndpoint = candidateFarEndpoint;
+            confirmingDistance = minimumDistance;
+            break;
+        }
+        if (ripEdge != nullptr)
+        {
+            break;
+        }
+    }
+
+    if (ripEdge == nullptr)
+    {
+        AppendDebugLog("TryCreateSecondPointRip: no qualifying non-selected-face edge was found at P2.");
+        return true;
+    }
+
+    // NX's edge-rip command expects both sheet-side edges of the open seam.
+    // The Q edge and its parallel mate above only prove that this is a
+    // thickness corner; they are not the pair passed to the rip builder.
+    EdgeHasParallelMateAtThickness(inputs.targetBody,
+                                   ripEdge,
+                                   inputs.thickness,
+                                   pairedRipEdge,
+                                   pairedRipDistance);
+    if (pairedRipEdge == nullptr)
+    {
+        errorMessage = "A matching parallel edge could not be found for the detected P2 rip edge.";
+        AppendDebugLog("TryCreateSecondPointRip: " + errorMessage);
+        return false;
+    }
+
+    std::ostringstream trace;
+    trace << "TryCreateSecondPointRip qualified: P2=" << FormatPoint(inputs.endPoint)
+          << ", ripEdge=" << ripEdge->Tag()
+          << ", ripEdgeLength=" << ripEdge->GetLength()
+          << ", pairedRipEdge=" << pairedRipEdge->Tag()
+          << ", pairedRipDistance=" << pairedRipDistance
+          << ", farEndpoint=" << FormatPoint(farEndpoint)
+          << ", confirmingEdge=" << (confirmingEdge != nullptr ? confirmingEdge->Tag() : NULL_TAG)
+          << ", confirmingParallelEdge="
+          << (confirmingParallelEdge != nullptr ? confirmingParallelEdge->Tag() : NULL_TAG)
+          << ", minimumParallelDistance=" << confirmingDistance
+          << ", thickness=" << inputs.thickness;
+    AppendDebugLog(trace.str());
+
+    Features::SheetMetal::EdgeRipBuilder* builder = nullptr;
+    Section* section = nullptr;
+    try
+    {
+        Part* workPart = session_->Parts()->Work();
+        if (workPart == nullptr)
+        {
+            errorMessage = "No work part is active while creating the sheet-metal rip.";
+            return false;
+        }
+        builder = workPart->Features()->SheetmetalManager()->CreateEdgeRipFeatureBuilder(nullptr);
+        builder->SetApplicationContext(Features::SheetMetal::ApplicationContextNxSheetMetal);
+        builder->Width()->SetFormula(inputs.clearanceValue);
+        builder->BlendRadius()->SetFormula(inputs.bendRadiusValue);
+        builder->SetEndCapShape(Features::SheetMetal::EdgeRipBuilder::EndCapShapeOptionsRound);
+        builder->SetSketch(nullptr);
+        builder->SetSection(nullptr);
+        builder->SetRipEdges(std::vector<Edge*>());
+
+        section = workPart->Sections()->CreateSection(9.5e-05, 0.0001, 0.5);
+        builder->SetSketch(nullptr);
+        builder->SetSection(section);
+        builder->SetRipEdges(std::vector<Edge*>{ripEdge, pairedRipEdge});
+        builder->SetUseSystemWidth(false);
+        builder->SetBlendSharpCorners(false);
+        builder->SetEndCapShape(Features::SheetMetal::EdgeRipBuilder::EndCapShapeOptionsRound);
+        builder->SetSymmetric(true);
+        builder->SetReverseWidthDirection(false);
+        builder->SetParentFeatureInternal(false);
+
+        Features::Feature* createdRip = builder->CommitFeature();
+        const tag_t createdRipTag = createdRip != nullptr ? createdRip->Tag() : NULL_TAG;
+        builder->Destroy();
+        builder = nullptr;
+        section->Destroy();
+        section = nullptr;
+        if (createdRipTag == NULL_TAG)
+        {
+            errorMessage = "NX did not return a feature after creating the sheet-metal rip.";
+            return false;
+        }
+        ripCreated = true;
+        AppendDebugLog("TryCreateSecondPointRip created edge-rip feature tag=" +
+                       std::to_string(createdRipTag));
+        return true;
+    }
+    catch (const NXException& ex)
+    {
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        if (section != nullptr)
+        {
+            section->Destroy();
+        }
+        errorMessage = "Failed to create the sheet-metal rip at P2.\n" + NxExceptionText(ex);
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+    catch (const std::exception& ex)
+    {
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        if (section != nullptr)
+        {
+            section->Destroy();
+        }
+        errorMessage = std::string("Failed to create the sheet-metal rip at P2.\n") + ex.what();
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+}
+
 double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) const
 {
     if (body == nullptr || baseFace == nullptr)
@@ -2376,25 +3659,54 @@ double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) cons
         return 0.0;
     }
 
-    Part* workPart = session_->Parts()->Work();
     double bestDistance = std::numeric_limits<double>::max();
 
     try
     {
         Vector3d baseNormal;
-        if (!FaceNormal(baseFace, baseNormal))
+        Point3d basePlanePoint;
+        if (!FacePlaneData(baseFace, basePlanePoint, baseNormal))
         {
-            AppendDebugLog("EstimateSheetThickness failed to read base face normal.");
+            AppendDebugLog("EstimateSheetThickness failed to read base face plane data.");
+            return 0.0;
+        }
+
+        Vector3d projectionXAxis;
+        Vector3d projectionYAxis;
+        if (!FaceProjectionAxes(baseFace, baseNormal, projectionXAxis, projectionYAxis))
+        {
+            AppendDebugLog("EstimateSheetThickness failed to build projection axes.");
             return 0.0;
         }
 
         const double baseArea = MeasureFaceArea(baseFace);
-        const double minParallelArea = baseArea * 0.60;
+        const double minProjectedOverlapRatio = kThicknessProjectionOverlapRatio;
+        std::vector<ProjectionPoint2d> basePolygon;
+        if (!FaceProjectionPolygon(baseFace, basePlanePoint, projectionXAxis, projectionYAxis, basePolygon))
+        {
+            AppendDebugLog("EstimateSheetThickness failed to build base projection polygon.");
+            return 0.0;
+        }
+        const double baseProjectedArea = PolygonArea(basePolygon);
+        const double baseProjectionAreaErrorRatio =
+            baseArea > kPointTolerance
+                ? std::fabs(baseProjectedArea - baseArea) / baseArea
+                : std::numeric_limits<double>::max();
+        const bool baseProjectionIsReliable =
+            baseProjectionAreaErrorRatio <= kThicknessProjectionAreaErrorRatio;
+
         std::ostringstream trace;
         trace << "EstimateSheetThickness baseFace=" << baseFace->Tag()
               << ", baseArea=" << baseArea
-              << ", minParallelArea=" << minParallelArea;
+              << ", baseProjectedArea=" << baseProjectedArea
+              << ", baseProjectionAreaErrorRatio=" << baseProjectionAreaErrorRatio
+              << ", baseProjectionIsReliable=" << (baseProjectionIsReliable ? "true" : "false")
+              << ", minProjectedOverlapRatio=" << minProjectedOverlapRatio
+              << ", basePlanePoint=" << FormatPoint(basePlanePoint)
+              << ", projectionX=" << FormatVector(projectionXAxis)
+              << ", projectionY=" << FormatVector(projectionYAxis);
 
+        std::vector<ThicknessCandidate> candidates;
         std::vector<Face*> faces = body->GetFaces();
         for (Face* face : faces)
         {
@@ -2404,46 +3716,100 @@ double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) cons
             }
 
             Vector3d faceNormal;
-            if (!FaceNormal(face, faceNormal))
+            Point3d candidatePlanePoint;
+            if (!FacePlaneData(face, candidatePlanePoint, faceNormal))
             {
                 continue;
             }
             const double parallel = std::fabs(Dot(baseNormal, faceNormal));
             if (parallel < 0.999)
             {
-                trace << "\n  skip face=" << face->Tag() << " parallel=" << parallel;
                 continue;
             }
 
-            const double area = MeasureFaceArea(face);
-            if (baseArea > kPointTolerance && area < minParallelArea)
-            {
-                trace << "\n  skip face=" << face->Tag()
-                      << " area=" << area
-                      << " parallel=" << parallel;
-                continue;
-            }
-
-            MeasureDistance* distance = workPart->MeasureManager()->NewDistance(
-                nullptr,
-                MeasureManager::MeasureTypeMinimum,
-                baseFace,
-                face);
-            if (distance == nullptr)
+            const double signedPlaneDistance = Dot(Subtract(candidatePlanePoint, basePlanePoint), baseNormal);
+            const double planeDistance = std::fabs(signedPlaneDistance);
+            if (planeDistance <= kPlaneTolerance)
             {
                 continue;
             }
 
-            const double value = distance->Value();
-            delete distance;
-            trace << "\n  candidate face=" << face->Tag()
-                  << " area=" << area
-                  << " parallel=" << parallel
-                  << " distance=" << value;
-            if (value > kPointTolerance && value < bestDistance)
+            candidates.push_back({face, planeDistance, signedPlaneDistance});
+        }
+
+        std::sort(candidates.begin(), candidates.end(), [](const ThicknessCandidate& first, const ThicknessCandidate& second) {
+            return first.planeDistance < second.planeDistance;
+        });
+
+        trace << "\n  parallelPlaneCandidates=" << candidates.size();
+        for (const ThicknessCandidate& candidate : candidates)
+        {
+            const double candidateArea = MeasureFaceArea(candidate.face);
+            const double candidateToBaseAreaRatio =
+                baseArea > kPointTolerance ? candidateArea / baseArea : 0.0;
+            if (candidateToBaseAreaRatio + 1.0e-9 < minProjectedOverlapRatio)
             {
-                bestDistance = value;
+                trace << "\n  skip face=" << candidate.face->Tag()
+                      << " planeDistance=" << candidate.planeDistance
+                      << " reason=candidate area too small"
+                      << " candidateArea=" << candidateArea
+                      << " candidateToBaseAreaRatio=" << candidateToBaseAreaRatio;
+                continue;
             }
+
+            double overlapArea = 0.0;
+            double candidateProjectedArea = 0.0;
+            const double projectedOverlapRatio = ProjectedOverlapRatioWithBase(basePolygon,
+                                                                                baseProjectedArea,
+                                                                                candidate.face,
+                                                                                basePlanePoint,
+                                                                                projectionXAxis,
+                                                                                projectionYAxis,
+                                                                                overlapArea,
+                                                                                candidateProjectedArea);
+            const double candidateProjectionAreaErrorRatio =
+                candidateArea > kPointTolerance
+                    ? std::fabs(candidateProjectedArea - candidateArea) / candidateArea
+                    : std::numeric_limits<double>::max();
+            const bool candidateProjectionIsReliable =
+                candidateProjectionAreaErrorRatio <= kThicknessProjectionAreaErrorRatio;
+            const bool projectionIsReliable =
+                baseProjectionIsReliable && candidateProjectionIsReliable;
+            const double overlapRatio =
+                baseArea > kPointTolerance ? overlapArea / baseArea : projectedOverlapRatio;
+            if (projectionIsReliable &&
+                overlapRatio + 1.0e-9 < minProjectedOverlapRatio)
+            {
+                trace << "\n  skip face=" << candidate.face->Tag()
+                      << " planeDistance=" << candidate.planeDistance
+                      << " reason=reliable projected overlap is too small"
+                      << " overlapRatio=" << overlapRatio
+                      << " projectedOverlapRatio=" << projectedOverlapRatio
+                      << " overlapArea=" << overlapArea
+                      << " baseArea=" << baseArea
+                      << " baseProjectedArea=" << baseProjectedArea
+                      << " candidateArea=" << candidateArea
+                      << " candidateProjectedArea=" << candidateProjectedArea;
+                continue;
+            }
+
+            trace << "\n  selected candidate face=" << candidate.face->Tag()
+                  << " planeDistance=" << candidate.planeDistance
+                  << " signedPlaneDistance=" << candidate.signedPlaneDistance
+                  << " selectionRule="
+                  << (projectionIsReliable ? "projected overlap" : "nearest parallel face with sufficient area")
+                  << " candidateArea=" << candidateArea
+                  << " candidateToBaseAreaRatio=" << candidateToBaseAreaRatio
+                  << " overlapRatio=" << overlapRatio
+                  << " projectedOverlapRatio=" << projectedOverlapRatio
+                  << " overlapArea=" << overlapArea
+                  << " baseArea=" << baseArea
+                  << " baseProjectedArea=" << baseProjectedArea
+                  << " baseProjectionAreaErrorRatio=" << baseProjectionAreaErrorRatio
+                  << " candidateProjectedArea=" << candidateProjectedArea
+                  << " candidateProjectionAreaErrorRatio=" << candidateProjectionAreaErrorRatio;
+            bestDistance = candidate.planeDistance;
+            break;
         }
         trace << "\n  selected thickness="
               << (bestDistance == std::numeric_limits<double>::max() ? 0.0 : bestDistance);
@@ -2468,7 +3834,7 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
 {
     if (inputs.featureMode == FeatureMode::NinetyRight)
     {
-        errorMessage = "90度右模板尚未接入，请先提供对应的UDF模板PRT。";
+        errorMessage = "90 degree right UDF template is not connected yet.";
         AppendDebugLog(errorMessage);
         return false;
     }
@@ -2490,6 +3856,14 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
     }
 
     const tag_t workPartTag = workPart->Tag();
+    std::set<tag_t> bodyTagsBeforeUdf;
+    for (Body* body : *workPart->Bodies())
+    {
+        if (body != nullptr)
+        {
+            bodyTagsBeforeUdf.insert(body->Tag());
+        }
+    }
     std::ostringstream trace;
     trace << "==== 2P_SiBian UDF insert ====\n"
           << "workPart=" << workPartTag << "\n"
@@ -2875,15 +4249,112 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
         return false;
     }
 
+    std::vector<Body*> createdToolBodies;
+    for (Body* body : *workPart->Bodies())
+    {
+        if (body != nullptr &&
+            body->Tag() != (inputs.targetBody != nullptr ? inputs.targetBody->Tag() : NULL_TAG) &&
+            bodyTagsBeforeUdf.find(body->Tag()) == bodyTagsBeforeUdf.end())
+        {
+            createdToolBodies.push_back(body);
+        }
+    }
+
+    if (createdToolBodies.empty())
+    {
+        Features::Feature* udfFeature = dynamic_cast<Features::Feature*>(NXObjectManager::Get(newUdf));
+        if (udfFeature != nullptr)
+        {
+            for (Body* body : udfFeature->GetBodies())
+            {
+                if (body != nullptr &&
+                    body->Tag() != (inputs.targetBody != nullptr ? inputs.targetBody->Tag() : NULL_TAG))
+                {
+                    createdToolBodies.push_back(body);
+                }
+            }
+        }
+    }
+
+    if (inputs.targetBody == nullptr || createdToolBodies.empty())
+    {
+        UF_OBJ_delete_object(newUdf);
+        deleteCreatedRefsOnFailure();
+        errorMessage = "The UDF was created, but its independent tool body could not be found for subtraction.";
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+
+    tag_t finalResultFeature = NULL_TAG;
+    try
+    {
+        for (Body* toolBody : createdToolBodies)
+        {
+            if (toolBody == nullptr || toolBody->Tag() == inputs.targetBody->Tag())
+            {
+                continue;
+            }
+
+            Features::BooleanBuilder* booleanBuilder = workPart->Features()->CreateBooleanBuilder(nullptr);
+            booleanBuilder->SetOperation(Features::Feature::BooleanTypeSubtract);
+            booleanBuilder->SetTarget(inputs.targetBody);
+#pragma warning(push)
+#pragma warning(disable : 4996)
+            booleanBuilder->SetTool(toolBody);
+#pragma warning(pop)
+            booleanBuilder->SetRetainTarget(false);
+            booleanBuilder->SetRetainTool(false);
+            const tag_t toolTag = toolBody->Tag();
+            NXObject* booleanResult = booleanBuilder->Commit();
+            finalResultFeature = booleanResult != nullptr ? booleanResult->Tag() : NULL_TAG;
+            booleanBuilder->Destroy();
+            AppendDebugLog("UDF body subtraction: target=" + std::to_string(inputs.targetBody->Tag()) +
+                           ", tool=" + std::to_string(toolTag) +
+                           ", resultFeature=" + std::to_string(finalResultFeature));
+            if (finalResultFeature == NULL_TAG)
+            {
+                throw std::runtime_error("NX returned no Boolean Subtract feature.");
+            }
+        }
+    }
+    catch (const NXException& ex)
+    {
+        UF_OBJ_delete_object(newUdf);
+        deleteCreatedRefsOnFailure();
+        errorMessage = "The UDF body was created, but subtraction from the selected-face body failed.\n" +
+                       NxExceptionText(ex);
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+    catch (const std::exception& ex)
+    {
+        UF_OBJ_delete_object(newUdf);
+        deleteCreatedRefsOnFailure();
+        errorMessage = std::string("The UDF body was created, but subtraction from the selected-face body failed.\n") +
+                       ex.what();
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+
+    if (finalResultFeature == NULL_TAG)
+    {
+        UF_OBJ_delete_object(newUdf);
+        deleteCreatedRefsOnFailure();
+        errorMessage = "No Boolean Subtract feature was created from the UDF tool body.";
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+
     if (createdUdfTag != nullptr)
     {
-        *createdUdfTag = newUdf;
+        *createdUdfTag = finalResultFeature;
     }
     if (createdReferenceTags != nullptr)
     {
         *createdReferenceTags = createdRefs;
     }
-    AppendDebugLog("created UDF instance tag=" + std::to_string(newUdf));
+    AppendDebugLog("created UDF instance tag=" + std::to_string(newUdf) +
+                   ", final subtract feature tag=" + std::to_string(finalResultFeature));
     return true;
 }
 
@@ -2902,6 +4373,7 @@ void TwoPointSiBianUI::ConfigurePointSelection(NXOpen::BlockStyler::SelectObject
 
     try
     {
+        properties->SetEnum("StepStatus", 1);
         properties->SetEnum("SelectMode", 0);
         std::vector<NXOpen::Selection::MaskTriple> masks;
         masks.emplace_back(UF_point_type, UF_point_subtype, 0);
@@ -2926,3 +4398,4 @@ void TwoPointSiBianUI::ShowError(const std::string& message) const
                               NXMessageBox::DialogTypeError,
                               message.c_str());
 }
+

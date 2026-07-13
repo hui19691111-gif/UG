@@ -1,4 +1,5 @@
 #include "TwoPointSiBianUI.hpp"
+#include "../../protection/native/ZhihuiLicenseGuard.hpp"
 
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
@@ -27,6 +28,15 @@ extern "C" DllExport void ufusr(char* param, int* returnCode, int rlen)
     if (returnCode != nullptr)
     {
         *returnCode = 0;
+    }
+
+    if (!zhihui_license_guard::EnsureAuthorized(L"ZHIHUI.TWOPOINTSIBIAN", L"2点四边"))
+    {
+        if (returnCode != nullptr)
+        {
+            *returnCode = -1;
+        }
+        return;
     }
 
     const int initStatus = UF_initialize();

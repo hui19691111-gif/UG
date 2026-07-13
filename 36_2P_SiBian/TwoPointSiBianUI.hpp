@@ -53,6 +53,8 @@ private:
         NXOpen::Edge* endNegativeYEdge = nullptr;
         double thickness = 0.0;
         double spanLength = 0.0;
+        bool inferredFromSingleClick = false;
+        NXOpen::Point3d selectionClickPoint;
         std::string clearanceValue = "0.2";
         std::string bendRadiusValue = "0.2";
         FeatureMode featureMode = FeatureMode::Chamfer;
@@ -72,11 +74,21 @@ private:
     bool ReadSelectedPoint(NXOpen::BlockStyler::SelectObject* block,
                            NXOpen::TaggedObject*& selectedObject,
                            NXOpen::Point3d& point) const;
+    bool InferEndpointsFromFaceClick(NXOpen::TaggedObject* selectedObject,
+                                     const NXOpen::Point3d& clickPoint,
+                                     InferredInputs& inputs) const;
     NXOpen::Body* FindBody(NXOpen::TaggedObject* object) const;
     NXOpen::Body* FindBodyAndFaceContainingPoints(const NXOpen::Point3d& first,
                                                   const NXOpen::Point3d& second,
                                                   NXOpen::Face*& face) const;
     NXOpen::Edge* FindEdgeAtPoint(NXOpen::Body* body, const NXOpen::Point3d& point) const;
+    NXOpen::Face* FindPlanarFaceAtPoint(NXOpen::Body* body,
+                                        const NXOpen::Point3d& point) const;
+    double ThicknessEdgeScoreAtPoint(NXOpen::Body* body,
+                                     NXOpen::Face* baseFace,
+                                     const NXOpen::Point3d& point,
+                                     const NXOpen::Vector3d& faceNormal,
+                                     double expectedThickness) const;
     bool FindSignedEdgesAtPoint(NXOpen::Body* body,
                                  const NXOpen::Point3d& point,
                                  const NXOpen::Vector3d& xDirection,
@@ -93,6 +105,14 @@ private:
                                           NXOpen::Vector3d& normal) const;
     double EstimateSheetThickness(NXOpen::Body* body, NXOpen::Face* baseFace) const;
     double MeasureFaceArea(NXOpen::Face* face) const;
+    bool EdgeHasParallelMateAtThickness(NXOpen::Body* body,
+                                        NXOpen::Edge* edge,
+                                        double thickness,
+                                        NXOpen::Edge*& parallelEdge,
+                                        double& minimumDistance) const;
+    bool TryCreateSecondPointRip(const InferredInputs& inputs,
+                                 bool& ripCreated,
+                                 std::string& errorMessage) const;
     bool CreateUserDefinedFeature(const InferredInputs& inputs,
                                   std::string& errorMessage,
                                   tag_t* createdUdfTag = nullptr,

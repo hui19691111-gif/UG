@@ -17,7 +17,7 @@
                 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="CanFocus" mask="69636" name="CanFocus" sname="CanFocus" source="1" type="logical" value="True" />
                 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="KeyboardFocus" mask="69636" name="KeyboardFocus" sname="KeyboardFocus" source="1" type="logical" value="False" />
                 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="CanKeyboardFocus" mask="69636" name="CanKeyboardFocus" sname="CanKeyboardFocus" source="1" type="logical" value="False" />
-                <Property ClassID="UGS::UICOMP_selection" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="StepStatus" mask="16384" name="StepStatus" selected="0" sname="StepStatus" source="1" type="enum">
+                <Property ClassID="UGS::UICOMP_selection" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="StepStatus" mask="16384" name="StepStatus" selected="1" sname="StepStatus" source="1" type="enum">
                   <Option name="Required" value="0" />
                   <Option name="Optional" value="1" />
                   <Option name="Satisfied" value="2" />
@@ -100,7 +100,7 @@
                 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="CanFocus" mask="69636" name="CanFocus" sname="CanFocus" source="1" type="logical" value="True" />
                 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="KeyboardFocus" mask="69636" name="KeyboardFocus" sname="KeyboardFocus" source="1" type="logical" value="False" />
                 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="CanKeyboardFocus" mask="69636" name="CanKeyboardFocus" sname="CanKeyboardFocus" source="1" type="logical" value="False" />
-                <Property ClassID="UGS::UICOMP_selection" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="StepStatus" mask="16384" name="StepStatus" selected="0" sname="StepStatus" source="1" type="enum">
+                <Property ClassID="UGS::UICOMP_selection" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="StepStatus" mask="16384" name="StepStatus" selected="1" sname="StepStatus" source="1" type="enum">
                   <Option name="Required" value="0" />
                   <Option name="Optional" value="1" />
                   <Option name="Satisfied" value="2" />
@@ -498,7 +498,7 @@
       <Property ClassID="Bad Class Id (OM_invalid)" group="Dialog Callbacks::" hierarchy="NULL" id="Dialog Shown" mask="0" name="Dialog Shown" sname="Dialog Shown" source="3" type="logical" value="True" />
       <Property ClassID="Bad Class Id (OM_invalid)" group="Dialog Callbacks::" hierarchy="NULL" id="Focus Notify" mask="0" name="Focus Notify" sname="Focus Notify" source="3" type="logical" value="False" />
       <Property ClassID="Bad Class Id (OM_invalid)" group="Dialog Callbacks::" hierarchy="NULL" id="Keyboard Focus Notify" mask="0" name="Keyboard Focus Notify" sname="Keyboard Focus Notify" source="3" type="logical" value="False" />
-      <Property ClassID="Bad Class Id (OM_invalid)" group="Dialog Callbacks::" hierarchy="NULL" id="Enable OK/Apply Button" mask="0" name="Enable OK/Apply Button" sname="Enable OK/Apply Button" source="3" type="logical" value="False" />
+      <Property ClassID="Bad Class Id (OM_invalid)" group="Dialog Callbacks::" hierarchy="NULL" id="Enable OK/Apply Button" mask="0" name="Enable OK/Apply Button" sname="Enable OK/Apply Button" source="3" type="logical" value="True" />
       <Property ClassID="Bad Class Id (OM_invalid)" group="Catalog Specific::" hierarchy="NULL" id="Block Name" mask="132" name="Block Name" sname="Block Name" source="3" type="utfstring" value="" />
       <Property ClassID="Bad Class Id (OM_invalid)" group="Catalog Specific::" hierarchy="NULL" id="Block Icon" mask="132" name="Block Icon" sname="Block Icon" source="3" type="string" value="hand" />
       <Property ClassID="Bad Class Id (OM_invalid)" group="Catalog Specific::" hierarchy="NULL" id="Catalog Tooltip" mask="132" name="Catalog Tooltip" sname="Catalog Tooltip" source="3" type="utfstring" value="User Defined UI Block" />
