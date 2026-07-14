@@ -284,10 +284,10 @@
               </PropertyList>
             </item>
           </Property>
-          <Property class="UICOMP_toggle" hierarchy="UGS::UI::Comp::WizardGroup" id="toggle0" mask="256" name="toggle0" presentation="开关" type="uicomp">
-            <item Expanded="1" SupportsDisablingLogic="1" class="UICOMP_toggle" hierarchy="UICOMP_string" icon="styler_toggle.bmp" id="toggle0" name="toggle0" notes="" presentation="开关" type="uicomp">
+          <Property class="UICOMP_toggle" hierarchy="UGS::UI::Comp::WizardGroup" id="smartModeToggle" mask="256" name="smartModeToggle" presentation="开关" type="uicomp">
+            <item Expanded="1" SupportsDisablingLogic="1" class="UICOMP_toggle" hierarchy="UICOMP_string" icon="styler_toggle.bmp" id="smartModeToggle" name="smartModeToggle" notes="" presentation="开关" type="uicomp">
               <PropertyList id="id" mode="0">
-                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="API Name" mask="16400" name="API Name" sname="BlockID" source="3" type="string" value="toggle0" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="API Name" mask="16400" name="API Name" sname="BlockID" source="3" type="string" value="smartModeToggle" />
                 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
                 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
                 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False" />
@@ -314,8 +314,8 @@
                 <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Left" loc="2" mask="16384" name="Left" offset="0" sname="Left" source="3" target="Default" type="attachment" />
                 <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment" />
                 <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Bottom" loc="4" mask="16384" name="Bottom" offset="0" sname="Bottom" source="3" target="Default" type="attachment" />
-                <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Value" mask="256" name="Value" sname="Value" source="4" type="logical" value="True" />
-                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="切角边" />
+                <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Value" mask="256" name="Value" sname="Value" source="4" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="智能判断" />
               </PropertyList>
             </item>
           </Property>

@@ -3,8 +3,10 @@
 #include <NXOpen/BlockStyler_Enumeration.hxx>
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_StringBlock.hxx>
+#include <NXOpen/BlockStyler_Toggle.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
+#include <NXOpen/DisplayableObject.hxx>
 #include <NXOpen/Features_CustomAttribute.hxx>
 #include <NXOpen/Features_CustomAttributeCollection.hxx>
 #include <NXOpen/Features_CustomDoubleAttribute.hxx>
@@ -42,6 +44,7 @@
 #include <uf.h>
 #include <uf_assem.h>
 #include <uf_curve.h>
+#include <uf_disp.h>
 #include <uf_modl.h>
 #include <uf_modl_sweep.h>
 #include <uf_modl_expressions_retiring.h>
@@ -94,7 +97,8 @@ constexpr double kEndpointPairMinimumAngleDegrees = 150.0;
 constexpr double kEndpointPairMaximumAngleDegrees = 180.0;
 constexpr double kConvexCornerMaximumAngleDegrees = 180.0;
 constexpr const char* kTemplatePartName = "2p_SiBian_1.prt";
-constexpr const char* kTemplate90LeftPartName = "2P_SiBian_90R.prt";
+constexpr const char* kTemplate90LeftPartName = "2P_SiBian_90.prt";
+constexpr const char* kTemplate90RightPartName = "2P_SiBian_90R.prt";
 constexpr const wchar_t* kTempTemplateRoot = L"ZhihuiSheetMetal\\UDF\\36_2P_SiBian";
 
 struct ProjectionPoint2d
@@ -128,7 +132,11 @@ UdfTemplateSpec TemplateSpecForMode(TwoPointSiBianUI::FeatureMode mode)
 {
     if (mode == TwoPointSiBianUI::FeatureMode::NinetyLeft)
     {
-        return {IDR_UDF_TEMPLATE_90L_PRT, L"2P_SiBian_90L_", kTemplate90LeftPartName};
+        return {IDR_UDF_TEMPLATE_90L_PRT, L"2P_SiBian_90_", kTemplate90LeftPartName};
+    }
+    if (mode == TwoPointSiBianUI::FeatureMode::NinetyRight)
+    {
+        return {IDR_UDF_TEMPLATE_90R_PRT, L"2P_SiBian_90R_", kTemplate90RightPartName};
     }
 
     return {IDR_UDF_TEMPLATE_PRT, L"2p_SiBian_1_", kTemplatePartName};
@@ -1997,7 +2005,25 @@ bool AllocateUdfExpressionValues(UF_MODL_udf_exp_data_t& expData,
         const tag_t oldExpression = expData.old_exps != nullptr ? expData.old_exps[index] : NULL_TAG;
         const std::string expressionName = ExpressionLeftHandSide(oldExpression);
         const std::string expressionKey = ToLowerAscii(TrimAscii(expressionName));
-        if (expressionKey == "p7")
+        if ((featureMode == TwoPointSiBianUI::FeatureMode::NinetyLeft ||
+             featureMode == TwoPointSiBianUI::FeatureMode::NinetyRight) &&
+            expressionKey == "p42")
+        {
+            value = sheetThicknessValue;
+        }
+        else if ((featureMode == TwoPointSiBianUI::FeatureMode::NinetyLeft ||
+                  featureMode == TwoPointSiBianUI::FeatureMode::NinetyRight) &&
+                 expressionKey == "p43")
+        {
+            value = bendRadiusValue;
+        }
+        else if ((featureMode == TwoPointSiBianUI::FeatureMode::NinetyLeft ||
+                  featureMode == TwoPointSiBianUI::FeatureMode::NinetyRight) &&
+                 expressionKey == "p45")
+        {
+            value = clearanceValue;
+        }
+        else if (expressionKey == "p7")
         {
             value = sheetThicknessValue;
         }
@@ -2010,19 +2036,25 @@ bool AllocateUdfExpressionValues(UF_MODL_udf_exp_data_t& expData,
             value = clearanceValue;
         }
         else
-        if (ContainsAny(expressionName, {"鏉垮帤", "banhou", "thickness", "sheet"}))
+        if (ContainsAny(expressionName, {"板厚"}) ||
+            ContainsAny(expressionKey, {"banhou", "thickness", "sheet"}))
         {
             value = sheetThicknessValue;
         }
-        else if (ContainsAny(expressionName, {"鎶樺集r", "鎶樺集R", "bend", "radius", "r"}))
+        else if (ContainsAny(expressionName, {"折弯r", "折弯R"}) ||
+                 ContainsAny(expressionKey, {"bend", "radius"}) ||
+                 expressionKey == "r")
         {
             value = bendRadiusValue;
         }
-        else if (ContainsAny(expressionName, {"闂撮殭", "gap", "clearance"}))
+        else if (ContainsAny(expressionName, {"间隙"}) ||
+                 ContainsAny(expressionKey, {"gap", "clearance"}))
         {
             value = clearanceValue;
         }
-        else if (featureMode == TwoPointSiBianUI::FeatureMode::Chamfer)
+        else if (featureMode == TwoPointSiBianUI::FeatureMode::Chamfer ||
+                 featureMode == TwoPointSiBianUI::FeatureMode::NinetyLeft ||
+                 featureMode == TwoPointSiBianUI::FeatureMode::NinetyRight)
         {
             if (index == 0)
             {
@@ -2334,8 +2366,10 @@ TwoPointSiBianUI::TwoPointSiBianUI()
       dialog_(nullptr),
       startPointBlock_(nullptr),
       endPointBlock_(nullptr),
+      activeSmartSelectionBlock_(nullptr),
       clearanceBlock_(nullptr),
       bendRadiusBlock_(nullptr),
+      smartModeBlock_(nullptr),
       featureModeBlock_(nullptr),
       customFeatureManager_(nullptr),
       editedFeature_(nullptr),
@@ -2343,7 +2377,12 @@ TwoPointSiBianUI::TwoPointSiBianUI()
       previewUndoMark_(static_cast<Session::UndoMarkId>(0)),
       previewUdfTag_(NULL_TAG),
       previewReferenceTags_(),
+      hasSmartEndpointCache_(false),
+      smartEndpointBodyTag_(NULL_TAG),
+      smartCachedP1_(),
+      smartCachedP2_(),
       hasPreview_(false),
+      previewCommitted_(false),
       isUpdatingPreview_(false)
 {
     customFeatureManager_ = session_->CustomFeatureClassManager();
@@ -2375,18 +2414,21 @@ void TwoPointSiBianUI::initialize_cb()
 {
     startPointBlock_ = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(dialog_->TopBlock()->FindBlock("selection0"));
     endPointBlock_ = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(dialog_->TopBlock()->FindBlock("selection01"));
+    activeSmartSelectionBlock_ = startPointBlock_;
     clearanceBlock_ = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(dialog_->TopBlock()->FindBlock("string0"));
     bendRadiusBlock_ = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(dialog_->TopBlock()->FindBlock("string01"));
+    smartModeBlock_ = dynamic_cast<NXOpen::BlockStyler::Toggle*>(dialog_->TopBlock()->FindBlock("smartModeToggle"));
     featureModeBlock_ = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(dialog_->TopBlock()->FindBlock("wrapCornerMode"));
 
     if (featureModeBlock_ != nullptr)
     {
         std::vector<NXString> members;
-        members.emplace_back("鏂滆", NXString::UTF8);
-        members.emplace_back("90搴﹀乏", NXString::UTF8);
-        members.emplace_back("90搴﹀彸", NXString::UTF8);
+        members.emplace_back("斜角", NXString::UTF8);
+        members.emplace_back("90度左", NXString::UTF8);
+        members.emplace_back("90度右", NXString::UTF8);
         featureModeBlock_->SetEnumMembers(members);
-        featureModeBlock_->SetValueAsString(NXString("鏂滆", NXString::UTF8));
+        featureModeBlock_->SetValueAsString(NXString("斜角", NXString::UTF8));
+        featureModeBlock_->SetEnable(!IsSmartModeEnabled());
         AppendDebugLog("feature mode enum initialized.");
     }
     else
@@ -2411,11 +2453,11 @@ TwoPointSiBianUI::FeatureMode TwoPointSiBianUI::ReadFeatureMode() const
         const char* text = value.GetUTF8Text();
         const std::string mode = text != nullptr ? text : "";
         AppendDebugLog("read feature mode=" + mode);
-        if (mode == "90搴﹀乏")
+        if (mode == "90度左")
         {
             return FeatureMode::NinetyLeft;
         }
-        if (mode == "90搴﹀彸")
+        if (mode == "90度右")
         {
             return FeatureMode::NinetyRight;
         }
@@ -2426,6 +2468,23 @@ TwoPointSiBianUI::FeatureMode TwoPointSiBianUI::ReadFeatureMode() const
     }
 
     return FeatureMode::Chamfer;
+}
+
+bool TwoPointSiBianUI::IsSmartModeEnabled() const
+{
+    if (smartModeBlock_ == nullptr)
+    {
+        return false;
+    }
+    try
+    {
+        return smartModeBlock_->Value();
+    }
+    catch (const NXException& ex)
+    {
+        AppendDebugLog("failed to read smart mode toggle: " + UfMessage(ex.ErrorCode()));
+        return false;
+    }
 }
 
 void TwoPointSiBianUI::dialogShown_cb()
@@ -2454,7 +2513,31 @@ bool TwoPointSiBianUI::enable_ok_cb()
 
 int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
-    (void)block;
+    if (block == startPointBlock_ || block == endPointBlock_)
+    {
+        activeSmartSelectionBlock_ = static_cast<NXOpen::BlockStyler::SelectObject*>(block);
+        // Selection blocks retain their objects for input, but the selected
+        // face itself should not remain painted in the graphics window.
+        UnhighlightSelectionObjects();
+    }
+    if (block == smartModeBlock_)
+    {
+        const bool smartMode = IsSmartModeEnabled();
+        hasSmartEndpointCache_ = false;
+        smartEndpointBodyTag_ = NULL_TAG;
+        if (featureModeBlock_ != nullptr)
+        {
+            featureModeBlock_->SetEnable(!smartMode);
+        }
+        AppendDebugLog(std::string("update_cb smart mode=") +
+                       (smartMode ? "true; manual enum disabled." : "false; manual enum enabled."));
+    }
+    if (block == featureModeBlock_)
+    {
+        AppendDebugLog(previewCommitted_
+                           ? "update_cb feature mode changed after Apply; keeping the applied chain and starting a new preview."
+                           : "update_cb feature mode changed; replacing the complete uncommitted preview chain.");
+    }
     if (enable_ok_cb())
     {
         if (!isUpdatingPreview_)
@@ -2462,6 +2545,7 @@ int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
             isUpdatingPreview_ = true;
             const bool ok = CreatePreview();
             isUpdatingPreview_ = false;
+            UnhighlightSelectionObjects();
             if (!ok)
             {
                 AppendDebugLog("update_cb preview failed; keeping dialog input accepted.");
@@ -2510,32 +2594,117 @@ int TwoPointSiBianUI::apply_cb()
 
 int TwoPointSiBianUI::ok_cb()
 {
-    return apply_cb();
+    const int result = apply_cb();
+    if (result == 0)
+    {
+        FinalizeCommittedPreview();
+    }
+    return result;
 }
 
 int TwoPointSiBianUI::cancel_cb()
 {
-    AppendDebugLog("cancel_cb entered; undoing preview");
-    UndoPreview();
+    if (previewCommitted_)
+    {
+        AppendDebugLog("cancel_cb entered after Apply; keeping the committed feature and finalizing its undo mark.");
+        FinalizeCommittedPreview();
+    }
+    else
+    {
+        AppendDebugLog("cancel_cb entered; undoing preview");
+        UndoPreview();
+    }
     return 0;
 }
 
 int TwoPointSiBianUI::close_cb()
 {
-    AppendDebugLog("close_cb entered; undoing uncommitted preview");
-    UndoPreview();
+    if (previewCommitted_)
+    {
+        AppendDebugLog("close_cb entered after Apply; keeping the committed feature and finalizing its undo mark.");
+        FinalizeCommittedPreview();
+    }
+    else
+    {
+        AppendDebugLog("close_cb entered; undoing uncommitted preview");
+        UndoPreview();
+    }
     return 0;
 }
 
 bool TwoPointSiBianUI::CreatePreview()
 {
     AppendDebugLog("CreatePreview entered");
-    UndoPreview();
 
-    previewUndoMark_ = session_->SetUndoMark(Session::MarkVisibilityInvisible, "2P_SiBian Preview");
+    // A face selected while the old preview exists may belong to the preview's
+    // boolean topology.  Save only its stable body tag and cursor position
+    // before rollback, then resolve the face again on the restored body.
+    tag_t rollbackSafeBodyTag = NULL_TAG;
+    Point3d rollbackSafeClickPoint;
+    bool hasRollbackSafeSingleClick = false;
+    if (IsSmartModeEnabled())
+    {
+        TaggedObject* clickedObject = nullptr;
+        BlockStyler::SelectObject* clickedBlock = activeSmartSelectionBlock_;
+        if (clickedBlock == nullptr)
+        {
+            clickedBlock = endPointBlock_ != nullptr ? endPointBlock_ : startPointBlock_;
+        }
+        if (ReadSelectedPoint(clickedBlock, clickedObject, rollbackSafeClickPoint))
+        {
+            Body* clickedBody = FindBody(clickedObject);
+            if (clickedBody != nullptr)
+            {
+                rollbackSafeBodyTag = clickedBody->Tag();
+                hasRollbackSafeSingleClick = true;
+                AppendDebugLog("CreatePreview captured rollback-safe smart click: body=" +
+                               std::to_string(rollbackSafeBodyTag) +
+                               ", point=" + FormatPoint(rollbackSafeClickPoint));
+            }
+        }
+    }
+    // Apply is a true commit boundary.  A later face selection starts another
+    // operation and must not remove the chain that the user already applied.
+    // Only an uncommitted live preview is replaceable (for example while
+    // switching Left/Right/Chamfer before pressing Apply).
+    if (previewCommitted_)
+    {
+        AppendDebugLog("CreatePreview preserving the previously applied feature chain.");
+        FinalizeCommittedPreview();
+    }
+    else
+    {
+        UndoPreview();
+    }
+
+    // NX can discard our undo mark while a UDF is being instantiated.  Keep a
+    // feature snapshot as an independent rollback boundary so enumeration
+    // changes also remove UDF-owned extrudes, rips, offsets and booleans.
+    previewBaselineFeatureTags_ = CurrentWorkPartFeatureTags();
+    previewCreatedFeatureTags_.clear();
+    AppendDebugLog("CreatePreview captured feature baseline count=" +
+                   std::to_string(previewBaselineFeatureTags_.size()));
+
+    previewUndoMark_ = session_->SetUndoMark(Session::MarkVisibilityVisible, "2P_SiBian Preview");
+
+    TaggedObject* rollbackSafeClickObject = nullptr;
+    if (hasRollbackSafeSingleClick)
+    {
+        try
+        {
+            rollbackSafeClickObject = dynamic_cast<TaggedObject*>(
+                NXObjectManager::Get(rollbackSafeBodyTag));
+        }
+        catch (...)
+        {
+            rollbackSafeClickObject = nullptr;
+        }
+    }
 
     InferredInputs inputs;
-    if (!ReadInputs(inputs))
+    if (!ReadInputs(inputs,
+                    rollbackSafeClickObject,
+                    hasRollbackSafeSingleClick ? &rollbackSafeClickPoint : nullptr))
     {
         AppendDebugLog("CreatePreview ReadInputs failed.");
         UndoPreview();
@@ -2675,7 +2844,9 @@ bool TwoPointSiBianUI::CreatePreview()
             const double lockedSheetThickness = inputs.thickness;
             InferredInputs refreshedInputs;
             refreshedInputs.thickness = lockedSheetThickness;
-            if (!ReadInputs(refreshedInputs))
+            if (!ReadInputs(refreshedInputs,
+                            rollbackSafeClickObject,
+                            hasRollbackSafeSingleClick ? &rollbackSafeClickPoint : nullptr))
             {
                 UndoPreview();
                 ShowError("The original second endpoint could not be recalculated after creating the sheet-metal rips.");
@@ -2774,6 +2945,18 @@ bool TwoPointSiBianUI::CreatePreview()
 
     previewUdfTag_ = finalResultTag;
     previewReferenceTags_ = allReferenceTags;
+    if (inputs.smartMode && inputs.inferredFromSingleClick && inputs.targetBody != nullptr)
+    {
+        smartCachedP1_ = inputs.startPoint;
+        smartCachedP2_ = inputs.endPoint;
+        smartEndpointBodyTag_ = inputs.targetBody->Tag();
+        hasSmartEndpointCache_ = true;
+        AppendDebugLog("CreatePreview retained smart endpoints: body=" +
+                       std::to_string(smartEndpointBodyTag_) +
+                       ", P1=" + FormatPoint(smartCachedP1_) +
+                       ", P2=" + FormatPoint(smartCachedP2_));
+    }
+    CapturePreviewCreatedFeatureTags();
     hasPreview_ = true;
     AppendDebugLog("CreatePreview OK, undoMark=" + std::to_string(static_cast<int>(previewUndoMark_)) +
                    ", previewUdfTag=" + std::to_string(previewUdfTag_) +
@@ -2781,11 +2964,55 @@ bool TwoPointSiBianUI::CreatePreview()
     return true;
 }
 
-void TwoPointSiBianUI::UndoPreview()
+std::vector<tag_t> TwoPointSiBianUI::CurrentWorkPartFeatureTags() const
 {
+    std::vector<tag_t> tags;
+    Part* workPart = session_ != nullptr ? session_->Parts()->Work() : nullptr;
+    if (workPart == nullptr || workPart->Features() == nullptr)
+    {
+        return tags;
+    }
+
+    Features::FeatureCollection* features = workPart->Features();
+    for (auto iterator = features->begin(); iterator != features->end(); ++iterator)
+    {
+        Features::Feature* feature = *iterator;
+        if (feature != nullptr && feature->Tag() != NULL_TAG)
+        {
+            tags.push_back(feature->Tag());
+        }
+    }
+    return tags;
+}
+
+void TwoPointSiBianUI::CapturePreviewCreatedFeatureTags()
+{
+    const std::set<tag_t> baseline(previewBaselineFeatureTags_.begin(),
+                                   previewBaselineFeatureTags_.end());
+    previewCreatedFeatureTags_.clear();
+    for (tag_t featureTag : CurrentWorkPartFeatureTags())
+    {
+        if (baseline.find(featureTag) == baseline.end())
+        {
+            previewCreatedFeatureTags_.push_back(featureTag);
+        }
+    }
+    AppendDebugLog("CreatePreview captured created feature count=" +
+                   std::to_string(previewCreatedFeatureTags_.size()));
+}
+
+void TwoPointSiBianUI::UndoPreview(bool includeCommitted)
+{
+    if (previewCommitted_ && !includeCommitted)
+    {
+        return;
+    }
     if (!hasPreview_ &&
+        !previewCommitted_ &&
         previewUdfTag_ == NULL_TAG &&
         previewReferenceTags_.empty() &&
+        previewBaselineFeatureTags_.empty() &&
+        previewCreatedFeatureTags_.empty() &&
         previewUndoMark_ == static_cast<Session::UndoMarkId>(0))
     {
         return;
@@ -2813,10 +3040,40 @@ void TwoPointSiBianUI::UndoPreview()
 
     if (!undoSucceeded)
     {
-        if (previewUdfTag_ != NULL_TAG)
+        // Re-scan here as well as on successful creation.  This makes a
+        // partially-created UDF rollback-safe when creation fails before the
+        // normal created-feature list can be captured.
+        const std::set<tag_t> baseline(previewBaselineFeatureTags_.begin(),
+                                       previewBaselineFeatureTags_.end());
+        std::vector<tag_t> createdFeatureTags;
+        std::set<tag_t> alreadyQueued;
+        for (tag_t featureTag : CurrentWorkPartFeatureTags())
         {
-            const int deleteResult = UF_OBJ_delete_object(previewUdfTag_);
-            AppendDebugLog("UndoPreview fallback delete result feature tag=" + std::to_string(previewUdfTag_) +
+            if (baseline.find(featureTag) == baseline.end() && alreadyQueued.insert(featureTag).second)
+            {
+                createdFeatureTags.push_back(featureTag);
+            }
+        }
+        for (tag_t featureTag : previewCreatedFeatureTags_)
+        {
+            if (featureTag != NULL_TAG && alreadyQueued.insert(featureTag).second)
+            {
+                createdFeatureTags.push_back(featureTag);
+            }
+        }
+        if (previewUdfTag_ != NULL_TAG && alreadyQueued.insert(previewUdfTag_).second)
+        {
+            createdFeatureTags.push_back(previewUdfTag_);
+        }
+
+        AppendDebugLog("UndoPreview fallback deleting created feature count=" +
+                       std::to_string(createdFeatureTags.size()));
+        for (auto iterator = createdFeatureTags.rbegin();
+             iterator != createdFeatureTags.rend();
+             ++iterator)
+        {
+            const int deleteResult = UF_OBJ_delete_object(*iterator);
+            AppendDebugLog("UndoPreview fallback delete created feature tag=" + std::to_string(*iterator) +
                            ", result=" + std::to_string(deleteResult) +
                            " " + UfMessage(deleteResult));
         }
@@ -2835,9 +3092,12 @@ void TwoPointSiBianUI::UndoPreview()
     }
 
     hasPreview_ = false;
+    previewCommitted_ = false;
     previewUndoMark_ = static_cast<Session::UndoMarkId>(0);
     previewUdfTag_ = NULL_TAG;
     previewReferenceTags_.clear();
+    previewBaselineFeatureTags_.clear();
+    previewCreatedFeatureTags_.clear();
 }
 
 void TwoPointSiBianUI::CommitPreview()
@@ -2847,35 +3107,88 @@ void TwoPointSiBianUI::CommitPreview()
         return;
     }
 
+    AppendDebugLog("CommitPreview retaining replaceable mark=" +
+                   std::to_string(static_cast<int>(previewUndoMark_)) +
+                   " until mode/input change or dialog finalization.");
+    hasPreview_ = false;
+    previewCommitted_ = true;
+    hasSmartEndpointCache_ = false;
+    smartEndpointBodyTag_ = NULL_TAG;
+}
+
+void TwoPointSiBianUI::FinalizeCommittedPreview()
+{
+    if (!previewCommitted_)
+    {
+        return;
+    }
     try
     {
-        AppendDebugLog("CommitPreview mark=" + std::to_string(static_cast<int>(previewUndoMark_)));
-        session_->DeleteUndoMark(previewUndoMark_, "2P_SiBian Preview");
+        if (previewUndoMark_ != static_cast<Session::UndoMarkId>(0))
+        {
+            AppendDebugLog("FinalizeCommittedPreview deleting retained mark=" +
+                           std::to_string(static_cast<int>(previewUndoMark_)));
+            session_->DeleteUndoMark(previewUndoMark_, "2P_SiBian Preview");
+        }
     }
     catch (const NXException& ex)
     {
-        AppendDebugLog("CommitPreview NXException: " + UfMessage(ex.ErrorCode()));
+        AppendDebugLog("FinalizeCommittedPreview NXException: " + UfMessage(ex.ErrorCode()));
     }
     catch (...)
     {
-        AppendDebugLog("CommitPreview unknown exception");
+        AppendDebugLog("FinalizeCommittedPreview unknown exception");
     }
 
-    hasPreview_ = false;
+    previewCommitted_ = false;
     previewUndoMark_ = static_cast<Session::UndoMarkId>(0);
     previewUdfTag_ = NULL_TAG;
     previewReferenceTags_.clear();
+    previewBaselineFeatureTags_.clear();
+    previewCreatedFeatureTags_.clear();
 }
-bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs) const
+bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
+                                  TaggedObject* singleClickObjectOverride,
+                                  const Point3d* singleClickPointOverride) const
 {
+    inputs.smartMode = IsSmartModeEnabled();
     inputs.featureMode = ReadFeatureMode();
 
     TaggedObject* selectedStartObject = nullptr;
     TaggedObject* selectedEndObject = nullptr;
     Point3d selectedStartPoint;
     Point3d selectedEndPoint;
-    const bool hasStart = ReadSelectedPoint(startPointBlock_, selectedStartObject, selectedStartPoint);
-    const bool hasEnd = ReadSelectedPoint(endPointBlock_, selectedEndObject, selectedEndPoint);
+    bool hasStart = ReadSelectedPoint(startPointBlock_, selectedStartObject, selectedStartPoint);
+    bool hasEnd = ReadSelectedPoint(endPointBlock_, selectedEndObject, selectedEndPoint);
+
+    if (singleClickObjectOverride != nullptr && singleClickPointOverride != nullptr)
+    {
+        selectedStartObject = nullptr;
+        hasStart = false;
+        selectedEndObject = singleClickObjectOverride;
+        selectedEndPoint = *singleClickPointOverride;
+        hasEnd = true;
+        AppendDebugLog("ReadInputs using rollback-safe smart click body=" +
+                       std::to_string(singleClickObjectOverride->Tag()) +
+                       ", point=" + FormatPoint(selectedEndPoint));
+    }
+    else if (inputs.smartMode && hasStart && hasEnd)
+    {
+        // Automatic progression can leave both selection blocks populated
+        // after several face clicks. Smart mode is intentionally one-click;
+        // use the block that generated the latest update.
+        if (activeSmartSelectionBlock_ == startPointBlock_)
+        {
+            hasEnd = false;
+            selectedEndObject = nullptr;
+        }
+        else
+        {
+            hasStart = false;
+            selectedStartObject = nullptr;
+        }
+        AppendDebugLog("ReadInputs smart mode ignored the older populated selection block.");
+    }
 
     if (hasStart && hasEnd && Distance(selectedStartPoint, selectedEndPoint) > kPointTolerance)
     {
@@ -2887,10 +3200,54 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs) const
     else
     {
         TaggedObject* clickObject = hasEnd ? selectedEndObject : selectedStartObject;
-        const Point3d clickPoint = hasEnd ? selectedEndPoint : selectedStartPoint;
+        Point3d clickPoint = hasEnd ? selectedEndPoint : selectedStartPoint;
         inputs.inferredFromSingleClick = true;
         inputs.selectionClickPoint = clickPoint;
-        if (!InferEndpointsFromFaceClick(clickObject, clickPoint, inputs))
+
+        Body* clickBody = FindBody(clickObject);
+        const bool canReuseSmartEndpoints =
+            inputs.smartMode && hasSmartEndpointCache_ && clickBody != nullptr &&
+            clickBody->Tag() == smartEndpointBodyTag_;
+        if (canReuseSmartEndpoints)
+        {
+            inputs.startObject = clickObject;
+            inputs.endObject = clickObject;
+            inputs.startPoint = smartCachedP1_;
+            inputs.endPoint = smartCachedP2_;
+            inputs.targetBody = clickBody;
+            inputs.baseFace = FindPlanarFaceContainingPoints(clickBody,
+                                                             inputs.startPoint,
+                                                             inputs.endPoint);
+            if (inputs.baseFace == nullptr)
+            {
+                AppendDebugLog("ReadInputs smart endpoint cache rejected: cached P1/P2 no longer share a planar face.");
+                if (!InferEndpointsFromFaceClick(clickObject, clickPoint, inputs))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                Point3d planePoint;
+                Vector3d planeNormal;
+                if (FacePlaneData(inputs.baseFace, planePoint, planeNormal) &&
+                    Normalize(planeNormal))
+                {
+                    const double normalDistance = Dot(Subtract(clickPoint, planePoint),
+                                                      planeNormal);
+                    clickPoint = Point3d(clickPoint.X - planeNormal.X * normalDistance,
+                                         clickPoint.Y - planeNormal.Y * normalDistance,
+                                         clickPoint.Z - planeNormal.Z * normalDistance);
+                    inputs.selectionClickPoint = clickPoint;
+                }
+                AppendDebugLog("ReadInputs reused recorded smart endpoints: body=" +
+                               std::to_string(clickBody->Tag()) +
+                               ", P1=" + FormatPoint(inputs.startPoint) +
+                               ", P2=" + FormatPoint(inputs.endPoint) +
+                               ", projectedClick=" + FormatPoint(inputs.selectionClickPoint));
+            }
+        }
+        else if (!InferEndpointsFromFaceClick(clickObject, clickPoint, inputs))
         {
             return false;
         }
@@ -2933,6 +3290,38 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs) const
     if (!Normalize(yDirection))
     {
         return false;
+    }
+
+    if (inputs.smartMode && inputs.inferredFromSingleClick)
+    {
+        const Vector3d clickToP1 = Subtract(inputs.startPoint, inputs.selectionClickPoint);
+        const Vector3d clickToP2 = Subtract(inputs.endPoint, inputs.selectionClickPoint);
+        const double clickAngle = AngleDegrees(clickToP1, clickToP2);
+        const double signedMouseY = Dot(Subtract(inputs.selectionClickPoint, inputs.startPoint),
+                                        yDirection);
+        if (clickAngle < kEndpointPairMinimumAngleDegrees - 1.0e-6)
+        {
+            inputs.featureMode = signedMouseY >= 0.0
+                                     ? FeatureMode::NinetyLeft
+                                     : FeatureMode::NinetyRight;
+        }
+        else
+        {
+            inputs.featureMode = FeatureMode::Chamfer;
+        }
+        const char* smartModeName = inputs.featureMode == FeatureMode::NinetyLeft
+                                        ? "90-left"
+                                        : (inputs.featureMode == FeatureMode::NinetyRight
+                                               ? "90-right"
+                                               : "chamfer");
+        AppendDebugLog("smart mode decision: clickAngle=" +
+                       FormatExpressionNumber(clickAngle) +
+                       ", signedMouseY=" + FormatExpressionNumber(signedMouseY) +
+                       ", result=" + smartModeName);
+    }
+    else if (inputs.smartMode)
+    {
+        AppendDebugLog("smart mode skipped because two explicit endpoints were selected; using manual enum value.");
     }
     AppendDebugLog("local directions: X=(" + FormatExpressionNumber(xDirection.X) + "," +
                    FormatExpressionNumber(xDirection.Y) + "," +
@@ -3148,8 +3537,10 @@ bool TwoPointSiBianUI::InferEndpointsFromFaceClick(TaggedObject* selectedObject,
 
             const Vector3d secondFromClick = Subtract(candidates[secondIndex].point, clickPoint);
             const double pairAngle = AngleDegrees(firstFromClick, secondFromClick);
-            if (pairAngle + 1.0e-6 < kEndpointPairMinimumAngleDegrees ||
-                pairAngle - 1.0e-6 > kEndpointPairMaximumAngleDegrees)
+            if ((!inputs.smartMode &&
+                 (pairAngle + 1.0e-6 < kEndpointPairMinimumAngleDegrees ||
+                  pairAngle - 1.0e-6 > kEndpointPairMaximumAngleDegrees)) ||
+                (inputs.smartMode && pairAngle <= 1.0e-6))
             {
                 continue;
             }
@@ -3173,7 +3564,9 @@ bool TwoPointSiBianUI::InferEndpointsFromFaceClick(TaggedObject* selectedObject,
     }
     if (!foundPair)
     {
-        AppendDebugLog("InferEndpointsFromFaceClick failed: no nearest boundary point pair has a click angle in [150,180] degrees.");
+        AppendDebugLog(inputs.smartMode
+                           ? "InferEndpointsFromFaceClick failed: no usable nearest boundary point pair was found for smart mode."
+                           : "InferEndpointsFromFaceClick failed: no nearest boundary point pair has a click angle in [150,180] degrees.");
         return false;
     }
 
@@ -3227,8 +3620,9 @@ bool TwoPointSiBianUI::InferEndpointsFromFaceClick(TaggedObject* selectedObject,
           << ", face=" << face->Tag()
           << "\n  expectedThickness=" << expectedThickness
           << "\n  selectedPairAngle=" << selectedPairAngle
-          << " (required " << kEndpointPairMinimumAngleDegrees << "-"
-          << kEndpointPairMaximumAngleDegrees << ")"
+          << (inputs.smartMode
+                  ? " (smart mode: below 150 selects a 90-degree template)"
+                  : " (manual mode required 150-180)")
           << "\n  nearestPair[0]=" << FormatPoint(first.point)
           << " distance=" << first.distance
           << " thicknessScore=" << first.thicknessScore
@@ -5464,13 +5858,6 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
                                                 std::vector<tag_t>* createdReferenceTags,
                                                 std::vector<tag_t>* createdToolBodyTags) const
 {
-    if (inputs.featureMode == FeatureMode::NinetyRight)
-    {
-        errorMessage = "90 degree right UDF template is not connected yet.";
-        AppendDebugLog(errorMessage);
-        return false;
-    }
-
     if (createdUdfTag != nullptr)
     {
         *createdUdfTag = NULL_TAG;
@@ -5598,12 +5985,15 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
     AppendDebugLog(DescribeExpressions(expData));
     AppendDebugLog(DescribeRefs(refData));
 
-    if (inputs.featureMode == FeatureMode::Chamfer && refData.num_refs != 4)
+    if ((inputs.featureMode == FeatureMode::Chamfer ||
+         inputs.featureMode == FeatureMode::NinetyLeft ||
+         inputs.featureMode == FeatureMode::NinetyRight) &&
+        refData.num_refs != 4)
     {
         UF_MODL_udf_free_exp_data(&expData);
         UF_MODL_udf_free_ref_data(&refData);
         closeTemplate();
-        errorMessage = "The chamfer UDF template must have exactly 4 references in order: A edge, face, a edge, B edge. Actual reference count: " +
+        errorMessage = "The chamfer/90-left UDF template must have exactly 4 references in order: A edge, face, a edge, B edge. Actual reference count: " +
                        std::to_string(refData.num_refs) + ".";
         AppendDebugLog(errorMessage);
         return false;
@@ -5773,7 +6163,10 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
             edgeOrdinal,
             sketchExternalOrdinal);
 
-        if (inputs.featureMode == FeatureMode::Chamfer && index >= 0 && index <= 3)
+        if ((inputs.featureMode == FeatureMode::Chamfer ||
+             inputs.featureMode == FeatureMode::NinetyLeft ||
+             inputs.featureMode == FeatureMode::NinetyRight) &&
+            index >= 0 && index <= 3)
         {
             const tag_t chamferRefs[] = {
                 inputs.startPositiveYEdge != nullptr ? inputs.startPositiveYEdge->Tag() : NULL_TAG,
@@ -5787,18 +6180,6 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
                 EdgeDirectionWithStartPoint(inputs.endPositiveYEdge, inputs.endPoint, "a(P2,Y+) start=P2"),
                 EdgeDirectionWithEndPoint(inputs.startNegativeYEdge, inputs.startPoint, "B(P1,Y-) end=P1")};
             refData.reverse_refs_dir[index] = chamferDirs[index];
-        }
-        else if (inputs.featureMode == FeatureMode::NinetyLeft && index >= 0 && index <= 5)
-        {
-            const tag_t ninetyLeftRefs[] = {
-                startPointTag,
-                inputs.startPositiveYEdge != nullptr ? inputs.startPositiveYEdge->Tag() : NULL_TAG,
-                inputs.baseFace != nullptr ? inputs.baseFace->Tag() : NULL_TAG,
-                endPointTag,
-                inputs.endPositiveYEdge != nullptr ? inputs.endPositiveYEdge->Tag() : NULL_TAG,
-                inputs.startNegativeYEdge != nullptr ? inputs.startNegativeYEdge->Tag() : NULL_TAG};
-            matched = ninetyLeftRefs[index];
-            refData.reverse_refs_dir[index] = UF_MODL_UDF_KEEP_DIR;
         }
         else
         {
@@ -6036,6 +6417,40 @@ void TwoPointSiBianUI::ConfigurePointSelection(NXOpen::BlockStyler::SelectObject
     }
 
     delete properties;
+}
+
+void TwoPointSiBianUI::UnhighlightSelectionObjects() const
+{
+    const std::array<BlockStyler::SelectObject*, 2> blocks = {
+        startPointBlock_, endPointBlock_};
+    std::set<tag_t> clearedTags;
+    for (BlockStyler::SelectObject* block : blocks)
+    {
+        if (block == nullptr)
+        {
+            continue;
+        }
+        try
+        {
+            for (TaggedObject* selectedObject : block->GetSelectedObjects())
+            {
+                if (selectedObject == nullptr || selectedObject->Tag() == NULL_TAG ||
+                    !clearedTags.insert(selectedObject->Tag()).second)
+                {
+                    continue;
+                }
+                if (DisplayableObject* displayable = dynamic_cast<DisplayableObject*>(selectedObject))
+                {
+                    displayable->Unhighlight();
+                }
+                UF_DISP_set_highlight(selectedObject->Tag(), 0);
+            }
+        }
+        catch (...)
+        {
+            // A previous preview face can already be invalid at this point.
+        }
+    }
 }
 
 void TwoPointSiBianUI::ShowError(const std::string& message) const

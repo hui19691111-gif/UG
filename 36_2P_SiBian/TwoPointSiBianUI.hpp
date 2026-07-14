@@ -6,6 +6,7 @@
 #include <NXOpen/BlockStyler_Enumeration.hxx>
 #include <NXOpen/BlockStyler_SelectObject.hxx>
 #include <NXOpen/BlockStyler_StringBlock.hxx>
+#include <NXOpen/BlockStyler_Toggle.hxx>
 #include <NXOpen/Body.hxx>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/Face.hxx>
@@ -54,6 +55,7 @@ private:
         double thickness = 0.0;
         double spanLength = 0.0;
         bool inferredFromSingleClick = false;
+        bool smartMode = false;
         NXOpen::Point3d selectionClickPoint;
         std::string clearanceValue = "0.2";
         std::string bendRadiusValue = "0.2";
@@ -69,8 +71,11 @@ private:
     int cancel_cb();
     int close_cb();
 
-    bool ReadInputs(InferredInputs& inputs) const;
+    bool ReadInputs(InferredInputs& inputs,
+                    NXOpen::TaggedObject* singleClickObjectOverride = nullptr,
+                    const NXOpen::Point3d* singleClickPointOverride = nullptr) const;
     FeatureMode ReadFeatureMode() const;
+    bool IsSmartModeEnabled() const;
     bool ReadSelectedPoint(NXOpen::BlockStyler::SelectObject* block,
                            NXOpen::TaggedObject*& selectedObject,
                            NXOpen::Point3d& point) const;
@@ -180,9 +185,13 @@ private:
                             tag_t& resultFeatureTag,
                             std::string& errorMessage) const;
     bool CreatePreview();
-    void UndoPreview();
+    void UndoPreview(bool includeCommitted = false);
     void CommitPreview();
+    void FinalizeCommittedPreview();
+    std::vector<tag_t> CurrentWorkPartFeatureTags() const;
+    void CapturePreviewCreatedFeatureTags();
     void ConfigurePointSelection(NXOpen::BlockStyler::SelectObject* block) const;
+    void UnhighlightSelectionObjects() const;
     void ShowError(const std::string& message) const;
 
 private:
@@ -191,8 +200,10 @@ private:
     NXOpen::BlockStyler::BlockDialog* dialog_;
     NXOpen::BlockStyler::SelectObject* startPointBlock_;
     NXOpen::BlockStyler::SelectObject* endPointBlock_;
+    NXOpen::BlockStyler::SelectObject* activeSmartSelectionBlock_;
     NXOpen::BlockStyler::StringBlock* clearanceBlock_;
     NXOpen::BlockStyler::StringBlock* bendRadiusBlock_;
+    NXOpen::BlockStyler::Toggle* smartModeBlock_;
     NXOpen::BlockStyler::Enumeration* featureModeBlock_;
     NXOpen::Features::CustomFeatureClassManager* customFeatureManager_;
     NXOpen::Features::CustomFeature* editedFeature_;
@@ -200,6 +211,13 @@ private:
     NXOpen::Session::UndoMarkId previewUndoMark_;
     tag_t previewUdfTag_;
     std::vector<tag_t> previewReferenceTags_;
+    std::vector<tag_t> previewBaselineFeatureTags_;
+    std::vector<tag_t> previewCreatedFeatureTags_;
+    bool hasSmartEndpointCache_;
+    tag_t smartEndpointBodyTag_;
+    NXOpen::Point3d smartCachedP1_;
+    NXOpen::Point3d smartCachedP2_;
     bool hasPreview_;
+    bool previewCommitted_;
     bool isUpdatingPreview_;
 };
