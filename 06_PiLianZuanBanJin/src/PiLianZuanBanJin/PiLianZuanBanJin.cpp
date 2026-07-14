@@ -89,7 +89,7 @@ HMODULE LoadProtectedLicenseGate()
         }
     }
 
-    HMODULE fixedModule = LoadLibraryW(L"D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\application\\ZhaoFuNxLicenseGate.dll");
+    HMODULE fixedModule = LoadLibraryW(L"D:\\UG智辉钣金插件\\application\\ZhaoFuNxLicenseGate.dll");
     if (fixedModule != NULL)
     {
         return fixedModule;
@@ -1904,7 +1904,7 @@ namespace
 
     std::string BatchPartPickerStatePath()
     {
-        return std::string("D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\config\\PiLianZuanBanJin_part_picker_state.ini");
+        return std::string(u8"D:\\UG智辉钣金插件\\config\\PiLianZuanBanJin_part_picker_state.ini");
     }
 
     std::string EncodePickerStateValue(const std::string& value)
@@ -2652,7 +2652,7 @@ namespace
 
     std::string FindConfigPath()
     {
-        std::string path = std::string("D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\config\\") + PiLianConfigFileName;
+        std::string path = std::string(u8"D:\\UG智辉钣金插件\\config\\") + PiLianConfigFileName;
         return FileExists(path) ? path : std::string();
     }
 
@@ -3606,6 +3606,21 @@ namespace
         if (body == NULL)
         {
             if (info != NULL) info->reason = "Empty body.";
+            return false;
+        }
+
+        // A screw, nut, or stud may be long along its axis, but its two
+        // transverse bounding-box dimensions must remain comparable.  Sheet
+        // metal bodies often contain cylindrical bend or boss faces; without
+        // this guard one such face can make the whole wide plate look like a
+        // fastener when projected along that cylinder axis.
+        const BodyBox bodyBox = MeasureBodyBox(body);
+        if (bodyBox.height > 1e-6 && bodyBox.width / bodyBox.height > 3.0)
+        {
+            if (info != NULL)
+            {
+                info->reason = "Body transverse bounding-box aspect ratio is too large for a fastener.";
+            }
             return false;
         }
 
@@ -4745,13 +4760,358 @@ namespace
         return FaceEdgesByUf(face).size() > 4;
     }
 
-    std::map<tag_t, double> ChainPositionScores(const std::vector<FaceCandidate>& candidates)
+    struct SectionPositionNode
+    {
+        FaceCandidate candidate;
+        std::vector<int> memberIndices;
+        double segmentLength = 0.0;
+        std::vector<std::pair<int, double> > neighbors;
+    };
+
+    bool TrySectionLengthPositionScores(
+        const std::vector<FaceCandidate>& candidates,
+        std::map<tag_t, double>* scores,
+        const std::map<tag_t, bool>* knownBendFaceTags)
+    {
+        if (scores == NULL)
+        {
+            return false;
+        }
+        scores->clear();
+        if (candidates.size() < 2)
+        {
+            return false;
+        }
+
+        // Holes, slots and local cuts can split one physical flange into several
+        // coplanar faces.  They are one section segment and must be collapsed
+        // before building the bend path, otherwise a normal two-way path looks
+        // like a branch at the large base face.
+        std::vector<SectionPositionNode> nodes;
+        std::map<tag_t, int> indexByTag;
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            if (candidates[i].face == NULL)
+            {
+                continue;
+            }
+            int groupIndex = -1;
+            for (size_t group = 0; group < nodes.size(); ++group)
+            {
+                const double normalAlignment = std::fabs(Dot3(
+                    candidates[i].normal, nodes[group].candidate.normal));
+                const double centerDelta[3] = {
+                    candidates[i].center[0] - nodes[group].candidate.center[0],
+                    candidates[i].center[1] - nodes[group].candidate.center[1],
+                    candidates[i].center[2] - nodes[group].candidate.center[2]
+                };
+                const double planeSeparation = std::fabs(Dot3(
+                    centerDelta, nodes[group].candidate.normal));
+                if (normalAlignment >= 0.9999 && planeSeparation <= 0.05)
+                {
+                    groupIndex = static_cast<int>(group);
+                    break;
+                }
+            }
+            if (groupIndex < 0)
+            {
+                SectionPositionNode node;
+                node.candidate = candidates[i];
+                nodes.push_back(node);
+                groupIndex = static_cast<int>(nodes.size() - 1);
+            }
+            nodes[groupIndex].memberIndices.push_back(static_cast<int>(i));
+            indexByTag[candidates[i].face->Tag()] = groupIndex;
+        }
+        if (nodes.size() < 2) return false;
+
+        double commonAxis[3] = { 0.0, 0.0, 0.0 };
+        bool hasCommonAxis = false;
+        bool incompatibleAxes = false;
+        std::set<std::pair<int, int> > connectedPairs;
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            Face* planarFace = candidates[i].face;
+            if (planarFace == NULL) continue;
+            std::vector<Edge*> planarEdges = FaceEdgesByUf(planarFace);
+            for (size_t edgeIndex = 0; edgeIndex < planarEdges.size(); ++edgeIndex)
+            {
+                logical isSmooth = false;
+                if (planarEdges[edgeIndex] == NULL ||
+                    UF_MODL_ask_edge_smoothness(planarEdges[edgeIndex]->Tag(), 18.2, &isSmooth) != 0 ||
+                    !isSmooth)
+                {
+                    // A true sheet-metal bend is tangent to its neighboring planar face.
+                    // Sharp circular boundaries belong to holes, bosses or fasteners and
+                    // must not participate in the section-path axis calculation.
+                    continue;
+                }
+                std::vector<Face*> adjacent = AdjacentFacesByEdge(planarEdges[edgeIndex], planarFace);
+                for (size_t adjacentIndex = 0; adjacentIndex < adjacent.size(); ++adjacentIndex)
+                {
+                    double axisPoint[3] = { 0.0, 0.0, 0.0 };
+                    double axisDirection[3] = { 0.0, 0.0, 1.0 };
+                    double radius = 0.0;
+                    int normDir = 0;
+                    Face* cylinderFace = adjacent[adjacentIndex];
+                    if (knownBendFaceTags != NULL &&
+                        (cylinderFace == NULL || !knownBendFaceTags->count(cylinderFace->Tag())))
+                    {
+                        continue;
+                    }
+                    if (!AskCylinderFaceData(cylinderFace, axisPoint, axisDirection, &radius, &normDir))
+                    {
+                        continue;
+                    }
+                    Normalize3(axisDirection);
+                    if (!hasCommonAxis)
+                    {
+                        commonAxis[0] = axisDirection[0];
+                        commonAxis[1] = axisDirection[1];
+                        commonAxis[2] = axisDirection[2];
+                        hasCommonAxis = true;
+                    }
+                    else if (std::fabs(Dot3(commonAxis, axisDirection)) < 0.95)
+                    {
+                        incompatibleAxes = true;
+                    }
+
+                    std::vector<Edge*> cylinderEdges = FaceEdgesByUf(cylinderFace);
+                    for (size_t cylinderEdgeIndex = 0; cylinderEdgeIndex < cylinderEdges.size(); ++cylinderEdgeIndex)
+                    {
+                        logical cylinderEdgeSmooth = false;
+                        if (cylinderEdges[cylinderEdgeIndex] == NULL ||
+                            UF_MODL_ask_edge_smoothness(cylinderEdges[cylinderEdgeIndex]->Tag(), 18.2, &cylinderEdgeSmooth) != 0 ||
+                            !cylinderEdgeSmooth)
+                        {
+                            continue;
+                        }
+                        std::vector<Face*> cylinderAdjacent = AdjacentFacesByEdge(cylinderEdges[cylinderEdgeIndex], cylinderFace);
+                        for (size_t otherIndex = 0; otherIndex < cylinderAdjacent.size(); ++otherIndex)
+                        {
+                            Face* otherPlanar = cylinderAdjacent[otherIndex];
+                            if (otherPlanar == NULL || otherPlanar->Tag() == planarFace->Tag()) continue;
+                            std::map<tag_t, int>::const_iterator found = indexByTag.find(otherPlanar->Tag());
+                            if (found == indexByTag.end()) continue;
+                            const int first = indexByTag[planarFace->Tag()];
+                            const int second = found->second;
+                            if (first == second) continue;
+                            const std::pair<int, int> key = first < second
+                                ? std::make_pair(first, second)
+                                : std::make_pair(second, first);
+                            if (!connectedPairs.insert(key).second) continue;
+
+                            double dotNormals = Dot3(nodes[first].candidate.normal, nodes[second].candidate.normal);
+                            dotNormals = std::max(-1.0, std::min(1.0, dotNormals));
+                            const double bendAngle = std::acos(std::fabs(dotNormals));
+                            const double bendLength = std::max(0.0, radius) * bendAngle;
+                            nodes[first].neighbors.push_back(std::make_pair(second, bendLength));
+                            nodes[second].neighbors.push_back(std::make_pair(first, bendLength));
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!hasCommonAxis || incompatibleAxes || connectedPairs.empty())
+        {
+            std::ostringstream log;
+            log << "section position fallback reason=invalid-bend-graph"
+                << " hasCommonAxis=" << (hasCommonAxis ? 1 : 0)
+                << " incompatibleAxes=" << (incompatibleAxes ? 1 : 0)
+                << " connectedPairs=" << connectedPairs.size()
+                << " candidates=" << candidates.size();
+            AppendMarkerLineDebugLog(log.str());
+            return false;
+        }
+
+        for (size_t i = 0; i < nodes.size(); ++i)
+        {
+            if (nodes[i].neighbors.size() > 2)
+            {
+                std::ostringstream log;
+                log << "section position fallback reason=branch"
+                    << " face=" << nodes[i].candidate.face->Tag()
+                    << " neighborCount=" << nodes[i].neighbors.size();
+                AppendMarkerLineDebugLog(log.str());
+                return false;
+            }
+            double sectionDirection[3] = {
+                commonAxis[1] * nodes[i].candidate.normal[2] - commonAxis[2] * nodes[i].candidate.normal[1],
+                commonAxis[2] * nodes[i].candidate.normal[0] - commonAxis[0] * nodes[i].candidate.normal[2],
+                commonAxis[0] * nodes[i].candidate.normal[1] - commonAxis[1] * nodes[i].candidate.normal[0]
+            };
+            Normalize3(sectionDirection);
+            double minProjection = std::numeric_limits<double>::max();
+            double maxProjection = -std::numeric_limits<double>::max();
+            for (size_t member = 0; member < nodes[i].memberIndices.size(); ++member)
+            {
+                const FaceCandidate& memberCandidate = candidates[nodes[i].memberIndices[member]];
+                std::vector<Edge*> edges = FaceEdgesByUf(memberCandidate.face);
+                for (size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex)
+                {
+                    Point3d firstPoint;
+                    Point3d secondPoint;
+                    try
+                    {
+                        edges[edgeIndex]->GetVertices(&firstPoint, &secondPoint);
+                    }
+                    catch (...)
+                    {
+                        continue;
+                    }
+                    const double firstProjection = firstPoint.X * sectionDirection[0] +
+                        firstPoint.Y * sectionDirection[1] + firstPoint.Z * sectionDirection[2];
+                    const double secondProjection = secondPoint.X * sectionDirection[0] +
+                        secondPoint.Y * sectionDirection[1] + secondPoint.Z * sectionDirection[2];
+                    minProjection = std::min(minProjection, std::min(firstProjection, secondProjection));
+                    maxProjection = std::max(maxProjection, std::max(firstProjection, secondProjection));
+                }
+            }
+            if (minProjection > maxProjection || maxProjection - minProjection <= 1e-6)
+            {
+                std::ostringstream log;
+                log << "section position fallback reason=invalid-segment-length"
+                    << " face=" << nodes[i].candidate.face->Tag();
+                AppendMarkerLineDebugLog(log.str());
+                return false;
+            }
+            nodes[i].segmentLength = maxProjection - minProjection;
+        }
+
+        int startIndex = -1;
+        for (size_t i = 0; i < nodes.size(); ++i)
+        {
+            if (nodes[i].neighbors.size() == 1)
+            {
+                startIndex = static_cast<int>(i);
+                break;
+            }
+        }
+        if (startIndex < 0)
+        {
+            // A converted closed profile has no degree-one node even though its
+            // source sheet must have a longitudinal seam.  Use the narrowest
+            // flat section as the stable seam/reference segment, then unwrap
+            // the cycle from there.  This preserves the requested half-total-
+            // section-length definition instead of falling back to XYZ center.
+            double shortestSegment = std::numeric_limits<double>::max();
+            for (size_t i = 0; i < nodes.size(); ++i)
+            {
+                if (nodes[i].neighbors.size() == 2 && nodes[i].segmentLength < shortestSegment)
+                {
+                    shortestSegment = nodes[i].segmentLength;
+                    startIndex = static_cast<int>(i);
+                }
+            }
+            if (startIndex < 0)
+            {
+                AppendMarkerLineDebugLog("section position fallback reason=no-open-end-or-cycle");
+                return false;
+            }
+            std::ostringstream log;
+            log << "section position closed-cycle seam=shortest-segment"
+                << " face=" << nodes[startIndex].candidate.face->Tag()
+                << " segmentLength=" << nodes[startIndex].segmentLength
+                << " groups=" << nodes.size();
+            AppendMarkerLineDebugLog(log.str());
+        }
+
+        std::vector<int> order;
+        std::vector<double> bendAfter;
+        std::set<int> visited;
+        int previous = -1;
+        int current = startIndex;
+        while (current >= 0 && !visited.count(current))
+        {
+            visited.insert(current);
+            order.push_back(current);
+            int next = -1;
+            double nextBendLength = 0.0;
+            for (size_t n = 0; n < nodes[current].neighbors.size(); ++n)
+            {
+                if (nodes[current].neighbors[n].first != previous)
+                {
+                    next = nodes[current].neighbors[n].first;
+                    nextBendLength = nodes[current].neighbors[n].second;
+                    break;
+                }
+            }
+            if (next >= 0) bendAfter.push_back(nextBendLength);
+            previous = current;
+            current = next;
+        }
+        if (visited.size() != nodes.size() || order.size() < 2)
+        {
+            std::ostringstream log;
+            log << "section position fallback reason=disconnected"
+                << " visited=" << visited.size()
+                << " groups=" << nodes.size()
+                << " originalCandidates=" << candidates.size();
+            AppendMarkerLineDebugLog(log.str());
+            return false;
+        }
+
+        double totalLength = 0.0;
+        for (size_t i = 0; i < order.size(); ++i)
+        {
+            totalLength += nodes[order[i]].segmentLength;
+            if (i < bendAfter.size()) totalLength += bendAfter[i];
+        }
+        if (totalLength <= 1e-6)
+        {
+            AppendMarkerLineDebugLog("section position fallback reason=zero-total-length");
+            return false;
+        }
+
+        const double sectionCenter = totalLength * 0.5;
+        double cursor = 0.0;
+        for (size_t i = 0; i < order.size(); ++i)
+        {
+            SectionPositionNode& node = nodes[order[i]];
+            const double faceCenterPosition = cursor + node.segmentLength * 0.5;
+            const double distance = std::fabs(faceCenterPosition - sectionCenter);
+            const double normalizedDistance = std::min(1.0, distance / std::max(sectionCenter, 1e-9));
+            const double score = 3.0 * (1.0 - normalizedDistance);
+            for (size_t member = 0; member < node.memberIndices.size(); ++member)
+            {
+                Face* memberFace = candidates[node.memberIndices[member]].face;
+                if (memberFace != NULL) (*scores)[memberFace->Tag()] = score;
+            }
+            std::ostringstream log;
+            log << "section position face=" << node.candidate.face->Tag()
+                << " coplanarMembers=" << node.memberIndices.size()
+                << " segmentLength=" << node.segmentLength
+                << " faceCenterPosition=" << faceCenterPosition
+                << " totalLength=" << totalLength
+                << " sectionCenter=" << sectionCenter
+                << " distance=" << distance
+                << " positionScore=" << score;
+            AppendMarkerLineDebugLog(log.str());
+            cursor += node.segmentLength;
+            if (i < bendAfter.size()) cursor += bendAfter[i];
+        }
+        return true;
+    }
+
+    std::map<tag_t, double> ChainPositionScores(
+        const std::vector<FaceCandidate>& candidates,
+        const std::map<tag_t, bool>* knownBendFaceTags = NULL)
     {
         std::map<tag_t, double> scores;
         if (candidates.empty())
         {
             return scores;
         }
+
+        if (TrySectionLengthPositionScores(candidates, &scores, knownBendFaceTags))
+        {
+            AppendMarkerLineDebugLog(knownBendFaceTags == NULL
+                ? "position score mode=section-length-center"
+                : "position score mode=known-bend-face-chain-center");
+            return scores;
+        }
+        AppendMarkerLineDebugLog("position score mode=legacy-axis-center fallback");
 
         double minC[3] = { candidates[0].center[0], candidates[0].center[1], candidates[0].center[2] };
         double maxC[3] = { candidates[0].center[0], candidates[0].center[1], candidates[0].center[2] };
@@ -4789,7 +5149,8 @@ namespace
 
     FaceInfo ScoreAndSelectBaseFace(
         std::vector<FaceCandidate> candidates,
-        const std::map<tag_t, bool>& scoringChainTags)
+        const std::map<tag_t, bool>& scoringChainTags,
+        const std::map<tag_t, bool>* knownBendFaceTags = NULL)
     {
         FaceInfo result;
         if (candidates.empty())
@@ -4811,7 +5172,7 @@ namespace
             minArea = 1.0;
         }
 
-        std::map<tag_t, double> position = ChainPositionScores(candidates);
+        std::map<tag_t, double> position = ChainPositionScores(candidates, knownBendFaceTags);
         {
             std::ostringstream log;
             log << "score base face begin candidates=" << candidates.size()
@@ -5986,24 +6347,32 @@ namespace
 
             std::map<tag_t, bool> selectedSideTags;
             std::string selectedSideReason;
+            bool selectedInnerSide = false;
             if (innerHasMarker != outerHasMarker)
             {
                 selectedSideTags = innerHasMarker ? innerSideTags : outerSideTags;
+                selectedInnerSide = innerHasMarker;
                 selectedSideReason = innerHasMarker ? "marker-side-inner" : "marker-side-outer";
             }
             else if (innerHasMarker && outerHasMarker)
             {
                 selectedSideTags = options.preferUpBends ? innerSideTags : outerSideTags;
+                selectedInnerSide = options.preferUpBends;
                 selectedSideReason = options.preferUpBends ? "marker-both-sides-prefer-inner" : "marker-both-sides-prefer-outer";
             }
             else
             {
                 selectedSideTags = options.preferUpBends ? innerSideTags : outerSideTags;
+                selectedInnerSide = options.preferUpBends;
                 selectedSideReason = options.preferUpBends ? "no-marker-prefer-inner" : "no-marker-prefer-outer";
             }
 
             std::vector<FaceCandidate> sideCandidates = FilterCandidatesByTags(allCandidates, selectedSideTags);
-            FaceInfo sideFace = ScoreAndSelectBaseFace(sideCandidates, selectedSideTags);
+            std::map<tag_t, bool> innerBendTags;
+            std::map<tag_t, bool> outerBendTags;
+            BuildBendFaceTagSets(manager, body, &innerBendTags, &outerBendTags);
+            const std::map<tag_t, bool>& selectedBendTags = selectedInnerSide ? innerBendTags : outerBendTags;
+            FaceInfo sideFace = ScoreAndSelectBaseFace(sideCandidates, selectedSideTags, &selectedBendTags);
             {
                 std::ostringstream log;
                 log << "base select bend side decision innerFaces=" << innerSideTags.size()
@@ -7159,7 +7528,7 @@ namespace
             return existing;
         }
 
-        return std::string("D:\\UG閺呴缚绶ｉ柦锝夊櫨閹绘帊娆\config\\") + PiLianRulesIniFileName;
+        return std::string(u8"D:\\UG智辉钣金插件\\config\\") + PiLianRulesIniFileName;
     }
 
     std::vector<CoefficientRow> LoadCoefficientRowsFromIni()
@@ -10911,6 +11280,354 @@ namespace
         }
     }
 
+    struct TrialUnfoldCandidate
+    {
+        tag_t faceTag = NULL_TAG;
+        double originalScore = 0.0;
+        double scoreWithoutPosition = 0.0;
+        double area = 0.0;
+    };
+
+    bool MeasureTrialFlatCenterDistance(
+        Body* flatBody,
+        const double fixedFaceCenter[3],
+        double* normalizedDistance,
+        double* rawDistance,
+        double* flatSpanU,
+        double* flatSpanV)
+    {
+        if (flatBody == NULL || fixedFaceCenter == NULL || normalizedDistance == NULL)
+        {
+            return false;
+        }
+
+        Face* largestFace = FindLargestFace(flatBody);
+        if (largestFace == NULL)
+        {
+            return false;
+        }
+
+        double facePoint[3] = { 0.0, 0.0, 0.0 };
+        double normal[3] = { 0.0, 0.0, 1.0 };
+        if (!AskFacePointFromEdges(largestFace, facePoint) ||
+            !AskNxOpenCreatedFaceNormal(largestFace, facePoint, normal))
+        {
+            return false;
+        }
+        Normalize3(normal);
+
+        double reference[3] = { 1.0, 0.0, 0.0 };
+        if (std::fabs(normal[0]) > 0.8)
+        {
+            reference[0] = 0.0;
+            reference[1] = 1.0;
+        }
+        double axisU[3] = {
+            reference[1] * normal[2] - reference[2] * normal[1],
+            reference[2] * normal[0] - reference[0] * normal[2],
+            reference[0] * normal[1] - reference[1] * normal[0]
+        };
+        Normalize3(axisU);
+        double axisV[3] = {
+            normal[1] * axisU[2] - normal[2] * axisU[1],
+            normal[2] * axisU[0] - normal[0] * axisU[2],
+            normal[0] * axisU[1] - normal[1] * axisU[0]
+        };
+        Normalize3(axisV);
+
+        std::vector<Point3d> points = CollectBodyEdgePoints(flatBody);
+        if (points.empty())
+        {
+            return false;
+        }
+
+        double minU = std::numeric_limits<double>::max();
+        double maxU = -std::numeric_limits<double>::max();
+        double minV = std::numeric_limits<double>::max();
+        double maxV = -std::numeric_limits<double>::max();
+        for (size_t i = 0; i < points.size(); ++i)
+        {
+            const double point[3] = { points[i].X, points[i].Y, points[i].Z };
+            const double u = Dot3(point, axisU);
+            const double v = Dot3(point, axisV);
+            minU = std::min(minU, u);
+            maxU = std::max(maxU, u);
+            minV = std::min(minV, v);
+            maxV = std::max(maxV, v);
+        }
+
+        const double centerU = (minU + maxU) * 0.5;
+        const double centerV = (minV + maxV) * 0.5;
+        const double candidateU = Dot3(fixedFaceCenter, axisU);
+        const double candidateV = Dot3(fixedFaceCenter, axisV);
+        const double du = candidateU - centerU;
+        const double dv = candidateV - centerV;
+        const double distance = std::sqrt(du * du + dv * dv);
+        const double spanU = std::fabs(maxU - minU);
+        const double spanV = std::fabs(maxV - minV);
+        const double halfDiagonal = std::max(0.5 * std::sqrt(spanU * spanU + spanV * spanV), 1e-9);
+
+        *normalizedDistance = std::min(1.0, distance / halfDiagonal);
+        if (rawDistance != NULL) *rawDistance = distance;
+        if (flatSpanU != NULL) *flatSpanU = spanU;
+        if (flatSpanV != NULL) *flatSpanV = spanV;
+        return true;
+    }
+
+    Face* ResolveTrialFaceOnBody(Body* body, tag_t originalFaceTag, double originalArea, const double originalCenter[3])
+    {
+        if (body == NULL)
+        {
+            return NULL;
+        }
+        Face* originalFace = dynamic_cast<Face*>(ObjectFromTag(originalFaceTag));
+        if (originalFace != NULL && BodyContainsFace(body, originalFace))
+        {
+            return originalFace;
+        }
+
+        Face* best = NULL;
+        double bestScore = std::numeric_limits<double>::max();
+        std::vector<Face*> faces = body->GetFaces();
+        for (size_t i = 0; i < faces.size(); ++i)
+        {
+            int type = 0;
+            double radius = 0.0;
+            double center[3] = { 0.0, 0.0, 0.0 };
+            double normal[3] = { 0.0, 0.0, 1.0 };
+            if (!AskFaceData(faces[i], &type, center, normal, &radius) || type != UF_MODL_PLANAR_FACE)
+            {
+                continue;
+            }
+            const double area = FaceBoxAreaScore(faces[i]);
+            const double areaDelta = std::fabs(area - originalArea) / std::max(originalArea, 1e-9);
+            const double dx = center[0] - originalCenter[0];
+            const double dy = center[1] - originalCenter[1];
+            const double dz = center[2] - originalCenter[2];
+            const double score = areaDelta * 1000.0 + std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (score < bestScore)
+            {
+                bestScore = score;
+                best = faces[i];
+            }
+        }
+        return best;
+    }
+
+    bool EvaluateCandidateByTrialUnfold(
+        Part* workPart,
+        SheetmetalManager* manager,
+        Body* sourceBody,
+        const AutoConvertOptions& options,
+        const TrialUnfoldCandidate& candidate,
+        double* normalizedDistance,
+        double* rawDistance)
+    {
+        if (workPart == NULL || manager == NULL || sourceBody == NULL || normalizedDistance == NULL)
+        {
+            return false;
+        }
+
+        Face* sourceFace = dynamic_cast<Face*>(ObjectFromTag(candidate.faceTag));
+        if (sourceFace == NULL)
+        {
+            return false;
+        }
+        int sourceType = 0;
+        double sourceRadius = 0.0;
+        double sourceCenter[3] = { 0.0, 0.0, 0.0 };
+        double sourceNormal[3] = { 0.0, 0.0, 1.0 };
+        if (!AskFaceData(sourceFace, &sourceType, sourceCenter, sourceNormal, &sourceRadius))
+        {
+            return false;
+        }
+
+        Session* session = Session::GetSession();
+        const char* markName = "Trial unfold base face";
+        Session::UndoMarkId markId = session->SetUndoMark(Session::MarkVisibilityInvisible, markName);
+        bool measured = false;
+        try
+        {
+            Body* activeBody = sourceBody;
+            Feature* convertFeature = NULL;
+            if (!IsSheetmetalBody(workPart, manager, sourceBody))
+            {
+                ApplySheetmetalPreferencesBeforeConvert(workPart, options);
+                ConvertToSheetmetalBuilder* convertBuilder = manager->CreateConvertToSheetmetalFeatureBuilder(NULL);
+                convertBuilder->SetApplicationContext(ApplicationContextNxSheetMetal);
+                convertBuilder->SetBendReliefType(ConvertToSheetmetalBuilder::BendReliefTypeOptionsSquare);
+                convertBuilder->BendReliefDepth()->SetRightHandSide(FormatDouble(options.reliefDepth, 6));
+                convertBuilder->BendReliefWidth()->SetRightHandSide(FormatDouble(options.reliefWidth, 6));
+                convertBuilder->SetMaintainZeroBendRadius(options.innerRadius <= 0.0);
+                convertBuilder->SetBaseFace(sourceFace);
+                std::vector<Edge*> ripEdges;
+                convertBuilder->SetRipEdges(ripEdges);
+                convertFeature = convertBuilder->CommitFeature();
+                convertBuilder->Destroy();
+                activeBody = ResolveFeatureBody(convertFeature, sourceBody);
+            }
+
+            Face* activeFace = ResolveTrialFaceOnBody(activeBody, candidate.faceTag, candidate.area, sourceCenter);
+            if (activeFace != NULL)
+            {
+                const std::set<tag_t> beforeFlatBodyTags = CollectPartSolidBodyTags(workPart);
+                Feature* flatFeature = CommitFlatPattern(workPart, NULL, activeFace, NULL, Point3d(0.0, 0.0, 0.0));
+                if (flatFeature != NULL)
+                {
+                    TryMakeFlatSolidExternal(flatFeature);
+                    std::string resolveSource;
+                    Body* flatBody = ResolveFlatSolidBodyFromFlatPatternObjects(flatFeature, &resolveSource);
+                    if (flatBody == NULL)
+                    {
+                        flatBody = ResolveFlatSolidBodyFromPartDelta(workPart, beforeFlatBodyTags, activeBody);
+                    }
+                    double spanU = 0.0;
+                    double spanV = 0.0;
+                    measured = MeasureTrialFlatCenterDistance(
+                        flatBody, sourceCenter, normalizedDistance, rawDistance, &spanU, &spanV);
+                    std::ostringstream log;
+                    log << "trial unfold face=" << candidate.faceTag
+                        << " measured=" << (measured ? 1 : 0)
+                        << " distance=" << (rawDistance == NULL ? 0.0 : *rawDistance)
+                        << " normalizedDistance=" << (measured ? *normalizedDistance : -1.0)
+                        << " flatSpanU=" << spanU
+                        << " flatSpanV=" << spanV
+                        << " resolveSource=" << resolveSource;
+                    AppendMarkerLineDebugLog(log.str());
+                }
+            }
+        }
+        catch (const NXException& ex)
+        {
+            AppendMarkerLineDebugLog(std::string("trial unfold nx exception face=") +
+                std::to_string(static_cast<int>(candidate.faceTag)) + " " + NxExceptionSummary(ex));
+        }
+        catch (const std::exception& ex)
+        {
+            AppendMarkerLineDebugLog(std::string("trial unfold exception face=") +
+                std::to_string(static_cast<int>(candidate.faceTag)) + " " + ex.what());
+        }
+        catch (...)
+        {
+            AppendMarkerLineDebugLog(std::string("trial unfold unknown exception face=") +
+                std::to_string(static_cast<int>(candidate.faceTag)));
+        }
+
+        try { session->UndoToMark(markId, markName); } catch (...) {}
+        try { session->DeleteUndoMark(markId, markName); } catch (...) {}
+        try { session->CleanUpFacetedFacesAndEdges(); } catch (...) {}
+        return measured;
+    }
+
+    FaceInfo RefineBaseFaceByTrialUnfold(
+        Part* workPart,
+        SheetmetalManager* manager,
+        Body* body,
+        const AutoConvertOptions& options,
+        const FaceInfo& initial)
+    {
+        if (workPart == NULL || manager == NULL || body == NULL || initial.face == NULL)
+        {
+            return initial;
+        }
+
+        std::vector<FaceCandidate> allCandidates = GetPlanarCandidates(body);
+        std::map<tag_t, bool> innerTags;
+        std::map<tag_t, bool> outerTags;
+        std::map<tag_t, bool> selectedSideTags;
+        if (BuildBendSidePlanarTagSets(manager, body, &innerTags, &outerTags))
+        {
+            const tag_t initialTag = initial.face->Tag();
+            selectedSideTags = innerTags.find(initialTag) != innerTags.end() ? innerTags : outerTags;
+        }
+        std::vector<FaceCandidate> candidates = selectedSideTags.empty()
+            ? allCandidates
+            : FilterCandidatesByTags(allCandidates, selectedSideTags);
+        if (candidates.size() < 2)
+        {
+            return initial;
+        }
+
+        double minArea = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            if (candidates[i].area > 1e-9) minArea = std::min(minArea, candidates[i].area);
+        }
+        if (minArea == std::numeric_limits<double>::max()) minArea = 1.0;
+        const std::map<tag_t, double> positionScores = ChainPositionScores(candidates);
+        std::vector<TrialUnfoldCandidate> trialCandidates;
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            const tag_t tag = candidates[i].face == NULL ? NULL_TAG : candidates[i].face->Tag();
+            int cylinderCount = 0;
+            const double areaScore = std::max(1.0, candidates[i].area / std::max(minArea, 1e-9));
+            const double innerLoopScore = HasInnerLoopScore(candidates[i].face) ? 1.0 : 0.0;
+            const double cylinderScore = AdjacentCylinderScore(candidates[i].face, &cylinderCount);
+            const double positionScore = positionScores.count(tag) ? positionScores.find(tag)->second : 0.0;
+            TrialUnfoldCandidate trial;
+            trial.faceTag = tag;
+            trial.area = candidates[i].area;
+            trial.scoreWithoutPosition = areaScore + innerLoopScore + cylinderScore;
+            trial.originalScore = trial.scoreWithoutPosition + positionScore;
+            trialCandidates.push_back(trial);
+        }
+        std::sort(trialCandidates.begin(), trialCandidates.end(), [](const TrialUnfoldCandidate& a, const TrialUnfoldCandidate& b) {
+            if (std::fabs(a.originalScore - b.originalScore) > 1e-9) return a.originalScore > b.originalScore;
+            if (std::fabs(a.area - b.area) > 1e-9) return a.area > b.area;
+            return a.faceTag < b.faceTag;
+        });
+        if (trialCandidates.size() > 4) trialCandidates.resize(4);
+
+        FaceInfo refined = initial;
+        double bestRefinedScore = -std::numeric_limits<double>::max();
+        double bestDistance = std::numeric_limits<double>::max();
+        bool anyMeasured = false;
+        for (size_t i = 0; i < trialCandidates.size(); ++i)
+        {
+            double normalizedDistance = 1.0;
+            double rawDistance = 0.0;
+            if (!EvaluateCandidateByTrialUnfold(
+                workPart, manager, body, options, trialCandidates[i], &normalizedDistance, &rawDistance))
+            {
+                continue;
+            }
+            anyMeasured = true;
+            const double unfoldedPositionScore = 3.0 * (1.0 - normalizedDistance);
+            const double refinedScore = trialCandidates[i].scoreWithoutPosition + unfoldedPositionScore;
+            std::ostringstream log;
+            log << "trial unfold score face=" << trialCandidates[i].faceTag
+                << " originalScore=" << trialCandidates[i].originalScore
+                << " scoreWithoutPosition=" << trialCandidates[i].scoreWithoutPosition
+                << " unfoldedPositionScore=" << unfoldedPositionScore
+                << " refinedScore=" << refinedScore
+                << " distance=" << rawDistance;
+            AppendMarkerLineDebugLog(log.str());
+            if (refinedScore > bestRefinedScore + 1e-9 ||
+                (std::fabs(refinedScore - bestRefinedScore) <= 1e-9 && rawDistance < bestDistance))
+            {
+                Face* restoredFace = dynamic_cast<Face*>(ObjectFromTag(trialCandidates[i].faceTag));
+                if (restoredFace != NULL)
+                {
+                    refined.face = restoredFace;
+                    refined.type = UF_MODL_PLANAR_FACE;
+                    refined.areaScore = trialCandidates[i].area;
+                    refined.totalScore = refinedScore;
+                    bestRefinedScore = refinedScore;
+                    bestDistance = rawDistance;
+                }
+            }
+        }
+        if (anyMeasured)
+        {
+            std::ostringstream log;
+            log << "trial unfold selected face=" << (refined.face == NULL ? 0 : refined.face->Tag())
+                << " refinedScore=" << refined.totalScore
+                << " distance=" << bestDistance;
+            AppendMarkerLineDebugLog(log.str());
+        }
+        return refined;
+    }
+
     void ApplyFaceColor(Session* session, Face* face, int color)
     {
         if (session == NULL || face == NULL || color <= 0)
@@ -11761,6 +12478,17 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 }
 
                 BodyBox box = MeasureBodyBox(body);
+                {
+                    std::ostringstream log;
+                    log << "largest filter inspect body=" << body->Tag()
+                        << " layer=" << layer
+                        << " length=" << FormatDouble(box.length, 3)
+                        << " width=" << FormatDouble(box.width, 3)
+                        << " height=" << FormatDouble(box.height, 3)
+                        << " score=" << FormatDouble(box.score, 3)
+                        << " enabled=" << (options.largestBodyOnlyPerLayer ? 1 : 0);
+                    AppendMarkerLineDebugLog(log.str());
+                }
                 if (options.skipSmallBody && (box.length < options.minLength || box.width < options.minWidth))
                 {
                     if (manualButtonProcessedBodyTags_.size() > 0)
@@ -11782,11 +12510,17 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                     const bool skipFastener = ShouldSkipFastenerBody(body, &fastenerInfo);
                     if (skipFastener)
                     {
+                        std::ostringstream log;
+                        log << "candidate skip fastener body=" << body->Tag()
+                            << " layer=" << layer
+                            << " length=" << FormatDouble(box.length, 3)
+                            << " width=" << FormatDouble(box.width, 3)
+                            << " height=" << FormatDouble(box.height, 3)
+                            << " reason=" << fastenerInfo.reason;
+                        AppendMarkerLineDebugLog(log.str());
                         if (manualButtonProcessedBodyTags_.size() > 0)
                         {
-                            std::ostringstream log;
-                            log << "candidate skip fastener body=" << body->Tag();
-                            AppendMarkerLineDebugLog(log.str());
+                            AppendMarkerLineDebugLog("candidate skip fastener confirmed during manual candidate refresh");
                         }
                         continue;
                     }
@@ -11803,8 +12537,28 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 {
                     if (largestByLayer.find(layer) == largestByLayer.end() || box.score > largestScoreByLayer[layer])
                     {
+                        std::ostringstream log;
+                        log << "largest filter select layer=" << layer
+                            << " body=" << body->Tag()
+                            << " score=" << FormatDouble(box.score, 3);
+                        if (largestByLayer.find(layer) != largestByLayer.end())
+                        {
+                            log << " replacedBody=" << largestByLayer[layer]->Tag()
+                                << " replacedScore=" << FormatDouble(largestScoreByLayer[layer], 3);
+                        }
+                        AppendMarkerLineDebugLog(log.str());
                         largestByLayer[layer] = body;
                         largestScoreByLayer[layer] = box.score;
+                    }
+                    else
+                    {
+                        std::ostringstream log;
+                        log << "largest filter reject layer=" << layer
+                            << " body=" << body->Tag()
+                            << " score=" << FormatDouble(box.score, 3)
+                            << " winnerBody=" << largestByLayer[layer]->Tag()
+                            << " winnerScore=" << FormatDouble(largestScoreByLayer[layer], 3);
+                        AppendMarkerLineDebugLog(log.str());
                     }
                 }
                 else
@@ -11817,6 +12571,11 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
             {
                 for (std::map<int, Body*>::iterator it = largestByLayer.begin(); it != largestByLayer.end(); ++it)
                 {
+                    std::ostringstream log;
+                    log << "largest filter winner layer=" << it->first
+                        << " body=" << (it->second == NULL ? 0 : it->second->Tag())
+                        << " score=" << FormatDouble(largestScoreByLayer[it->first], 3);
+                    AppendMarkerLineDebugLog(log.str());
                     collected.push_back(it->second);
                 }
             }
@@ -11831,7 +12590,12 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
             log << "run candidates part=" << processPartName
                 << " count=" << candidates.size()
                 << " manualBaseXAxis=" << (options.manualBaseXAxis ? 1 : 0)
-                << " manualOnly=" << (options.manualOnly ? 1 : 0);
+                << " manualOnly=" << (options.manualOnly ? 1 : 0)
+                << " largestBodyOnlyPerLayer=" << (options.largestBodyOnlyPerLayer ? 1 : 0)
+                << " filterLayerRange=" << (options.filterLayerRange ? 1 : 0)
+                << " startLayer=" << options.startLayer
+                << " endLayer=" << options.endLayer
+                << " skipFasteners=" << (options.skipFasteners ? 1 : 0);
             AppendMarkerLineDebugLog(log.str());
         }
 
