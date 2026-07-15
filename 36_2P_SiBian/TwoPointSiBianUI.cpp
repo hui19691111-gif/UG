@@ -99,6 +99,8 @@ constexpr double kConvexCornerMaximumAngleDegrees = 180.0;
 constexpr const char* kTemplatePartName = "2p_SiBian_1.prt";
 constexpr const char* kTemplate90LeftPartName = "2P_SiBian_90.prt";
 constexpr const char* kTemplate90RightPartName = "2P_SiBian_90R.prt";
+constexpr const char* kTemplate90ClearanceGroovePartName = "90JianXiCao.prt";
+constexpr const char* kTemplate90ClearanceGrooveRightPartName = "90JianXiCaoR.prt";
 constexpr const wchar_t* kTempTemplateRoot = L"ZhihuiSheetMetal\\UDF\\36_2P_SiBian";
 
 struct ProjectionPoint2d
@@ -128,8 +130,22 @@ struct UdfTemplateSpec
     const char* logName;
 };
 
-UdfTemplateSpec TemplateSpecForMode(TwoPointSiBianUI::FeatureMode mode)
+UdfTemplateSpec TemplateSpecForMode(TwoPointSiBianUI::FeatureMode mode,
+                                    bool useNinetyClearanceGrooveTemplate,
+                                    bool useNinetyClearanceGrooveRightTemplate)
 {
+    if (useNinetyClearanceGrooveRightTemplate)
+    {
+        return {IDR_UDF_TEMPLATE_90_JIAN_XI_CAO_R_PRT,
+                L"90JianXiCaoR_",
+                kTemplate90ClearanceGrooveRightPartName};
+    }
+    if (useNinetyClearanceGrooveTemplate)
+    {
+        return {IDR_UDF_TEMPLATE_90_JIAN_XI_CAO_PRT,
+                L"90JianXiCao_",
+                kTemplate90ClearanceGroovePartName};
+    }
     if (mode == TwoPointSiBianUI::FeatureMode::NinetyLeft)
     {
         return {IDR_UDF_TEMPLATE_90L_PRT, L"2P_SiBian_90_", kTemplate90LeftPartName};
@@ -381,10 +397,17 @@ public:
         Cleanup();
     }
 
-    bool Extract(TwoPointSiBianUI::FeatureMode mode, std::string& path, std::string& trace)
+    bool Extract(TwoPointSiBianUI::FeatureMode mode,
+                 bool useNinetyClearanceGrooveTemplate,
+                 bool useNinetyClearanceGrooveRightTemplate,
+                 std::string& path,
+                 std::string& trace)
     {
         Cleanup();
-        const UdfTemplateSpec spec = TemplateSpecForMode(mode);
+        const UdfTemplateSpec spec =
+            TemplateSpecForMode(mode,
+                                useNinetyClearanceGrooveTemplate,
+                                useNinetyClearanceGrooveRightTemplate);
 
         HMODULE module = CurrentModuleHandle();
         if (module == nullptr)
@@ -2381,6 +2404,7 @@ TwoPointSiBianUI::TwoPointSiBianUI()
       smartEndpointBodyTag_(NULL_TAG),
       smartCachedP1_(),
       smartCachedP2_(),
+      retainSmartEndpointCacheOnUndo_(false),
       hasPreview_(false),
       previewCommitted_(false),
       isUpdatingPreview_(false)
@@ -2424,11 +2448,10 @@ void TwoPointSiBianUI::initialize_cb()
     {
         std::vector<NXString> members;
         members.emplace_back("斜角", NXString::UTF8);
-        members.emplace_back("90度左", NXString::UTF8);
-        members.emplace_back("90度右", NXString::UTF8);
+        members.emplace_back("直角左", NXString::UTF8);
+        members.emplace_back("直角右", NXString::UTF8);
         featureModeBlock_->SetEnumMembers(members);
         featureModeBlock_->SetValueAsString(NXString("斜角", NXString::UTF8));
-        featureModeBlock_->SetEnable(!IsSmartModeEnabled());
         AppendDebugLog("feature mode enum initialized.");
     }
     else
@@ -2453,11 +2476,11 @@ TwoPointSiBianUI::FeatureMode TwoPointSiBianUI::ReadFeatureMode() const
         const char* text = value.GetUTF8Text();
         const std::string mode = text != nullptr ? text : "";
         AppendDebugLog("read feature mode=" + mode);
-        if (mode == "90度左")
+        if (mode == "直角左")
         {
             return FeatureMode::NinetyLeft;
         }
-        if (mode == "90度右")
+        if (mode == "直角右")
         {
             return FeatureMode::NinetyRight;
         }
@@ -2489,9 +2512,21 @@ bool TwoPointSiBianUI::IsSmartModeEnabled() const
 
 void TwoPointSiBianUI::dialogShown_cb()
 {
-    if (startPointBlock_ != nullptr)
+    try
     {
-        startPointBlock_->Focus();
+        ConfigureInputMode(IsSmartModeEnabled(), false);
+        if (startPointBlock_ != nullptr)
+        {
+            startPointBlock_->Focus();
+        }
+    }
+    catch (const NXException& ex)
+    {
+        AppendDebugLog("dialogShown input setup NXException: " + UfMessage(ex.ErrorCode()));
+    }
+    catch (...)
+    {
+        AppendDebugLog("dialogShown input setup unknown exception.");
     }
 }
 
@@ -2503,12 +2538,15 @@ bool TwoPointSiBianUI::enable_ok_cb()
     Point3d endPoint;
     const bool hasStart = ReadSelectedPoint(startPointBlock_, startObject, startPoint);
     const bool hasEnd = ReadSelectedPoint(endPointBlock_, endObject, endPoint);
+    if (IsSmartModeEnabled())
+    {
+        return hasStart || hasEnd;
+    }
     if (hasStart && hasEnd && Distance(startPoint, endPoint) > kPointTolerance)
     {
         return true;
     }
-
-    return hasEnd || hasStart;
+    return false;
 }
 
 int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
@@ -2519,15 +2557,51 @@ int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
         // Selection blocks retain their objects for input, but the selected
         // face itself should not remain painted in the graphics window.
         UnhighlightSelectionObjects();
+
+        // In manual mode, completing the first endpoint must immediately
+        // transfer input to the second endpoint control.  Do this explicitly
+        // instead of relying only on Block Styler automatic progression.
+        if (block == startPointBlock_ && !IsSmartModeEnabled() && endPointBlock_ != nullptr)
+        {
+            TaggedObject* selectedObject = nullptr;
+            Point3d selectedPoint;
+            if (ReadSelectedPoint(startPointBlock_, selectedObject, selectedPoint))
+            {
+                try
+                {
+                    endPointBlock_->Focus();
+                    AppendDebugLog("manual first endpoint accepted; focus moved to second endpoint.");
+                }
+                catch (const NXException& ex)
+                {
+                    AppendDebugLog("failed to focus second endpoint: " + UfMessage(ex.ErrorCode()));
+                }
+                catch (...)
+                {
+                    AppendDebugLog("failed to focus second endpoint: unknown exception.");
+                }
+            }
+        }
     }
     if (block == smartModeBlock_)
     {
         const bool smartMode = IsSmartModeEnabled();
         hasSmartEndpointCache_ = false;
         smartEndpointBodyTag_ = NULL_TAG;
-        if (featureModeBlock_ != nullptr)
+        retainSmartEndpointCacheOnUndo_ = false;
+        try
         {
-            featureModeBlock_->SetEnable(!smartMode);
+            ConfigureInputMode(smartMode, true);
+        }
+        catch (const NXException& ex)
+        {
+            AppendDebugLog("update ConfigureInputMode NXException: " + UfMessage(ex.ErrorCode()));
+            return 0;
+        }
+        catch (...)
+        {
+            AppendDebugLog("update ConfigureInputMode unknown exception.");
+            return 0;
         }
         AppendDebugLog(std::string("update_cb smart mode=") +
                        (smartMode ? "true; manual enum disabled." : "false; manual enum enabled."));
@@ -2710,11 +2784,17 @@ bool TwoPointSiBianUI::CreatePreview()
         UndoPreview();
         return false;
     }
+    // Preserve the endpoints resolved on the unmodified body.  Later rips and
+    // offsets may move/split P2, but a replacement preview must restart from
+    // this original pair instead of a face exposed by the preview topology.
+    const InferredInputs originalPreviewInputs = inputs;
 
     std::vector<tag_t> allToolBodyTags;
     std::vector<tag_t> allReferenceTags;
-    std::vector<tag_t> deferredRightAngleRipTags;
+    std::vector<std::pair<tag_t, double>> deferredRightAngleRipPlans;
     std::vector<InferredInputs> deferredSecondUdfInputsList;
+    std::vector<tag_t> rightAngleOffsetFeatureTags;
+    bool hasRightAngle90SecondFeaturePath = false;
     if (inputs.inferredFromSingleClick)
     {
         constexpr int kMaximumContinuationCount = 16;
@@ -2735,6 +2815,9 @@ bool TwoPointSiBianUI::CreatePreview()
             bool deferredSecondUdfRequested = false;
             InferredInputs deferredSecondUdfInputs;
             tag_t deferredRightAngleRipTag = NULL_TAG;
+            double deferredRightAngleRipAngle = 0.0;
+            std::vector<tag_t> createdRightAngleOffsetTags;
+            bool createdRightAngle90SecondFeaturePath = false;
             std::string ripError;
             AppendDebugLog("CreatePreview continuation iteration=" + std::to_string(iteration + 1) +
                            ", start=" + FormatPoint(iterationInputs.startPoint) +
@@ -2750,6 +2833,9 @@ bool TwoPointSiBianUI::CreatePreview()
                                          deferredSecondUdfRequested,
                                          deferredSecondUdfInputs,
                                          deferredRightAngleRipTag,
+                                         deferredRightAngleRipAngle,
+                                         createdRightAngleOffsetTags,
+                                         createdRightAngle90SecondFeaturePath,
                                          ripError))
             {
                 UndoPreview();
@@ -2763,6 +2849,12 @@ bool TwoPointSiBianUI::CreatePreview()
                                     secondReferenceTags.begin(),
                                     secondReferenceTags.end());
             anyRipCreated = anyRipCreated || ripCreated;
+            rightAngleOffsetFeatureTags.insert(rightAngleOffsetFeatureTags.end(),
+                                               createdRightAngleOffsetTags.begin(),
+                                               createdRightAngleOffsetTags.end());
+            hasRightAngle90SecondFeaturePath =
+                hasRightAngle90SecondFeaturePath ||
+                createdRightAngle90SecondFeaturePath;
             if (deferredSecondUdfRequested)
             {
                 bool alreadyDeferred = false;
@@ -2792,12 +2884,20 @@ bool TwoPointSiBianUI::CreatePreview()
                                    ", end=" + FormatPoint(deferredSecondUdfInputs.endPoint));
                 }
             }
-            if (deferredRightAngleRipTag != NULL_TAG &&
-                std::find(deferredRightAngleRipTags.begin(),
-                          deferredRightAngleRipTags.end(),
-                          deferredRightAngleRipTag) == deferredRightAngleRipTags.end())
+            if (deferredRightAngleRipTag != NULL_TAG)
             {
-                deferredRightAngleRipTags.push_back(deferredRightAngleRipTag);
+                const auto existingPlan = std::find_if(
+                    deferredRightAngleRipPlans.begin(),
+                    deferredRightAngleRipPlans.end(),
+                    [deferredRightAngleRipTag](const std::pair<tag_t, double>& plan)
+                    {
+                        return plan.first == deferredRightAngleRipTag;
+                    });
+                if (existingPlan == deferredRightAngleRipPlans.end())
+                {
+                    deferredRightAngleRipPlans.emplace_back(deferredRightAngleRipTag,
+                                                            deferredRightAngleRipAngle);
+                }
             }
             if (!continuationCreated)
             {
@@ -2840,13 +2940,14 @@ bool TwoPointSiBianUI::CreatePreview()
 
         if (anyRipCreated)
         {
-            AppendDebugLog("CreatePreview continuation rips committed; recalculating the original P2 from the selection click without recalculating sheet thickness.");
+            AppendDebugLog("CreatePreview continuation rips committed; refreshing the original endpoints without recalculating sheet thickness.");
             const double lockedSheetThickness = inputs.thickness;
             InferredInputs refreshedInputs;
             refreshedInputs.thickness = lockedSheetThickness;
-            if (!ReadInputs(refreshedInputs,
-                            rollbackSafeClickObject,
-                            hasRollbackSafeSingleClick ? &rollbackSafeClickPoint : nullptr))
+            const bool refreshed = inputs.smartMode && inputs.inferredFromSingleClick
+                                       ? RefreshSmartInputsAfterRips(inputs, refreshedInputs)
+                                       : ReadInputs(refreshedInputs);
+            if (!refreshed)
             {
                 UndoPreview();
                 ShowError("The original second endpoint could not be recalculated after creating the sheet-metal rips.");
@@ -2887,6 +2988,21 @@ bool TwoPointSiBianUI::CreatePreview()
                        ", end=" + FormatPoint(deferredSecondInputs.endPoint));
     }
 
+    if (hasRightAngle90SecondFeaturePath)
+    {
+        InferredInputs constrainedInputs;
+        if (!ConstrainRightAnglePrimaryP2ToOffsetSharedEdges(originalPreviewInputs,
+                                                             inputs,
+                                                             rightAngleOffsetFeatureTags,
+                                                             constrainedInputs))
+        {
+            UndoPreview();
+            ShowError("The right-angle primary feature P2 could not be resolved from endpoints shared by the plane and offset faces.");
+            return false;
+        }
+        inputs = constrainedInputs;
+    }
+
     tag_t firstUdfTag = NULL_TAG;
     std::vector<tag_t> firstReferenceTags;
     std::vector<tag_t> firstToolBodyTags;
@@ -2919,14 +3035,16 @@ bool TwoPointSiBianUI::CreatePreview()
     }
 
     tag_t finalResultTag = finalSubtractTag;
-    for (tag_t deferredRightAngleRipTag : deferredRightAngleRipTags)
+    for (const std::pair<tag_t, double>& deferredRightAngleRipPlan : deferredRightAngleRipPlans)
     {
+        const tag_t deferredRightAngleRipTag = deferredRightAngleRipPlan.first;
         Features::Feature* ripFeature = dynamic_cast<Features::Feature*>(
             NXObjectManager::Get(deferredRightAngleRipTag));
         tag_t firstOffsetTag = NULL_TAG;
         tag_t secondOffsetTag = NULL_TAG;
         if (!OffsetRightAngleRipFeature(inputs,
                                         ripFeature,
+                                        deferredRightAngleRipPlan.second,
                                         firstOffsetTag,
                                         secondOffsetTag,
                                         errorMessage))
@@ -2947,11 +3065,22 @@ bool TwoPointSiBianUI::CreatePreview()
     previewReferenceTags_ = allReferenceTags;
     if (inputs.smartMode && inputs.inferredFromSingleClick && inputs.targetBody != nullptr)
     {
-        smartCachedP1_ = inputs.startPoint;
-        smartCachedP2_ = inputs.endPoint;
-        smartEndpointBodyTag_ = inputs.targetBody->Tag();
+        // Keep the point pair resolved on the untouched body for every smart
+        // preview mode.  A chamfer/left/right replacement first rolls the old
+        // preview back; caching the refreshed post-rip pair made the following
+        // click resolve on an exposed opposite sheet face and reversed both
+        // the start direction and the left/right result.
+        retainSmartEndpointCacheOnUndo_ = true;
+        const InferredInputs& cacheInputs = originalPreviewInputs;
+        smartCachedP1_ = cacheInputs.startPoint;
+        smartCachedP2_ = cacheInputs.endPoint;
+        smartEndpointBodyTag_ = cacheInputs.targetBody != nullptr
+                                    ? cacheInputs.targetBody->Tag()
+                                    : inputs.targetBody->Tag();
         hasSmartEndpointCache_ = true;
-        AppendDebugLog("CreatePreview retained smart endpoints: body=" +
+        AppendDebugLog(std::string("CreatePreview retained smart endpoints: policy=") +
+                       "all-smart original pre-rip" +
+                       ", body=" +
                        std::to_string(smartEndpointBodyTag_) +
                        ", P1=" + FormatPoint(smartCachedP1_) +
                        ", P2=" + FormatPoint(smartCachedP2_));
@@ -3003,6 +3132,12 @@ void TwoPointSiBianUI::CapturePreviewCreatedFeatureTags()
 
 void TwoPointSiBianUI::UndoPreview(bool includeCommitted)
 {
+    if (!retainSmartEndpointCacheOnUndo_)
+    {
+        hasSmartEndpointCache_ = false;
+        smartEndpointBodyTag_ = NULL_TAG;
+    }
+
     if (previewCommitted_ && !includeCommitted)
     {
         return;
@@ -3114,6 +3249,7 @@ void TwoPointSiBianUI::CommitPreview()
     previewCommitted_ = true;
     hasSmartEndpointCache_ = false;
     smartEndpointBodyTag_ = NULL_TAG;
+    retainSmartEndpointCacheOnUndo_ = false;
 }
 
 void TwoPointSiBianUI::FinalizeCommittedPreview()
@@ -3190,8 +3326,14 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
         AppendDebugLog("ReadInputs smart mode ignored the older populated selection block.");
     }
 
-    if (hasStart && hasEnd && Distance(selectedStartPoint, selectedEndPoint) > kPointTolerance)
+    if (!inputs.smartMode)
     {
+        if (!hasStart || !hasEnd ||
+            Distance(selectedStartPoint, selectedEndPoint) <= kPointTolerance)
+        {
+            AppendDebugLog("ReadInputs manual mode requires two distinct edge endpoints; single-face inference is disabled.");
+            return false;
+        }
         inputs.startObject = selectedStartObject;
         inputs.endObject = selectedEndObject;
         inputs.startPoint = selectedStartPoint;
@@ -3200,6 +3342,11 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
     else
     {
         TaggedObject* clickObject = hasEnd ? selectedEndObject : selectedStartObject;
+        if (clickObject == nullptr)
+        {
+            AppendDebugLog("ReadInputs smart mode requires one selected face point.");
+            return false;
+        }
         Point3d clickPoint = hasEnd ? selectedEndPoint : selectedStartPoint;
         inputs.inferredFromSingleClick = true;
         inputs.selectionClickPoint = clickPoint;
@@ -3451,6 +3598,280 @@ bool TwoPointSiBianUI::CompleteInputsForEndpoints(InferredInputs& inputs) const
     }
     inputs.spanLength = Distance(inputs.startPoint, inputs.endPoint);
     return inputs.thickness > kPointTolerance;
+}
+
+bool TwoPointSiBianUI::RefreshSmartInputsAfterRips(const InferredInputs& originalInputs,
+                                                   InferredInputs& refreshedInputs) const
+{
+    Body* body = originalInputs.targetBody;
+    if (body == nullptr)
+    {
+        return false;
+    }
+
+    Face* face = FindPlanarFaceContainingPoints(body,
+                                                originalInputs.startPoint,
+                                                originalInputs.endPoint);
+    if (face == nullptr)
+    {
+        face = originalInputs.baseFace;
+    }
+    if (face == nullptr || face->SolidFaceType() != Face::FaceTypePlanar)
+    {
+        AppendDebugLog("RefreshSmartInputsAfterRips failed: the original endpoint plane is unavailable.");
+        return false;
+    }
+
+    std::vector<Point3d> boundaryPoints;
+    if (!FaceBoundaryPoints(face, boundaryPoints) || boundaryPoints.empty())
+    {
+        AppendDebugLog("RefreshSmartInputsAfterRips failed: no updated peripheral endpoints were found.");
+        return false;
+    }
+
+    struct EndpointCandidate
+    {
+        Point3d point;
+        double displacement = 0.0;
+    };
+    auto buildCandidates = [&](const Point3d& originalPoint)
+    {
+        std::vector<EndpointCandidate> candidates;
+        candidates.push_back({originalPoint, 0.0});
+        for (const Point3d& point : boundaryPoints)
+        {
+            const double displacement = Distance(point, originalPoint);
+            bool duplicate = false;
+            for (const EndpointCandidate& existing : candidates)
+            {
+                if (Distance(existing.point, point) <= kPointTolerance)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate)
+            {
+                candidates.push_back({point, displacement});
+            }
+        }
+        std::sort(candidates.begin(), candidates.end(), [](const EndpointCandidate& lhs,
+                                                            const EndpointCandidate& rhs)
+        {
+            return lhs.displacement < rhs.displacement;
+        });
+        if (candidates.size() > 8)
+        {
+            candidates.resize(8);
+        }
+        return candidates;
+    };
+
+    const std::vector<EndpointCandidate> startCandidates =
+        buildCandidates(originalInputs.startPoint);
+    const std::vector<EndpointCandidate> endCandidates =
+        buildCandidates(originalInputs.endPoint);
+    const double maximumSnapDistance = std::max(5.0, originalInputs.thickness * 5.0);
+    double bestScore = std::numeric_limits<double>::max();
+    bool found = false;
+
+    for (const EndpointCandidate& start : startCandidates)
+    {
+        if (start.displacement > maximumSnapDistance)
+        {
+            continue;
+        }
+        for (const EndpointCandidate& end : endCandidates)
+        {
+            if (end.displacement > maximumSnapDistance ||
+                Distance(start.point, end.point) <= kPointTolerance)
+            {
+                continue;
+            }
+
+            InferredInputs candidate = originalInputs;
+            candidate.startPoint = start.point;
+            candidate.endPoint = end.point;
+            candidate.baseFace = FindPlanarFaceContainingPoints(body,
+                                                                candidate.startPoint,
+                                                                candidate.endPoint);
+            candidate.startEdge = nullptr;
+            candidate.endEdge = nullptr;
+            candidate.startPositiveYEdge = nullptr;
+            candidate.startNegativeYEdge = nullptr;
+            candidate.endPositiveYEdge = nullptr;
+            candidate.endNegativeYEdge = nullptr;
+            candidate.thickness = originalInputs.thickness;
+            if (candidate.baseFace == nullptr || !CompleteInputsForEndpoints(candidate))
+            {
+                continue;
+            }
+
+            // P1 is expected to remain stable.  Give its displacement a larger
+            // weight, then choose the valid updated P2 nearest the original P2.
+            const double score = start.displacement * 10.0 + end.displacement;
+            if (score < bestScore)
+            {
+                bestScore = score;
+                refreshedInputs = candidate;
+                found = true;
+            }
+        }
+    }
+
+    if (!found)
+    {
+        AppendDebugLog("RefreshSmartInputsAfterRips failed: no valid updated edge pair exists near the recorded P1/P2.");
+        return false;
+    }
+
+    AppendDebugLog("RefreshSmartInputsAfterRips OK: recordedP1=" +
+                   FormatPoint(originalInputs.startPoint) +
+                   ", recordedP2=" + FormatPoint(originalInputs.endPoint) +
+                   ", updatedP1=" + FormatPoint(refreshedInputs.startPoint) +
+                   ", updatedP2=" + FormatPoint(refreshedInputs.endPoint) +
+                   ", score=" + FormatExpressionNumber(bestScore));
+    return true;
+}
+
+bool TwoPointSiBianUI::ConstrainRightAnglePrimaryP2ToOffsetSharedEdges(
+    const InferredInputs& originalInputs,
+    const InferredInputs& currentInputs,
+    const std::vector<tag_t>& offsetFeatureTags,
+    InferredInputs& constrainedInputs) const
+{
+    constrainedInputs = currentInputs;
+    if (currentInputs.targetBody == nullptr || currentInputs.baseFace == nullptr ||
+        offsetFeatureTags.empty())
+    {
+        return false;
+    }
+
+    std::set<tag_t> offsetFaceTags;
+    for (tag_t featureTag : offsetFeatureTags)
+    {
+        if (featureTag == NULL_TAG)
+        {
+            continue;
+        }
+        Features::Feature* offsetFeature = dynamic_cast<Features::Feature*>(
+            NXObjectManager::Get(featureTag));
+        if (offsetFeature == nullptr)
+        {
+            continue;
+        }
+        for (Face* offsetFace : offsetFeature->GetFaces())
+        {
+            if (offsetFace != nullptr)
+            {
+                offsetFaceTags.insert(offsetFace->Tag());
+            }
+        }
+    }
+    if (offsetFaceTags.empty())
+    {
+        AppendDebugLog("Right-angle final P2 constraint failed: the offset features returned no faces.");
+        return false;
+    }
+
+    struct SharedEndpointCandidate
+    {
+        Point3d point;
+        tag_t edgeTag = NULL_TAG;
+        double distanceToRecordedP2 = 0.0;
+    };
+    std::vector<SharedEndpointCandidate> candidates;
+    for (Edge* planeEdge : currentInputs.baseFace->GetEdges())
+    {
+        if (planeEdge == nullptr)
+        {
+            continue;
+        }
+        bool sharedWithOffsetFace = false;
+        for (Face* adjacentFace : planeEdge->GetFaces())
+        {
+            if (adjacentFace != nullptr &&
+                adjacentFace != currentInputs.baseFace &&
+                offsetFaceTags.find(adjacentFace->Tag()) != offsetFaceTags.end())
+            {
+                sharedWithOffsetFace = true;
+                break;
+            }
+        }
+        if (!sharedWithOffsetFace)
+        {
+            continue;
+        }
+
+        Point3d first;
+        Point3d second;
+        planeEdge->GetVertices(&first, &second);
+        for (const Point3d& endpoint : std::array<Point3d, 2>{first, second})
+        {
+            bool duplicate = false;
+            for (const SharedEndpointCandidate& existing : candidates)
+            {
+                if (Distance(existing.point, endpoint) <= kPointTolerance)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate)
+            {
+                candidates.push_back({endpoint,
+                                      planeEdge->Tag(),
+                                      Distance(endpoint, originalInputs.endPoint)});
+            }
+        }
+    }
+
+    std::sort(candidates.begin(), candidates.end(),
+              [](const SharedEndpointCandidate& first,
+                 const SharedEndpointCandidate& second)
+              {
+                  return first.distanceToRecordedP2 < second.distanceToRecordedP2;
+              });
+    for (const SharedEndpointCandidate& endpoint : candidates)
+    {
+        if (Distance(currentInputs.startPoint, endpoint.point) <= kPointTolerance)
+        {
+            continue;
+        }
+        InferredInputs candidate = currentInputs;
+        candidate.endPoint = endpoint.point;
+        candidate.startEdge = nullptr;
+        candidate.endEdge = nullptr;
+        candidate.startPositiveYEdge = nullptr;
+        candidate.startNegativeYEdge = nullptr;
+        candidate.endPositiveYEdge = nullptr;
+        candidate.endNegativeYEdge = nullptr;
+        candidate.thickness = originalInputs.thickness;
+        if (!CompleteInputsForEndpoints(candidate))
+        {
+            continue;
+        }
+        constrainedInputs = candidate;
+        AppendDebugLog("Right-angle final P2 constrained to plane/offset shared-edge endpoint: mode=" +
+                       std::string(currentInputs.featureMode == FeatureMode::NinetyLeft
+                                       ? "90-left"
+                                       : "90-right") +
+                       ", plane=" +
+                       std::to_string(currentInputs.baseFace->Tag()) +
+                       ", sharedEdge=" + std::to_string(endpoint.edgeTag) +
+                       ", recordedP2=" + FormatPoint(originalInputs.endPoint) +
+                       ", constrainedP2=" + FormatPoint(endpoint.point) +
+                       ", distance=" +
+                       FormatExpressionNumber(endpoint.distanceToRecordedP2) +
+                       ", candidateCount=" + std::to_string(candidates.size()));
+        return true;
+    }
+
+    AppendDebugLog("Right-angle final P2 constraint failed: no valid endpoint belongs to an edge shared by the plane and offset faces"
+                   ", plane=" + std::to_string(currentInputs.baseFace->Tag()) +
+                   ", offsetFeatureCount=" + std::to_string(offsetFeatureTags.size()) +
+                   ", candidateCount=" + std::to_string(candidates.size()));
+    return false;
 }
 
 bool TwoPointSiBianUI::InferEndpointsFromFaceClick(TaggedObject* selectedObject,
@@ -4710,6 +5131,331 @@ bool TwoPointSiBianUI::CreateConcaveStripCut(const InferredInputs& inputs,
     return true;
 }
 
+#if 0 // Abandoned replace-face / -60 clearance-face experiment.
+bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
+    const InferredInputs& inputs,
+    Face* commonFace,
+    const std::vector<tag_t>& offsetFeatureTags,
+    tag_t& offsetFeatureTag,
+    std::string& errorMessage) const
+{
+    offsetFeatureTag = NULL_TAG;
+    errorMessage.clear();
+    Part* workPart = session_->Parts()->Work();
+    if (workPart == nullptr || inputs.targetBody == nullptr || commonFace == nullptr ||
+        offsetFeatureTags.empty())
+    {
+        errorMessage = "The B1/B2 plane or rip-offset feature is unavailable for the -60 face offset.";
+        return false;
+    }
+
+    double clearance = 0.0;
+    try
+    {
+        clearance = std::fabs(std::stod(inputs.clearanceValue));
+    }
+    catch (...)
+    {
+        errorMessage = "The dialog clearance value could not be read for the -60 face-offset edge check.";
+        return false;
+    }
+    const double clearanceTolerance = std::max(0.01, clearance * 0.10);
+
+    std::set<tag_t> offsetFaceTags;
+    for (tag_t featureTag : offsetFeatureTags)
+    {
+        Features::Feature* feature = featureTag == NULL_TAG
+                                         ? nullptr
+                                         : dynamic_cast<Features::Feature*>(NXObjectManager::Get(featureTag));
+        if (feature == nullptr)
+        {
+            continue;
+        }
+        for (Face* face : feature->GetFaces())
+        {
+            if (face != nullptr)
+            {
+                offsetFaceTags.insert(face->Tag());
+            }
+        }
+    }
+
+    Face* originalOffsetFace = nullptr;
+    Edge* clearanceSharedEdge = nullptr;
+    double bestClearanceError = std::numeric_limits<double>::max();
+    for (Edge* planeEdge : commonFace->GetEdges())
+    {
+        if (planeEdge == nullptr)
+        {
+            continue;
+        }
+        const double edgeLength = planeEdge->GetLength();
+        const double error = std::fabs(edgeLength - clearance);
+        if (error > clearanceTolerance || error >= bestClearanceError)
+        {
+            continue;
+        }
+        for (Face* adjacentFace : planeEdge->GetFaces())
+        {
+            if (adjacentFace != nullptr && adjacentFace != commonFace &&
+                offsetFaceTags.find(adjacentFace->Tag()) != offsetFaceTags.end())
+            {
+                originalOffsetFace = adjacentFace;
+                clearanceSharedEdge = planeEdge;
+                bestClearanceError = error;
+                break;
+            }
+        }
+    }
+    if (originalOffsetFace == nullptr || clearanceSharedEdge == nullptr)
+    {
+        errorMessage = "No plane/offset-face shared edge has a length equal to the dialog clearance.";
+        AppendDebugLog("OffsetConcaveClearanceFace failed: commonFace=" +
+                       std::to_string(commonFace->Tag()) +
+                       ", clearance=" + FormatExpressionNumber(clearance) +
+                       ", offsetFaceCount=" + std::to_string(offsetFaceTags.size()));
+        return false;
+    }
+
+    Features::OffsetFaceBuilder* offsetBuilder = nullptr;
+    const tag_t cachedCommonFaceTag = commonFace->Tag();
+    const tag_t cachedSharedEdgeTag = clearanceSharedEdge->Tag();
+    const double cachedSharedEdgeLength = clearanceSharedEdge->GetLength();
+    const tag_t cachedOffsetFaceTag = originalOffsetFace->Tag();
+    try
+    {
+        offsetBuilder = workPart->Features()->CreateOffsetFaceBuilder(nullptr);
+        offsetBuilder->Distance()->SetFormula("-60");
+        offsetBuilder->SetDirection(false);
+        FaceDumbRule* offsetRule = workPart->ScRuleFactory()->CreateRuleFaceDumb(
+            std::vector<Face*>{originalOffsetFace});
+        offsetBuilder->FaceCollector()->ReplaceRules(
+            std::vector<SelectionIntentRule*>{offsetRule}, false);
+        Features::Feature* offsetFeature = offsetBuilder->CommitFeature();
+        offsetFeatureTag = offsetFeature != nullptr ? offsetFeature->Tag() : NULL_TAG;
+        offsetBuilder->Destroy();
+        offsetBuilder = nullptr;
+        if (offsetFeatureTag == NULL_TAG)
+        {
+            errorMessage = "NX did not return a feature after offsetting the clearance face by -60.";
+            return false;
+        }
+        AppendDebugLog("OffsetConcaveClearanceFace completed: commonFace=" +
+                       std::to_string(cachedCommonFaceTag) +
+                       ", clearanceSharedEdge=" + std::to_string(cachedSharedEdgeTag) +
+                       ", clearanceEdgeLength=" +
+                       FormatExpressionNumber(cachedSharedEdgeLength) +
+                       ", clearanceOffsetFace=" + std::to_string(cachedOffsetFaceTag) +
+                       ", distance=-60" +
+                       ", offsetFeature=" + std::to_string(offsetFeatureTag));
+        return true;
+    }
+    catch (const NXException& ex)
+    {
+        if (offsetBuilder != nullptr)
+        {
+            offsetBuilder->Destroy();
+        }
+        errorMessage = "Failed to offset the rip clearance face by -60.\n" +
+                       NxExceptionText(ex);
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+
+#if 0 // Legacy replacement-face implementation intentionally disabled.
+
+    Point3d originalPlanePoint;
+    Vector3d originalNormal;
+    if (!FacePlaneData(originalOffsetFace, originalPlanePoint, originalNormal))
+    {
+        errorMessage = "The rip-offset face is not planar for the replace-face operation.";
+        return false;
+    }
+
+    auto faceHasThicknessWidth = [&](Face* candidate,
+                                     double& bestWidthError,
+                                     tag_t& firstWidthEdge,
+                                     tag_t& secondWidthEdge)
+    {
+        bestWidthError = std::numeric_limits<double>::max();
+        firstWidthEdge = NULL_TAG;
+        secondWidthEdge = NULL_TAG;
+        const std::vector<Edge*> edges = candidate->GetEdges();
+        for (std::size_t firstIndex = 0; firstIndex < edges.size(); ++firstIndex)
+        {
+            Point3d firstStart;
+            Point3d firstEnd;
+            if (edges[firstIndex] == nullptr ||
+                !EdgeNaturalStartEnd(edges[firstIndex], firstStart, firstEnd))
+            {
+                continue;
+            }
+            Vector3d firstDirection = Subtract(firstEnd, firstStart);
+            if (!Normalize(firstDirection))
+            {
+                continue;
+            }
+            for (std::size_t secondIndex = firstIndex + 1; secondIndex < edges.size(); ++secondIndex)
+            {
+                Point3d secondStart;
+                Point3d secondEnd;
+                if (edges[secondIndex] == nullptr ||
+                    !EdgeNaturalStartEnd(edges[secondIndex], secondStart, secondEnd))
+                {
+                    continue;
+                }
+                Vector3d secondDirection = Subtract(secondEnd, secondStart);
+                if (!Normalize(secondDirection) ||
+                    std::fabs(Dot(firstDirection, secondDirection)) < 0.999)
+                {
+                    continue;
+                }
+                try
+                {
+                    MeasureDistance* measurement = workPart->MeasureManager()->NewDistance(
+                        nullptr,
+                        MeasureManager::MeasureTypeMinimum,
+                        edges[firstIndex],
+                        edges[secondIndex]);
+                    if (measurement == nullptr)
+                    {
+                        continue;
+                    }
+                    const double width = measurement->Value();
+                    delete measurement;
+                    const double error = std::fabs(width - inputs.thickness);
+                    if (error < bestWidthError)
+                    {
+                        bestWidthError = error;
+                        firstWidthEdge = edges[firstIndex]->Tag();
+                        secondWidthEdge = edges[secondIndex]->Tag();
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+        const double thicknessTolerance = std::max(0.02, inputs.thickness * 0.10);
+        return firstWidthEdge != NULL_TAG && bestWidthError <= thicknessTolerance;
+    };
+
+    Face* replacementThicknessFace = nullptr;
+    Edge* connectionEdge = nullptr;
+    double nearestPlaneDistance = std::numeric_limits<double>::max();
+    double selectedWidthError = std::numeric_limits<double>::max();
+    tag_t selectedWidthEdge1 = NULL_TAG;
+    tag_t selectedWidthEdge2 = NULL_TAG;
+    std::set<tag_t> visitedFaces;
+    for (Edge* planeEdge : commonFace->GetEdges())
+    {
+        if (planeEdge == nullptr)
+        {
+            continue;
+        }
+        for (Face* candidate : planeEdge->GetFaces())
+        {
+            if (candidate == nullptr || candidate == commonFace ||
+                candidate == originalOffsetFace ||
+                candidate->SolidFaceType() != Face::FaceTypePlanar ||
+                !visitedFaces.insert(candidate->Tag()).second)
+            {
+                continue;
+            }
+            Point3d candidatePlanePoint;
+            Vector3d candidateNormal;
+            if (!FacePlaneData(candidate, candidatePlanePoint, candidateNormal) ||
+                std::fabs(Dot(originalNormal, candidateNormal)) < 0.995)
+            {
+                continue;
+            }
+            double widthError = 0.0;
+            tag_t widthEdge1 = NULL_TAG;
+            tag_t widthEdge2 = NULL_TAG;
+            if (!faceHasThicknessWidth(candidate, widthError, widthEdge1, widthEdge2))
+            {
+                continue;
+            }
+            const double planeDistance =
+                std::fabs(Dot(Subtract(candidatePlanePoint, originalPlanePoint), originalNormal));
+            if (planeDistance < nearestPlaneDistance)
+            {
+                replacementThicknessFace = candidate;
+                connectionEdge = planeEdge;
+                nearestPlaneDistance = planeDistance;
+                selectedWidthError = widthError;
+                selectedWidthEdge1 = widthEdge1;
+                selectedWidthEdge2 = widthEdge2;
+            }
+        }
+    }
+    if (replacementThicknessFace == nullptr)
+    {
+        errorMessage = "No connected thickness face parallel to and nearest the rip-offset face was found.";
+        return false;
+    }
+
+    Features::ReplaceFaceBuilder* builder = nullptr;
+    try
+    {
+        builder = workPart->Features()->CreateReplaceFaceBuilder(nullptr);
+        builder->SetType(Features::ReplaceFaceBuilder::ReplaceTypesReplace);
+        builder->OffsetDistance()->SetFormula("0");
+        builder->ResetReplaceFaceMethod();
+        builder->ResetFreeEdgeProjectionOption();
+        builder->SetReverseDirection(false);
+
+        FaceDumbRule* originalRule = workPart->ScRuleFactory()->CreateRuleFaceDumb(
+            std::vector<Face*>{originalOffsetFace});
+        builder->FaceToReplace()->ReplaceRules(
+            std::vector<SelectionIntentRule*>{originalRule}, false);
+        FaceDumbRule* replacementRule = workPart->ScRuleFactory()->CreateRuleFaceDumb(
+            std::vector<Face*>{replacementThicknessFace});
+        builder->ReplacementFaces()->ReplaceRules(
+            std::vector<SelectionIntentRule*>{replacementRule}, false);
+
+        Features::Feature* replaceFeature = builder->CommitFeature();
+        replaceFeatureTag = replaceFeature != nullptr ? replaceFeature->Tag() : NULL_TAG;
+        builder->Destroy();
+        builder = nullptr;
+        if (replaceFeatureTag == NULL_TAG)
+        {
+            errorMessage = "NX did not return a feature after replacing the rip-offset face.";
+            return false;
+        }
+        AppendDebugLog("CreateConcaveReplaceFace completed: commonFace=" +
+                       std::to_string(commonFace->Tag()) +
+                       ", clearanceSharedEdge=" + std::to_string(clearanceSharedEdge->Tag()) +
+                       ", clearanceEdgeLength=" +
+                       FormatExpressionNumber(clearanceSharedEdge->GetLength()) +
+                       ", originalOffsetFace=" + std::to_string(originalOffsetFace->Tag()) +
+                       ", connectionEdge=" + std::to_string(connectionEdge->Tag()) +
+                       ", replacementThicknessFace=" +
+                       std::to_string(replacementThicknessFace->Tag()) +
+                       ", thicknessWidthEdges=(" + std::to_string(selectedWidthEdge1) +
+                       "," + std::to_string(selectedWidthEdge2) + ")" +
+                       ", thicknessWidthError=" +
+                       FormatExpressionNumber(selectedWidthError) +
+                       ", faceDistance=" +
+                       FormatExpressionNumber(nearestPlaneDistance) +
+                       ", replaceFeature=" + std::to_string(replaceFeatureTag));
+        return true;
+    }
+    catch (const NXException& ex)
+    {
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        errorMessage = "Failed to replace the rip-offset face with the connected thickness face.\n" +
+                       NxExceptionText(ex);
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+#endif
+}
+#endif
+
 bool TwoPointSiBianUI::FindAuxiliaryRipPair(Body* body,
                                              Face* commonFace,
                                              Edge* b1,
@@ -4925,6 +5671,7 @@ bool TwoPointSiBianUI::CreateSheetMetalRip(const InferredInputs& inputs,
 
 bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
                                                    Features::Feature* ripFeature,
+                                                   double cornerInteriorAngle,
                                                    tag_t& firstOffsetTag,
                                                    tag_t& secondOffsetTag,
                                                    std::string& errorMessage) const
@@ -4942,6 +5689,178 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
     Features::OffsetFaceBuilder* secondBuilder = nullptr;
     try
     {
+        const bool useDirectionalRightAngleOffsets =
+            (inputs.featureMode == FeatureMode::NinetyLeft ||
+             inputs.featureMode == FeatureMode::NinetyRight) &&
+            (std::fabs(cornerInteriorAngle - 90.0) <= 0.1 ||
+             std::fabs(cornerInteriorAngle - 270.0) <= 0.1);
+
+        if (useDirectionalRightAngleOffsets)
+        {
+            const bool isNinetyLeft =
+                inputs.featureMode == FeatureMode::NinetyLeft;
+            const bool isReflex270 =
+                std::fabs(cornerInteriorAngle - 270.0) <= 0.1;
+            // A reflex 270-degree corner reverses the normal 90-degree side
+            // assignment for both left and right modes.
+            // left 90: Y+ small;  left 270: Y- small
+            // right 90: Y- small; right 270: Y+ small
+            const bool smallOffsetOnPositiveY = isNinetyLeft != isReflex270;
+            const char* modeName = isNinetyLeft ? "90-left" : "90-right";
+            Vector3d xDirection = Subtract(inputs.endPoint, inputs.startPoint);
+            const Point3d midpoint((inputs.startPoint.X + inputs.endPoint.X) * 0.5,
+                                   (inputs.startPoint.Y + inputs.endPoint.Y) * 0.5,
+                                   (inputs.startPoint.Z + inputs.endPoint.Z) * 0.5);
+            Vector3d faceNormal;
+            if (!Normalize(xDirection) ||
+                !FaceNormalAtPoint(inputs.baseFace, midpoint, faceNormal))
+            {
+                errorMessage = "The local X/Y directions for the directional right-angle rip offsets could not be resolved.";
+                return false;
+            }
+            OrientNormalAwayFromOppositeFace(inputs.targetBody,
+                                             inputs.baseFace,
+                                             midpoint,
+                                             faceNormal);
+            Vector3d yDirection = Cross(faceNormal, xDirection);
+            if (!Normalize(yDirection))
+            {
+                errorMessage = "The local Y direction for the directional right-angle rip offsets is invalid.";
+                return false;
+            }
+
+            auto facePositionSignedY = [&](Face* face, double& signedY)
+            {
+                std::vector<Point3d> points;
+                if (face == nullptr || !FaceBoundaryPoints(face, points) || points.empty())
+                {
+                    return false;
+                }
+                Point3d center(0.0, 0.0, 0.0);
+                for (const Point3d& point : points)
+                {
+                    center.X += point.X;
+                    center.Y += point.Y;
+                    center.Z += point.Z;
+                }
+                const double count = static_cast<double>(points.size());
+                center.X /= count;
+                center.Y /= count;
+                center.Z /= count;
+                // Classify by geometric position relative to the P1->P2
+                // local X axis.  The face normal is intentionally not used:
+                // Y+ / Y- means which side of that axis the rip face lies on.
+                signedY = Dot(Subtract(center, inputs.startPoint), yDirection);
+                return true;
+            };
+
+            auto collectFacesOnSide = [&](const std::vector<Face*>& faces,
+                                           bool positiveSide,
+                                           const char* stage) -> std::vector<Face*>
+            {
+                std::vector<Face*> selectedFaces;
+                for (Face* face : faces)
+                {
+                    double signedY = 0.0;
+                    if (!facePositionSignedY(face, signedY) ||
+                        (positiveSide ? signedY <= kPlaneTolerance
+                                      : signedY >= -kPlaneTolerance))
+                    {
+                        continue;
+                    }
+                    const double area = MeasureFaceArea(face);
+                    AppendDebugLog(std::string(modeName) + " rip face candidate stage=" + stage +
+                                   ", face=" + std::to_string(face->Tag()) +
+                                    ", signedY=" + FormatExpressionNumber(signedY) +
+                                    ", area=" + FormatExpressionNumber(area));
+                    selectedFaces.push_back(face);
+                }
+                return selectedFaces;
+            };
+
+            std::vector<Face*> positiveYFaces = collectFacesOnSide(ripFeature->GetFaces(),
+                                                                    true,
+                                                                    "rip-positive");
+            if (positiveYFaces.empty())
+            {
+                errorMessage = "No Y-positive rip feature face was found for the directional right-angle offset.";
+                return false;
+            }
+
+            // Resolve both directional faces before changing either one. The
+            // Offset Face feature normally reports only the face it moved, so
+            // searching firstOffsetFeature->GetFaces() cannot find the
+            // untouched opposite rip face.
+            std::vector<Face*> negativeYFaces = collectFacesOnSide(ripFeature->GetFaces(),
+                                                                    false,
+                                                                    "rip-negative");
+            if (negativeYFaces.empty())
+            {
+                errorMessage = "No Y-negative rip feature face was found for the directional right-angle offset.";
+                return false;
+            }
+
+            const std::vector<Face*>& smallOffsetFaces = smallOffsetOnPositiveY
+                                                              ? positiveYFaces
+                                                              : negativeYFaces;
+            const std::vector<Face*>& largeOffsetFaces = smallOffsetOnPositiveY
+                                                              ? negativeYFaces
+                                                              : positiveYFaces;
+            const char* smallSideName = smallOffsetOnPositiveY ? "Y-positive" : "Y-negative";
+            const char* largeSideName = smallOffsetOnPositiveY ? "Y-negative" : "Y-positive";
+
+            firstBuilder = workPart->Features()->CreateOffsetFaceBuilder(nullptr);
+            const std::string smallOffsetFormula = "(0.02-(" + inputs.clearanceValue + "))";
+            firstBuilder->Distance()->SetFormula(smallOffsetFormula.c_str());
+            firstBuilder->SetDirection(false);
+            FaceDumbRule* smallOffsetRule =
+                workPart->ScRuleFactory()->CreateRuleFaceDumb(smallOffsetFaces);
+            std::vector<SelectionIntentRule*> smallOffsetRules(1, smallOffsetRule);
+            firstBuilder->FaceCollector()->ReplaceRules(smallOffsetRules, false);
+            Features::Feature* firstOffsetFeature = firstBuilder->CommitFeature();
+            firstOffsetTag = firstOffsetFeature != nullptr ? firstOffsetFeature->Tag() : NULL_TAG;
+            firstBuilder->Destroy();
+            firstBuilder = nullptr;
+            if (firstOffsetFeature == nullptr)
+            {
+                errorMessage = std::string("The ") + smallSideName +
+                               " rip faces could not be offset by 0.02 minus clearance.";
+                return false;
+            }
+
+            secondBuilder = workPart->Features()->CreateOffsetFaceBuilder(nullptr);
+            const std::string largeOffsetFormula =
+                "(" + FormatExpressionNumber(inputs.thickness) + "+0.02)";
+            secondBuilder->Distance()->SetFormula(largeOffsetFormula.c_str());
+            secondBuilder->SetDirection(false);
+            FaceDumbRule* largeOffsetRule =
+                workPart->ScRuleFactory()->CreateRuleFaceDumb(largeOffsetFaces);
+            std::vector<SelectionIntentRule*> largeOffsetRules(1, largeOffsetRule);
+            secondBuilder->FaceCollector()->ReplaceRules(largeOffsetRules, false);
+            Features::Feature* secondOffsetFeature = secondBuilder->CommitFeature();
+            secondOffsetTag = secondOffsetFeature != nullptr ? secondOffsetFeature->Tag() : NULL_TAG;
+            secondBuilder->Destroy();
+            secondBuilder = nullptr;
+            if (secondOffsetFeature == nullptr)
+            {
+                errorMessage = std::string("The ") + largeSideName +
+                               " rip faces could not be offset by thickness plus 0.02.";
+                return false;
+            }
+
+            AppendDebugLog(std::string(modeName) + " directional rip offsets completed: rip=" +
+                           std::to_string(ripFeature->Tag()) +
+                           ", positiveFaceCount=" + std::to_string(positiveYFaces.size()) +
+                           ", negativeFaceCount=" + std::to_string(negativeYFaces.size()) +
+                           ", smallSide=" + smallSideName +
+                           ", smallDistance=" + smallOffsetFormula +
+                           ", firstOffset=" + std::to_string(firstOffsetTag) +
+                           ", largeSide=" + largeSideName +
+                           ", largeDistance=" + largeOffsetFormula +
+                           ", secondOffset=" + std::to_string(secondOffsetTag));
+            return true;
+        }
+
         firstBuilder = workPart->Features()->CreateOffsetFaceBuilder(nullptr);
         const std::string clearanceFormula = "-(" + inputs.clearanceValue + ")";
         firstBuilder->Distance()->SetFormula(clearanceFormula.c_str());
@@ -5038,6 +5957,9 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                                                  bool& deferredSecondUdfRequested,
                                                  InferredInputs& deferredSecondUdfInputs,
                                                  tag_t& deferredRightAngleRipTag,
+                                                 double& deferredRightAngleRipAngle,
+                                                 std::vector<tag_t>& createdRightAngleOffsetTags,
+                                                 bool& createdRightAngle90SecondFeaturePath,
                                                  std::string& errorMessage) const
 {
     ripCreated = false;
@@ -5047,6 +5969,9 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
     continuationCreated = false;
     deferredSecondUdfRequested = false;
     deferredRightAngleRipTag = NULL_TAG;
+    deferredRightAngleRipAngle = 0.0;
+    createdRightAngleOffsetTags.clear();
+    createdRightAngle90SecondFeaturePath = false;
     errorMessage.clear();
     if ((!inputs.inferredFromSingleClick && !allowContinuationInputs) ||
         inputs.targetBody == nullptr ||
@@ -5342,6 +6267,36 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                    ", B1=" + std::to_string(qCornerFirstEdgeTag) +
                    ", B2=" + std::to_string(qCornerSecondEdgeTag) +
                    ", execute=" + (qCornerRequiresRipOffsets ? "true" : "false"));
+    const bool isNinetyRightMode =
+        inputs.featureMode == FeatureMode::NinetyRight;
+    const bool isNinetyLeftMode =
+        inputs.featureMode == FeatureMode::NinetyLeft;
+    const bool qCornerIs90 =
+        std::fabs(qCornerInteriorAngle - 90.0) <= 0.1;
+    const bool qCornerIs270 =
+        std::fabs(qCornerInteriorAngle - 270.0) <= 0.1;
+
+    // The second clearance-groove UDF belongs to the originally selected P2
+    // corner.  Do not classify that UDF from the far Q end of P2-Q: on a
+    // thickness wall the two ends commonly report complementary 270/90
+    // angles, which swaps JianXiCao and JianXiCaoR.
+    double secondFeatureCornerAngle = qCornerInteriorAngle;
+    const bool hasSelectedP2CornerAngle =
+        FaceInteriorCornerAngle(inputs.baseFace,
+                                inputs.endPoint,
+                                secondFeatureCornerAngle);
+    const bool secondFeatureCornerIs90 =
+        std::fabs(secondFeatureCornerAngle - 90.0) <= 0.1;
+    const bool secondFeatureCornerIs270 =
+        std::fabs(secondFeatureCornerAngle - 270.0) <= 0.1;
+    AppendDebugLog("second UDF corner classification: selectedP2=" +
+                   FormatPoint(inputs.endPoint) +
+                   ", selectedP2Angle=" +
+                   FormatExpressionNumber(secondFeatureCornerAngle) +
+                   ", hasSelectedP2Angle=" +
+                   (hasSelectedP2CornerAngle ? "true" : "false") +
+                   ", farQAngle=" +
+                   FormatExpressionNumber(qCornerInteriorAngle));
 
     // NX's edge-rip command expects both sheet-side edges of the open seam.
     // The Q edge and its parallel mate above only prove that this is a
@@ -5472,7 +6427,24 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
     // second UDF first, then edge rip, then the refreshed primary UDF.
     if (useFallbackSecondUdf)
     {
-        if (!CreateUserDefinedFeature(fallbackSecondInputs,
+        InferredInputs secondUdfCreationInputs = fallbackSecondInputs;
+        if ((isNinetyLeftMode && secondFeatureCornerIs90) ||
+            (isNinetyRightMode && secondFeatureCornerIs270))
+        {
+            secondUdfCreationInputs.useNinetyClearanceGrooveTemplate = true;
+            AppendDebugLog("TryCreateSecondPointRip selected 90JianXiCao for the second UDF, mode=" +
+                           std::string(isNinetyRightMode ? "90-right" : "90-left") +
+                           ", cornerAngle=" + FormatExpressionNumber(secondFeatureCornerAngle));
+        }
+        else if ((isNinetyRightMode && secondFeatureCornerIs90) ||
+                 (isNinetyLeftMode && secondFeatureCornerIs270))
+        {
+            secondUdfCreationInputs.useNinetyClearanceGrooveRightTemplate = true;
+            AppendDebugLog("TryCreateSecondPointRip selected 90JianXiCaoR for the second UDF, mode=" +
+                           std::string(isNinetyRightMode ? "90-right" : "90-left") +
+                           ", cornerAngle=" + FormatExpressionNumber(secondFeatureCornerAngle));
+        }
+        if (!CreateUserDefinedFeature(secondUdfCreationInputs,
                                       errorMessage,
                                       &secondUdfTag,
                                       &secondReferenceTags,
@@ -5543,12 +6515,44 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
             errorMessage = "NX did not return a feature after creating the sheet-metal rip.";
             return false;
         }
-        if (qCornerRequiresRipOffsets)
+        if (qCornerRequiresRipOffsets &&
+            (inputs.featureMode == FeatureMode::NinetyLeft ||
+             inputs.featureMode == FeatureMode::NinetyRight) &&
+            (std::fabs(qCornerInteriorAngle - 90.0) <= 0.1 ||
+             std::fabs(qCornerInteriorAngle - 270.0) <= 0.1))
+        {
+            tag_t firstOffsetTag = NULL_TAG;
+            tag_t secondOffsetTag = NULL_TAG;
+            if (!OffsetRightAngleRipFeature(inputs,
+                                            createdRip,
+                                            qCornerInteriorAngle,
+                                            firstOffsetTag,
+                                            secondOffsetTag,
+                                            errorMessage))
+            {
+                return false;
+            }
+            AppendDebugLog("TryCreateSecondPointRip applied 90/270-degree rip offsets immediately after rip: angle=" +
+                           FormatExpressionNumber(qCornerInteriorAngle) +
+                           ", rip=" + std::to_string(createdRipTag) +
+                           ", firstOffset=" + std::to_string(firstOffsetTag) +
+                           ", secondOffset=" + std::to_string(secondOffsetTag));
+            createdRightAngleOffsetTags.push_back(firstOffsetTag);
+            createdRightAngleOffsetTags.push_back(secondOffsetTag);
+        }
+        else if (qCornerRequiresRipOffsets)
         {
             deferredRightAngleRipTag = createdRipTag;
-            AppendDebugLog("TryCreateSecondPointRip deferred 90/270-degree rip offsets until after final subtraction: angle=" +
+            deferredRightAngleRipAngle = qCornerInteriorAngle;
+            AppendDebugLog("TryCreateSecondPointRip kept legacy deferred 90/270-degree rip offsets: angle=" +
                            FormatExpressionNumber(qCornerInteriorAngle) +
-                           ", rip=" + std::to_string(deferredRightAngleRipTag));
+                           ", mode=" +
+                           (inputs.featureMode == FeatureMode::Chamfer
+                                ? "chamfer"
+                                : (inputs.featureMode == FeatureMode::NinetyRight
+                                       ? "90-right"
+                                       : "90-left")) +
+                           ", rip=" + std::to_string(createdRipTag));
         }
         if (useConcaveStripBranch)
         {
@@ -5628,6 +6632,22 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                 }
                 deferredSecondUdfRequested = true;
                 deferredSecondUdfInputs = concaveSecondInputs;
+                if ((isNinetyLeftMode && secondFeatureCornerIs90) ||
+                    (isNinetyRightMode && secondFeatureCornerIs270))
+                {
+                    deferredSecondUdfInputs.useNinetyClearanceGrooveTemplate = true;
+                    AppendDebugLog("TryCreateSecondPointRip selected 90JianXiCao for the deferred second UDF, mode=" +
+                                   std::string(isNinetyRightMode ? "90-right" : "90-left") +
+                                   ", cornerAngle=" + FormatExpressionNumber(secondFeatureCornerAngle));
+                }
+                else if ((isNinetyRightMode && secondFeatureCornerIs90) ||
+                         (isNinetyLeftMode && secondFeatureCornerIs270))
+                {
+                    deferredSecondUdfInputs.useNinetyClearanceGrooveRightTemplate = true;
+                    AppendDebugLog("TryCreateSecondPointRip selected 90JianXiCaoR for the deferred second UDF, mode=" +
+                                   std::string(isNinetyRightMode ? "90-right" : "90-left") +
+                                   ", cornerAngle=" + FormatExpressionNumber(secondFeatureCornerAngle));
+                }
 
                 // The next iteration still evaluates Q3, not Q4.
                 continuationInputs = fallbackSecondInputs;
@@ -5641,6 +6661,18 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                                ", continuationSearchEndpoint=Q3" +
                                ", continue=true");
             }
+        }
+        createdRightAngle90SecondFeaturePath =
+            (inputs.featureMode == FeatureMode::NinetyLeft ||
+             inputs.featureMode == FeatureMode::NinetyRight) &&
+            qCornerIs90 &&
+            (secondUdfTag != NULL_TAG || deferredSecondUdfRequested);
+        if (createdRightAngle90SecondFeaturePath)
+        {
+            AppendDebugLog("TryCreateSecondPointRip marked right-angle/90-degree second-feature path for constrained final P2 recalculation, mode=" +
+                           std::string(inputs.featureMode == FeatureMode::NinetyLeft
+                                           ? "90-left"
+                                           : "90-right"));
         }
         ripCreated = true;
         AppendDebugLog("TryCreateSecondPointRip created edge-rip feature tag=" +
@@ -5906,7 +6938,11 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
     std::string openedTemplatePath;
 
     std::string extractTrace = "embedded template extraction:\n";
-    if (!extractedTemplate.Extract(inputs.featureMode, openedTemplatePath, extractTrace))
+    if (!extractedTemplate.Extract(inputs.featureMode,
+                                   inputs.useNinetyClearanceGrooveTemplate,
+                                   inputs.useNinetyClearanceGrooveRightTemplate,
+                                   openedTemplatePath,
+                                   extractTrace))
     {
         AppendDebugLog(extractTrace);
         errorMessage = "Failed to extract embedded UDF template.\nSee " + DebugLogPath();
@@ -5959,7 +6995,10 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
     if (udfDefinition == NULL_TAG)
     {
         closeTemplate();
-        const UdfTemplateSpec currentTemplateSpec = TemplateSpecForMode(inputs.featureMode);
+        const UdfTemplateSpec currentTemplateSpec =
+            TemplateSpecForMode(inputs.featureMode,
+                                inputs.useNinetyClearanceGrooveTemplate,
+                                inputs.useNinetyClearanceGrooveRightTemplate);
         errorMessage = "No UDF definition feature was found in " + openedTemplatePath +
                        ". Please confirm " + std::string(currentTemplateSpec.logName) +
                        " is a UG User Defined Feature template.";
@@ -6417,6 +7456,83 @@ void TwoPointSiBianUI::ConfigurePointSelection(NXOpen::BlockStyler::SelectObject
     }
 
     delete properties;
+}
+
+void TwoPointSiBianUI::ConfigureInputMode(bool smartMode, bool clearSelections)
+{
+    AppendDebugLog(std::string("ConfigureInputMode begin mode=") +
+                   (smartMode ? "smart" : "manual"));
+    const std::vector<TaggedObject*> noSelection;
+    if (clearSelections)
+    {
+        try
+        {
+            if (startPointBlock_ != nullptr)
+            {
+                startPointBlock_->SetSelectedObjects(noSelection);
+            }
+            if (endPointBlock_ != nullptr)
+            {
+                endPointBlock_->SetSelectedObjects(noSelection);
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    if (featureModeBlock_ != nullptr)
+    {
+        featureModeBlock_->SetShow(!smartMode);
+        featureModeBlock_->SetEnable(!smartMode);
+    }
+    if (startPointBlock_ != nullptr)
+    {
+        startPointBlock_->SetShow(true);
+        startPointBlock_->SetEnable(true);
+        startPointBlock_->SetAutomaticProgression(!smartMode);
+        startPointBlock_->SetLabelString(smartMode ? "选择面上点" : "第一条边端点");
+        std::vector<Selection::MaskTriple> masks;
+        if (smartMode)
+        {
+            masks.emplace_back(UF_solid_type,
+                               UF_solid_face_subtype,
+                               UF_UI_SEL_FEATURE_ANY_FACE);
+        }
+        else
+        {
+            masks.emplace_back(UF_point_type, UF_point_subtype, 0);
+            masks.emplace_back(UF_solid_type,
+                               UF_solid_body_subtype,
+                               UF_UI_SEL_FEATURE_ANY_EDGE);
+        }
+        startPointBlock_->SetSelectionFilter(
+            Selection::SelectionActionClearAndEnableSpecific,
+            masks);
+    }
+    if (endPointBlock_ != nullptr)
+    {
+        endPointBlock_->SetShow(!smartMode);
+        endPointBlock_->SetEnable(!smartMode);
+        endPointBlock_->SetAutomaticProgression(false);
+        endPointBlock_->SetLabelString("第二条边端点");
+        if (!smartMode)
+        {
+            std::vector<Selection::MaskTriple> masks;
+            masks.emplace_back(UF_point_type, UF_point_subtype, 0);
+            masks.emplace_back(UF_solid_type,
+                               UF_solid_body_subtype,
+                               UF_UI_SEL_FEATURE_ANY_EDGE);
+            endPointBlock_->SetSelectionFilter(
+                Selection::SelectionActionClearAndEnableSpecific,
+                masks);
+        }
+    }
+    activeSmartSelectionBlock_ = startPointBlock_;
+    AppendDebugLog(std::string("ConfigureInputMode mode=") +
+                   (smartMode
+                        ? "smart; one face-point control visible, enum disabled."
+                        : "manual; two edge-endpoint controls visible, face inference disabled."));
 }
 
 void TwoPointSiBianUI::UnhighlightSelectionObjects() const

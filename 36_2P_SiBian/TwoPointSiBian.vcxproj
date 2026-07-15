@@ -54,7 +54,7 @@
       <AdditionalDependencies>libugopenint.lib;libufun.lib;libnxopencpp.lib;libnxopencpp_gateway.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopenuicpp.lib;user32.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)TwoPointSiBian.dlx" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)CustomFeatureConfiguration.xml" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2p_SiBian_1.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2p_SiBian_1.prt" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2P_SiBian_90.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2P_SiBian_90.prt" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2P_SiBian_90R.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2P_SiBian_90R.prt" "$(OutDir)"</Command>
+      <Command>copy /Y "$(ProjectDir)TwoPointSiBian.dlx" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)CustomFeatureConfiguration.xml" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2p_SiBian_1.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2p_SiBian_1.prt" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2P_SiBian_90.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2P_SiBian_90.prt" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2P_SiBian_90R.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2P_SiBian_90R.prt" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)90JianXiCao.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)90JianXiCao.prt" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)90JianXiCaoR.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)90JianXiCaoR.prt" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -78,6 +78,10 @@
     <None Include="2P_SiBian_90.prt" />
     <None Include="2P_SiBian_90R.cgm" />
     <None Include="2P_SiBian_90R.prt" />
+    <None Include="90JianXiCao.cgm" />
+    <None Include="90JianXiCao.prt" />
+    <None Include="90JianXiCaoR.cgm" />
+    <None Include="90JianXiCaoR.prt" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

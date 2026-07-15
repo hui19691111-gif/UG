@@ -56,6 +56,8 @@ private:
         double spanLength = 0.0;
         bool inferredFromSingleClick = false;
         bool smartMode = false;
+        bool useNinetyClearanceGrooveTemplate = false;
+        bool useNinetyClearanceGrooveRightTemplate = false;
         NXOpen::Point3d selectionClickPoint;
         std::string clearanceValue = "0.2";
         std::string bendRadiusValue = "0.2";
@@ -83,6 +85,13 @@ private:
                                      const NXOpen::Point3d& clickPoint,
                                      InferredInputs& inputs) const;
     bool CompleteInputsForEndpoints(InferredInputs& inputs) const;
+    bool RefreshSmartInputsAfterRips(const InferredInputs& originalInputs,
+                                     InferredInputs& refreshedInputs) const;
+    bool ConstrainRightAnglePrimaryP2ToOffsetSharedEdges(
+        const InferredInputs& originalInputs,
+        const InferredInputs& currentInputs,
+        const std::vector<tag_t>& offsetFeatureTags,
+        InferredInputs& constrainedInputs) const;
     NXOpen::Body* FindBody(NXOpen::TaggedObject* object) const;
     NXOpen::Body* FindBodyAndFaceContainingPoints(const NXOpen::Point3d& first,
                                                   const NXOpen::Point3d& second,
@@ -160,6 +169,7 @@ private:
                              std::string& errorMessage) const;
     bool OffsetRightAngleRipFeature(const InferredInputs& inputs,
                                     NXOpen::Features::Feature* ripFeature,
+                                    double cornerInteriorAngle,
                                     tag_t& firstOffsetTag,
                                     tag_t& secondOffsetTag,
                                     std::string& errorMessage) const;
@@ -174,6 +184,9 @@ private:
                                  bool& deferredSecondUdfRequested,
                                  InferredInputs& deferredSecondUdfInputs,
                                  tag_t& deferredRightAngleRipTag,
+                                 double& deferredRightAngleRipAngle,
+                                 std::vector<tag_t>& createdRightAngleOffsetTags,
+                                 bool& createdRightAngle90SecondFeaturePath,
                                  std::string& errorMessage) const;
     bool CreateUserDefinedFeature(const InferredInputs& inputs,
                                   std::string& errorMessage,
@@ -191,6 +204,7 @@ private:
     std::vector<tag_t> CurrentWorkPartFeatureTags() const;
     void CapturePreviewCreatedFeatureTags();
     void ConfigurePointSelection(NXOpen::BlockStyler::SelectObject* block) const;
+    void ConfigureInputMode(bool smartMode, bool clearSelections);
     void UnhighlightSelectionObjects() const;
     void ShowError(const std::string& message) const;
 
@@ -217,6 +231,7 @@ private:
     tag_t smartEndpointBodyTag_;
     NXOpen::Point3d smartCachedP1_;
     NXOpen::Point3d smartCachedP2_;
+    bool retainSmartEndpointCacheOnUndo_;
     bool hasPreview_;
     bool previewCommitted_;
     bool isUpdatingPreview_;

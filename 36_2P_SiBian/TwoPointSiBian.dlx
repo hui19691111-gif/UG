@@ -83,7 +83,7 @@
                 <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment" />
                 <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Bottom" loc="4" mask="16384" name="Bottom" offset="0" sname="Bottom" source="3" target="Default" type="attachment" />
                 <Property ClassID="UGS::UICOMP_selection" group="Snap::" hierarchy="UGS::UICOMP_selection" id="SnapPointOverlay" mask="256" name="SnapPointOverlay" sname="PointOverlay" source="1" type="logical" value="True" />
-                <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="Label" mask="256" name="Label" sname="LabelString" source="3" type="utfstring" value="起点" />
+                <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="Label" mask="256" name="Label" sname="LabelString" source="3" type="utfstring" value="第一条边端点" />
               </PropertyList>
             </item>
           </Property>
@@ -166,7 +166,7 @@
                 <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment" />
                 <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Bottom" loc="4" mask="16384" name="Bottom" offset="0" sname="Bottom" source="3" target="Default" type="attachment" />
                 <Property ClassID="UGS::UICOMP_selection" group="Snap::" hierarchy="UGS::UICOMP_selection" id="SnapPointOverlay" mask="256" name="SnapPointOverlay" sname="PointOverlay" source="1" type="logical" value="True" />
-                <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="Label" mask="256" name="Label" sname="LabelString" source="3" type="utfstring" value="终点" />
+                <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="Label" mask="256" name="Label" sname="LabelString" source="3" type="utfstring" value="第二条边端点" />
               </PropertyList>
             </item>
           </Property>
