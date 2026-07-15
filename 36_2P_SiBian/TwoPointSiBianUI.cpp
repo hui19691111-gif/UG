@@ -15,16 +15,24 @@
 #include <NXOpen/Features_CustomFeatureData.hxx>
 #include <NXOpen/Features_CustomFeatureDataCollection.hxx>
 #include <NXOpen/Features_CustomTagAttribute.hxx>
+#include <NXOpen/Features_ExtrudeBuilder.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
 #include <NXOpen/Features_OffsetFaceBuilder.hxx>
 #include <NXOpen/Features_SheetMetal_EdgeRipBuilder.hxx>
 #include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
+#include <NXOpen/EdgeDumbRule.hxx>
 #include <NXOpen/FaceDumbRule.hxx>
 #include <NXOpen/FaceFeatureRule.hxx>
 #include <NXOpen/MeasureDistance.hxx>
 #include <NXOpen/MeasureFaces.hxx>
 #include <NXOpen/MeasureManager.hxx>
+#include <NXOpen/GeometricUtilities_BooleanOperation.hxx>
+#include <NXOpen/GeometricUtilities_Extend.hxx>
+#include <NXOpen/GeometricUtilities_FeatureOffset.hxx>
+#include <NXOpen/GeometricUtilities_FeatureOptions.hxx>
+#include <NXOpen/GeometricUtilities_Limits.hxx>
+#include <NXOpen/GeometricUtilities_SmartVolumeProfileBuilder.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObjectManager.hxx>
@@ -37,6 +45,8 @@
 #include <NXOpen/SectionCollection.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
+#include <NXOpen/SelectionIntentRuleOptions.hxx>
+#include <NXOpen/SmartObject.hxx>
 #include <NXOpen/TaggedObject.hxx>
 #include <NXOpen/Unit.hxx>
 #include <NXOpen/UnitCollection.hxx>
@@ -648,6 +658,62 @@ bool Normalize(Vector3d& vector)
     vector.X /= length;
     vector.Y /= length;
     vector.Z /= length;
+    return true;
+}
+
+Point3d AddVector(const Point3d& point, const Vector3d& vector)
+{
+    return Point3d(point.X + vector.X,
+                   point.Y + vector.Y,
+                   point.Z + vector.Z);
+}
+
+Vector3d ScaleVector(const Vector3d& vector, double scale)
+{
+    return Vector3d(vector.X * scale,
+                    vector.Y * scale,
+                    vector.Z * scale);
+}
+
+Vector3d ProjectVectorToPlane(const Vector3d& vector, const Vector3d& normal)
+{
+    return Vector3d(vector.X - normal.X * Dot(vector, normal),
+                    vector.Y - normal.Y * Dot(vector, normal),
+                    vector.Z - normal.Z * Dot(vector, normal));
+}
+
+Vector3d InwardOffsetDirectionInPlane(const Vector3d& lineDirection,
+                                      const Vector3d& planeNormal,
+                                      const Vector3d& inwardHint)
+{
+    Vector3d direction = Cross(planeNormal, lineDirection);
+    if (!Normalize(direction))
+    {
+        return Vector3d(0.0, 0.0, 0.0);
+    }
+    if (Dot(direction, inwardHint) < 0.0)
+    {
+        direction = ScaleVector(direction, -1.0);
+    }
+    return direction;
+}
+
+bool IntersectCoplanarLines(const Point3d& firstOrigin,
+                            const Vector3d& firstDirection,
+                            const Point3d& secondOrigin,
+                            const Vector3d& secondDirection,
+                            const Vector3d& planeNormal,
+                            Point3d& intersection)
+{
+    const double denominator = Dot(Cross(firstDirection, secondDirection), planeNormal);
+    if (std::fabs(denominator) <= 1.0e-9)
+    {
+        return false;
+    }
+    const double firstParameter =
+        Dot(Cross(Subtract(secondOrigin, firstOrigin), secondDirection), planeNormal) /
+        denominator;
+    intersection = AddVector(firstOrigin, ScaleVector(firstDirection, firstParameter));
     return true;
 }
 
@@ -2393,6 +2459,7 @@ TwoPointSiBianUI::TwoPointSiBianUI()
       clearanceBlock_(nullptr),
       bendRadiusBlock_(nullptr),
       smartModeBlock_(nullptr),
+      chamferEdgeToggleBlock_(nullptr),
       featureModeBlock_(nullptr),
       customFeatureManager_(nullptr),
       editedFeature_(nullptr),
@@ -2442,7 +2509,18 @@ void TwoPointSiBianUI::initialize_cb()
     clearanceBlock_ = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(dialog_->TopBlock()->FindBlock("string0"));
     bendRadiusBlock_ = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(dialog_->TopBlock()->FindBlock("string01"));
     smartModeBlock_ = dynamic_cast<NXOpen::BlockStyler::Toggle*>(dialog_->TopBlock()->FindBlock("smartModeToggle"));
+    chamferEdgeToggleBlock_ = dynamic_cast<NXOpen::BlockStyler::Toggle*>(dialog_->TopBlock()->FindBlock("gapOnlyToggle"));
     featureModeBlock_ = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(dialog_->TopBlock()->FindBlock("wrapCornerMode"));
+
+    if (chamferEdgeToggleBlock_ != nullptr)
+    {
+        chamferEdgeToggleBlock_->SetValue(true);
+        AppendDebugLog("chamfer-edge toggle initialized: enabled=true.");
+    }
+    else
+    {
+        AppendDebugLog("chamfer-edge toggle block missing; defaulting to enabled.");
+    }
 
     if (featureModeBlock_ != nullptr)
     {
@@ -2788,6 +2866,15 @@ bool TwoPointSiBianUI::CreatePreview()
     // offsets may move/split P2, but a replacement preview must restart from
     // this original pair instead of a face exposed by the preview topology.
     const InferredInputs originalPreviewInputs = inputs;
+    Edge* referenceCornerEdge = nullptr;
+    if (inputs.chamferEdgeMode)
+    {
+        referenceCornerEdge = FindReferenceCornerEdge(inputs);
+        AppendDebugLog("CreatePreview reference-project chamfer edge prepared: edge=" +
+                       std::to_string(referenceCornerEdge != nullptr
+                                          ? referenceCornerEdge->Tag()
+                                          : NULL_TAG));
+    }
 
     std::vector<tag_t> allToolBodyTags;
     std::vector<tag_t> allReferenceTags;
@@ -3059,6 +3146,23 @@ bool TwoPointSiBianUI::CreatePreview()
                        ", subtract=" + std::to_string(finalSubtractTag) +
                        ", firstOffset=" + std::to_string(firstOffsetTag) +
                        ", secondOffset=" + std::to_string(secondOffsetTag));
+    }
+
+    if (inputs.chamferEdgeMode && referenceCornerEdge != nullptr)
+    {
+        InferredInputs cornerCutInputs = originalPreviewInputs;
+        cornerCutInputs.targetBody = inputs.targetBody;
+        cornerCutInputs.thickness = inputs.thickness;
+        std::string cornerCutError;
+        if (!CreateReferenceCornerEdgeCut(cornerCutInputs,
+                                          referenceCornerEdge,
+                                          cornerCutError))
+        {
+            // 26_2P_BiLanCao treats this additional cut as optional and keeps
+            // the already-created main slot if its corner cut cannot resolve.
+            AppendDebugLog("CreatePreview reference-project chamfer edge cut skipped/failed: " +
+                           cornerCutError);
+        }
     }
 
     previewUdfTag_ = finalResultTag;
@@ -3505,6 +3609,8 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
     inputs.spanLength = Distance(inputs.startPoint, inputs.endPoint);
     inputs.clearanceValue = ReadStringBlockValue(clearanceBlock_, "string0", "0.2");
     inputs.bendRadiusValue = ReadStringBlockValue(bendRadiusBlock_, "string01", "0.2");
+    inputs.chamferEdgeMode =
+        chamferEdgeToggleBlock_ == nullptr || chamferEdgeToggleBlock_->Value();
 
     std::ostringstream trace;
     trace << "ReadInputs OK:"
@@ -3523,7 +3629,8 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
           << "\n  spanLength=" << inputs.spanLength
           << ", thickness=" << inputs.thickness
           << "\n  clearanceValue=" << inputs.clearanceValue
-          << ", bendRadiusValue=" << inputs.bendRadiusValue;
+          << ", bendRadiusValue=" << inputs.bendRadiusValue
+          << ", chamferEdge=" << (inputs.chamferEdgeMode ? 1 : 0);
     AppendDebugLog(trace.str());
     return true;
 }
@@ -5150,6 +5257,952 @@ bool TwoPointSiBianUI::CreateConcaveStripCut(const InferredInputs& inputs,
     return true;
 }
 
+std::vector<Edge*> TwoPointSiBianUI::FindReferenceConnectedEdges(
+    Body* body,
+    const Point3d& point) const
+{
+    std::vector<Edge*> result;
+    std::set<tag_t> tags;
+    if (body == nullptr)
+    {
+        return result;
+    }
+    for (Edge* edge : body->GetEdges())
+    {
+        if (edge != nullptr && EdgeTouchesPoint(edge, point) && tags.insert(edge->Tag()).second)
+        {
+            result.push_back(edge);
+        }
+    }
+    return result;
+}
+
+Edge* TwoPointSiBianUI::FindReferenceCornerEdge(const InferredInputs& inputs) const
+{
+    if (inputs.targetBody == nullptr || inputs.baseFace == nullptr)
+    {
+        return nullptr;
+    }
+
+    struct PlaneCandidate
+    {
+        Edge* edge = nullptr;
+        Vector3d direction;
+    };
+    std::vector<PlaneCandidate> planeCandidates;
+    for (Edge* edge : inputs.baseFace->GetEdges())
+    {
+        if (edge == nullptr || !EdgeTouchesPoint(edge, inputs.startPoint))
+        {
+            continue;
+        }
+        Point3d first;
+        Point3d second;
+        try
+        {
+            edge->GetVertices(&first, &second);
+        }
+        catch (...)
+        {
+            continue;
+        }
+        Vector3d direction = Distance(inputs.startPoint, first) <= Distance(inputs.startPoint, second)
+                                 ? Subtract(second, inputs.startPoint)
+                                 : Subtract(first, inputs.startPoint);
+        if (Normalize(direction))
+        {
+            planeCandidates.push_back({edge, direction});
+        }
+    }
+    if (planeCandidates.size() < 2)
+    {
+        AppendDebugLog("reference chamfer edge rejected: fewer than two base-face edges meet P1.");
+        return nullptr;
+    }
+
+    std::size_t firstIndex = 0;
+    std::size_t secondIndex = 1;
+    double bestPairScore = -1.0;
+    for (std::size_t first = 0; first < planeCandidates.size(); ++first)
+    {
+        for (std::size_t second = first + 1; second < planeCandidates.size(); ++second)
+        {
+            const double score = 1.0 - std::fabs(Dot(planeCandidates[first].direction,
+                                                     planeCandidates[second].direction));
+            if (score > bestPairScore)
+            {
+                bestPairScore = score;
+                firstIndex = first;
+                secondIndex = second;
+            }
+        }
+    }
+
+    const tag_t planeEdge1 = planeCandidates[firstIndex].edge->Tag();
+    const tag_t planeEdge2 = planeCandidates[secondIndex].edge->Tag();
+    Edge* bestEdge = nullptr;
+    double bestLength = -1.0;
+    for (Edge* edge : FindReferenceConnectedEdges(inputs.targetBody, inputs.startPoint))
+    {
+        if (edge == nullptr || edge->Tag() == planeEdge1 || edge->Tag() == planeEdge2)
+        {
+            continue;
+        }
+        const double length = edge->GetLength();
+        if (length > bestLength)
+        {
+            bestLength = length;
+            bestEdge = edge;
+        }
+    }
+    AppendDebugLog("reference chamfer edge search: P1=" + FormatPoint(inputs.startPoint) +
+                   ", planeEdge1=" + std::to_string(planeEdge1) +
+                   ", planeEdge2=" + std::to_string(planeEdge2) +
+                   ", cornerEdge=" +
+                   std::to_string(bestEdge != nullptr ? bestEdge->Tag() : NULL_TAG));
+    return bestEdge;
+}
+
+std::vector<Face*> TwoPointSiBianUI::FindReferencePlanarFaces(Edge* edge) const
+{
+    std::vector<Face*> result;
+    std::set<tag_t> tags;
+    if (edge == nullptr)
+    {
+        return result;
+    }
+    for (Face* face : edge->GetFaces())
+    {
+        try
+        {
+            if (face != nullptr && face->SolidFaceType() == Face::FaceTypePlanar &&
+                tags.insert(face->Tag()).second)
+            {
+                result.push_back(face);
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+    std::sort(result.begin(), result.end(), [this](Face* left, Face* right) {
+        return MeasureFaceArea(left) > MeasureFaceArea(right);
+    });
+    if (result.size() > 2)
+    {
+        result.resize(2);
+    }
+    return result;
+}
+
+bool TwoPointSiBianUI::ComputeReferenceInwardNormal(Body* body,
+                                                     Face* face,
+                                                     Vector3d& inwardNormal) const
+{
+    Point3d planeOrigin;
+    Vector3d planeNormal;
+    if (body == nullptr || !FacePlaneData(face, planeOrigin, planeNormal))
+    {
+        return false;
+    }
+    double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    if (UF_MODL_ask_bounding_box(body->Tag(), box) != 0)
+    {
+        return false;
+    }
+    const Point3d bodyCenter((box[0] + box[3]) * 0.5,
+                             (box[1] + box[4]) * 0.5,
+                             (box[2] + box[5]) * 0.5);
+    if (Dot(planeNormal, Subtract(bodyCenter, planeOrigin)) < 0.0)
+    {
+        planeNormal = ScaleVector(planeNormal, -1.0);
+    }
+    inwardNormal = planeNormal;
+    return Normalize(inwardNormal);
+}
+
+bool TwoPointSiBianUI::ExtrudeReferenceCornerProfile(
+    const InferredInputs& inputs,
+    const std::vector<Point3d>& profilePoints,
+    const Point3d& origin,
+    const Vector3d& direction,
+    double startLimitValue,
+    double endLimitValue,
+    const char* operationName,
+    std::string& errorMessage) const
+{
+    if (profilePoints.size() < 4 || inputs.targetBody == nullptr)
+    {
+        errorMessage = std::string(operationName) + ": invalid profile or target body.";
+        return false;
+    }
+    std::vector<tag_t> curveTags;
+    uf_list_p_t curveList = nullptr;
+    uf_list_p_t featureList = nullptr;
+    auto cleanup = [&]() {
+        if (curveList != nullptr) UF_MODL_delete_list(&curveList);
+        if (featureList != nullptr) UF_MODL_delete_list(&featureList);
+        for (tag_t curveTag : curveTags)
+        {
+            if (curveTag != NULL_TAG && UF_OBJ_delete_object(curveTag) != 0)
+            {
+                UF_OBJ_set_blank_status(curveTag, UF_OBJ_BLANKED);
+            }
+        }
+    };
+    for (std::size_t index = 0; index + 1 < profilePoints.size(); ++index)
+    {
+        UF_CURVE_line_t lineData;
+        CopyPoint(profilePoints[index], lineData.start_point);
+        CopyPoint(profilePoints[index + 1], lineData.end_point);
+        tag_t lineTag = NULL_TAG;
+        if (UF_CURVE_create_line(&lineData, &lineTag) != 0 || lineTag == NULL_TAG)
+        {
+            errorMessage = std::string(operationName) + ": failed to create profile curves.";
+            cleanup();
+            return false;
+        }
+        curveTags.push_back(lineTag);
+    }
+    if (UF_MODL_create_list(&curveList) != 0 || curveList == nullptr)
+    {
+        errorMessage = std::string(operationName) + ": failed to allocate the curve list.";
+        cleanup();
+        return false;
+    }
+    for (tag_t curveTag : curveTags) UF_MODL_put_list_item(curveList, curveTag);
+    const std::string startLimit = FormatExpressionNumber(startLimitValue);
+    const std::string endLimit = FormatExpressionNumber(endLimitValue);
+    char taper[] = "0.0";
+    char* limits[2] = {const_cast<char*>(startLimit.c_str()),
+                       const_cast<char*>(endLimit.c_str())};
+    double originData[3] = {origin.X, origin.Y, origin.Z};
+    double directionData[3] = {direction.X, direction.Y, direction.Z};
+    const int result = UF_MODL_create_extruded(curveList,
+                                                taper,
+                                                limits,
+                                                originData,
+                                                directionData,
+                                                UF_NULLSIGN,
+                                                &featureList);
+    tag_t featureTag = NULL_TAG;
+    tag_t toolBodyTag = NULL_TAG;
+    int count = 0;
+    if (result == 0 && featureList != nullptr &&
+        UF_MODL_ask_list_count(featureList, &count) == 0 && count > 0)
+    {
+        UF_MODL_ask_list_item(featureList, 0, &featureTag);
+        UF_MODL_ask_feat_body(featureTag, &toolBodyTag);
+    }
+    if (toolBodyTag == NULL_TAG)
+    {
+        errorMessage = std::string(operationName) + ": failed to extrude the corner profile.\n" +
+                       UfMessage(result);
+        cleanup();
+        return false;
+    }
+    tag_t subtractTag = NULL_TAG;
+    const bool subtracted = SubtractToolBodies(inputs.targetBody,
+                                                std::vector<tag_t>{toolBodyTag},
+                                                subtractTag,
+                                                errorMessage);
+    cleanup();
+    if (subtracted)
+    {
+        AppendDebugLog(std::string(operationName) + " completed: extrude=" +
+                       std::to_string(featureTag) + ", subtract=" +
+                       std::to_string(subtractTag));
+    }
+    return subtracted;
+}
+
+bool TwoPointSiBianUI::CreateReferenceNonRightCornerEdgeCut(
+    const InferredInputs& inputs,
+    Edge* cornerEdge,
+    double angleDegrees,
+    const std::vector<Face*>& principalFaces,
+    const std::vector<Vector3d>& inwardNormals,
+    std::string& errorMessage) const
+{
+    if (inputs.targetBody == nullptr || cornerEdge == nullptr ||
+        principalFaces.size() < 2 || inwardNormals.size() < 2)
+    {
+        errorMessage = "Reference chamfer: incomplete non-right-angle inputs.";
+        return false;
+    }
+    double clearance = 0.0;
+    double bendRadius = 0.0;
+    if (!TryParseExpressionNumber(inputs.clearanceValue, clearance) ||
+        !TryParseExpressionNumber(inputs.bendRadiusValue, bendRadius))
+    {
+        errorMessage = "Reference chamfer: clearance or bend radius is not numeric.";
+        return false;
+    }
+    clearance = std::fabs(clearance);
+    bendRadius = std::fabs(bendRadius);
+
+    Point3d first;
+    Point3d second;
+    try
+    {
+        cornerEdge->GetVertices(&first, &second);
+    }
+    catch (...)
+    {
+        errorMessage = "Reference chamfer: the corner-edge endpoints are unavailable.";
+        return false;
+    }
+    Point3d profileOrigin = first;
+    Point3d otherEndpoint = second;
+    if (Distance(second, inputs.startPoint) < Distance(first, inputs.startPoint))
+    {
+        profileOrigin = second;
+        otherEndpoint = first;
+    }
+    Vector3d edgeDirection = Subtract(otherEndpoint, profileOrigin);
+    const double edgeLength = Length(edgeDirection);
+    if (!Normalize(edgeDirection) || edgeLength <= kPointTolerance)
+    {
+        errorMessage = "Reference chamfer: the corner-edge direction is invalid.";
+        return false;
+    }
+
+    Point3d facePoint1;
+    Point3d facePoint2;
+    Vector3d faceNormal1;
+    Vector3d faceNormal2;
+    if (!FacePlaneData(principalFaces[0], facePoint1, faceNormal1) ||
+        !FacePlaneData(principalFaces[1], facePoint2, faceNormal2))
+    {
+        errorMessage = "Reference chamfer: the corner-edge face planes are unavailable.";
+        return false;
+    }
+    Vector3d faceDirection1 = ProjectVectorToPlane(Subtract(facePoint1, profileOrigin), edgeDirection);
+    Vector3d faceDirection2 = ProjectVectorToPlane(Subtract(facePoint2, profileOrigin), edgeDirection);
+    if (!Normalize(faceDirection1))
+    {
+        faceDirection1 = Cross(edgeDirection, faceNormal1);
+    }
+    if (!Normalize(faceDirection2))
+    {
+        faceDirection2 = Cross(edgeDirection, faceNormal2);
+    }
+    if (!Normalize(faceDirection1) || !Normalize(faceDirection2))
+    {
+        errorMessage = "Reference chamfer: the two face directions are invalid.";
+        return false;
+    }
+
+    std::vector<Point3d> profilePoints;
+    const double offsetDistance = inputs.thickness + bendRadius + clearance * 0.5;
+    bool explicitProfileCreated = false;
+    Vector3d centerDirection =
+        ProjectVectorToPlane(Subtract(inputs.endPoint, inputs.startPoint), edgeDirection);
+    if (Normalize(centerDirection))
+    {
+        if (Dot(centerDirection, faceDirection1) < 0.0)
+        {
+            faceDirection1 = ScaleVector(faceDirection1, -1.0);
+        }
+        if (Dot(centerDirection, faceDirection2) < 0.0)
+        {
+            faceDirection2 = ScaleVector(faceDirection2, -1.0);
+        }
+        auto evaluateGapProfile = [&](double centerDistance,
+                                      std::vector<Point3d>* points,
+                                      double* gap) -> bool {
+            const Point3d cPoint = AddVector(profileOrigin,
+                                              ScaleVector(centerDirection, centerDistance));
+            const double edgeParameterA = Dot(Subtract(cPoint, profileOrigin), faceDirection1);
+            const double edgeParameterE = Dot(Subtract(cPoint, profileOrigin), faceDirection2);
+            if (edgeParameterA <= kPointTolerance || edgeParameterE <= kPointTolerance)
+            {
+                return false;
+            }
+            const Point3d aPoint = AddVector(profileOrigin,
+                                              ScaleVector(faceDirection1, edgeParameterA));
+            const Point3d ePoint = AddVector(profileOrigin,
+                                              ScaleVector(faceDirection2, edgeParameterE));
+            Vector3d aToC = Subtract(cPoint, aPoint);
+            Vector3d eToC = Subtract(cPoint, ePoint);
+            if (Length(aToC) <= inputs.thickness + kPointTolerance ||
+                Length(eToC) <= inputs.thickness + kPointTolerance ||
+                !Normalize(aToC) || !Normalize(eToC))
+            {
+                return false;
+            }
+            const Point3d bPoint = AddVector(aPoint, ScaleVector(aToC, inputs.thickness));
+            const Point3d dPoint = AddVector(ePoint, ScaleVector(eToC, inputs.thickness));
+            if (gap != nullptr) *gap = Distance(bPoint, dPoint);
+            if (points != nullptr)
+            {
+                *points = {profileOrigin, aPoint, cPoint, ePoint, profileOrigin};
+            }
+            return true;
+        };
+
+        double lowDistance = std::max(inputs.thickness, clearance) + kPointTolerance;
+        double lowGap = 0.0;
+        for (int index = 0; index < 80; ++index)
+        {
+            if (evaluateGapProfile(lowDistance, nullptr, &lowGap)) break;
+            lowDistance *= 1.25;
+        }
+        double highDistance = lowDistance;
+        double highGap = lowGap;
+        for (int index = 0; index < 80 && highGap < clearance; ++index)
+        {
+            highDistance *= 1.5;
+            if (!evaluateGapProfile(highDistance, nullptr, &highGap)) highGap = 0.0;
+        }
+        if (highGap >= clearance && clearance > kPointTolerance)
+        {
+            for (int index = 0; index < 80; ++index)
+            {
+                const double middle = (lowDistance + highDistance) * 0.5;
+                double middleGap = 0.0;
+                if (evaluateGapProfile(middle, nullptr, &middleGap) && middleGap >= clearance)
+                {
+                    highDistance = middle;
+                }
+                else
+                {
+                    lowDistance = middle;
+                }
+            }
+            double finalGap = 0.0;
+            explicitProfileCreated = evaluateGapProfile(highDistance, &profilePoints, &finalGap);
+            if (explicitProfileCreated)
+            {
+                AppendDebugLog("reference non-right chamfer profile=OACEO, targetGap=" +
+                               FormatExpressionNumber(clearance) +
+                               ", actualGap=" + FormatExpressionNumber(finalGap));
+            }
+        }
+    }
+
+    if (!explicitProfileCreated && angleDegrees < 179.0)
+    {
+        Vector3d bisector(inwardNormals[0].X + inwardNormals[1].X,
+                          inwardNormals[0].Y + inwardNormals[1].Y,
+                          inwardNormals[0].Z + inwardNormals[1].Z);
+        bisector = ProjectVectorToPlane(bisector, edgeDirection);
+        if (!Normalize(bisector))
+        {
+            bisector = Vector3d(faceDirection1.X + faceDirection2.X,
+                                faceDirection1.Y + faceDirection2.Y,
+                                faceDirection1.Z + faceDirection2.Z);
+        }
+        if (!Normalize(bisector))
+        {
+            errorMessage = "Reference chamfer: the acute-angle bisector is invalid.";
+            return false;
+        }
+        const Vector3d offset1 = InwardOffsetDirectionInPlane(faceDirection1,
+                                                               edgeDirection,
+                                                               bisector);
+        const Vector3d offset2 = InwardOffsetDirectionInPlane(faceDirection2,
+                                                               edgeDirection,
+                                                               bisector);
+        const Point3d offsetOrigin1 = AddVector(profileOrigin,
+                                                 ScaleVector(offset1, offsetDistance));
+        const Point3d offsetOrigin2 = AddVector(profileOrigin,
+                                                 ScaleVector(offset2, offsetDistance));
+        Point3d topPoint;
+        if (Length(offset1) <= kPointTolerance || Length(offset2) <= kPointTolerance ||
+            !IntersectCoplanarLines(offsetOrigin1,
+                                    faceDirection1,
+                                    offsetOrigin2,
+                                    faceDirection2,
+                                    edgeDirection,
+                                    topPoint))
+        {
+            errorMessage = "Reference chamfer: the acute-angle profile could not be intersected.";
+            return false;
+        }
+        const Point3d leftPoint = AddVector(topPoint, ScaleVector(offset1, -offsetDistance));
+        const Point3d rightPoint = AddVector(topPoint, ScaleVector(offset2, -offsetDistance));
+        const double currentGap = std::min(Distance(profileOrigin, leftPoint),
+                                           Distance(profileOrigin, rightPoint));
+        const double scale = clearance > kPointTolerance && currentGap > kPointTolerance
+                                 ? clearance / currentGap
+                                 : 1.0;
+        profilePoints = {
+            profileOrigin,
+            AddVector(profileOrigin, ScaleVector(Subtract(leftPoint, profileOrigin), scale)),
+            AddVector(profileOrigin, ScaleVector(Subtract(topPoint, profileOrigin), scale)),
+            AddVector(profileOrigin, ScaleVector(Subtract(rightPoint, profileOrigin), scale)),
+            profileOrigin};
+        AppendDebugLog("reference non-right chamfer profile=acute-4-line fallback.");
+    }
+
+    if (profilePoints.empty())
+    {
+        errorMessage = "Reference chamfer: no valid non-right-angle profile was produced.";
+        return false;
+    }
+    return ExtrudeReferenceCornerProfile(inputs,
+                                         profilePoints,
+                                         profileOrigin,
+                                         edgeDirection,
+                                         -inputs.thickness,
+                                         edgeLength + inputs.thickness,
+                                         "reference non-right corner-edge cut",
+                                         errorMessage);
+}
+
+bool TwoPointSiBianUI::CreateReferenceRightCornerEdgeCut(
+    const InferredInputs& inputs,
+    Edge* cornerEdge,
+    Face* referenceFace,
+    std::string& errorMessage) const
+{
+    Part* workPart = session_ != nullptr ? session_->Parts()->Work() : nullptr;
+    Vector3d inwardNormal;
+    if (workPart == nullptr || inputs.targetBody == nullptr || cornerEdge == nullptr ||
+        !ComputeReferenceInwardNormal(inputs.targetBody, referenceFace, inwardNormal))
+    {
+        errorMessage = "Reference chamfer: the 90-degree reference edge or face is unavailable.";
+        return false;
+    }
+    double clearance = 0.0;
+    if (!TryParseExpressionNumber(inputs.clearanceValue, clearance))
+    {
+        errorMessage = "Reference chamfer: clearance is not numeric.";
+        return false;
+    }
+    clearance = std::fabs(clearance);
+    Point3d first;
+    Point3d second;
+    try
+    {
+        cornerEdge->GetVertices(&first, &second);
+    }
+    catch (...)
+    {
+        errorMessage = "Reference chamfer: the 90-degree corner-edge endpoints are unavailable.";
+        return false;
+    }
+    const Point3d helpPoint((first.X + second.X) * 0.5,
+                            (first.Y + second.Y) * 0.5,
+                            (first.Z + second.Z) * 0.5);
+    Features::ExtrudeBuilder* builder = nullptr;
+    try
+    {
+        builder = workPart->Features()->CreateExtrudeBuilder(nullptr);
+        Section* section = workPart->Sections()->CreateSection(9.5e-05, 0.0001, 0.5);
+        builder->SetSection(section);
+        builder->AllowSelfIntersectingSection(true);
+        builder->SetDistanceTolerance(0.0001);
+        builder->BooleanOperation()->SetType(
+            GeometricUtilities::BooleanOperation::BooleanTypeCreate);
+        builder->SmartVolumeProfile()->SetOpenProfileSmartVolumeOption(false);
+        builder->SmartVolumeProfile()->SetCloseProfileRule(
+            GeometricUtilities::SmartVolumeProfileBuilder::CloseProfileRuleTypeFci);
+        section->SetDistanceTolerance(0.0001);
+        section->SetChainingTolerance(9.5e-05);
+        section->SetAllowedEntityTypes(Section::AllowTypesOnlyCurves);
+        section->AllowSelfIntersection(true);
+        section->AllowDegenerateCurves(false);
+
+        SelectionIntentRuleOptions* ruleOptions =
+            workPart->ScRuleFactory()->CreateRuleOptions();
+        ruleOptions->SetSelectedFromInactive(false);
+        std::vector<Edge*> seeds(1, cornerEdge);
+        EdgeDumbRule* edgeRule =
+            workPart->ScRuleFactory()->CreateRuleEdgeDumb(seeds, ruleOptions);
+        delete ruleOptions;
+        std::vector<SelectionIntentRule*> rules(1, edgeRule);
+        section->AddToSection(rules,
+                              cornerEdge,
+                              nullptr,
+                              nullptr,
+                              helpPoint,
+                              Section::ModeCreate,
+                              false);
+        Direction* direction = workPart->Directions()->CreateDirection(
+            helpPoint,
+            inwardNormal,
+            SmartObject::UpdateOptionWithinModeling);
+        builder->SetDirection(direction);
+        builder->Limits()->StartExtend()->Value()->SetFormula(
+            FormatExpressionNumber(inputs.thickness).c_str());
+        builder->Limits()->EndExtend()->Value()->SetFormula(
+            FormatExpressionNumber(inputs.thickness + clearance).c_str());
+        builder->Limits()->StartExtend()->SetTrimType(
+            GeometricUtilities::Extend::ExtendTypeValue);
+        builder->Limits()->EndExtend()->SetTrimType(
+            GeometricUtilities::Extend::ExtendTypeValue);
+        builder->Offset()->SetOption(GeometricUtilities::TypeSymmetricOffset);
+        builder->Offset()->StartOffset()->SetFormula("0.0");
+        builder->Offset()->EndOffset()->SetFormula(
+            FormatExpressionNumber(inputs.thickness).c_str());
+        builder->FeatureOptions()->SetBodyType(
+            GeometricUtilities::FeatureOptions::BodyStyleSolid);
+
+        Features::Feature* feature = builder->CommitFeature();
+        builder->Destroy();
+        builder = nullptr;
+        tag_t toolBodyTag = NULL_TAG;
+        if (feature == nullptr ||
+            UF_MODL_ask_feat_body(feature->Tag(), &toolBodyTag) != 0 ||
+            toolBodyTag == NULL_TAG)
+        {
+            errorMessage = "Reference chamfer: the 90-degree edge extrusion produced no tool body.";
+            return false;
+        }
+        tag_t subtractTag = NULL_TAG;
+        if (!SubtractToolBodies(inputs.targetBody,
+                                std::vector<tag_t>{toolBodyTag},
+                                subtractTag,
+                                errorMessage))
+        {
+            return false;
+        }
+        AppendDebugLog("reference 90-degree corner-edge cut completed: edge=" +
+                       std::to_string(cornerEdge->Tag()) +
+                       ", face=" + std::to_string(referenceFace->Tag()) +
+                       ", subtract=" + std::to_string(subtractTag));
+        return true;
+    }
+    catch (const NXException& ex)
+    {
+        errorMessage = "Reference chamfer: 90-degree edge cut failed.\n" + NxExceptionText(ex);
+    }
+    catch (...)
+    {
+        errorMessage = "Reference chamfer: 90-degree edge cut failed with an unknown exception.";
+    }
+    if (builder != nullptr)
+    {
+        try
+        {
+            builder->Destroy();
+        }
+        catch (...)
+        {
+        }
+    }
+    return false;
+}
+
+bool TwoPointSiBianUI::CreateReferenceTopCornerCut(
+    const InferredInputs& inputs,
+    const Point3d& point,
+    Vector3d cornerEdgeDirection,
+    Vector3d edge1Direction,
+    Vector3d edge2Direction,
+    std::string& errorMessage) const
+{
+    double clearance = 0.0;
+    double bendRadius = 0.0;
+    if (!TryParseExpressionNumber(inputs.clearanceValue, clearance) ||
+        !TryParseExpressionNumber(inputs.bendRadiusValue, bendRadius) ||
+        !Normalize(cornerEdgeDirection) ||
+        !Normalize(edge1Direction) ||
+        !Normalize(edge2Direction))
+    {
+        errorMessage = "Reference chamfer: invalid top-corner inputs.";
+        return false;
+    }
+    clearance = std::fabs(clearance);
+    bendRadius = std::fabs(bendRadius);
+    const double cutLength = inputs.thickness + bendRadius;
+    Vector3d centerDirection =
+        ProjectVectorToPlane(Subtract(inputs.endPoint, inputs.startPoint), cornerEdgeDirection);
+    if (!Normalize(centerDirection) || cutLength <= kPointTolerance)
+    {
+        errorMessage = "Reference chamfer: invalid top-corner center direction.";
+        return false;
+    }
+    if (Dot(centerDirection, edge1Direction) < 0.0)
+    {
+        edge1Direction = ScaleVector(edge1Direction, -1.0);
+    }
+    if (Dot(centerDirection, edge2Direction) < 0.0)
+    {
+        edge2Direction = ScaleVector(edge2Direction, -1.0);
+    }
+
+    std::vector<Point3d> profilePoints;
+    auto evaluate = [&](double centerDistance,
+                        std::vector<Point3d>* points,
+                        double* gap) -> bool {
+        const Point3d cPoint = AddVector(point, ScaleVector(centerDirection, centerDistance));
+        const double parameterA = Dot(Subtract(cPoint, point), edge1Direction);
+        const double parameterE = Dot(Subtract(cPoint, point), edge2Direction);
+        if (parameterA <= kPointTolerance || parameterE <= kPointTolerance)
+        {
+            return false;
+        }
+        const Point3d aPoint = AddVector(point, ScaleVector(edge1Direction, parameterA));
+        const Point3d ePoint = AddVector(point, ScaleVector(edge2Direction, parameterE));
+        Vector3d aToC = Subtract(cPoint, aPoint);
+        Vector3d eToC = Subtract(cPoint, ePoint);
+        if (Length(aToC) <= cutLength + kPointTolerance ||
+            Length(eToC) <= cutLength + kPointTolerance ||
+            !Normalize(aToC) || !Normalize(eToC))
+        {
+            return false;
+        }
+        const Point3d bPoint = AddVector(aPoint, ScaleVector(aToC, cutLength));
+        const Point3d dPoint = AddVector(ePoint, ScaleVector(eToC, cutLength));
+        if (gap != nullptr) *gap = Distance(bPoint, dPoint);
+        if (points != nullptr)
+        {
+            *points = {point, aPoint, bPoint, cPoint, dPoint, ePoint, point};
+        }
+        return true;
+    };
+
+    double lowDistance = cutLength + kPointTolerance;
+    double lowGap = 0.0;
+    for (int index = 0; index < 80; ++index)
+    {
+        if (evaluate(lowDistance, nullptr, &lowGap)) break;
+        lowDistance *= 1.25;
+    }
+    double highDistance = lowDistance;
+    double highGap = lowGap;
+    for (int index = 0; index < 80 && highGap < clearance; ++index)
+    {
+        highDistance *= 1.5;
+        if (!evaluate(highDistance, nullptr, &highGap)) highGap = 0.0;
+    }
+    if (highGap < clearance || clearance <= kPointTolerance)
+    {
+        errorMessage = "Reference chamfer: no valid far-end top-corner profile was found.";
+        return false;
+    }
+    for (int index = 0; index < 80; ++index)
+    {
+        const double middle = (lowDistance + highDistance) * 0.5;
+        double middleGap = 0.0;
+        if (evaluate(middle, nullptr, &middleGap) && middleGap >= clearance)
+        {
+            highDistance = middle;
+        }
+        else
+        {
+            lowDistance = middle;
+        }
+    }
+    double finalGap = 0.0;
+    if (!evaluate(highDistance, &profilePoints, &finalGap))
+    {
+        errorMessage = "Reference chamfer: far-end top-corner profile evaluation failed.";
+        return false;
+    }
+    AppendDebugLog("reference top-corner profile=OABCDEO, targetGap=" +
+                   FormatExpressionNumber(clearance) +
+                   ", actualGap=" + FormatExpressionNumber(finalGap));
+    return ExtrudeReferenceCornerProfile(inputs,
+                                         profilePoints,
+                                         point,
+                                         cornerEdgeDirection,
+                                         0.0,
+                                         cutLength,
+                                         "reference far-end top-corner cut",
+                                         errorMessage);
+}
+
+bool TwoPointSiBianUI::CreateReferenceCornerEdgeCut(const InferredInputs& inputs,
+                                                     Edge* cornerEdge,
+                                                     std::string& errorMessage) const
+{
+    std::vector<Face*> faces = FindReferencePlanarFaces(cornerEdge);
+    if (inputs.targetBody == nullptr || cornerEdge == nullptr || faces.size() < 2)
+    {
+        errorMessage = "Reference chamfer: the selected corner edge does not have two planar faces.";
+        return false;
+    }
+    std::vector<Vector3d> inwardNormals;
+    for (Face* face : faces)
+    {
+        Vector3d normal;
+        if (!ComputeReferenceInwardNormal(inputs.targetBody, face, normal))
+        {
+            errorMessage = "Reference chamfer: an inward face normal could not be calculated.";
+            return false;
+        }
+        inwardNormals.push_back(normal);
+    }
+    double cosine = std::max(-1.0, std::min(1.0, Dot(inwardNormals[0], inwardNormals[1])));
+    const double angleDegrees = std::acos(cosine) * 180.0 / 3.14159265358979323846;
+    const bool isRightAngle = std::fabs(angleDegrees - 90.0) <= 1.0;
+
+    // The reference project chooses the larger or smaller adjacent face from
+    // its wrap-side enumeration.  The current dialog's left path maps to the
+    // larger face and its right path maps to the smaller face.
+    Face* preferredFace = inputs.featureMode == FeatureMode::NinetyRight
+                              ? faces.back()
+                              : faces.front();
+
+    struct PendingTopCut
+    {
+        bool create = false;
+        Point3d point;
+        Vector3d cornerDirection;
+        Vector3d firstDirection;
+        Vector3d secondDirection;
+    } pending;
+    Point3d cornerFirst;
+    Point3d cornerSecond;
+    try
+    {
+        cornerEdge->GetVertices(&cornerFirst, &cornerSecond);
+    }
+    catch (...)
+    {
+        errorMessage = "Reference chamfer: corner-edge endpoints are unavailable.";
+        return false;
+    }
+    pending.point = Distance(cornerFirst, inputs.endPoint) >
+                            Distance(cornerSecond, inputs.endPoint) + 0.05
+                        ? cornerFirst
+                        : cornerSecond;
+    const bool endpointTie =
+        std::fabs(Distance(cornerFirst, inputs.endPoint) -
+                  Distance(cornerSecond, inputs.endPoint)) <= 0.05;
+    if (!endpointTie && angleDegrees > kPointTolerance && angleDegrees < 180.0 - kPointTolerance)
+    {
+        double nearestDistance = std::numeric_limits<double>::max();
+        for (Edge* bodyEdge : inputs.targetBody->GetEdges())
+        {
+            if (bodyEdge == nullptr) continue;
+            Point3d first;
+            Point3d second;
+            try
+            {
+                bodyEdge->GetVertices(&first, &second);
+            }
+            catch (...)
+            {
+                continue;
+            }
+            for (const Point3d& candidate : {first, second})
+            {
+                const double distance = Distance(pending.point, candidate);
+                if (distance > 0.05 && distance < nearestDistance)
+                {
+                    nearestDistance = distance;
+                }
+            }
+        }
+        auto theoreticalScore = [&](double effectiveAngle,
+                                    double& planarDistance,
+                                    double& topDistance) -> double {
+            const double sineHalf = std::sin(effectiveAngle * 0.5 *
+                                             3.14159265358979323846 / 180.0);
+            if (std::fabs(sineHalf) <= 1.0e-8)
+            {
+                return std::numeric_limits<double>::max();
+            }
+            planarDistance = inputs.thickness / sineHalf;
+            topDistance = std::sqrt(planarDistance * planarDistance +
+                                    inputs.thickness * inputs.thickness);
+            return std::min(std::fabs(nearestDistance - planarDistance),
+                            std::fabs(nearestDistance - topDistance));
+        };
+        double planarDistance = 0.0;
+        double topDistance = 0.0;
+        double score = theoreticalScore(angleDegrees, planarDistance, topDistance);
+        double supplementPlanar = 0.0;
+        double supplementTop = 0.0;
+        const double supplementScore = theoreticalScore(180.0 - angleDegrees,
+                                                         supplementPlanar,
+                                                         supplementTop);
+        if (supplementScore < score)
+        {
+            planarDistance = supplementPlanar;
+            topDistance = supplementTop;
+        }
+        const double tolerance = std::max(0.05, inputs.thickness * 0.15);
+        const double planarDelta = std::fabs(nearestDistance - planarDistance);
+        const double topDelta = std::fabs(nearestDistance - topDistance);
+        const bool isTopCorner = planarDelta > tolerance &&
+                                 (topDelta <= tolerance || topDelta < planarDelta);
+        if (isTopCorner)
+        {
+            std::vector<Edge*> connected =
+                FindReferenceConnectedEdges(inputs.targetBody, pending.point);
+            connected.erase(std::remove_if(connected.begin(), connected.end(),
+                                           [cornerEdge](Edge* edge) {
+                                               return edge == nullptr || edge->Tag() == cornerEdge->Tag();
+                                           }),
+                            connected.end());
+            if (connected.size() >= 2)
+            {
+                auto directionFromPoint = [&](Edge* edge, Vector3d& direction) -> bool {
+                    Point3d first;
+                    Point3d second;
+                    try
+                    {
+                        edge->GetVertices(&first, &second);
+                    }
+                    catch (...)
+                    {
+                        return false;
+                    }
+                    direction = Distance(pending.point, first) <= Distance(pending.point, second)
+                                    ? Subtract(second, pending.point)
+                                    : Subtract(first, pending.point);
+                    return Normalize(direction);
+                };
+                pending.cornerDirection =
+                    Distance(pending.point, cornerFirst) <= Distance(pending.point, cornerSecond)
+                        ? Subtract(cornerSecond, pending.point)
+                        : Subtract(cornerFirst, pending.point);
+                pending.create = Normalize(pending.cornerDirection) &&
+                                 directionFromPoint(connected[0], pending.firstDirection) &&
+                                 directionFromPoint(connected[1], pending.secondDirection);
+                if (pending.create &&
+                    Dot(Cross(pending.firstDirection, pending.secondDirection),
+                        pending.cornerDirection) < 0.0)
+                {
+                    std::swap(pending.firstDirection, pending.secondDirection);
+                }
+            }
+        }
+    }
+
+    AppendDebugLog("reference chamfer route: edge=" + std::to_string(cornerEdge->Tag()) +
+                   ", angle=" + FormatExpressionNumber(angleDegrees) +
+                   ", right=" + (isRightAngle ? "true" : "false") +
+                   ", preferredFace=" + std::to_string(preferredFace->Tag()) +
+                   ", farTopCut=" + (pending.create ? "true" : "false"));
+    const bool created = isRightAngle
+                             ? CreateReferenceRightCornerEdgeCut(inputs,
+                                                                 cornerEdge,
+                                                                 preferredFace,
+                                                                 errorMessage)
+                             : CreateReferenceNonRightCornerEdgeCut(inputs,
+                                                                    cornerEdge,
+                                                                    angleDegrees,
+                                                                    faces,
+                                                                    inwardNormals,
+                                                                    errorMessage);
+    if (!created)
+    {
+        return false;
+    }
+    if (pending.create)
+    {
+        std::string topError;
+        if (!CreateReferenceTopCornerCut(inputs,
+                                         pending.point,
+                                         pending.cornerDirection,
+                                         pending.firstDirection,
+                                         pending.secondDirection,
+                                         topError))
+        {
+            // The reference project treats the far-end top cut as optional.
+            AppendDebugLog("reference optional far-end top-corner cut skipped: " + topError);
+        }
+    }
+    return true;
+}
+
 bool TwoPointSiBianUI::CreateObliqueClearanceCut(
     const InferredInputs& inputs,
     Edge* referenceBEdge,
@@ -6000,7 +7053,8 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
                                                    tag_t& firstOffsetTag,
                                                    tag_t& secondOffsetTag,
                                                    std::string& errorMessage,
-                                                   bool swapDirectionalOffsetGroups) const
+                                                   bool swapDirectionalOffsetGroups,
+                                                   bool forceDirectionalOffsetGroups) const
 {
     firstOffsetTag = NULL_TAG;
     secondOffsetTag = NULL_TAG;
@@ -6017,14 +7071,18 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
     {
         const bool useDirectionalRightAngleOffsets =
             (inputs.featureMode == FeatureMode::NinetyLeft ||
-             inputs.featureMode == FeatureMode::NinetyRight) &&
+             inputs.featureMode == FeatureMode::NinetyRight ||
+             forceDirectionalOffsetGroups) &&
             (std::fabs(cornerInteriorAngle - 90.0) <= 0.1 ||
              std::fabs(cornerInteriorAngle - 270.0) <= 0.1);
 
         if (useDirectionalRightAngleOffsets)
         {
+            // The chamfer branch uses B1 just like the left branch elsewhere
+            // in this workflow, so its two directional groups follow the
+            // left-side assignment.  Only NinetyRight uses the right mapping.
             const bool isNinetyLeft =
-                inputs.featureMode == FeatureMode::NinetyLeft;
+                inputs.featureMode != FeatureMode::NinetyRight;
             const bool isReflex270 =
                 std::fabs(cornerInteriorAngle - 270.0) <= 0.1;
             // A reflex 270-degree corner reverses the normal 90-degree side
@@ -6036,7 +7094,10 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
             {
                 smallOffsetOnPositiveY = !smallOffsetOnPositiveY;
             }
-            const char* modeName = isNinetyLeft ? "90-left" : "90-right";
+            const char* modeName =
+                inputs.featureMode == FeatureMode::Chamfer
+                    ? "chamfer-90/270"
+                    : (isNinetyLeft ? "90-left" : "90-right");
             Vector3d xDirection = Subtract(inputs.endPoint, inputs.startPoint);
             const Point3d midpoint((inputs.startPoint.X + inputs.endPoint.X) * 0.5,
                                    (inputs.startPoint.Y + inputs.endPoint.Y) * 0.5,
@@ -6724,6 +7785,8 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         inputs.featureMode == FeatureMode::NinetyRight;
     const bool isNinetyLeftMode =
         inputs.featureMode == FeatureMode::NinetyLeft;
+    const bool useRightAngleRipOffsets =
+        qCornerRequiresRipOffsets && (isNinetyLeftMode || isNinetyRightMode);
     const bool qCornerIs90 =
         std::fabs(qCornerInteriorAngle - 90.0) <= 0.1;
     const bool qCornerIs270 =
@@ -6968,9 +8031,11 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
             errorMessage = "NX did not return a feature after creating the sheet-metal rip.";
             return false;
         }
-        if (qCornerRequiresRipOffsets &&
-            (inputs.featureMode == FeatureMode::NinetyLeft ||
-             inputs.featureMode == FeatureMode::NinetyRight) &&
+        const bool forceImmediateConcaveChamferOffsets =
+            useConcaveStripBranch &&
+            inputs.featureMode == FeatureMode::Chamfer &&
+            qCornerRequiresRipOffsets;
+        if ((useRightAngleRipOffsets || forceImmediateConcaveChamferOffsets) &&
             (std::fabs(qCornerInteriorAngle - 90.0) <= 0.1 ||
              std::fabs(qCornerInteriorAngle - 270.0) <= 0.1))
         {
@@ -6982,12 +8047,19 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                                             firstOffsetTag,
                                             secondOffsetTag,
                                             errorMessage,
-                                            useConcaveStripBranch && qCornerIs270))
+                                            useConcaveStripBranch && qCornerIs270,
+                                            forceImmediateConcaveChamferOffsets))
             {
                 return false;
             }
-            AppendDebugLog("TryCreateSecondPointRip applied 90/270-degree rip offsets immediately after rip: angle=" +
+            AppendDebugLog("TryCreateSecondPointRip applied two-group 90/270-degree rip-face offsets immediately after rip: angle=" +
                            FormatExpressionNumber(qCornerInteriorAngle) +
+                           ", mode=" +
+                           (inputs.featureMode == FeatureMode::Chamfer
+                                ? "chamfer"
+                                : (inputs.featureMode == FeatureMode::NinetyRight
+                                       ? "90-right"
+                                       : "90-left")) +
                            ", rip=" + std::to_string(createdRipTag) +
                            ", firstOffset=" + std::to_string(firstOffsetTag) +
                            ", secondOffset=" + std::to_string(secondOffsetTag));
@@ -6996,16 +8068,11 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         }
         else if (qCornerRequiresRipOffsets)
         {
+            // Preserve the original behavior for every other chamfer path.
             deferredRightAngleRipTag = createdRipTag;
             deferredRightAngleRipAngle = qCornerInteriorAngle;
-            AppendDebugLog("TryCreateSecondPointRip kept legacy deferred 90/270-degree rip offsets: angle=" +
+            AppendDebugLog("TryCreateSecondPointRip retained legacy deferred 90/270 rip-face offsets outside the concave P2Q+2T branch: angle=" +
                            FormatExpressionNumber(qCornerInteriorAngle) +
-                           ", mode=" +
-                           (inputs.featureMode == FeatureMode::Chamfer
-                                ? "chamfer"
-                                : (inputs.featureMode == FeatureMode::NinetyRight
-                                       ? "90-right"
-                                       : "90-left")) +
                            ", rip=" + std::to_string(createdRipTag));
         }
         if (useConcaveStripBranch)
@@ -7046,11 +8113,12 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                            ", selection=nearest updated peripheral endpoint excluding only Q3");
             if (concaveQ3HasThicknessEdge)
             {
-                if (qCornerRequiresRipOffsets)
+                if (useRightAngleRipOffsets || forceImmediateConcaveChamferOffsets)
                 {
                     // 90/270-degree modes create their directional offset
-                    // groups immediately; the clearance face must come from
-                    // those offset results.
+                    // groups immediately.  The P2Q+2T concave chamfer branch
+                    // now uses the same offset results for its -60 clearance
+                    // face and must not fall through to rectangle extrusion.
                     tag_t clearanceOffsetFeatureTag = NULL_TAG;
                     if (!OffsetConcaveClearanceFace(inputs,
                                                     concaveSecondInputs.baseFace,

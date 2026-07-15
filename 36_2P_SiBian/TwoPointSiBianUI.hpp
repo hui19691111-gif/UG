@@ -56,6 +56,7 @@ private:
         double spanLength = 0.0;
         bool inferredFromSingleClick = false;
         bool smartMode = false;
+        bool chamferEdgeMode = true;
         bool useNinetyClearanceGrooveTemplate = false;
         bool useNinetyClearanceGrooveRightTemplate = false;
         NXOpen::Point3d selectionClickPoint;
@@ -154,6 +155,46 @@ private:
                                const NXOpen::Vector3d& planeNormal,
                                tag_t& subtractFeatureTag,
                                std::string& errorMessage) const;
+    std::vector<NXOpen::Edge*> FindReferenceConnectedEdges(
+        NXOpen::Body* body,
+        const NXOpen::Point3d& point) const;
+    NXOpen::Edge* FindReferenceCornerEdge(
+        const InferredInputs& inputs) const;
+    std::vector<NXOpen::Face*> FindReferencePlanarFaces(
+        NXOpen::Edge* edge) const;
+    bool ComputeReferenceInwardNormal(NXOpen::Body* body,
+                                      NXOpen::Face* face,
+                                      NXOpen::Vector3d& inwardNormal) const;
+    bool CreateReferenceCornerEdgeCut(const InferredInputs& inputs,
+                                      NXOpen::Edge* cornerEdge,
+                                      std::string& errorMessage) const;
+    bool CreateReferenceRightCornerEdgeCut(const InferredInputs& inputs,
+                                           NXOpen::Edge* cornerEdge,
+                                           NXOpen::Face* referenceFace,
+                                           std::string& errorMessage) const;
+    bool CreateReferenceNonRightCornerEdgeCut(
+        const InferredInputs& inputs,
+        NXOpen::Edge* cornerEdge,
+        double angleDegrees,
+        const std::vector<NXOpen::Face*>& principalFaces,
+        const std::vector<NXOpen::Vector3d>& inwardNormals,
+        std::string& errorMessage) const;
+    bool CreateReferenceTopCornerCut(
+        const InferredInputs& inputs,
+        const NXOpen::Point3d& point,
+        NXOpen::Vector3d cornerEdgeDirection,
+        NXOpen::Vector3d edge1Direction,
+        NXOpen::Vector3d edge2Direction,
+        std::string& errorMessage) const;
+    bool ExtrudeReferenceCornerProfile(
+        const InferredInputs& inputs,
+        const std::vector<NXOpen::Point3d>& profilePoints,
+        const NXOpen::Point3d& origin,
+        const NXOpen::Vector3d& direction,
+        double startLimit,
+        double endLimit,
+        const char* operationName,
+        std::string& errorMessage) const;
     bool CreateObliqueClearanceCut(const InferredInputs& inputs,
                                    NXOpen::Edge* referenceBEdge,
                                    NXOpen::Edge* p2QRipEdge,
@@ -184,9 +225,10 @@ private:
                                     NXOpen::Features::Feature* ripFeature,
                                     double cornerInteriorAngle,
                                     tag_t& firstOffsetTag,
-                                    tag_t& secondOffsetTag,
-                                    std::string& errorMessage,
-                                    bool swapDirectionalOffsetGroups = false) const;
+                                     tag_t& secondOffsetTag,
+                                     std::string& errorMessage,
+                                     bool swapDirectionalOffsetGroups = false,
+                                     bool forceDirectionalOffsetGroups = false) const;
     bool TryCreateSecondPointRip(const InferredInputs& inputs,
                                  bool allowContinuationInputs,
                                  bool& ripCreated,
@@ -232,6 +274,7 @@ private:
     NXOpen::BlockStyler::StringBlock* clearanceBlock_;
     NXOpen::BlockStyler::StringBlock* bendRadiusBlock_;
     NXOpen::BlockStyler::Toggle* smartModeBlock_;
+    NXOpen::BlockStyler::Toggle* chamferEdgeToggleBlock_;
     NXOpen::BlockStyler::Enumeration* featureModeBlock_;
     NXOpen::Features::CustomFeatureClassManager* customFeatureManager_;
     NXOpen::Features::CustomFeature* editedFeature_;

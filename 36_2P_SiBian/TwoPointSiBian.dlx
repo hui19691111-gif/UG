@@ -349,8 +349,8 @@
                 <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Left" loc="2" mask="16384" name="Left" offset="0" sname="Left" source="3" target="Default" type="attachment" />
                 <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment" />
                 <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Bottom" loc="4" mask="16384" name="Bottom" offset="0" sname="Bottom" source="3" target="Default" type="attachment" />
-                <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Value" mask="256" name="Value" sname="Value" source="4" type="logical" value="False" />
-                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="只切间隙槽" />
+                <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Value" mask="256" name="Value" sname="Value" source="4" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="切角边" />
               </PropertyList>
             </item>
           </Property>
