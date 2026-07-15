@@ -154,6 +154,19 @@ private:
                                const NXOpen::Vector3d& planeNormal,
                                tag_t& subtractFeatureTag,
                                std::string& errorMessage) const;
+    bool CreateObliqueClearanceCut(const InferredInputs& inputs,
+                                   NXOpen::Edge* referenceBEdge,
+                                   NXOpen::Edge* p2QRipEdge,
+                                   NXOpen::Face* b1B2Plane,
+                                   const NXOpen::Point3d& originalQ,
+                                   const NXOpen::Vector3d& planeNormal,
+                                   tag_t& subtractFeatureTag,
+                                   std::string& errorMessage) const;
+    bool OffsetConcaveClearanceFace(const InferredInputs& inputs,
+                                    NXOpen::Face* commonFace,
+                                    const std::vector<tag_t>& offsetFeatureTags,
+                                    tag_t& offsetFeatureTag,
+                                    std::string& errorMessage) const;
     bool FindAuxiliaryRipPair(NXOpen::Body* body,
                               NXOpen::Face* commonFace,
                               NXOpen::Edge* b1,
@@ -172,7 +185,8 @@ private:
                                     double cornerInteriorAngle,
                                     tag_t& firstOffsetTag,
                                     tag_t& secondOffsetTag,
-                                    std::string& errorMessage) const;
+                                    std::string& errorMessage,
+                                    bool swapDirectionalOffsetGroups = false) const;
     bool TryCreateSecondPointRip(const InferredInputs& inputs,
                                  bool allowContinuationInputs,
                                  bool& ripCreated,

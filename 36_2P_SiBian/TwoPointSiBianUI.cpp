@@ -3832,8 +3832,27 @@ bool TwoPointSiBianUI::ConstrainRightAnglePrimaryP2ToOffsetSharedEdges(
               {
                   return first.distanceToRecordedP2 < second.distanceToRecordedP2;
               });
+    const bool hasMovedOffsetEndpoint =
+        std::any_of(candidates.begin(),
+                    candidates.end(),
+                    [](const SharedEndpointCandidate& candidate)
+                    {
+                        return candidate.distanceToRecordedP2 > kPointTolerance;
+                    });
     for (const SharedEndpointCandidate& endpoint : candidates)
     {
+        // Offset features can retain an unchanged edge at the recorded P2 in
+        // their result-face set.  That zero-distance endpoint is not the end
+        // of the moved rip-offset edge.  Prefer the nearest endpoint that was
+        // actually displaced whenever one exists.
+        if (hasMovedOffsetEndpoint &&
+            endpoint.distanceToRecordedP2 <= kPointTolerance)
+        {
+            AppendDebugLog("Right-angle final P2 skipped unchanged recorded endpoint: edge=" +
+                           std::to_string(endpoint.edgeTag) +
+                           ", point=" + FormatPoint(endpoint.point));
+            continue;
+        }
         if (Distance(currentInputs.startPoint, endpoint.point) <= kPointTolerance)
         {
             continue;
@@ -5131,7 +5150,271 @@ bool TwoPointSiBianUI::CreateConcaveStripCut(const InferredInputs& inputs,
     return true;
 }
 
-#if 0 // Abandoned replace-face / -60 clearance-face experiment.
+bool TwoPointSiBianUI::CreateObliqueClearanceCut(
+    const InferredInputs& inputs,
+    Edge* referenceBEdge,
+    Edge* p2QRipEdge,
+    Face* b1B2Plane,
+    const Point3d& originalQ,
+    const Vector3d& inputPlaneNormal,
+    tag_t& subtractFeatureTag,
+    std::string& errorMessage) const
+{
+    subtractFeatureTag = NULL_TAG;
+    if (inputs.targetBody == nullptr || referenceBEdge == nullptr || b1B2Plane == nullptr)
+    {
+        errorMessage = "The reference B edge or B1/B2 plane is unavailable for the oblique clearance cut.";
+        return false;
+    }
+
+    double clearance = 0.0;
+    try
+    {
+        clearance = std::fabs(std::stod(inputs.clearanceValue));
+    }
+    catch (...)
+    {
+        errorMessage = "The dialog clearance value is invalid for the oblique clearance rectangle.";
+        return false;
+    }
+    if (clearance <= kPointTolerance)
+    {
+        errorMessage = "The dialog clearance must be positive for the oblique clearance rectangle.";
+        return false;
+    }
+
+    Point3d b1First;
+    Point3d b1Second;
+    if (!EdgeNaturalStartEnd(referenceBEdge, b1First, b1Second))
+    {
+        errorMessage = "The reference B-edge endpoints could not be read after the P2-Q rip.";
+        return false;
+    }
+    const Point3d b1RipEndpoint =
+        Distance(b1First, originalQ) <= Distance(b1Second, originalQ)
+            ? b1First
+            : b1Second;
+    const Point3d b1OtherEndpoint =
+        Distance(b1First, originalQ) <= Distance(b1Second, originalQ)
+            ? b1Second
+            : b1First;
+
+    Edge* shortestDirectionEdge = nullptr;
+    Point3d shortestOtherEndpoint;
+    double shortestLength = std::numeric_limits<double>::max();
+    for (Edge* edge : inputs.targetBody->GetEdges())
+    {
+        if (edge == nullptr || edge == referenceBEdge || edge == p2QRipEdge ||
+            !EdgeTouchesPoint(edge, b1RipEndpoint))
+        {
+            continue;
+        }
+        Point3d otherEndpoint;
+        if (!EdgeOtherPoint(edge, b1RipEndpoint, otherEndpoint))
+        {
+            continue;
+        }
+        const double length = edge->GetLength();
+        if (length > kPointTolerance && length < shortestLength)
+        {
+            shortestDirectionEdge = edge;
+            shortestOtherEndpoint = otherEndpoint;
+            shortestLength = length;
+        }
+    }
+    if (shortestDirectionEdge == nullptr)
+    {
+        errorMessage = "No shortest direction edge was found at the reference B endpoint nearest the rip.";
+        return false;
+    }
+
+    Vector3d lineDirection = Subtract(shortestOtherEndpoint, b1RipEndpoint);
+    Vector3d planeNormal = inputPlaneNormal;
+    if (!Normalize(lineDirection) || !Normalize(planeNormal))
+    {
+        errorMessage = "The oblique rectangle direction or B1/B2 plane normal is invalid.";
+        return false;
+    }
+    Vector3d sideDirection = Cross(planeNormal, lineDirection);
+    if (!Normalize(sideDirection))
+    {
+        errorMessage = "The oblique rectangle width direction is invalid.";
+        return false;
+    }
+
+    // Put the complete rectangle width on the side opposite B1 so the
+    // clearance rectangle shares only its long boundary with the B1 side and
+    // does not overlap B1.
+    const Vector3d b1Direction = Subtract(b1OtherEndpoint, b1RipEndpoint);
+    if (Dot(b1Direction, sideDirection) > 0.0)
+    {
+        sideDirection.X = -sideDirection.X;
+        sideDirection.Y = -sideDirection.Y;
+        sideDirection.Z = -sideDirection.Z;
+    }
+
+    double furthestIntersection = -1.0;
+    for (Edge* boundaryEdge : b1B2Plane->GetEdges())
+    {
+        Point3d edgeStart;
+        Point3d edgeEnd;
+        if (boundaryEdge == nullptr ||
+            !EdgeNaturalStartEnd(boundaryEdge, edgeStart, edgeEnd))
+        {
+            continue;
+        }
+        const Vector3d startVector = Subtract(edgeStart, b1RipEndpoint);
+        const Vector3d endVector = Subtract(edgeEnd, b1RipEndpoint);
+        const double startX = Dot(startVector, lineDirection);
+        const double startY = Dot(startVector, sideDirection);
+        const double endX = Dot(endVector, lineDirection);
+        const double endY = Dot(endVector, sideDirection);
+
+        if (std::fabs(startY) <= kPlaneTolerance &&
+            std::fabs(endY) <= kPlaneTolerance)
+        {
+            furthestIntersection = std::max(furthestIntersection,
+                                            std::max(startX, endX));
+            continue;
+        }
+        const double denominator = startY - endY;
+        if (std::fabs(denominator) <= kPlaneTolerance)
+        {
+            continue;
+        }
+        const double segmentParameter = startY / denominator;
+        if (segmentParameter < -kPointTolerance ||
+            segmentParameter > 1.0 + kPointTolerance)
+        {
+            continue;
+        }
+        const double rayParameter =
+            startX + segmentParameter * (endX - startX);
+        if (rayParameter >= -kPointTolerance)
+        {
+            furthestIntersection = std::max(furthestIntersection,
+                                            rayParameter);
+        }
+    }
+    if (furthestIntersection <= kPointTolerance)
+    {
+        errorMessage = "The shortest-edge ray did not reach the B1/B2 plane perimeter.";
+        return false;
+    }
+
+    const double rectangleLength = furthestIntersection + 1.0;
+    const Point3d lineEnd(b1RipEndpoint.X + lineDirection.X * rectangleLength,
+                          b1RipEndpoint.Y + lineDirection.Y * rectangleLength,
+                          b1RipEndpoint.Z + lineDirection.Z * rectangleLength);
+    const Point3d corners[] = {
+        b1RipEndpoint,
+        lineEnd,
+        Point3d(lineEnd.X + sideDirection.X * clearance,
+                lineEnd.Y + sideDirection.Y * clearance,
+                lineEnd.Z + sideDirection.Z * clearance),
+        Point3d(b1RipEndpoint.X + sideDirection.X * clearance,
+                b1RipEndpoint.Y + sideDirection.Y * clearance,
+                b1RipEndpoint.Z + sideDirection.Z * clearance)};
+
+    std::vector<tag_t> curveTags;
+    uf_list_p_t curveList = nullptr;
+    uf_list_p_t featureList = nullptr;
+    auto cleanupLists = [&]() {
+        if (curveList != nullptr) UF_MODL_delete_list(&curveList);
+        if (featureList != nullptr) UF_MODL_delete_list(&featureList);
+    };
+    for (int index = 0; index < 4; ++index)
+    {
+        UF_CURVE_line_t lineData;
+        const Point3d& start = corners[index];
+        const Point3d& end = corners[(index + 1) % 4];
+        lineData.start_point[0] = start.X;
+        lineData.start_point[1] = start.Y;
+        lineData.start_point[2] = start.Z;
+        lineData.end_point[0] = end.X;
+        lineData.end_point[1] = end.Y;
+        lineData.end_point[2] = end.Z;
+        tag_t lineTag = NULL_TAG;
+        const int lineResult = UF_CURVE_create_line(&lineData, &lineTag);
+        if (lineResult != 0 || lineTag == NULL_TAG)
+        {
+            errorMessage = "Failed to create the oblique clearance rectangle profile.\n" +
+                           UfMessage(lineResult);
+            cleanupLists();
+            return false;
+        }
+        curveTags.push_back(lineTag);
+    }
+    if (UF_MODL_create_list(&curveList) != 0 || curveList == nullptr)
+    {
+        errorMessage = "Failed to allocate the oblique clearance rectangle profile list.";
+        return false;
+    }
+    for (tag_t curveTag : curveTags)
+    {
+        UF_MODL_put_list_item(curveList, curveTag);
+    }
+
+    std::string startLimit = "-" + FormatExpressionNumber(inputs.thickness);
+    std::string endLimit = FormatExpressionNumber(inputs.thickness);
+    char taper[] = "0.0";
+    char* limits[2] = {const_cast<char*>(startLimit.c_str()),
+                       const_cast<char*>(endLimit.c_str())};
+    double origin[3] = {b1RipEndpoint.X, b1RipEndpoint.Y, b1RipEndpoint.Z};
+    double direction[3] = {planeNormal.X, planeNormal.Y, planeNormal.Z};
+    const int extrudeResult = UF_MODL_create_extruded(curveList,
+                                                       taper,
+                                                       limits,
+                                                       origin,
+                                                       direction,
+                                                       UF_NULLSIGN,
+                                                       &featureList);
+    tag_t extrudeFeatureTag = NULL_TAG;
+    tag_t toolBodyTag = NULL_TAG;
+    int featureCount = 0;
+    if (extrudeResult == 0 && featureList != nullptr &&
+        UF_MODL_ask_list_count(featureList, &featureCount) == 0 &&
+        featureCount > 0)
+    {
+        UF_MODL_ask_list_item(featureList, 0, &extrudeFeatureTag);
+        UF_MODL_ask_feat_body(extrudeFeatureTag, &toolBodyTag);
+    }
+    cleanupLists();
+    if (extrudeResult != 0 || toolBodyTag == NULL_TAG)
+    {
+        errorMessage = "Failed to extrude the oblique clearance rectangle.\n" +
+                       UfMessage(extrudeResult);
+        return false;
+    }
+    if (!SubtractToolBodies(inputs.targetBody,
+                            std::vector<tag_t>{toolBodyTag},
+                            subtractFeatureTag,
+                            errorMessage))
+    {
+        return false;
+    }
+
+    AppendDebugLog("oblique clearance rectangle cut completed: referenceBEdge=" +
+                   std::to_string(referenceBEdge->Tag()) +
+                   ", B1RipEndpoint=" + FormatPoint(b1RipEndpoint) +
+                   ", shortestDirectionEdge=" +
+                   std::to_string(shortestDirectionEdge->Tag()) +
+                   ", shortestLength=" +
+                   FormatExpressionNumber(shortestLength) +
+                   ", perimeterIntersection=" +
+                   FormatExpressionNumber(furthestIntersection) +
+                   ", extensionBeyondPerimeter=1" +
+                   ", rectangleLength=" +
+                   FormatExpressionNumber(rectangleLength) +
+                   ", rectangleWidth=" +
+                   FormatExpressionNumber(clearance) +
+                   ", extrudeFeature=" +
+                   std::to_string(extrudeFeatureTag) +
+                   ", subtractFeature=" +
+                   std::to_string(subtractFeatureTag));
+    return true;
+}
+
 bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
     const InferredInputs& inputs,
     Face* commonFace,
@@ -5160,6 +5443,10 @@ bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
         return false;
     }
     const double clearanceTolerance = std::max(0.01, clearance * 0.10);
+    const double requiredFacePerimeter =
+        2.0 * (clearance + inputs.thickness);
+    const double perimeterTolerance =
+        std::max(0.02, requiredFacePerimeter * 0.01);
 
     std::set<tag_t> offsetFaceTags;
     for (tag_t featureTag : offsetFeatureTags)
@@ -5183,6 +5470,8 @@ bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
     Face* originalOffsetFace = nullptr;
     Edge* clearanceSharedEdge = nullptr;
     double bestClearanceError = std::numeric_limits<double>::max();
+    double selectedFacePerimeter = 0.0;
+    double bestPerimeterError = std::numeric_limits<double>::max();
     for (Edge* planeEdge : commonFace->GetEdges())
     {
         if (planeEdge == nullptr)
@@ -5200,19 +5489,48 @@ bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
             if (adjacentFace != nullptr && adjacentFace != commonFace &&
                 offsetFaceTags.find(adjacentFace->Tag()) != offsetFaceTags.end())
             {
+                double facePerimeter = 0.0;
+                for (Edge* faceEdge : adjacentFace->GetEdges())
+                {
+                    if (faceEdge != nullptr)
+                    {
+                        facePerimeter += faceEdge->GetLength();
+                    }
+                }
+                const double perimeterError =
+                    std::fabs(facePerimeter - requiredFacePerimeter);
+                if (perimeterError > perimeterTolerance)
+                {
+                    AppendDebugLog("OffsetConcaveClearanceFace rejected face by perimeter: face=" +
+                                   std::to_string(adjacentFace->Tag()) +
+                                   ", sharedEdge=" + std::to_string(planeEdge->Tag()) +
+                                   ", sharedEdgeLength=" +
+                                   FormatExpressionNumber(edgeLength) +
+                                   ", perimeter=" +
+                                   FormatExpressionNumber(facePerimeter) +
+                                   ", requiredPerimeter=" +
+                                   FormatExpressionNumber(requiredFacePerimeter) +
+                                   ", tolerance=" +
+                                   FormatExpressionNumber(perimeterTolerance));
+                    continue;
+                }
                 originalOffsetFace = adjacentFace;
                 clearanceSharedEdge = planeEdge;
                 bestClearanceError = error;
+                selectedFacePerimeter = facePerimeter;
+                bestPerimeterError = perimeterError;
                 break;
             }
         }
     }
     if (originalOffsetFace == nullptr || clearanceSharedEdge == nullptr)
     {
-        errorMessage = "No plane/offset-face shared edge has a length equal to the dialog clearance.";
+        errorMessage = "No rip-offset face satisfied both the clearance-edge length and the clearance/thickness perimeter.";
         AppendDebugLog("OffsetConcaveClearanceFace failed: commonFace=" +
                        std::to_string(commonFace->Tag()) +
                        ", clearance=" + FormatExpressionNumber(clearance) +
+                       ", requiredPerimeter=" +
+                       FormatExpressionNumber(requiredFacePerimeter) +
                        ", offsetFaceCount=" + std::to_string(offsetFaceTags.size()));
         return false;
     }
@@ -5222,6 +5540,8 @@ bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
     const tag_t cachedSharedEdgeTag = clearanceSharedEdge->Tag();
     const double cachedSharedEdgeLength = clearanceSharedEdge->GetLength();
     const tag_t cachedOffsetFaceTag = originalOffsetFace->Tag();
+    const double cachedFacePerimeter = selectedFacePerimeter;
+    const double cachedPerimeterError = bestPerimeterError;
     try
     {
         offsetBuilder = workPart->Features()->CreateOffsetFaceBuilder(nullptr);
@@ -5246,6 +5566,12 @@ bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
                        ", clearanceEdgeLength=" +
                        FormatExpressionNumber(cachedSharedEdgeLength) +
                        ", clearanceOffsetFace=" + std::to_string(cachedOffsetFaceTag) +
+                       ", facePerimeter=" +
+                       FormatExpressionNumber(cachedFacePerimeter) +
+                       ", requiredPerimeter=" +
+                       FormatExpressionNumber(requiredFacePerimeter) +
+                       ", perimeterError=" +
+                       FormatExpressionNumber(cachedPerimeterError) +
                        ", distance=-60" +
                        ", offsetFeature=" + std::to_string(offsetFeatureTag));
         return true;
@@ -5454,7 +5780,6 @@ bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
     }
 #endif
 }
-#endif
 
 bool TwoPointSiBianUI::FindAuxiliaryRipPair(Body* body,
                                              Face* commonFace,
@@ -5674,7 +5999,8 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
                                                    double cornerInteriorAngle,
                                                    tag_t& firstOffsetTag,
                                                    tag_t& secondOffsetTag,
-                                                   std::string& errorMessage) const
+                                                   std::string& errorMessage,
+                                                   bool swapDirectionalOffsetGroups) const
 {
     firstOffsetTag = NULL_TAG;
     secondOffsetTag = NULL_TAG;
@@ -5705,7 +6031,11 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
             // assignment for both left and right modes.
             // left 90: Y+ small;  left 270: Y- small
             // right 90: Y- small; right 270: Y+ small
-            const bool smallOffsetOnPositiveY = isNinetyLeft != isReflex270;
+            bool smallOffsetOnPositiveY = isNinetyLeft != isReflex270;
+            if (swapDirectionalOffsetGroups)
+            {
+                smallOffsetOnPositiveY = !smallOffsetOnPositiveY;
+            }
             const char* modeName = isNinetyLeft ? "90-left" : "90-right";
             Vector3d xDirection = Subtract(inputs.endPoint, inputs.startPoint);
             const Point3d midpoint((inputs.startPoint.X + inputs.endPoint.X) * 0.5,
@@ -5852,6 +6182,8 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
                            std::to_string(ripFeature->Tag()) +
                            ", positiveFaceCount=" + std::to_string(positiveYFaces.size()) +
                            ", negativeFaceCount=" + std::to_string(negativeYFaces.size()) +
+                           ", groupsSwapped=" +
+                           (swapDirectionalOffsetGroups ? "true" : "false") +
                            ", smallSide=" + smallSideName +
                            ", smallDistance=" + smallOffsetFormula +
                            ", firstOffset=" + std::to_string(firstOffsetTag) +
@@ -6003,8 +6335,82 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         }
     }
 
+    Vector3d bAxisX = Subtract(inputs.endPoint, inputs.startPoint);
+    const Point3d bAxisSample((inputs.startPoint.X + inputs.endPoint.X) * 0.5,
+                              (inputs.startPoint.Y + inputs.endPoint.Y) * 0.5,
+                              (inputs.startPoint.Z + inputs.endPoint.Z) * 0.5);
+    Vector3d bAxisZ;
+    if (!Normalize(bAxisX) ||
+        !FaceNormalAtPoint(inputs.baseFace, bAxisSample, bAxisZ))
+    {
+        errorMessage = "The P1-P2 X axis or selected-face Z axis could not be resolved for B1/B2 ordering.";
+        return false;
+    }
+    OrientNormalAwayFromOppositeFace(inputs.targetBody,
+                                     inputs.baseFace,
+                                     bAxisSample,
+                                     bAxisZ);
+    Vector3d bAxisY = Cross(bAxisZ, bAxisX);
+    if (!Normalize(bAxisY))
+    {
+        errorMessage = "The P1-P2 local Y axis could not be resolved for B1/B2 ordering.";
+        return false;
+    }
+    auto orderB1PositiveB2Negative = [&](Edge* firstCandidate,
+                                         Edge* secondCandidate,
+                                         const Point3d& qPoint,
+                                         Edge*& b1,
+                                         Edge*& b2,
+                                         double& b1SignedY,
+                                         double& b2SignedY)
+    {
+        b1 = nullptr;
+        b2 = nullptr;
+        Point3d firstOther;
+        Point3d secondOther;
+        if (!EdgeOtherPoint(firstCandidate, qPoint, firstOther) ||
+            !EdgeOtherPoint(secondCandidate, qPoint, secondOther))
+        {
+            return false;
+        }
+        const double firstSignedY =
+            Dot(Subtract(firstOther, qPoint), bAxisY);
+        const double secondSignedY =
+            Dot(Subtract(secondOther, qPoint), bAxisY);
+        if (firstSignedY > kPlaneTolerance &&
+            secondSignedY < -kPlaneTolerance)
+        {
+            b1 = firstCandidate;
+            b2 = secondCandidate;
+            b1SignedY = firstSignedY;
+            b2SignedY = secondSignedY;
+            return true;
+        }
+        if (secondSignedY > kPlaneTolerance &&
+            firstSignedY < -kPlaneTolerance)
+        {
+            b1 = secondCandidate;
+            b2 = firstCandidate;
+            b1SignedY = secondSignedY;
+            b2SignedY = firstSignedY;
+            return true;
+        }
+        return false;
+    };
+    AppendDebugLog("B1/B2 local axes fixed from P1-P2: X=(" +
+                   FormatExpressionNumber(bAxisX.X) + "," +
+                   FormatExpressionNumber(bAxisX.Y) + "," +
+                   FormatExpressionNumber(bAxisX.Z) + "), Y=(" +
+                   FormatExpressionNumber(bAxisY.X) + "," +
+                   FormatExpressionNumber(bAxisY.Y) + "," +
+                   FormatExpressionNumber(bAxisY.Z) + "), Z=(" +
+                   FormatExpressionNumber(bAxisZ.X) + "," +
+                   FormatExpressionNumber(bAxisZ.Y) + "," +
+                   FormatExpressionNumber(bAxisZ.Z) + ")");
+
     Edge* ripEdge = nullptr;
     Edge* confirmingEdge = nullptr;
+    Edge* secondaryQEdge = nullptr;
     Edge* confirmingParallelEdge = nullptr;
     Edge* pairedRipEdge = nullptr;
     Point3d farEndpoint;
@@ -6086,22 +6492,50 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                      secondIndex < remainingEdgesAtQ.size();
                      ++secondIndex)
                 {
+                    Edge* candidateB1 = nullptr;
+                    Edge* candidateB2 = nullptr;
+                    double candidateB1SignedY = 0.0;
+                    double candidateB2SignedY = 0.0;
+                    if (!orderB1PositiveB2Negative(remainingEdgesAtQ[firstIndex],
+                                                   remainingEdgesAtQ[secondIndex],
+                                                   candidateFarEndpoint,
+                                                   candidateB1,
+                                                   candidateB2,
+                                                   candidateB1SignedY,
+                                                   candidateB2SignedY))
+                    {
+                        continue;
+                    }
                     Face* commonFace = FindPlanarFaceContainingEdges(
                         inputs.targetBody,
-                        remainingEdgesAtQ[firstIndex],
-                        remainingEdgesAtQ[secondIndex]);
+                        candidateB1,
+                        candidateB2);
+                    if (commonFace == nullptr)
+                    {
+                        continue;
+                    }
+                    AppendDebugLog("ordered Q edges by P1-P2 local Y: Q=" +
+                                   FormatPoint(candidateFarEndpoint) +
+                                   ", B1=" + std::to_string(candidateB1->Tag()) +
+                                   ", B1SignedY=" +
+                                   FormatExpressionNumber(candidateB1SignedY) +
+                                   ", B2=" + std::to_string(candidateB2->Tag()) +
+                                   ", B2SignedY=" +
+                                   FormatExpressionNumber(candidateB2SignedY) +
+                                   ", commonFace=" +
+                                   std::to_string(commonFace->Tag()));
                     Edge* candidateAuxiliaryRip = nullptr;
                     Edge* candidateAuxiliaryParallel = nullptr;
                     if (FindAuxiliaryRipPair(inputs.targetBody,
                                              commonFace,
-                                             remainingEdgesAtQ[firstIndex],
-                                             remainingEdgesAtQ[secondIndex],
+                                             candidateB1,
+                                             candidateB2,
                                              inputs.thickness,
                                              candidateAuxiliaryRip,
                                              candidateAuxiliaryParallel))
                     {
-                        fallbackFirstEdge = remainingEdgesAtQ[firstIndex];
-                        fallbackSecondEdge = remainingEdgesAtQ[secondIndex];
+                        fallbackFirstEdge = candidateB1;
+                        fallbackSecondEdge = candidateB2;
                         auxiliaryRipEdge = candidateAuxiliaryRip;
                         auxiliaryParallelRipEdge = candidateAuxiliaryParallel;
                         useAuxiliaryRipBranch = true;
@@ -6113,14 +6547,14 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                     InferredInputs candidateQFirstInputs;
                     const bool candidateHasQFirstInputs =
                         BuildQFirstSecondInputs(inputs,
-                                               remainingEdgesAtQ[firstIndex],
-                                               remainingEdgesAtQ[secondIndex],
+                                               candidateB1,
+                                               candidateB2,
                                                candidateFarEndpoint,
                                                candidateQFirstInputs);
                     bool candidateHasConcaveStripPlan =
                         BuildConcaveStripPlan(inputs,
-                                              remainingEdgesAtQ[firstIndex],
-                                              remainingEdgesAtQ[secondIndex],
+                                              candidateB1,
+                                              candidateB2,
                                               candidateFarEndpoint,
                                               candidateQ3,
                                               candidateQ4,
@@ -6165,8 +6599,8 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                     }
                     if (candidateHasQFirstInputs || candidateHasConcaveStripPlan)
                     {
-                        fallbackFirstEdge = remainingEdgesAtQ[firstIndex];
-                        fallbackSecondEdge = remainingEdgesAtQ[secondIndex];
+                        fallbackFirstEdge = candidateB1;
+                        fallbackSecondEdge = candidateB2;
                         if (candidateHasQFirstInputs)
                         {
                             fallbackSecondInputs = candidateQFirstInputs;
@@ -6184,13 +6618,13 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                         break;
                     }
                     if (BuildFallbackSecondInputs(inputs,
-                                                  remainingEdgesAtQ[firstIndex],
-                                                  remainingEdgesAtQ[secondIndex],
+                                                  candidateB1,
+                                                  candidateB2,
                                                   candidateFarEndpoint,
                                                   candidateFallbackInputs))
                     {
-                        fallbackFirstEdge = remainingEdgesAtQ[firstIndex];
-                        fallbackSecondEdge = remainingEdgesAtQ[secondIndex];
+                        fallbackFirstEdge = candidateB1;
+                        fallbackSecondEdge = candidateB2;
                         break;
                     }
                 }
@@ -6200,6 +6634,7 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         {
             ripEdge = candidateRipEdge;
             confirmingEdge = fallbackFirstEdge;
+            secondaryQEdge = fallbackSecondEdge;
             farEndpoint = candidateFarEndpoint;
             if (!useAuxiliaryRipBranch &&
                 !hasQFirstEqualCandidate &&
@@ -6245,9 +6680,23 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
              secondIndex < qConnectedEdges.size();
              ++secondIndex)
         {
+            Edge* orderedB1 = nullptr;
+            Edge* orderedB2 = nullptr;
+            double orderedB1SignedY = 0.0;
+            double orderedB2SignedY = 0.0;
+            if (!orderB1PositiveB2Negative(qConnectedEdges[firstIndex],
+                                           qConnectedEdges[secondIndex],
+                                           farEndpoint,
+                                           orderedB1,
+                                           orderedB2,
+                                           orderedB1SignedY,
+                                           orderedB2SignedY))
+            {
+                continue;
+            }
             Face* commonFace = FindPlanarFaceContainingEdges(inputs.targetBody,
-                                                             qConnectedEdges[firstIndex],
-                                                             qConnectedEdges[secondIndex]);
+                                                             orderedB1,
+                                                             orderedB2);
             double candidateAngle = 0.0;
             if (commonFace != nullptr &&
                 FaceInteriorCornerAngle(commonFace, farEndpoint, candidateAngle) &&
@@ -6256,8 +6705,12 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
             {
                 qCornerRequiresRipOffsets = true;
                 qCornerInteriorAngle = candidateAngle;
-                qCornerFirstEdgeTag = qConnectedEdges[firstIndex]->Tag();
-                qCornerSecondEdgeTag = qConnectedEdges[secondIndex]->Tag();
+                qCornerFirstEdgeTag = orderedB1->Tag();
+                qCornerSecondEdgeTag = orderedB2->Tag();
+                AppendDebugLog("90/270 Q-corner ordered B1/B2: B1SignedY=" +
+                               FormatExpressionNumber(orderedB1SignedY) +
+                               ", B2SignedY=" +
+                               FormatExpressionNumber(orderedB2SignedY));
                 break;
             }
         }
@@ -6528,7 +6981,8 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                                             qCornerInteriorAngle,
                                             firstOffsetTag,
                                             secondOffsetTag,
-                                            errorMessage))
+                                            errorMessage,
+                                            useConcaveStripBranch && qCornerIs270))
             {
                 return false;
             }
@@ -6592,18 +7046,62 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                            ", selection=nearest updated peripheral endpoint excluding only Q3");
             if (concaveQ3HasThicknessEdge)
             {
-                tag_t stripSubtractTag = NULL_TAG;
-                if (!CreateConcaveStripCut(inputs,
-                                           concaveQ3,
-                                           concaveQ4,
-                                           concavePlaneNormal,
-                                           stripSubtractTag,
-                                           errorMessage))
+                if (qCornerRequiresRipOffsets)
                 {
-                    return false;
+                    // 90/270-degree modes create their directional offset
+                    // groups immediately; the clearance face must come from
+                    // those offset results.
+                    tag_t clearanceOffsetFeatureTag = NULL_TAG;
+                    if (!OffsetConcaveClearanceFace(inputs,
+                                                    concaveSecondInputs.baseFace,
+                                                    createdRightAngleOffsetTags,
+                                                    clearanceOffsetFeatureTag,
+                                                    errorMessage))
+                    {
+                        return false;
+                    }
+                    AppendDebugLog("TryCreateSecondPointRip applied -60 clearance-face offset for 90/270-degree branch, feature=" +
+                                   std::to_string(clearanceOffsetFeatureTag));
                 }
-                AppendDebugLog("TryCreateSecondPointRip concave strip subtraction completed after P2-Q rip, feature=" +
-                               std::to_string(stripSubtractTag));
+                else
+                {
+                    tag_t stripSubtractTag = NULL_TAG;
+                    Edge* rectangleReferenceBEdge =
+                        inputs.featureMode == FeatureMode::NinetyRight
+                            ? secondaryQEdge
+                            : confirmingEdge;
+                    if (rectangleReferenceBEdge == nullptr)
+                    {
+                        errorMessage = "The ordered B edge required for the oblique clearance rectangle is unavailable.";
+                        return false;
+                    }
+                    if (!CreateObliqueClearanceCut(
+                            inputs,
+                            rectangleReferenceBEdge,
+                            ripEdge,
+                            concaveSecondInputs.baseFace,
+                            farEndpoint,
+                            concavePlaneNormal,
+                            stripSubtractTag,
+                            errorMessage))
+                    {
+                        return false;
+                    }
+                    AppendDebugLog("TryCreateSecondPointRip created B-edge-directed clearance rectangle for non-90/270 P2Q+2T branch, mode=" +
+                                   std::string(inputs.featureMode == FeatureMode::NinetyLeft
+                                                   ? "90-left"
+                                                   : (inputs.featureMode == FeatureMode::NinetyRight
+                                                          ? "90-right"
+                                                          : "chamfer")) +
+                                   ", reference=" +
+                                   (inputs.featureMode == FeatureMode::NinetyRight
+                                        ? "B2"
+                                        : "B1") +
+                                   ", referenceEdge=" +
+                                   std::to_string(rectangleReferenceBEdge->Tag()) +
+                                   ", feature=" +
+                                   std::to_string(stripSubtractTag));
+                }
                 AppendDebugLog("TryCreateSecondPointRip concave chain stopped at Q3: Q3 has a thickness-length edge"
                                ", Q3=" + FormatPoint(concaveQ3));
             }
@@ -6665,14 +7163,17 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         createdRightAngle90SecondFeaturePath =
             (inputs.featureMode == FeatureMode::NinetyLeft ||
              inputs.featureMode == FeatureMode::NinetyRight) &&
-            qCornerIs90 &&
-            (secondUdfTag != NULL_TAG || deferredSecondUdfRequested);
+            ((qCornerIs90 &&
+              (secondUdfTag != NULL_TAG || deferredSecondUdfRequested)) ||
+             (qCornerIs270 && useConcaveStripBranch));
         if (createdRightAngle90SecondFeaturePath)
         {
-            AppendDebugLog("TryCreateSecondPointRip marked right-angle/90-degree second-feature path for constrained final P2 recalculation, mode=" +
+            AppendDebugLog("TryCreateSecondPointRip marked right-angle path for offset-face-edge constrained primary P2 recalculation, mode=" +
                            std::string(inputs.featureMode == FeatureMode::NinetyLeft
                                            ? "90-left"
-                                           : "90-right"));
+                                           : "90-right") +
+                           ", cornerAngle=" + FormatExpressionNumber(qCornerInteriorAngle) +
+                           ", concaveStrip=" + (useConcaveStripBranch ? "true" : "false"));
         }
         ripCreated = true;
         AppendDebugLog("TryCreateSecondPointRip created edge-rip feature tag=" +
