@@ -26,10 +26,20 @@ target_include_directories(BaoRongQieChu
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_compile_definitions(BaoRongQieChu PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_definitions(BaoRongQieChu PRIVATE
+    UNICODE
+    _UNICODE
+    NOMINMAX
+    $<$<CONFIG:Release>:ZH_PROTECTED_BUILD=1>
+)
 
 target_compile_options(BaoRongQieChu PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /EHsc>
+    $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/O2 /GL /Gw /Gy /GS>
+)
+
+target_link_options(BaoRongQieChu PRIVATE
+    $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/LTCG /OPT:REF /OPT:ICF /DYNAMICBASE /NXCOMPAT /RELEASE /INCREMENTAL:NO>
 )
 
 target_link_directories(BaoRongQieChu PRIVATE ${NX_OPEN_LIBRARY_DIR})

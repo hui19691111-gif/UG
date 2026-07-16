@@ -23,6 +23,14 @@ class BaoRongQieChuDialog
         std::vector<tag_t> curveTags;
     };
 
+    struct PendingBlendReplacement
+    {
+        NXOpen::Body* targetBody;
+        double maxRadius;
+        double sheetThickness;
+        bool hasSheetThickness;
+    };
+
 public:
     BaoRongQieChuDialog();
     ~BaoRongQieChuDialog();
@@ -39,8 +47,9 @@ private:
 
     int ExecuteFromSelection();
     int ExecuteImmediateCutFromSelection();
-    int ExecutePendingBlendRemoval();
+    int ExecutePendingBlendReplacement();
     int ExecutePendingCutFaceRemoval();
+    int ExecutePendingConnectedFaceCreation();
     std::vector<NXOpen::TaggedObject*> GetSelectedObjects() const;
     bool GetBooleanSubtractEnabled() const;
     bool GetRemoveBlendEnabled() const;
@@ -52,8 +61,13 @@ private:
     void SyncOptionalControls();
     void LoadDialogMemory();
     void SaveDialogMemory();
-    void RememberPendingBlendBody(NXOpen::Body* body);
+    void RememberPendingBlendReplacement(
+        NXOpen::Body* body,
+        double maxRadius,
+        double sheetThickness,
+        bool hasSheetThickness);
     void RememberPendingCutFeature(NXOpen::Features::BooleanFeature* feature);
+    void RememberPendingConnectedFaceBody(NXOpen::Body* body);
     void CapturePendingHoleProfiles(const std::vector<NXOpen::TaggedObject*>& selectedObjects);
     void RestorePendingHoleProfiles(NXOpen::Part* workPart);
     void ClearPendingHoleProfiles();
@@ -70,7 +84,8 @@ private:
     NXOpen::BlockStyler::UIBlock* healRemovedRegionToggleBlock_;
     NXOpen::BlockStyler::UIBlock* offsetBlock_;
     std::vector<HoleLoopProfile> pendingHoleProfiles_;
-    std::vector<NXOpen::Body*> pendingBlendBodies_;
+    std::vector<PendingBlendReplacement> pendingBlendReplacements_;
     std::vector<NXOpen::Features::BooleanFeature*> pendingCutFeatures_;
+    std::vector<NXOpen::Body*> pendingConnectedFaceBodies_;
     bool isInternalUpdate_;
 };

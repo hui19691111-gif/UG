@@ -23,7 +23,9 @@
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
 #include <NXOpen/Features_RemoveParametersBuilder.hxx>
+#include <NXOpen/Features_ReplaceFaceBuilder.hxx>
 #include <NXOpen/Features_ResizeBlendBuilder.hxx>
+#include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
 #include <NXOpen/GeometricUtilities_BooleanOperation.hxx>
 #include <NXOpen/GeometricUtilities_Extend.hxx>
 #include <NXOpen/GeometricUtilities_FeatureOptions.hxx>
@@ -33,6 +35,8 @@
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObjectManager.hxx>
+#include <NXOpen/MeasureFaces.hxx>
+#include <NXOpen/MeasureManager.hxx>
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
 #include <NXOpen/Plane.hxx>
@@ -49,6 +53,7 @@
 #include <NXOpen/SelectObjectList.hxx>
 #include <NXOpen/SmartObject.hxx>
 #include <NXOpen/Unit.hxx>
+#include <NXOpen/UnitCollection.hxx>
 
 #include <Windows.h>
 #ifdef CreateDialog
@@ -60,6 +65,7 @@
 #include <uf_modl_curves.h>
 #include <uf_modl_utilities.h>
 #include <uf_disp.h>
+#include <uf_eval.h>
 #include <uf_obj.h>
 #include <uf_object_types.h>
 #include <uf_ui_types.h>
@@ -68,6 +74,7 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <sstream>
@@ -85,6 +92,74 @@ const double kHoleRestoreOverrun = 1.0;
 const double kHoleProfileKeyTolerance = 0.01;
 const double kRedColor[3] = {1.0, 0.0, 0.0};
 const double kBlueColor[3] = {0.0, 0.2, 1.0};
+
+std::filesystem::path GetDebugLogPath()
+{
+    wchar_t buffer[MAX_PATH] = {};
+    const HMODULE module = reinterpret_cast<HMODULE>(&__ImageBase);
+    const DWORD length = GetModuleFileNameW(module, buffer, MAX_PATH);
+    if (length > 0 && length < MAX_PATH)
+    {
+        const std::filesystem::path modulePath(buffer);
+        const std::filesystem::path applicationDirectory = modulePath.parent_path();
+        if (applicationDirectory.filename() == L"application")
+        {
+            return applicationDirectory.parent_path() / L"logs" / L"BaoRongQieChu_debug.log";
+        }
+
+        return applicationDirectory / L"BaoRongQieChu_debug.log";
+    }
+
+    return std::filesystem::path(L"D:\\UG\u667a\u8f89\u94a3\u91d1\u63d2\u4ef6\\logs\\BaoRongQieChu_debug.log");
+}
+
+void WriteDebugLog(const std::string& message)
+{
+    try
+    {
+        const std::filesystem::path logPath = GetDebugLogPath();
+        std::error_code error;
+        std::filesystem::create_directories(logPath.parent_path(), error);
+
+        SYSTEMTIME time = {};
+        GetLocalTime(&time);
+        std::ofstream stream(logPath, std::ios::out | std::ios::app);
+        if (!stream)
+        {
+            return;
+        }
+
+        stream << '['
+               << time.wYear << '-'
+               << (time.wMonth < 10 ? "0" : "") << time.wMonth << '-'
+               << (time.wDay < 10 ? "0" : "") << time.wDay << ' '
+               << (time.wHour < 10 ? "0" : "") << time.wHour << ':'
+               << (time.wMinute < 10 ? "0" : "") << time.wMinute << ':'
+               << (time.wSecond < 10 ? "0" : "") << time.wSecond << '.';
+        stream.width(3);
+        stream.fill('0');
+        stream << time.wMilliseconds << "] " << message << '\n';
+    }
+    catch (...)
+    {
+    }
+}
+
+std::string FormatTagList(const std::vector<tag_t>& tags)
+{
+    std::ostringstream stream;
+    stream << '[';
+    for (size_t index = 0; index < tags.size(); ++index)
+    {
+        if (index > 0)
+        {
+            stream << ',';
+        }
+        stream << tags[index];
+    }
+    stream << ']';
+    return stream.str();
+}
 
 std::string GetDialogFilePath()
 {
@@ -537,6 +612,9 @@ struct LoopKeyGeometry
     double projectedX;
     double projectedY;
     double projectedZ;
+    double spanX;
+    double spanY;
+    double spanZ;
 };
 
 LoopKeyGeometry AskLoopKeyGeometry(const NXOpen::Vector3d& normal, uf_loop_p_t loop)
@@ -602,6 +680,9 @@ LoopKeyGeometry AskLoopKeyGeometry(const NXOpen::Vector3d& normal, uf_loop_p_t l
     geometry.projectedX = projectedX;
     geometry.projectedY = projectedY;
     geometry.projectedZ = projectedZ;
+    geometry.spanX = hasBox ? box[3] - box[0] : 0.0;
+    geometry.spanY = hasBox ? box[4] - box[1] : 0.0;
+    geometry.spanZ = hasBox ? box[5] - box[2] : 0.0;
     return geometry;
 }
 
@@ -618,7 +699,10 @@ std::string MakeLoopSpatialKey(
         << ':' << QuantizeProfileKeyValue(geometry.canonicalNormal.Z)
         << ':' << QuantizeProfileKeyValue(geometry.projectedX)
         << ':' << QuantizeProfileKeyValue(geometry.projectedY)
-        << ':' << QuantizeProfileKeyValue(geometry.projectedZ);
+        << ':' << QuantizeProfileKeyValue(geometry.projectedZ)
+        << ':' << QuantizeProfileKeyValue(geometry.spanX)
+        << ':' << QuantizeProfileKeyValue(geometry.spanY)
+        << ':' << QuantizeProfileKeyValue(geometry.spanZ);
     if (includeProfilePlanePosition)
     {
         key << ':' << QuantizeProfileKeyValue(geometry.axial);
@@ -765,10 +849,689 @@ NXOpen::Body* ResolveTargetBodyFromSelection(const std::vector<NXOpen::TaggedObj
     return targetBody;
 }
 
+bool NormalizeVector(double vector[3])
+{
+    const double length = std::sqrt(
+        vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]);
+    if (length <= 1.0e-12)
+    {
+        return false;
+    }
+
+    vector[0] /= length;
+    vector[1] /= length;
+    vector[2] /= length;
+    return true;
+}
+
+double DotVector(const double first[3], const double second[3])
+{
+    return first[0] * second[0] + first[1] * second[1] + first[2] * second[2];
+}
+
+bool AskCylinderFaceGeometry(
+    NXOpen::Face* face,
+    double axisPoint[3],
+    double axisDirection[3],
+    double& radius)
+{
+    if (face == nullptr)
+    {
+        return false;
+    }
+
+    int faceType = 0;
+    double box[6] = {};
+    double radialData = 0.0;
+    int normalDirection = 0;
+    if (UF_MODL_ask_face_data(
+            face->Tag(),
+            &faceType,
+            axisPoint,
+            axisDirection,
+            box,
+            &radius,
+            &radialData,
+            &normalDirection) != 0 ||
+        faceType != UF_MODL_CYLINDRICAL_FACE ||
+        radius <= 1.0e-9 ||
+        !NormalizeVector(axisDirection))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool AskCylinderFaceHeight(
+    NXOpen::Face* face,
+    const double axisPoint[3],
+    const double axisDirection[3],
+    double& height)
+{
+    height = 0.0;
+    if (face == nullptr)
+    {
+        return false;
+    }
+
+    double minimumProjection = std::numeric_limits<double>::max();
+    double maximumProjection = -std::numeric_limits<double>::max();
+    size_t pointCount = 0;
+    for (NXOpen::Edge* edge : face->GetEdges())
+    {
+        if (edge == nullptr)
+        {
+            continue;
+        }
+
+        NXOpen::Point3d first;
+        NXOpen::Point3d second;
+        edge->GetVertices(&first, &second);
+        const NXOpen::Point3d points[2] = { first, second };
+        for (const NXOpen::Point3d& point : points)
+        {
+            const double delta[3] =
+            {
+                point.X - axisPoint[0],
+                point.Y - axisPoint[1],
+                point.Z - axisPoint[2]
+            };
+            const double projection = DotVector(delta, axisDirection);
+            minimumProjection = std::min(minimumProjection, projection);
+            maximumProjection = std::max(maximumProjection, projection);
+            ++pointCount;
+        }
+    }
+
+    if (pointCount < 2 ||
+        minimumProjection == std::numeric_limits<double>::max() ||
+        maximumProjection == -std::numeric_limits<double>::max())
+    {
+        return false;
+    }
+
+    height = std::abs(maximumProjection - minimumProjection);
+    return height > 1.0e-9;
+}
+
+bool AskCylinderFaceAngularSpan(NXOpen::Face* face, double& spanRadians)
+{
+    spanRadians = 0.0;
+    if (face == nullptr)
+    {
+        return false;
+    }
+
+    double uvMinMax[4] = {};
+    if (UF_MODL_ask_face_uv_minmax(face->Tag(), uvMinMax) != 0)
+    {
+        return false;
+    }
+
+    const double uSpan = std::abs(uvMinMax[1] - uvMinMax[0]);
+    const double vSpan = std::abs(uvMinMax[3] - uvMinMax[2]);
+    int uStatus = 0;
+    int vStatus = 0;
+    double uPeriod = 0.0;
+    double vPeriod = 0.0;
+    if (UF_MODL_ask_face_periodicity(
+            face->Tag(),
+            &uStatus,
+            &uPeriod,
+            &vStatus,
+            &vPeriod) == 0)
+    {
+        if (uPeriod > 1.0e-9 && uSpan <= uPeriod + 1.0e-6)
+        {
+            spanRadians = uSpan;
+            return true;
+        }
+        if (vPeriod > 1.0e-9 && vSpan <= vPeriod + 1.0e-6)
+        {
+            spanRadians = vSpan;
+            return true;
+        }
+    }
+
+    spanRadians = std::min(uSpan, vSpan);
+    return spanRadians > 1.0e-9;
+}
+
+bool AskSheetMetalThickness(
+    NXOpen::Part* workPart,
+    const std::vector<NXOpen::Face*>& faces,
+    double& thickness)
+{
+    thickness = 0.0;
+    if (workPart == nullptr || workPart->Features() == nullptr)
+    {
+        return false;
+    }
+
+    NXOpen::Body* body = nullptr;
+    for (NXOpen::Face* face : faces)
+    {
+        if (face != nullptr)
+        {
+            body = face->GetBody();
+            if (body != nullptr)
+            {
+                break;
+            }
+        }
+    }
+    if (body == nullptr)
+    {
+        return false;
+    }
+
+    try
+    {
+        NXOpen::Features::SheetMetal::SheetmetalManager* manager =
+            workPart->Features()->SheetmetalManager();
+        if (manager == nullptr || !manager->IsSheetmetalBody(body))
+        {
+            return false;
+        }
+
+        thickness = manager->GetBodyThickness(body);
+        return thickness > 1.0e-9;
+    }
+    catch (...)
+    {
+        thickness = 0.0;
+        return false;
+    }
+}
+
+struct ProjectedPoint2d
+{
+    double x;
+    double y;
+};
+
+double Cross2d(
+    const ProjectedPoint2d& first,
+    const ProjectedPoint2d& second,
+    const ProjectedPoint2d& third)
+{
+    return (second.x - first.x) * (third.y - first.y) -
+        (second.y - first.y) * (third.x - first.x);
+}
+
+double ProjectedPolygonArea(const std::vector<ProjectedPoint2d>& polygon)
+{
+    double signedArea = 0.0;
+    for (size_t index = 0; index < polygon.size(); ++index)
+    {
+        const ProjectedPoint2d& current = polygon[index];
+        const ProjectedPoint2d& next = polygon[(index + 1) % polygon.size()];
+        signedArea += current.x * next.y - current.y * next.x;
+    }
+    return std::abs(signedArea) * 0.5;
+}
+
+bool AskPlanarLoopArea(
+    uf_loop_p_t loop,
+    const NXOpen::Vector3d& planeNormal,
+    double& area)
+{
+    area = 0.0;
+    if (loop == nullptr || loop->edge_list == nullptr)
+    {
+        return false;
+    }
+
+    NXOpen::Vector3d normal = NormalizeVector(planeNormal);
+    NXOpen::Vector3d reference = std::abs(normal.Z) > 0.9 ?
+        NXOpen::Vector3d(0.0, 1.0, 0.0) : NXOpen::Vector3d(0.0, 0.0, 1.0);
+    NXOpen::Vector3d axisU(
+        reference.Y * normal.Z - reference.Z * normal.Y,
+        reference.Z * normal.X - reference.X * normal.Z,
+        reference.X * normal.Y - reference.Y * normal.X);
+    axisU = NormalizeVector(axisU);
+    const NXOpen::Vector3d axisV(
+        normal.Y * axisU.Z - normal.Z * axisU.Y,
+        normal.Z * axisU.X - normal.X * axisU.Z,
+        normal.X * axisU.Y - normal.Y * axisU.X);
+
+    std::vector<ProjectedPoint2d> polygon;
+    constexpr int kSamplesPerEdge = 32;
+    for (uf_list_p_t edgeNode = loop->edge_list;
+         edgeNode != nullptr;
+         edgeNode = edgeNode->next)
+    {
+        if (edgeNode->eid == NULL_TAG)
+        {
+            continue;
+        }
+
+        UF_EVAL_p_t evaluator = nullptr;
+        if (UF_EVAL_initialize(edgeNode->eid, &evaluator) != 0 || evaluator == nullptr)
+        {
+            continue;
+        }
+
+        double limits[2] = {};
+        std::vector<ProjectedPoint2d> segment;
+        if (UF_EVAL_ask_limits(evaluator, limits) == 0)
+        {
+            segment.reserve(kSamplesPerEdge + 1);
+            for (int sample = 0; sample <= kSamplesPerEdge; ++sample)
+            {
+                const double parameter = limits[0] +
+                    (limits[1] - limits[0]) *
+                    static_cast<double>(sample) / static_cast<double>(kSamplesPerEdge);
+                double point[3] = {};
+                if (UF_EVAL_evaluate(evaluator, 0, parameter, point, nullptr) == 0)
+                {
+                    const NXOpen::Vector3d vector(point[0], point[1], point[2]);
+                    segment.push_back(
+                        { DotVector(vector, axisU), DotVector(vector, axisV) });
+                }
+            }
+        }
+        UF_EVAL_free(evaluator);
+
+        if (segment.size() < 2)
+        {
+            continue;
+        }
+        if (!polygon.empty())
+        {
+            const auto squaredDistance = [](const ProjectedPoint2d& first, const ProjectedPoint2d& second)
+            {
+                const double dx = first.x - second.x;
+                const double dy = first.y - second.y;
+                return dx * dx + dy * dy;
+            };
+            if (squaredDistance(polygon.back(), segment.back()) <
+                squaredDistance(polygon.back(), segment.front()))
+            {
+                std::reverse(segment.begin(), segment.end());
+            }
+            segment.erase(segment.begin());
+        }
+        polygon.insert(polygon.end(), segment.begin(), segment.end());
+    }
+
+    area = ProjectedPolygonArea(polygon);
+    return polygon.size() >= 3 && area > 1.0e-9;
+}
+
+bool AskPlanarFaceData(NXOpen::Face* face, double point[3], double normal[3])
+{
+    if (face == nullptr)
+    {
+        return false;
+    }
+
+    int faceType = 0;
+    double box[6] = {};
+    double radius = 0.0;
+    double radialData = 0.0;
+    int normalDirection = 0;
+    return UF_MODL_ask_face_data(
+        face->Tag(),
+        &faceType,
+        point,
+        normal,
+        box,
+        &radius,
+        &radialData,
+        &normalDirection) == 0 &&
+        faceType == UF_MODL_PLANAR_FACE &&
+        NormalizeVector(normal);
+}
+
+bool AskFaceArea(NXOpen::Part* workPart, NXOpen::Face* face, double& area)
+{
+    area = 0.0;
+    if (workPart == nullptr || face == nullptr)
+    {
+        return false;
+    }
+
+    NXOpen::MeasureFaces* measurement = nullptr;
+    try
+    {
+        NXOpen::Unit* areaUnit = workPart->UnitCollection()->GetBase("Area");
+        NXOpen::Unit* lengthUnit = workPart->UnitCollection()->GetBase("Length");
+        std::vector<NXOpen::IParameterizedSurface*> faces(1, face);
+        measurement = workPart->MeasureManager()->NewFaceProperties(
+            areaUnit,
+            lengthUnit,
+            0.99,
+            faces);
+        area = measurement->Area();
+        delete measurement;
+        return area > 1.0e-6;
+    }
+    catch (...)
+    {
+        delete measurement;
+        return false;
+    }
+}
+
+std::vector<ProjectedPoint2d> AskProjectedFaceHull(
+    NXOpen::Face* face,
+    const double origin[3],
+    const double axisU[3],
+    const double axisV[3])
+{
+    std::vector<ProjectedPoint2d> points;
+    if (face == nullptr)
+    {
+        return points;
+    }
+
+    for (NXOpen::Edge* edge : face->GetEdges())
+    {
+        if (edge == nullptr)
+        {
+            continue;
+        }
+        NXOpen::Point3d vertices[2];
+        edge->GetVertices(&vertices[0], &vertices[1]);
+        for (const NXOpen::Point3d& vertex : vertices)
+        {
+            const double offset[3] =
+            {
+                vertex.X - origin[0],
+                vertex.Y - origin[1],
+                vertex.Z - origin[2]
+            };
+            points.push_back({ DotVector(offset, axisU), DotVector(offset, axisV) });
+        }
+    }
+
+    std::sort(
+        points.begin(),
+        points.end(),
+        [](const ProjectedPoint2d& first, const ProjectedPoint2d& second)
+        {
+            return std::abs(first.x - second.x) > 1.0e-7 ?
+                first.x < second.x : first.y < second.y;
+        });
+    points.erase(
+        std::unique(
+            points.begin(),
+            points.end(),
+            [](const ProjectedPoint2d& first, const ProjectedPoint2d& second)
+            {
+                return std::abs(first.x - second.x) <= 1.0e-7 &&
+                    std::abs(first.y - second.y) <= 1.0e-7;
+            }),
+        points.end());
+    if (points.size() < 3)
+    {
+        return {};
+    }
+
+    std::vector<ProjectedPoint2d> hull;
+    for (const ProjectedPoint2d& point : points)
+    {
+        while (hull.size() >= 2 &&
+               Cross2d(hull[hull.size() - 2], hull.back(), point) <= 1.0e-9)
+        {
+            hull.pop_back();
+        }
+        hull.push_back(point);
+    }
+    const size_t lowerSize = hull.size();
+    for (auto iterator = points.rbegin(); iterator != points.rend(); ++iterator)
+    {
+        while (hull.size() > lowerSize &&
+               Cross2d(hull[hull.size() - 2], hull.back(), *iterator) <= 1.0e-9)
+        {
+            hull.pop_back();
+        }
+        hull.push_back(*iterator);
+    }
+    hull.pop_back();
+    return hull;
+}
+
+ProjectedPoint2d IntersectProjectedLines(
+    const ProjectedPoint2d& segmentStart,
+    const ProjectedPoint2d& segmentEnd,
+    const ProjectedPoint2d& clipStart,
+    const ProjectedPoint2d& clipEnd)
+{
+    const double segmentX = segmentEnd.x - segmentStart.x;
+    const double segmentY = segmentEnd.y - segmentStart.y;
+    const double clipX = clipEnd.x - clipStart.x;
+    const double clipY = clipEnd.y - clipStart.y;
+    const double denominator = segmentX * clipY - segmentY * clipX;
+    if (std::abs(denominator) <= 1.0e-12)
+    {
+        return segmentEnd;
+    }
+
+    const double deltaX = clipStart.x - segmentStart.x;
+    const double deltaY = clipStart.y - segmentStart.y;
+    const double ratio = (deltaX * clipY - deltaY * clipX) / denominator;
+    return { segmentStart.x + segmentX * ratio, segmentStart.y + segmentY * ratio };
+}
+
+double AskProjectedOverlapArea(
+    const std::vector<ProjectedPoint2d>& subject,
+    const std::vector<ProjectedPoint2d>& clip)
+{
+    if (subject.size() < 3 || clip.size() < 3)
+    {
+        return 0.0;
+    }
+
+    std::vector<ProjectedPoint2d> output = subject;
+    for (size_t clipIndex = 0; clipIndex < clip.size() && !output.empty(); ++clipIndex)
+    {
+        const ProjectedPoint2d& clipStart = clip[clipIndex];
+        const ProjectedPoint2d& clipEnd = clip[(clipIndex + 1) % clip.size()];
+        const std::vector<ProjectedPoint2d> input = output;
+        output.clear();
+
+        ProjectedPoint2d segmentStart = input.back();
+        bool startInside = Cross2d(clipStart, clipEnd, segmentStart) >= -1.0e-9;
+        for (const ProjectedPoint2d& segmentEnd : input)
+        {
+            const bool endInside = Cross2d(clipStart, clipEnd, segmentEnd) >= -1.0e-9;
+            if (endInside)
+            {
+                if (!startInside)
+                {
+                    output.push_back(IntersectProjectedLines(
+                        segmentStart,
+                        segmentEnd,
+                        clipStart,
+                        clipEnd));
+                }
+                output.push_back(segmentEnd);
+            }
+            else if (startInside)
+            {
+                output.push_back(IntersectProjectedLines(
+                    segmentStart,
+                    segmentEnd,
+                    clipStart,
+                    clipEnd));
+            }
+            segmentStart = segmentEnd;
+            startInside = endInside;
+        }
+    }
+    return ProjectedPolygonArea(output);
+}
+
+bool InferSheetThicknessFromLargestPlanarFace(
+    NXOpen::Part* workPart,
+    const std::vector<NXOpen::Face*>& bodyFaces,
+    double& thickness)
+{
+    thickness = 0.0;
+    NXOpen::Face* largestPlanarFace = nullptr;
+    double largestArea = 0.0;
+    for (NXOpen::Face* face : bodyFaces)
+    {
+        double point[3] = {};
+        double normal[3] = {};
+        double area = 0.0;
+        if (AskPlanarFaceData(face, point, normal) &&
+            AskFaceArea(workPart, face, area) &&
+            area > largestArea)
+        {
+            largestPlanarFace = face;
+            largestArea = area;
+        }
+    }
+    if (largestPlanarFace == nullptr)
+    {
+        WriteDebugLog("thickness_geometry_result available=0 reason=no_planar_face");
+        return false;
+    }
+
+    double basePoint[3] = {};
+    double baseNormal[3] = {};
+    if (!AskPlanarFaceData(largestPlanarFace, basePoint, baseNormal))
+    {
+        return false;
+    }
+    double reference[3] = { 0.0, 0.0, 1.0 };
+    if (std::abs(baseNormal[2]) > 0.9)
+    {
+        reference[1] = 1.0;
+        reference[2] = 0.0;
+    }
+    double axisU[3] =
+    {
+        reference[1] * baseNormal[2] - reference[2] * baseNormal[1],
+        reference[2] * baseNormal[0] - reference[0] * baseNormal[2],
+        reference[0] * baseNormal[1] - reference[1] * baseNormal[0]
+    };
+    if (!NormalizeVector(axisU))
+    {
+        return false;
+    }
+    const double axisV[3] =
+    {
+        baseNormal[1] * axisU[2] - baseNormal[2] * axisU[1],
+        baseNormal[2] * axisU[0] - baseNormal[0] * axisU[2],
+        baseNormal[0] * axisU[1] - baseNormal[1] * axisU[0]
+    };
+    const std::vector<ProjectedPoint2d> baseHull = AskProjectedFaceHull(
+        largestPlanarFace,
+        basePoint,
+        axisU,
+        axisV);
+    const double baseProjectedArea = ProjectedPolygonArea(baseHull);
+    if (baseProjectedArea <= 1.0e-6)
+    {
+        return false;
+    }
+
+    double minimumDistance = std::numeric_limits<double>::max();
+    tag_t matchedFaceTag = NULL_TAG;
+    double matchedAreaRatio = 0.0;
+    double matchedOverlapRatio = 0.0;
+    size_t qualifiedCount = 0;
+    for (NXOpen::Face* face : bodyFaces)
+    {
+        if (face == nullptr || face == largestPlanarFace)
+        {
+            continue;
+        }
+
+        double candidatePoint[3] = {};
+        double candidateNormal[3] = {};
+        if (!AskPlanarFaceData(face, candidatePoint, candidateNormal) ||
+            std::abs(DotVector(baseNormal, candidateNormal)) < 0.999)
+        {
+            continue;
+        }
+
+        double candidateArea = 0.0;
+        if (!AskFaceArea(workPart, face, candidateArea))
+        {
+            continue;
+        }
+        const double areaRatio = candidateArea / largestArea;
+        if (areaRatio <= 0.60 + 1.0e-9)
+        {
+            continue;
+        }
+
+        const std::vector<ProjectedPoint2d> candidateHull = AskProjectedFaceHull(
+            face,
+            basePoint,
+            axisU,
+            axisV);
+        const double overlapRatio =
+            AskProjectedOverlapArea(baseHull, candidateHull) / baseProjectedArea;
+        if (overlapRatio <= 0.60 + 1.0e-9)
+        {
+            continue;
+        }
+
+        const double offset[3] =
+        {
+            candidatePoint[0] - basePoint[0],
+            candidatePoint[1] - basePoint[1],
+            candidatePoint[2] - basePoint[2]
+        };
+        const double distance = std::abs(DotVector(offset, baseNormal));
+        if (distance <= 0.01)
+        {
+            continue;
+        }
+
+        ++qualifiedCount;
+        WriteDebugLog(
+            "thickness_geometry_candidate base_tag=" +
+            std::to_string(largestPlanarFace->Tag()) +
+            " candidate_tag=" + std::to_string(face->Tag()) +
+            " area_ratio=" + FormatDouble(areaRatio) +
+            " overlap_ratio=" + FormatDouble(overlapRatio) +
+            " distance=" + FormatDouble(distance));
+        if (distance < minimumDistance)
+        {
+            minimumDistance = distance;
+            matchedFaceTag = face->Tag();
+            matchedAreaRatio = areaRatio;
+            matchedOverlapRatio = overlapRatio;
+        }
+    }
+
+    if (minimumDistance == std::numeric_limits<double>::max())
+    {
+        WriteDebugLog(
+            "thickness_geometry_result available=0 base_tag=" +
+            std::to_string(largestPlanarFace->Tag()) +
+            " base_area=" + FormatDouble(largestArea) +
+            " qualified_count=0");
+        return false;
+    }
+
+    thickness = minimumDistance;
+    WriteDebugLog(
+        "thickness_geometry_result available=1 base_tag=" +
+        std::to_string(largestPlanarFace->Tag()) +
+        " base_area=" + FormatDouble(largestArea) +
+        " matched_tag=" + std::to_string(matchedFaceTag) +
+        " matched_area_ratio=" + FormatDouble(matchedAreaRatio) +
+        " matched_overlap_ratio=" + FormatDouble(matchedOverlapRatio) +
+        " qualified_count=" + std::to_string(qualifiedCount) +
+        " thickness=" + FormatDouble(thickness));
+    return true;
+}
+
 std::vector<NXOpen::Face*> FindBlendFacesByRadius(
     NXOpen::Part* workPart,
     const std::vector<NXOpen::Face*>& candidateFaces,
-    double maxRadius)
+    double maxRadius,
+    double knownSheetThickness = 0.0,
+    bool hasKnownSheetThickness = false)
 {
     if (workPart == nullptr || candidateFaces.empty())
     {
@@ -783,7 +1546,28 @@ std::vector<NXOpen::Face*> FindBlendFacesByRadius(
     std::vector<bool> isBlendFace;
     resizeBuilder->IsBlendFace(candidateFaces, isBlendFace);
 
+    double sheetThickness = knownSheetThickness;
+    bool hasSheetThickness = hasKnownSheetThickness && sheetThickness > 1.0e-9;
+    std::string thicknessSource = hasSheetThickness ? "pre_cut_largest_planar_overlap" : "unavailable";
+    if (!hasSheetThickness)
+    {
+        hasSheetThickness = InferSheetThicknessFromLargestPlanarFace(
+            workPart,
+            candidateFaces,
+            sheetThickness);
+        if (hasSheetThickness)
+        {
+            thicknessSource = "largest_planar_overlap";
+        }
+    }
+    WriteDebugLog(
+        "blend_scan_thickness available=" + std::string(hasSheetThickness ? "1" : "0") +
+        " thickness=" + FormatDouble(sheetThickness) +
+        " source=" + thicknessSource);
+
     std::vector<NXOpen::Face*> blendFaces;
+    std::vector<tag_t> qualifyingFaceTags;
+    size_t recognizedBlendCount = 0;
     for (size_t index = 0; index < candidateFaces.size() && index < isBlendFace.size(); ++index)
     {
         if (!isBlendFace[index] || candidateFaces[index] == nullptr)
@@ -791,14 +1575,69 @@ std::vector<NXOpen::Face*> FindBlendFacesByRadius(
             continue;
         }
 
-        const double faceRadius = std::abs(resizeBuilder->GetBlendFaceRadius(candidateFaces[index]));
-        if (faceRadius <= maxRadius + 1.0e-6)
+        NXOpen::Face* candidateFace = candidateFaces[index];
+        const double faceRadius = std::abs(resizeBuilder->GetBlendFaceRadius(candidateFace));
+        const bool radiusQualifies = faceRadius <= maxRadius + 1.0e-6;
+        bool isCylinder = false;
+        bool heightEqualsThickness = false;
+        bool angularSpanExcluded = false;
+        double cylinderHeight = 0.0;
+        double angularSpan = 0.0;
+        double axisPoint[3] = {};
+        double axisDirection[3] = {};
+        double cylinderRadius = 0.0;
+        if (AskCylinderFaceGeometry(
+                candidateFace,
+                axisPoint,
+                axisDirection,
+                cylinderRadius))
         {
-            blendFaces.push_back(candidateFaces[index]);
+            isCylinder = true;
+            const bool hasHeight = AskCylinderFaceHeight(
+                candidateFace,
+                axisPoint,
+                axisDirection,
+                cylinderHeight);
+            const double heightTolerance = std::max(0.02, sheetThickness * 0.01);
+            heightEqualsThickness =
+                hasSheetThickness && hasHeight &&
+                std::abs(cylinderHeight - sheetThickness) <= heightTolerance;
+
+            if (AskCylinderFaceAngularSpan(candidateFace, angularSpan))
+            {
+                const double pi = std::acos(-1.0);
+                angularSpanExcluded = angularSpan >= pi - 1.0e-6;
+            }
+        }
+
+        const bool qualifies =
+            radiusQualifies && !heightEqualsThickness && !angularSpanExcluded;
+        ++recognizedBlendCount;
+        WriteDebugLog(
+            "blend_scan_face tag=" + std::to_string(candidateFace->Tag()) +
+            " radius=" + FormatDouble(faceRadius) +
+            " radius_qualifies=" + (radiusQualifies ? "1" : "0") +
+            " cylinder=" + (isCylinder ? "1" : "0") +
+            " cylinder_height=" + FormatDouble(cylinderHeight) +
+            " sheet_thickness=" + FormatDouble(sheetThickness) +
+            " excluded_height_equals_thickness=" + (heightEqualsThickness ? "1" : "0") +
+            " angular_span_deg=" + FormatDouble(angularSpan * 180.0 / std::acos(-1.0)) +
+            " excluded_angular_span=" + (angularSpanExcluded ? "1" : "0") +
+            " qualifies=" + (qualifies ? "1" : "0"));
+        if (qualifies)
+        {
+            blendFaces.push_back(candidateFace);
+            qualifyingFaceTags.push_back(candidateFace->Tag());
         }
     }
 
     resizeBuilder->Destroy();
+    WriteDebugLog(
+        "blend_scan_summary total_faces=" + std::to_string(candidateFaces.size()) +
+        " recognized_blends=" + std::to_string(recognizedBlendCount) +
+        " max_radius=" + FormatDouble(maxRadius) +
+        " qualifying_blends=" + std::to_string(blendFaces.size()) +
+        " qualifying_tags=" + FormatTagList(qualifyingFaceTags));
     return blendFaces;
 }
 
@@ -913,6 +1752,464 @@ bool TryDeleteBlendFaces(
     return true;
 }
 
+NXOpen::Face* ResolveFaceByTag(tag_t faceTag)
+{
+    if (faceTag == NULL_TAG)
+    {
+        return nullptr;
+    }
+
+    int type = 0;
+    int subtype = 0;
+    if (UF_OBJ_ask_type_and_subtype(faceTag, &type, &subtype) != 0 ||
+        type != UF_solid_type || subtype != UF_solid_face_subtype)
+    {
+        return nullptr;
+    }
+
+    return dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(faceTag));
+}
+
+std::vector<tag_t> FindTangentPlanarFaceTags(NXOpen::Face* blendFace)
+{
+    std::vector<tag_t> planarFaceTags;
+    if (blendFace == nullptr)
+    {
+        return planarFaceTags;
+    }
+
+    std::unordered_set<tag_t> seenFaceTags;
+    for (tag_t edgeTag : AskFaceEdges(blendFace->Tag()))
+    {
+        logical isSmooth = false;
+        if (UF_MODL_ask_edge_smoothness(edgeTag, 0.0, &isSmooth) != 0 || !isSmooth)
+        {
+            continue;
+        }
+
+        for (tag_t adjacentFaceTag : AskEdgeFaces(edgeTag))
+        {
+            if (adjacentFaceTag == NULL_TAG || adjacentFaceTag == blendFace->Tag() ||
+                !seenFaceTags.insert(adjacentFaceTag).second || !IsPlanarFace(adjacentFaceTag))
+            {
+                continue;
+            }
+
+            planarFaceTags.push_back(adjacentFaceTag);
+        }
+    }
+
+    return planarFaceTags;
+}
+
+bool TryReplaceFaces(
+    NXOpen::Part* workPart,
+    const std::vector<NXOpen::Face*>& facesToReplace,
+    NXOpen::Face* replacementFace,
+    bool reverseDirection)
+{
+    if (workPart == nullptr || facesToReplace.empty() || replacementFace == nullptr)
+    {
+        return false;
+    }
+
+    NXOpen::Features::ReplaceFaceBuilder* builder =
+        workPart->Features()->CreateReplaceFaceBuilder(nullptr);
+    if (builder == nullptr)
+    {
+        return false;
+    }
+
+    try
+    {
+        builder->SetType(NXOpen::Features::ReplaceFaceBuilder::ReplaceTypesReplace);
+        builder->OffsetDistance()->SetFormula("0");
+        builder->ResetReplaceFaceMethod();
+        builder->ResetFreeEdgeProjectionOption();
+        builder->SetReverseDirection(reverseDirection);
+
+        NXOpen::SelectionIntentRuleOptions* replaceOptions =
+            workPart->ScRuleFactory()->CreateRuleOptions();
+        replaceOptions->SetSelectedFromInactive(false);
+        NXOpen::FaceDumbRule* replaceRule =
+            workPart->ScRuleFactory()->CreateRuleFaceDumb(facesToReplace, replaceOptions);
+        std::vector<NXOpen::SelectionIntentRule*> replaceRules(1, replaceRule);
+        builder->FaceToReplace()->ReplaceRules(replaceRules, false);
+        delete replaceOptions;
+
+        NXOpen::SelectionIntentRuleOptions* replacementOptions =
+            workPart->ScRuleFactory()->CreateRuleOptions();
+        replacementOptions->SetSelectedFromInactive(false);
+        std::vector<NXOpen::Face*> replacementFaces(1, replacementFace);
+        NXOpen::FaceDumbRule* replacementRule =
+            workPart->ScRuleFactory()->CreateRuleFaceDumb(replacementFaces, replacementOptions);
+        std::vector<NXOpen::SelectionIntentRule*> replacementRules(1, replacementRule);
+        builder->ReplacementFaces()->ReplaceRules(replacementRules, false);
+        delete replacementOptions;
+
+        builder->OnApplyPre();
+        NXOpen::NXObject* result = builder->Commit();
+        builder->Destroy();
+        return result != nullptr;
+    }
+    catch (...)
+    {
+        builder->Destroy();
+        return false;
+    }
+}
+
+bool TryReplaceBlendWithTangentPlane(
+    NXOpen::Part* workPart,
+    tag_t blendFaceTag,
+    const std::vector<tag_t>& tangentPlaneTags)
+{
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    if (workPart == nullptr || session == nullptr)
+    {
+        return false;
+    }
+
+    WriteDebugLog(
+        "replace_failed_blend_start blend_tag=" + std::to_string(blendFaceTag) +
+        " tangent_plane_count=" + std::to_string(tangentPlaneTags.size()) +
+        " tangent_plane_tags=" + FormatTagList(tangentPlaneTags));
+
+    for (tag_t planeTag : tangentPlaneTags)
+    {
+        for (bool reverseDirection : { false, true })
+        {
+            NXOpen::Face* blendFace = ResolveFaceByTag(blendFaceTag);
+            NXOpen::Face* tangentPlane = ResolveFaceByTag(planeTag);
+            if (blendFace == nullptr || tangentPlane == nullptr)
+            {
+                WriteDebugLog(
+                    "replace_failed_blend_skip blend_tag=" + std::to_string(blendFaceTag) +
+                    " plane_tag=" + std::to_string(planeTag) +
+                    " reason=face_not_resolved");
+                continue;
+            }
+
+            const NXOpen::Session::UndoMarkId markId = session->SetUndoMark(
+                NXOpen::Session::MarkVisibilityInvisible,
+                "BaoRongQieChuTryReplaceBlend");
+            std::vector<NXOpen::Face*> facesToReplace(1, blendFace);
+            const bool replaced = TryReplaceFaces(
+                workPart,
+                facesToReplace,
+                tangentPlane,
+                reverseDirection);
+            if (replaced)
+            {
+                session->DeleteUndoMark(markId, "BaoRongQieChuTryReplaceBlend");
+                WriteDebugLog(
+                    "replace_failed_blend_result blend_tag=" + std::to_string(blendFaceTag) +
+                    " plane_tag=" + std::to_string(planeTag) +
+                    " reverse=" + (reverseDirection ? "1" : "0") +
+                    " success=1");
+                return true;
+            }
+
+            session->UndoToMark(markId, "BaoRongQieChuTryReplaceBlend");
+            session->DeleteUndoMark(markId, "BaoRongQieChuTryReplaceBlend");
+            WriteDebugLog(
+                "replace_failed_blend_result blend_tag=" + std::to_string(blendFaceTag) +
+                " plane_tag=" + std::to_string(planeTag) +
+                " reverse=" + (reverseDirection ? "1" : "0") +
+                " success=0");
+        }
+    }
+
+    WriteDebugLog(
+        "replace_failed_blend_end blend_tag=" + std::to_string(blendFaceTag) +
+        " success=0");
+    return false;
+}
+
+std::vector<tag_t> AskPeripheralLoopEdges(tag_t planarFaceTag)
+{
+    std::vector<tag_t> edges;
+    uf_loop_p_t loopList = nullptr;
+    if (UF_MODL_ask_face_loops(planarFaceTag, &loopList) != 0 || loopList == nullptr)
+    {
+        return edges;
+    }
+
+    std::unordered_set<tag_t> seenEdges;
+    for (uf_loop_p_t loop = loopList; loop != nullptr; loop = loop->next)
+    {
+        if (loop->type != 1)
+        {
+            continue;
+        }
+
+        for (uf_list_p_t node = loop->edge_list; node != nullptr; node = node->next)
+        {
+            if (node->eid != NULL_TAG && seenEdges.insert(node->eid).second)
+            {
+                edges.push_back(node->eid);
+            }
+        }
+    }
+
+    UF_MODL_delete_loop_list(&loopList);
+    return edges;
+}
+
+struct PlanarBlendGroup
+{
+    tag_t planarFaceTag;
+    std::vector<tag_t> blendFaceTags;
+};
+
+bool TryReplaceBlendGroupWithPlane(
+    NXOpen::Part* workPart,
+    tag_t planarFaceTag,
+    const std::vector<tag_t>& blendFaceTags)
+{
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    if (workPart == nullptr || session == nullptr || blendFaceTags.empty())
+    {
+        return false;
+    }
+
+    for (bool reverseDirection : { false, true })
+    {
+        NXOpen::Face* planarFace = ResolveFaceByTag(planarFaceTag);
+        std::vector<NXOpen::Face*> blendFaces;
+        blendFaces.reserve(blendFaceTags.size());
+        for (tag_t blendFaceTag : blendFaceTags)
+        {
+            NXOpen::Face* blendFace = ResolveFaceByTag(blendFaceTag);
+            if (blendFace != nullptr)
+            {
+                blendFaces.push_back(blendFace);
+            }
+        }
+        if (planarFace == nullptr || blendFaces.size() != blendFaceTags.size())
+        {
+            WriteDebugLog(
+                "outer_plane_replace_skip plane_tag=" + std::to_string(planarFaceTag) +
+                " requested_count=" + std::to_string(blendFaceTags.size()) +
+                " resolved_count=" + std::to_string(blendFaces.size()) +
+                " reason=face_not_resolved");
+            return false;
+        }
+
+        const NXOpen::Session::UndoMarkId markId = session->SetUndoMark(
+            NXOpen::Session::MarkVisibilityInvisible,
+            "BaoRongQieChuReplaceOuterPlaneBlends");
+        const bool replaced = TryReplaceFaces(
+            workPart,
+            blendFaces,
+            planarFace,
+            reverseDirection);
+        if (replaced)
+        {
+            session->DeleteUndoMark(markId, "BaoRongQieChuReplaceOuterPlaneBlends");
+            WriteDebugLog(
+                "outer_plane_replace_result plane_tag=" + std::to_string(planarFaceTag) +
+                " blend_count=" + std::to_string(blendFaceTags.size()) +
+                " blend_tags=" + FormatTagList(blendFaceTags) +
+                " reverse=" + (reverseDirection ? "1" : "0") +
+                " success=1");
+            return true;
+        }
+
+        session->UndoToMark(markId, "BaoRongQieChuReplaceOuterPlaneBlends");
+        session->DeleteUndoMark(markId, "BaoRongQieChuReplaceOuterPlaneBlends");
+        WriteDebugLog(
+            "outer_plane_replace_result plane_tag=" + std::to_string(planarFaceTag) +
+            " blend_count=" + std::to_string(blendFaceTags.size()) +
+            " blend_tags=" + FormatTagList(blendFaceTags) +
+            " reverse=" + (reverseDirection ? "1" : "0") +
+            " success=0");
+    }
+
+    return false;
+}
+
+void ReplaceQualifyingBlendsFromOuterPlanes(
+    NXOpen::Part* workPart,
+    NXOpen::Body* targetBody,
+    double maxRadius,
+    double sheetThickness,
+    bool hasSheetThickness)
+{
+    if (workPart == nullptr || targetBody == nullptr)
+    {
+        return;
+    }
+
+    const std::vector<NXOpen::Face*> bodyFaces = CollectFacesFromBody(targetBody);
+    const std::vector<NXOpen::Face*> qualifyingBlendFaces =
+        FindBlendFacesByRadius(
+            workPart,
+            bodyFaces,
+            maxRadius,
+            sheetThickness,
+            hasSheetThickness);
+
+    std::unordered_set<tag_t> qualifyingBlendTags;
+    for (NXOpen::Face* blendFace : qualifyingBlendFaces)
+    {
+        if (blendFace != nullptr)
+        {
+            qualifyingBlendTags.insert(blendFace->Tag());
+        }
+    }
+
+    std::map<tag_t, std::unordered_set<tag_t>> blendsByPlanarFace;
+    for (NXOpen::Face* face : bodyFaces)
+    {
+        if (face == nullptr || !IsPlanarFace(face->Tag()))
+        {
+            continue;
+        }
+
+        for (tag_t edgeTag : AskPeripheralLoopEdges(face->Tag()))
+        {
+            logical isSmooth = false;
+            if (UF_MODL_ask_edge_smoothness(edgeTag, 0.0, &isSmooth) != 0 || !isSmooth)
+            {
+                continue;
+            }
+
+            for (tag_t adjacentFaceTag : AskEdgeFaces(edgeTag))
+            {
+                if (qualifyingBlendTags.find(adjacentFaceTag) != qualifyingBlendTags.end())
+                {
+                    blendsByPlanarFace[face->Tag()].insert(adjacentFaceTag);
+                }
+            }
+        }
+    }
+
+    std::vector<PlanarBlendGroup> groups;
+    groups.reserve(blendsByPlanarFace.size());
+    for (const auto& entry : blendsByPlanarFace)
+    {
+        PlanarBlendGroup group;
+        group.planarFaceTag = entry.first;
+        group.blendFaceTags.assign(entry.second.begin(), entry.second.end());
+        std::sort(group.blendFaceTags.begin(), group.blendFaceTags.end());
+        groups.push_back(group);
+    }
+    std::sort(
+        groups.begin(),
+        groups.end(),
+        [](const PlanarBlendGroup& first, const PlanarBlendGroup& second)
+        {
+            if (first.blendFaceTags.size() != second.blendFaceTags.size())
+            {
+                return first.blendFaceTags.size() > second.blendFaceTags.size();
+            }
+            return first.planarFaceTag < second.planarFaceTag;
+        });
+
+    WriteDebugLog(
+        "outer_plane_replace_scan qualifying_blend_count=" +
+        std::to_string(qualifyingBlendTags.size()) +
+        " planar_group_count=" + std::to_string(groups.size()) +
+        " max_radius=" + FormatDouble(maxRadius));
+    for (size_t index = 0; index < groups.size(); ++index)
+    {
+        WriteDebugLog(
+            "outer_plane_replace_group order=" + std::to_string(index + 1) +
+            " plane_tag=" + std::to_string(groups[index].planarFaceTag) +
+            " blend_count=" + std::to_string(groups[index].blendFaceTags.size()) +
+            " blend_tags=" + FormatTagList(groups[index].blendFaceTags));
+    }
+
+    std::unordered_set<tag_t> replacedBlendTags;
+    size_t successfulGroupCount = 0;
+    for (const PlanarBlendGroup& group : groups)
+    {
+        std::vector<tag_t> pendingBlendTags;
+        for (tag_t blendFaceTag : group.blendFaceTags)
+        {
+            if (replacedBlendTags.find(blendFaceTag) == replacedBlendTags.end() &&
+                ResolveFaceByTag(blendFaceTag) != nullptr)
+            {
+                pendingBlendTags.push_back(blendFaceTag);
+            }
+        }
+        if (pendingBlendTags.empty())
+        {
+            continue;
+        }
+
+        if (TryReplaceBlendGroupWithPlane(
+                workPart,
+                group.planarFaceTag,
+                pendingBlendTags))
+        {
+            ++successfulGroupCount;
+            replacedBlendTags.insert(pendingBlendTags.begin(), pendingBlendTags.end());
+        }
+    }
+
+    std::vector<NXOpen::Face*> failedBlendFaces;
+    std::vector<tag_t> failedBlendTags;
+    for (tag_t blendFaceTag : qualifyingBlendTags)
+    {
+        if (replacedBlendTags.find(blendFaceTag) != replacedBlendTags.end())
+        {
+            continue;
+        }
+
+        failedBlendTags.push_back(blendFaceTag);
+        NXOpen::Face* failedFace = ResolveFaceByTag(blendFaceTag);
+        if (failedFace != nullptr)
+        {
+            failedBlendFaces.push_back(failedFace);
+        }
+    }
+    std::sort(failedBlendTags.begin(), failedBlendTags.end());
+    ColorFaces(NXOpen::Session::GetSession(), failedBlendFaces, kRedColor);
+
+    WriteDebugLog(
+        "outer_plane_replace_summary qualifying_blend_count=" +
+        std::to_string(qualifyingBlendTags.size()) +
+        " replaced_blend_count=" + std::to_string(replacedBlendTags.size()) +
+        " successful_group_count=" + std::to_string(successfulGroupCount) +
+        " unreplaced_blend_count=" +
+        std::to_string(qualifyingBlendTags.size() - replacedBlendTags.size()) +
+        " red_failure_count=" + std::to_string(failedBlendFaces.size()) +
+        " failure_tags=" + FormatTagList(failedBlendTags));
+}
+
+bool CreateConnectedFaceFeature(NXOpen::Part* workPart, NXOpen::Body* body)
+{
+    if (workPart == nullptr || body == nullptr)
+    {
+        return false;
+    }
+
+    tag_t resultFeatureTag = NULL_TAG;
+    tag_t faceTags[2] = { NULL_TAG, NULL_TAG };
+    const int errorCode = UF_MODL_edit_face_join(
+        1,
+        body->Tag(),
+        faceTags,
+        &resultFeatureTag);
+    if (errorCode != 0 || resultFeatureTag == NULL_TAG)
+    {
+        WriteDebugLog(
+            "connected_face_commit body_tag=" + std::to_string(body->Tag()) +
+            " api=UF_MODL_edit_face_join error_code=" + std::to_string(errorCode) +
+            " feature_tag=" + std::to_string(resultFeatureTag) +
+            " success=0");
+        return false;
+    }
+
+    WriteDebugLog(
+        "connected_face_commit body_tag=" + std::to_string(body->Tag()) +
+        " api=UF_MODL_edit_face_join error_code=0 feature_tag=" +
+        std::to_string(resultFeatureTag) + " success=1");
+    return true;
+}
+
 void DeleteBlendFaces(
     NXOpen::Part* workPart,
     const std::vector<NXOpen::Face*>& candidateFaces,
@@ -923,26 +2220,191 @@ void DeleteBlendFaces(
         return;
     }
 
-    for (NXOpen::Face* blendFace : candidateFaces)
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    if (session == nullptr)
     {
+        return;
+    }
+
+    std::vector<tag_t> candidateFaceTags;
+    candidateFaceTags.reserve(candidateFaces.size());
+    for (NXOpen::Face* face : candidateFaces)
+    {
+        if (face != nullptr)
+        {
+            candidateFaceTags.push_back(face->Tag());
+        }
+    }
+
+    WriteDebugLog(
+        "blend_delete_start qualifying_count=" + std::to_string(candidateFaceTags.size()) +
+        " max_radius=" + FormatDouble(maxRadius) +
+        " candidate_tags=" + FormatTagList(candidateFaceTags));
+
+    // Phase 1: test every blend face independently against the unchanged body.
+    // Each trial is rolled back immediately so an earlier deletion cannot alter
+    // the topology seen by a later trial.
+    std::vector<tag_t> successfullyDeletedFaceTags;
+    std::vector<tag_t> failedFaceTags;
+    std::map<tag_t, std::vector<tag_t>> tangentPlanesByFailedFace;
+    for (tag_t faceTag : candidateFaceTags)
+    {
+        NXOpen::Face* blendFace = ResolveFaceByTag(faceTag);
         if (blendFace == nullptr)
+        {
+            failedFaceTags.push_back(faceTag);
+            WriteDebugLog(
+                "blend_delete_trial tag=" + std::to_string(faceTag) +
+                " success=0 reason=face_not_resolved tangent_plane_count=0");
+            continue;
+        }
+
+        const std::vector<tag_t> tangentPlaneTags = FindTangentPlanarFaceTags(blendFace);
+        const NXOpen::Session::UndoMarkId trialMarkId = session->SetUndoMark(
+            NXOpen::Session::MarkVisibilityInvisible,
+            "BaoRongQieChuTryDeleteBlend");
+
+        std::vector<NXOpen::Face*> singleFace(1, blendFace);
+        const bool deleted = TryDeleteBlendFaces(workPart, singleFace, maxRadius);
+
+        // The trial feature must never remain in the part. Tags recorded above
+        // resolve to the restored original faces after this undo.
+        session->UndoToMark(trialMarkId, "BaoRongQieChuTryDeleteBlend");
+        session->DeleteUndoMark(trialMarkId, "BaoRongQieChuTryDeleteBlend");
+
+        if (deleted)
+        {
+            successfullyDeletedFaceTags.push_back(faceTag);
+        }
+        else
+        {
+            failedFaceTags.push_back(faceTag);
+            tangentPlanesByFailedFace[faceTag] = tangentPlaneTags;
+        }
+
+        WriteDebugLog(
+            "blend_delete_trial tag=" + std::to_string(faceTag) +
+            " success=" + (deleted ? "1" : "0") +
+            " tangent_plane_count=" + std::to_string(tangentPlaneTags.size()) +
+            " tangent_plane_tags=" + FormatTagList(tangentPlaneTags));
+    }
+
+
+    WriteDebugLog(
+        "blend_delete_trial_summary qualifying_count=" + std::to_string(candidateFaceTags.size()) +
+        " trial_success_count=" + std::to_string(successfullyDeletedFaceTags.size()) +
+        " trial_failure_count=" + std::to_string(failedFaceTags.size()) +
+        " success_tags=" + FormatTagList(successfullyDeletedFaceTags) +
+        " failure_tags=" + FormatTagList(failedFaceTags));
+
+    // Phase 2: commit the faces that passed the single-face test as one blend
+    // deletion feature.
+    std::vector<NXOpen::Face*> successfullyDeletedFaces;
+    successfullyDeletedFaces.reserve(successfullyDeletedFaceTags.size());
+    for (tag_t faceTag : successfullyDeletedFaceTags)
+    {
+        NXOpen::Face* face = ResolveFaceByTag(faceTag);
+        if (face != nullptr)
+        {
+            successfullyDeletedFaces.push_back(face);
+        }
+    }
+
+    bool committedSuccessfulFaces = successfullyDeletedFaces.empty();
+    if (!successfullyDeletedFaces.empty())
+    {
+        committedSuccessfulFaces = TryDeleteBlendFaces(workPart, successfullyDeletedFaces, maxRadius);
+        WriteDebugLog(
+            "blend_delete_commit_success_set requested_count=" +
+            std::to_string(successfullyDeletedFaces.size()) +
+            " committed=" + (committedSuccessfulFaces ? "1" : "0") +
+            " tags=" + FormatTagList(successfullyDeletedFaceTags));
+    }
+    if (!committedSuccessfulFaces)
+    {
+        throw std::runtime_error("Failed to commit the blend faces that passed the single-face deletion test.");
+    }
+
+    // Phase 3: a failed blend is replaced by one of its smooth adjacent planar
+    // support faces. Try both support planes and both replacement directions.
+    size_t replacedFailedFaceCount = 0;
+    for (tag_t failedFaceTag : failedFaceTags)
+    {
+        const auto tangentPlanes = tangentPlanesByFailedFace.find(failedFaceTag);
+        if (tangentPlanes == tangentPlanesByFailedFace.end())
         {
             continue;
         }
 
-        std::vector<NXOpen::Face*> singleFace(1, blendFace);
-        static_cast<void>(TryDeleteBlendFaces(workPart, singleFace, maxRadius));
-        return;
+        const bool replaced = TryReplaceBlendWithTangentPlane(
+            workPart,
+            failedFaceTag,
+            tangentPlanes->second);
+        if (replaced)
+        {
+            ++replacedFailedFaceCount;
+        }
     }
+
+    WriteDebugLog(
+        "blend_delete_final_summary qualifying_count=" + std::to_string(candidateFaceTags.size()) +
+        " deleted_count=" + std::to_string(successfullyDeletedFaces.size()) +
+        " delete_failed_count=" + std::to_string(failedFaceTags.size()) +
+        " replaced_failed_count=" + std::to_string(replacedFailedFaceCount) +
+        " unresolved_failed_count=" +
+            std::to_string(failedFaceTags.size() - replacedFailedFaceCount));
 }
 
-void DeleteFacesWithHeal(
+std::vector<std::vector<tag_t>> PartitionFacesIntoConnectedRegions(
+    const std::vector<tag_t>& faceTags)
+{
+    std::unordered_set<tag_t> candidates(faceTags.begin(), faceTags.end());
+    std::unordered_set<tag_t> visited;
+    std::vector<tag_t> orderedTags(candidates.begin(), candidates.end());
+    std::sort(orderedTags.begin(), orderedTags.end());
+
+    std::vector<std::vector<tag_t>> regions;
+    for (tag_t seedFaceTag : orderedTags)
+    {
+        if (!visited.insert(seedFaceTag).second)
+        {
+            continue;
+        }
+
+        std::vector<tag_t> region;
+        std::vector<tag_t> pending(1, seedFaceTag);
+        while (!pending.empty())
+        {
+            const tag_t faceTag = pending.back();
+            pending.pop_back();
+            region.push_back(faceTag);
+
+            for (tag_t edgeTag : AskFaceEdges(faceTag))
+            {
+                for (tag_t adjacentFaceTag : AskEdgeFaces(edgeTag))
+                {
+                    if (candidates.find(adjacentFaceTag) != candidates.end() &&
+                        visited.insert(adjacentFaceTag).second)
+                    {
+                        pending.push_back(adjacentFaceTag);
+                    }
+                }
+            }
+        }
+
+        std::sort(region.begin(), region.end());
+        regions.push_back(region);
+    }
+    return regions;
+}
+
+bool DeleteFacesWithHeal(
     NXOpen::Part* workPart,
     const std::vector<NXOpen::Face*>& faces)
 {
     if (workPart == nullptr || faces.empty())
     {
-        return;
+        return false;
     }
 
     NXOpen::Features::DeleteFaceBuilder* deleteFaceBuilder = workPart->Features()->CreateDeleteFaceBuilder(nullptr);
@@ -961,15 +2423,15 @@ void DeleteFacesWithHeal(
 
     try
     {
-        deleteFaceBuilder->CommitFeature();
+        NXOpen::Features::Feature* feature = deleteFaceBuilder->CommitFeature();
+        deleteFaceBuilder->Destroy();
+        return feature != nullptr;
     }
     catch (...)
     {
         deleteFaceBuilder->Destroy();
-        return;
+        return false;
     }
-
-    deleteFaceBuilder->Destroy();
 }
 
 NXOpen::Features::BooleanFeature* SubtractToolBody(
@@ -1055,7 +2517,10 @@ void ExecuteEnvelopeCut(
     bool removeBlend,
     double blendRadius,
     bool healRemovedRegion,
-    NXOpen::Features::BooleanFeature** outBooleanFeature = nullptr)
+    NXOpen::Features::BooleanFeature** outBooleanFeature = nullptr,
+    NXOpen::Body** outTargetBody = nullptr,
+    double* outSheetThickness = nullptr,
+    bool* outHasSheetThickness = nullptr)
 {
     if (workPart == nullptr || selectedObjects.empty())
     {
@@ -1115,22 +2580,43 @@ void ExecuteEnvelopeCut(
         throw std::runtime_error("No owning solid body was found for subtract.");
     }
 
-    NXOpen::Features::Feature* envelopeFeature = CreateEnvelopeBlock(workPart, minCorner, maxCorner, envelopeOffset);
     NXOpen::Body* targetBody = dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(ownerBodyTag));
     if (targetBody == nullptr)
     {
         throw std::runtime_error("Failed to get the owning body.");
     }
 
+    double preCutSheetThickness = 0.0;
+    bool hasPreCutSheetThickness = false;
+    if (removeBlend)
+    {
+        hasPreCutSheetThickness = InferSheetThicknessFromLargestPlanarFace(
+            workPart,
+            CollectFacesFromBody(targetBody),
+            preCutSheetThickness);
+        WriteDebugLog(
+            "pre_cut_thickness available=" +
+            std::string(hasPreCutSheetThickness ? "1" : "0") +
+            " thickness=" + FormatDouble(preCutSheetThickness));
+    }
+
+    if (outTargetBody != nullptr)
+    {
+        *outTargetBody = targetBody;
+    }
+    if (outSheetThickness != nullptr)
+    {
+        *outSheetThickness = preCutSheetThickness;
+    }
+    if (outHasSheetThickness != nullptr)
+    {
+        *outHasSheetThickness = hasPreCutSheetThickness;
+    }
+
+    NXOpen::Features::Feature* envelopeFeature = CreateEnvelopeBlock(workPart, minCorner, maxCorner, envelopeOffset);
+
     if (!enableBooleanSubtract)
     {
-      if (removeBlend)
-      {
-          const std::vector<NXOpen::Face*> candidateFaces = CollectFacesFromBody(targetBody);
-          const std::vector<NXOpen::Face*> blendFaces = FindBlendFacesByRadius(workPart, candidateFaces, blendRadius);
-          ColorFaces(NXOpen::Session::GetSession(), blendFaces, kRedColor);
-          DeleteBlendFaces(workPart, blendFaces, blendRadius);
-      }
         return;
     }
 
@@ -1142,17 +2628,12 @@ void ExecuteEnvelopeCut(
 
     NXOpen::Features::BooleanFeature* booleanFeature = SubtractToolBody(workPart, targetBody, toolBody);
     static_cast<void>(healRemovedRegion);
+
     if (outBooleanFeature != nullptr)
     {
         *outBooleanFeature = booleanFeature;
     }
 
-    if (removeBlend)
-    {
-        const std::vector<NXOpen::Face*> candidateFaces = CollectFacesFromBody(targetBody);
-        const std::vector<NXOpen::Face*> blendFaces = FindBlendFacesByRadius(workPart, candidateFaces, blendRadius);
-        DeleteBlendFaces(workPart, blendFaces, blendRadius);
-    }
 }
 }
 
@@ -1168,8 +2649,9 @@ BaoRongQieChuDialog::BaoRongQieChuDialog()
       healRemovedRegionToggleBlock_(nullptr),
       offsetBlock_(nullptr),
       pendingHoleProfiles_(),
-      pendingBlendBodies_(),
+      pendingBlendReplacements_(),
       pendingCutFeatures_(),
+      pendingConnectedFaceBodies_(),
       isInternalUpdate_(false)
 {
     const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_BAORONGQIECHU_DLX);
@@ -1275,13 +2757,19 @@ int BaoRongQieChuDialog::ExecuteFromSelection()
         return result;
     }
 
-    result = ExecutePendingBlendRemoval();
+    result = ExecutePendingBlendReplacement();
     if (result != 0)
     {
         return result;
     }
 
-    return ExecutePendingCutFaceRemoval();
+    result = ExecutePendingCutFaceRemoval();
+    if (result != 0)
+    {
+        return result;
+    }
+
+    return ExecutePendingConnectedFaceCreation();
 }
 
 int BaoRongQieChuDialog::ExecuteImmediateCutFromSelection()
@@ -1304,9 +2792,11 @@ int BaoRongQieChuDialog::ExecuteImmediateCutFromSelection()
 
     try
     {
-        NXOpen::Body* targetBody = ResolveTargetBodyFromSelection(selectedObjects);
         const double envelopeOffset = GetOffsetValue();
         NXOpen::Features::BooleanFeature* booleanFeature = nullptr;
+        NXOpen::Body* targetBody = nullptr;
+        double sheetThickness = 0.0;
+        bool hasSheetThickness = false;
         if (GetHealRemovedRegionEnabled())
         {
             CapturePendingHoleProfiles(selectedObjects);
@@ -1320,14 +2810,13 @@ int BaoRongQieChuDialog::ExecuteImmediateCutFromSelection()
             selectedObjects,
             GetBooleanSubtractEnabled(),
             envelopeOffset,
+            GetRemoveBlendEnabled(),
+            GetBlendRadiusValue(),
             false,
-            0.0,
-            false,
-            &booleanFeature);
-        if (GetRemoveBlendEnabled())
-        {
-            RememberPendingBlendBody(targetBody);
-        }
+            &booleanFeature,
+            &targetBody,
+            &sheetThickness,
+            &hasSheetThickness);
         if (booleanFeature != nullptr)
         {
             ColorFaces(session_, booleanFeature->GetFaces(), kBlueColor);
@@ -1335,6 +2824,20 @@ int BaoRongQieChuDialog::ExecuteImmediateCutFromSelection()
         if (GetHealRemovedRegionEnabled() && booleanFeature != nullptr)
         {
             RememberPendingCutFeature(booleanFeature);
+        }
+        if (GetRemoveBlendEnabled() && booleanFeature != nullptr && targetBody != nullptr)
+        {
+            RememberPendingBlendReplacement(
+                targetBody,
+                GetBlendRadiusValue(),
+                sheetThickness,
+                hasSheetThickness);
+            RememberPendingConnectedFaceBody(targetBody);
+            WriteDebugLog(
+                "blend_replace_deferred_until_confirm body_tag=" +
+                std::to_string(targetBody->Tag()) +
+                " max_radius=" + FormatDouble(GetBlendRadiusValue()) +
+                " sheet_thickness=" + FormatDouble(sheetThickness));
         }
         ClearSelection();
         session_->DeleteUndoMark(markId, "BaoRongQieChu");
@@ -1357,15 +2860,15 @@ int BaoRongQieChuDialog::ExecuteImmediateCutFromSelection()
     return 1;
 }
 
-int BaoRongQieChuDialog::ExecutePendingBlendRemoval()
+int BaoRongQieChuDialog::ExecutePendingBlendReplacement()
 {
     if (!GetRemoveBlendEnabled())
     {
-        pendingBlendBodies_.clear();
+        pendingBlendReplacements_.clear();
         return 0;
     }
 
-    if (pendingBlendBodies_.empty())
+    if (pendingBlendReplacements_.empty())
     {
         return 0;
     }
@@ -1378,26 +2881,35 @@ int BaoRongQieChuDialog::ExecutePendingBlendRemoval()
     }
 
     const NXOpen::Session::UndoMarkId markId =
-        session_->SetUndoMark(NXOpen::Session::MarkVisibilityVisible, "BaoRongQieChuRemoveBlend");
+        session_->SetUndoMark(NXOpen::Session::MarkVisibilityVisible, "BaoRongQieChuReplaceBlend");
 
     try
     {
-        for (NXOpen::Body* body : pendingBlendBodies_)
+        for (const PendingBlendReplacement& pending : pendingBlendReplacements_)
         {
-            if (body == nullptr)
+            if (pending.targetBody == nullptr)
             {
                 continue;
             }
 
-            const std::vector<NXOpen::Face*> candidateFaces = CollectFacesFromBody(body);
-            const std::vector<NXOpen::Face*> blendFaces =
-                FindBlendFacesByRadius(workPart, candidateFaces, GetBlendRadiusValue());
-            ColorFaces(session_, blendFaces, kRedColor);
-            DeleteBlendFaces(workPart, blendFaces, GetBlendRadiusValue());
+            WriteDebugLog(
+                "confirmed_outer_plane_replace_start body_tag=" +
+                std::to_string(pending.targetBody->Tag()) +
+                " max_radius=" + FormatDouble(pending.maxRadius) +
+                " sheet_thickness=" + FormatDouble(pending.sheetThickness));
+            ReplaceQualifyingBlendsFromOuterPlanes(
+                workPart,
+                pending.targetBody,
+                pending.maxRadius,
+                pending.sheetThickness,
+                pending.hasSheetThickness);
+            WriteDebugLog(
+                "confirmed_outer_plane_replace_end body_tag=" +
+                std::to_string(pending.targetBody->Tag()));
         }
 
-        pendingBlendBodies_.clear();
-        session_->DeleteUndoMark(markId, "BaoRongQieChuRemoveBlend");
+        pendingBlendReplacements_.clear();
+        session_->DeleteUndoMark(markId, "BaoRongQieChuReplaceBlend");
         return 0;
     }
     catch (const NXOpen::NXException& ex)
@@ -1410,8 +2922,8 @@ int BaoRongQieChuDialog::ExecutePendingBlendRemoval()
         ShowError(ex.what());
     }
 
-    session_->UndoToMark(markId, "BaoRongQieChuRemoveBlend");
-    session_->DeleteUndoMark(markId, "BaoRongQieChuRemoveBlend");
+    session_->UndoToMark(markId, "BaoRongQieChuReplaceBlend");
+    session_->DeleteUndoMark(markId, "BaoRongQieChuReplaceBlend");
     return 1;
 }
 
@@ -1441,16 +2953,21 @@ int BaoRongQieChuDialog::ExecutePendingCutFaceRemoval()
 
     try
     {
-        std::map<tag_t, std::vector<NXOpen::Face*>> facesByBody;
         std::unordered_set<tag_t> seenFaceTags;
+        size_t featureOrder = 0;
+        size_t totalRegionCount = 0;
+        size_t successfulRegionCount = 0;
+        size_t failedRegionCount = 0;
 
         for (NXOpen::Features::BooleanFeature* feature : pendingCutFeatures_)
         {
+            ++featureOrder;
             if (feature == nullptr)
             {
                 continue;
             }
 
+            std::vector<tag_t> featureFaceTags;
             const std::vector<NXOpen::Face*> cutFaces = feature->GetFaces();
             for (NXOpen::Face* face : cutFaces)
             {
@@ -1459,26 +2976,68 @@ int BaoRongQieChuDialog::ExecutePendingCutFaceRemoval()
                     continue;
                 }
 
-                tag_t bodyTag = NULL_TAG;
-                if (UF_MODL_ask_face_body(face->Tag(), &bodyTag) != 0 || bodyTag == NULL_TAG)
+                featureFaceTags.push_back(face->Tag());
+            }
+
+            const std::vector<std::vector<tag_t>> regions =
+                PartitionFacesIntoConnectedRegions(featureFaceTags);
+            WriteDebugLog(
+                "cut_heal_feature feature_order=" + std::to_string(featureOrder) +
+                " feature_tag=" + std::to_string(feature->Tag()) +
+                " cut_face_count=" + std::to_string(featureFaceTags.size()) +
+                " connected_region_count=" + std::to_string(regions.size()));
+
+            for (size_t regionIndex = 0; regionIndex < regions.size(); ++regionIndex)
+            {
+                ++totalRegionCount;
+                std::vector<NXOpen::Face*> regionFaces;
+                std::vector<tag_t> resolvedTags;
+                for (tag_t faceTag : regions[regionIndex])
                 {
+                    NXOpen::Face* face = ResolveFaceByTag(faceTag);
+                    if (face != nullptr)
+                    {
+                        regionFaces.push_back(face);
+                        resolvedTags.push_back(faceTag);
+                    }
+                }
+
+                if (regionFaces.empty())
+                {
+                    ++failedRegionCount;
+                    WriteDebugLog(
+                        "cut_heal_region feature_order=" + std::to_string(featureOrder) +
+                        " region_order=" + std::to_string(regionIndex + 1) +
+                        " requested_face_count=" + std::to_string(regions[regionIndex].size()) +
+                        " resolved_face_count=0 success=0 reason=faces_not_resolved");
                     continue;
                 }
 
-                facesByBody[bodyTag].push_back(face);
+                ColorFaces(session_, regionFaces, kBlueColor);
+                const bool healed = DeleteFacesWithHeal(workPart, regionFaces);
+                if (healed)
+                {
+                    ++successfulRegionCount;
+                }
+                else
+                {
+                    ++failedRegionCount;
+                }
+                WriteDebugLog(
+                    "cut_heal_region feature_order=" + std::to_string(featureOrder) +
+                    " region_order=" + std::to_string(regionIndex + 1) +
+                    " requested_face_count=" + std::to_string(regions[regionIndex].size()) +
+                    " resolved_face_count=" + std::to_string(regionFaces.size()) +
+                    " resolved_tags=" + FormatTagList(resolvedTags) +
+                    " success=" + (healed ? "1" : "0"));
             }
         }
 
-        for (const auto& entry : facesByBody)
-        {
-            if (entry.second.empty())
-            {
-                continue;
-            }
-
-            ColorFaces(session_, entry.second, kBlueColor);
-            DeleteFacesWithHeal(workPart, entry.second);
-        }
+        WriteDebugLog(
+            "cut_heal_summary feature_count=" + std::to_string(pendingCutFeatures_.size()) +
+            " region_count=" + std::to_string(totalRegionCount) +
+            " success_count=" + std::to_string(successfulRegionCount) +
+            " failure_count=" + std::to_string(failedRegionCount));
 
         RestorePendingHoleProfiles(workPart);
         pendingCutFeatures_.clear();
@@ -1498,6 +3057,64 @@ int BaoRongQieChuDialog::ExecutePendingCutFaceRemoval()
     session_->UndoToMark(markId, "BaoRongQieChuHealCutFaces");
     session_->DeleteUndoMark(markId, "BaoRongQieChuHealCutFaces");
     return 1;
+}
+
+int BaoRongQieChuDialog::ExecutePendingConnectedFaceCreation()
+{
+    if (!GetRemoveBlendEnabled())
+    {
+        pendingConnectedFaceBodies_.clear();
+        return 0;
+    }
+    if (pendingConnectedFaceBodies_.empty())
+    {
+        return 0;
+    }
+
+    NXOpen::Part* workPart = session_ != nullptr && session_->Parts() != nullptr ?
+        session_->Parts()->Work() : nullptr;
+    if (workPart == nullptr)
+    {
+        ShowError("No active work part.");
+        return 1;
+    }
+
+    const NXOpen::Session::UndoMarkId markId = session_->SetUndoMark(
+        NXOpen::Session::MarkVisibilityVisible,
+        "BaoRongQieChuConnectedFace");
+    size_t successCount = 0;
+    size_t failureCount = 0;
+    for (NXOpen::Body* body : pendingConnectedFaceBodies_)
+    {
+        if (body == nullptr)
+        {
+            ++failureCount;
+            continue;
+        }
+
+        const bool created = CreateConnectedFaceFeature(workPart, body);
+        if (created)
+        {
+            ++successCount;
+        }
+        else
+        {
+            ++failureCount;
+        }
+        WriteDebugLog(
+            "connected_face_result body_tag=" + std::to_string(body->Tag()) +
+            " success=" + (created ? "1" : "0"));
+    }
+
+    WriteDebugLog(
+        "connected_face_summary requested_count=" +
+        std::to_string(pendingConnectedFaceBodies_.size()) +
+        " success_count=" + std::to_string(successCount) +
+        " skipped_count=" + std::to_string(failureCount));
+    pendingConnectedFaceBodies_.clear();
+
+    session_->DeleteUndoMark(markId, "BaoRongQieChuConnectedFace");
+    return 0;
 }
 
 std::vector<NXOpen::TaggedObject*> BaoRongQieChuDialog::GetSelectedObjects() const
@@ -1610,7 +3227,8 @@ void BaoRongQieChuDialog::SyncOptionalControls()
 
     if (!removeBlend)
     {
-        pendingBlendBodies_.clear();
+        pendingBlendReplacements_.clear();
+        pendingConnectedFaceBodies_.clear();
     }
 
     if (!GetHealRemovedRegionEnabled())
@@ -1640,22 +3258,30 @@ void BaoRongQieChuDialog::SaveDialogMemory()
     zhihui_dialog_memory::SaveDouble(fileName, L"offset", offsetBlock_);
 }
 
-void BaoRongQieChuDialog::RememberPendingBlendBody(NXOpen::Body* body)
+void BaoRongQieChuDialog::RememberPendingBlendReplacement(
+    NXOpen::Body* body,
+    double maxRadius,
+    double sheetThickness,
+    bool hasSheetThickness)
 {
     if (body == nullptr)
     {
         return;
     }
 
-    for (NXOpen::Body* existingBody : pendingBlendBodies_)
+    for (PendingBlendReplacement& pending : pendingBlendReplacements_)
     {
-        if (existingBody == body)
+        if (pending.targetBody == body)
         {
+            pending.maxRadius = maxRadius;
+            pending.sheetThickness = sheetThickness;
+            pending.hasSheetThickness = hasSheetThickness;
             return;
         }
     }
 
-    pendingBlendBodies_.push_back(body);
+    pendingBlendReplacements_.push_back(
+        { body, maxRadius, sheetThickness, hasSheetThickness });
 }
 
 void BaoRongQieChuDialog::RememberPendingCutFeature(NXOpen::Features::BooleanFeature* feature)
@@ -1676,8 +3302,32 @@ void BaoRongQieChuDialog::RememberPendingCutFeature(NXOpen::Features::BooleanFea
     pendingCutFeatures_.push_back(feature);
 }
 
+void BaoRongQieChuDialog::RememberPendingConnectedFaceBody(NXOpen::Body* body)
+{
+    if (body == nullptr)
+    {
+        return;
+    }
+
+    for (NXOpen::Body* existingBody : pendingConnectedFaceBodies_)
+    {
+        if (existingBody == body)
+        {
+            return;
+        }
+    }
+    pendingConnectedFaceBodies_.push_back(body);
+}
+
 void BaoRongQieChuDialog::CapturePendingHoleProfiles(const std::vector<NXOpen::TaggedObject*>& selectedObjects)
 {
+    NXOpen::Part* workPart = session_ != nullptr && session_->Parts() != nullptr ?
+        session_->Parts()->Work() : nullptr;
+    if (workPart == nullptr)
+    {
+        return;
+    }
+
     std::unordered_set<std::string> capturedLoops;
     std::unordered_set<std::string> capturedProfilePlaneLoops;
     for (const HoleLoopProfile& profile : pendingHoleProfiles_)
@@ -1708,7 +3358,7 @@ void BaoRongQieChuDialog::CapturePendingHoleProfiles(const std::vector<NXOpen::T
         return false;
     };
 
-    const auto captureFirstMatchingLoop = [&](const std::unordered_set<tag_t>& selectedRingEdges) -> bool
+    const auto captureMatchingLoops = [&](const std::unordered_set<tag_t>& selectedRingEdges) -> bool
     {
         std::unordered_set<tag_t> checkedPlanarFaces;
         std::vector<PlanarFaceData> candidatePlanes;
@@ -1732,6 +3382,7 @@ void BaoRongQieChuDialog::CapturePendingHoleProfiles(const std::vector<NXOpen::T
             }
         }
 
+        bool capturedAny = false;
         for (const PlanarFaceData& planeData : candidatePlanes)
         {
                 NXOpen::Body* targetBody = dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(planeData.bodyTag));
@@ -1754,6 +3405,33 @@ void BaoRongQieChuDialog::CapturePendingHoleProfiles(const std::vector<NXOpen::T
                         continue;
                     }
 
+                    NXOpen::Face* planarFace = dynamic_cast<NXOpen::Face*>(
+                        NXOpen::NXObjectManager::Get(planeData.faceTag));
+                    double faceArea = 0.0;
+                    double innerLoopArea = 0.0;
+                    const bool hasFaceArea = AskFaceArea(workPart, planarFace, faceArea);
+                    const bool hasInnerLoopArea = AskPlanarLoopArea(
+                        loop,
+                        planeData.normal,
+                        innerLoopArea);
+                    const double areaRatio =
+                        hasFaceArea && faceArea > 1.0e-9 && hasInnerLoopArea ?
+                        innerLoopArea / faceArea : 0.0;
+                    const bool areaQualifies =
+                        hasFaceArea && hasInnerLoopArea && areaRatio < 0.15;
+                    WriteDebugLog(
+                        "hole_profile_inner_loop_area face_tag=" +
+                        std::to_string(planeData.faceTag) +
+                        " face_area=" + FormatDouble(faceArea) +
+                        " inner_loop_area=" + FormatDouble(innerLoopArea) +
+                        " area_ratio=" + FormatDouble(areaRatio) +
+                        " limit=0.150000 qualifies=" +
+                        (areaQualifies ? "1" : "0"));
+                    if (!areaQualifies)
+                    {
+                        continue;
+                    }
+
                     const std::string loopKey = MakeLoopKey(planeData.faceTag, loop);
                     if (!capturedLoops.insert(loopKey).second)
                     {
@@ -1766,11 +3444,18 @@ void BaoRongQieChuDialog::CapturePendingHoleProfiles(const std::vector<NXOpen::T
                         MakeProfilePlaneLoopKey(planeData.bodyTag, planeData.normal, loop);
                     if (capturedProfilePlaneLoops.find(profilePlaneLoopKey) != capturedProfilePlaneLoops.end())
                     {
+                        WriteDebugLog(
+                            "hole_profile_skip_duplicate_plane face_tag=" +
+                            std::to_string(planeData.faceTag));
                         continue;
                     }
 
                     if (!capturedProjectedLoopsInThisSelection.insert(projectedLoopKey).second)
                     {
+                        WriteDebugLog(
+                            "hole_profile_skip_duplicate_projection face_tag=" +
+                            std::to_string(planeData.faceTag) +
+                            " inner_loop_area=" + FormatDouble(innerLoopArea));
                         continue;
                     }
                     capturedProfilePlaneLoops.insert(profilePlaneLoopKey);
@@ -1797,6 +3482,12 @@ void BaoRongQieChuDialog::CapturePendingHoleProfiles(const std::vector<NXOpen::T
                     {
                         pendingHoleProfiles_.push_back(profile);
                         capturedFromThisFace = true;
+                        capturedAny = true;
+                        WriteDebugLog(
+                            "hole_profile_captured face_tag=" +
+                            std::to_string(planeData.faceTag) +
+                            " inner_loop_area=" + FormatDouble(innerLoopArea) +
+                            " curve_count=" + std::to_string(profile.curveTags.size()));
                         break;
                     }
                 }
@@ -1804,11 +3495,11 @@ void BaoRongQieChuDialog::CapturePendingHoleProfiles(const std::vector<NXOpen::T
                 UF_MODL_delete_loop_list(&loopList);
                 if (capturedFromThisFace)
                 {
-                    return true;
+                    continue;
                 }
         }
 
-        return false;
+        return capturedAny;
     };
 
     for (NXOpen::TaggedObject* object : selectedObjects)
@@ -1838,7 +3529,7 @@ void BaoRongQieChuDialog::CapturePendingHoleProfiles(const std::vector<NXOpen::T
                 }
 
                 const std::unordered_set<tag_t> ringEdges = ExpandHoleRingEdgesFromSeedEdge(edge->Tag());
-                if (captureFirstMatchingLoop(ringEdges))
+                if (captureMatchingLoops(ringEdges))
                 {
                     markConsumedEdges(ringEdges);
                     capturedFromHoleFace = true;
@@ -1849,7 +3540,7 @@ void BaoRongQieChuDialog::CapturePendingHoleProfiles(const std::vector<NXOpen::T
             if (!touchesHoleFace && !capturedFromHoleFace)
             {
                 const std::unordered_set<tag_t> ringEdges{edge->Tag()};
-                if (!hasConsumedEdge(ringEdges) && captureFirstMatchingLoop(ringEdges))
+                if (!hasConsumedEdge(ringEdges) && captureMatchingLoops(ringEdges))
                 {
                     markConsumedEdges(ringEdges);
                 }
@@ -1890,7 +3581,7 @@ void BaoRongQieChuDialog::CapturePendingHoleProfiles(const std::vector<NXOpen::T
         if (!faceEdges.empty())
         {
             const std::unordered_set<tag_t> ringEdges(faceEdges.begin(), faceEdges.end());
-            if (!hasConsumedEdge(ringEdges) && captureFirstMatchingLoop(ringEdges))
+            if (!hasConsumedEdge(ringEdges) && captureMatchingLoops(ringEdges))
             {
                 markConsumedEdges(ringEdges);
             }
