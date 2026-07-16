@@ -73,6 +73,8 @@ private:
     int ok_cb();
     int cancel_cb();
     int close_cb();
+    void LoadDialogMemory();
+    void SaveDialogMemory() const;
 
     bool ReadInputs(InferredInputs& inputs,
                     NXOpen::TaggedObject* singleClickObjectOverride = nullptr,
@@ -86,8 +88,8 @@ private:
                                      const NXOpen::Point3d& clickPoint,
                                      InferredInputs& inputs) const;
     bool CompleteInputsForEndpoints(InferredInputs& inputs) const;
-    bool RefreshSmartInputsAfterRips(const InferredInputs& originalInputs,
-                                     InferredInputs& refreshedInputs) const;
+    bool RefreshInputsAfterRips(const InferredInputs& originalInputs,
+                                InferredInputs& refreshedInputs) const;
     bool ConstrainRightAnglePrimaryP2ToOffsetSharedEdges(
         const InferredInputs& originalInputs,
         const InferredInputs& currentInputs,
@@ -254,6 +256,15 @@ private:
                             tag_t& resultFeatureTag,
                             std::string& errorMessage) const;
     bool CreatePreview();
+    bool LoadEditedFeatureState();
+    bool DetachEditedFeatureOutputs(std::string& errorMessage);
+    bool CommitCompositeFeature(const InferredInputs& inputs,
+                                const std::vector<tag_t>& childFeatureTags,
+                                const std::vector<tag_t>& referenceTags,
+                                std::string& errorMessage);
+    std::vector<tag_t> FindOwnedFeatureTags(const std::string& ownerId) const;
+    bool ReorderEditedCompositeAfterChildren(const std::vector<tag_t>& featureTags,
+                                             std::string& errorMessage);
     void UndoPreview(bool includeCommitted = false);
     void CommitPreview();
     void FinalizeCommittedPreview();
@@ -278,6 +289,15 @@ private:
     NXOpen::BlockStyler::Enumeration* featureModeBlock_;
     NXOpen::Features::CustomFeatureClassManager* customFeatureManager_;
     NXOpen::Features::CustomFeature* editedFeature_;
+    tag_t editedFeatureTag_;
+    tag_t editedInternalGroupTag_;
+    tag_t editedSavedCurrentFeatureTag_;
+    tag_t editedInsertionAnchorTag_;
+    bool editedCurrentFeatureRepositioned_;
+    std::string editedOwnerId_;
+    bool hasEditedEndpointCache_;
+    NXOpen::Point3d editedCachedP1_;
+    NXOpen::Point3d editedCachedP2_;
     NXOpen::Features::CustomFeatureClass* featureClass_;
     NXOpen::Session::UndoMarkId previewUndoMark_;
     tag_t previewUdfTag_;
@@ -292,4 +312,9 @@ private:
     bool hasPreview_;
     bool previewCommitted_;
     bool isUpdatingPreview_;
+    bool editedOutputsDetached_;
 };
+
+// Embedded PRT resources are extracted only below this process-specific root.
+// Calling this after the dialog and during unload removes any crash-safe leftovers.
+void CleanupTwoPointSiBianTemporaryTemplates();
