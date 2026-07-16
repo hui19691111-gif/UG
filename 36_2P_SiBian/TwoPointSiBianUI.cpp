@@ -6,6 +6,7 @@
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_StringBlock.hxx>
 #include <NXOpen/BlockStyler_Toggle.hxx>
+#include <NXOpen/BodyDumbRule.hxx>
 #include <NXOpen/CartesianCoordinateSystem.hxx>
 #include <NXOpen/CoordinateSystemCollection.hxx>
 #include <NXOpen/Direction.hxx>
@@ -22,6 +23,7 @@
 #include <NXOpen/Features_CustomStringAttribute.hxx>
 #include <NXOpen/Features_CustomTagArrayAttribute.hxx>
 #include <NXOpen/Features_BooleanBuilder.hxx>
+#include <NXOpen/Features_BooleanFeature.hxx>
 #include <NXOpen/Features_CustomFeatureBuilder.hxx>
 #include <NXOpen/Features_CustomFeatureData.hxx>
 #include <NXOpen/Features_CustomFeatureDataCollection.hxx>
@@ -57,12 +59,15 @@
 #include <NXOpen/PartCollection.hxx>
 #include <NXOpen/Plane.hxx>
 #include <NXOpen/PlaneCollection.hxx>
+#include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/Point.hxx>
 #include <NXOpen/PointCollection.hxx>
 #include <NXOpen/Section.hxx>
 #include <NXOpen/SectionCollection.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
+#include <NXOpen/ScCollector.hxx>
+#include <NXOpen/ScCollectorCollection.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
 #include <NXOpen/SmartObject.hxx>
@@ -90,6 +95,7 @@
 #include <uf_part.h>
 #include <uf_point.h>
 #include <uf_ui.h>
+#include <uf_view.h>
 
 #include <windows.h>
 #include <objbase.h>
@@ -127,6 +133,7 @@ constexpr double kPointTolerance = 1.0e-4;
 constexpr double kPlaneTolerance = 1.0e-3;
 constexpr double kSmartInnerLoopMinimumAreaRatio = 0.15;
 constexpr double kCornerExtensionDistance = 0.05;
+constexpr double kFaceNormalProbeDistance = 0.05;
 constexpr double kThicknessProjectionOverlapRatio = 0.60;
 constexpr double kThicknessProjectionAreaErrorRatio = 0.05;
 constexpr double kEndpointPairMinimumAngleDegrees = 150.0;
@@ -320,6 +327,72 @@ void AppendDebugLog(const std::string& message)
         log << "[" << stamp << "] " << message << std::endl;
     }
 }
+
+class ScopedPreviewDisplaySuppressor
+{
+public:
+    ScopedPreviewDisplaySuppressor()
+        : previousDisplayCode_(UF_DISP_UNSUPPRESS_DISPLAY),
+          previousStateKnown_(UF_DISP_ask_display(&previousDisplayCode_) == 0),
+          changedDisplayState_(false),
+          workView_(NULL_TAG),
+          workViewKnown_(UF_VIEW_ask_work_view(&workView_) == 0 &&
+                         workView_ != NULL_TAG)
+    {
+        if (!previousStateKnown_ ||
+            previousDisplayCode_ != UF_DISP_SUPPRESS_DISPLAY)
+        {
+            changedDisplayState_ =
+                UF_DISP_set_display(UF_DISP_SUPPRESS_DISPLAY) == 0;
+        }
+        AppendDebugLog("CreatePreview silent display begin: previousStateKnown=" +
+                       std::string(previousStateKnown_ ? "true" : "false") +
+                       ", previousState=" + std::to_string(previousDisplayCode_) +
+                       ", suppressedByPreview=" +
+                       std::string(changedDisplayState_ ? "true" : "false"));
+    }
+
+    ~ScopedPreviewDisplaySuppressor()
+    {
+        if (!changedDisplayState_)
+        {
+            return;
+        }
+
+        const int restoreCode = previousStateKnown_
+                                    ? previousDisplayCode_
+                                    : UF_DISP_UNSUPPRESS_DISPLAY;
+        UF_DISP_set_display(restoreCode);
+        if (restoreCode != UF_DISP_SUPPRESS_DISPLAY)
+        {
+            // Regenerating the complete display also repaints Block Styler and
+            // produces a visible flash.  Only the modeling work view changed
+            // while preview display was suppressed, so update that view only.
+            if (workViewKnown_)
+            {
+                UF_DISP_regenerate_view(workView_);
+            }
+        }
+        AppendDebugLog("CreatePreview silent display end: restoredState=" +
+                       std::to_string(restoreCode) +
+                       ", workViewRegenerated=" +
+                       std::string(restoreCode != UF_DISP_SUPPRESS_DISPLAY &&
+                                           workViewKnown_
+                                       ? "true"
+                                       : "false") +
+                       ", workViewTag=" + std::to_string(workView_));
+    }
+
+    ScopedPreviewDisplaySuppressor(const ScopedPreviewDisplaySuppressor&) = delete;
+    ScopedPreviewDisplaySuppressor& operator=(const ScopedPreviewDisplaySuppressor&) = delete;
+
+private:
+    int previousDisplayCode_;
+    bool previousStateKnown_;
+    bool changedDisplayState_;
+    tag_t workView_;
+    bool workViewKnown_;
+};
 
 void BeginDebugLogSection()
 {
@@ -1698,6 +1771,172 @@ bool PointContainmentOnFace(Face* face, const Point3d& point, int& status)
     return UF_MODL_ask_point_containment(coordinates, face->Tag(), &status) == 0;
 }
 
+bool FindFaceInteriorPoint(Face* face, Point3d& interiorPoint)
+{
+    if (face == nullptr || face->SolidFaceType() != Face::FaceTypePlanar)
+    {
+        return false;
+    }
+
+    double uvBounds[4] = {0.0, 0.0, 0.0, 0.0};
+    if (UF_MODL_ask_face_uv_minmax(face->Tag(), uvBounds) != 0 ||
+        uvBounds[1] <= uvBounds[0] || uvBounds[3] <= uvBounds[2])
+    {
+        AppendDebugLog("FindFaceInteriorPoint failed to read UV bounds: face=" +
+                       std::to_string(face->Tag()));
+        return false;
+    }
+
+    struct UvCandidate
+    {
+        double u = 0.0;
+        double v = 0.0;
+        double centerDistanceSquared = 0.0;
+    };
+    constexpr int gridCount = 25;
+    std::vector<UvCandidate> candidates;
+    candidates.reserve(gridCount * gridCount);
+    for (int uIndex = 0; uIndex < gridCount; ++uIndex)
+    {
+        const double uFraction =
+            (static_cast<double>(uIndex) + 0.5) / static_cast<double>(gridCount);
+        for (int vIndex = 0; vIndex < gridCount; ++vIndex)
+        {
+            const double vFraction =
+                (static_cast<double>(vIndex) + 0.5) / static_cast<double>(gridCount);
+            const double uDelta = uFraction - 0.5;
+            const double vDelta = vFraction - 0.5;
+            candidates.push_back(
+                {uvBounds[0] + (uvBounds[1] - uvBounds[0]) * uFraction,
+                 uvBounds[2] + (uvBounds[3] - uvBounds[2]) * vFraction,
+                 uDelta * uDelta + vDelta * vDelta});
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const UvCandidate& left, const UvCandidate& right) {
+                  return left.centerDistanceSquared < right.centerDistanceSquared;
+              });
+
+    for (const UvCandidate& candidate : candidates)
+    {
+        double u = candidate.u;
+        double v = candidate.v;
+        int faceStatus = 0;
+        if (UF_MODL_ask_uv_points_containment(1,
+                                              &u,
+                                              &v,
+                                              face->Tag(),
+                                              &faceStatus) != 0 ||
+            faceStatus != 1)
+        {
+            continue;
+        }
+
+        double parameter[2] = {u, v};
+        double point[3] = {0.0, 0.0, 0.0};
+        double u1[3] = {0.0, 0.0, 0.0};
+        double v1[3] = {0.0, 0.0, 0.0};
+        double u2[3] = {0.0, 0.0, 0.0};
+        double v2[3] = {0.0, 0.0, 0.0};
+        double unitNormal[3] = {0.0, 0.0, 0.0};
+        double radii[2] = {0.0, 0.0};
+        if (UF_MODL_ask_face_props(face->Tag(),
+                                   parameter,
+                                   point,
+                                   u1,
+                                   v1,
+                                   u2,
+                                   v2,
+                                   unitNormal,
+                                   radii) != 0)
+        {
+            continue;
+        }
+
+        const Point3d candidatePoint(point[0], point[1], point[2]);
+        int pointStatus = 0;
+        if (!PointContainmentOnFace(face, candidatePoint, pointStatus) ||
+            pointStatus != 1)
+        {
+            continue;
+        }
+
+        interiorPoint = candidatePoint;
+        AppendDebugLog("FindFaceInteriorPoint OK: face=" +
+                       std::to_string(face->Tag()) +
+                       ", point=" + FormatPoint(interiorPoint) +
+                       ", uv=(" + std::to_string(u) + "," +
+                       std::to_string(v) + ")");
+        return true;
+    }
+
+    AppendDebugLog("FindFaceInteriorPoint found no UV sample inside the trimmed face: face=" +
+                   std::to_string(face->Tag()));
+    return false;
+}
+
+bool ComputeFaceInwardNormalByContainment(Body* body,
+                                          Face* face,
+                                          Point3d& interiorPoint,
+                                          Vector3d& inwardNormal)
+{
+    Vector3d faceNormal;
+    if (body == nullptr ||
+        !FindFaceInteriorPoint(face, interiorPoint) ||
+        !FaceNormalAtPoint(face, interiorPoint, faceNormal))
+    {
+        return false;
+    }
+
+    const Point3d positiveProbe =
+        AddVector(interiorPoint, ScaleVector(faceNormal, kFaceNormalProbeDistance));
+    const Point3d negativeProbe =
+        AddVector(interiorPoint, ScaleVector(faceNormal, -kFaceNormalProbeDistance));
+    double positiveCoordinates[3] = {
+        positiveProbe.X, positiveProbe.Y, positiveProbe.Z};
+    double negativeCoordinates[3] = {
+        negativeProbe.X, negativeProbe.Y, negativeProbe.Z};
+    int positiveStatus = 0;
+    int negativeStatus = 0;
+    const int positiveResult =
+        UF_MODL_ask_point_containment(positiveCoordinates,
+                                      body->Tag(),
+                                      &positiveStatus);
+    const int negativeResult =
+        UF_MODL_ask_point_containment(negativeCoordinates,
+                                      body->Tag(),
+                                      &negativeStatus);
+    const bool positiveInside = positiveResult == 0 && positiveStatus == 1;
+    const bool negativeInside = negativeResult == 0 && negativeStatus == 1;
+
+    std::ostringstream trace;
+    trace << "ComputeFaceInwardNormalByContainment: face=" << face->Tag()
+          << ", sample=" << FormatPoint(interiorPoint)
+          << ", outwardNormal=" << FormatVector(faceNormal)
+          << ", probeDistance=" << kFaceNormalProbeDistance
+          << ", positiveProbe=" << FormatPoint(positiveProbe)
+          << ", positiveResult=" << positiveResult
+          << ", positiveStatus=" << positiveStatus
+          << ", negativeProbe=" << FormatPoint(negativeProbe)
+          << ", negativeResult=" << negativeResult
+          << ", negativeStatus=" << negativeStatus;
+
+    if (positiveInside == negativeInside)
+    {
+        trace << ", result=ambiguous";
+        AppendDebugLog(trace.str());
+        return false;
+    }
+
+    inwardNormal = positiveInside
+                       ? faceNormal
+                       : ScaleVector(faceNormal, -1.0);
+    trace << ", result=" << (positiveInside ? "positive" : "negative")
+          << ", inwardNormal=" << FormatVector(inwardNormal);
+    AppendDebugLog(trace.str());
+    return Normalize(inwardNormal);
+}
+
 bool CornerExtensionPointsOnBody(Body* body,
                                  Edge* firstEdge,
                                  Edge* secondEdge,
@@ -2915,6 +3154,11 @@ TwoPointSiBianUI::TwoPointSiBianUI()
       smartCachedP1_(),
       smartCachedP2_(),
       retainSmartEndpointCacheOnUndo_(false),
+      hasSelectionThicknessCache_(false),
+      selectionThicknessBodyTag_(NULL_TAG),
+      selectionThicknessP1_(),
+      selectionThicknessP2_(),
+      selectionThickness_(0.0),
       hasPreview_(false),
       previewCommitted_(false),
       isUpdatingPreview_(false),
@@ -3280,6 +3524,9 @@ int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
         hasSmartEndpointCache_ = false;
         smartEndpointBodyTag_ = NULL_TAG;
         retainSmartEndpointCacheOnUndo_ = false;
+        hasSelectionThicknessCache_ = false;
+        selectionThicknessBodyTag_ = NULL_TAG;
+        selectionThickness_ = 0.0;
         try
         {
             ConfigureInputMode(smartMode, true);
@@ -4382,6 +4629,7 @@ bool TwoPointSiBianUI::ReorderEditedCompositeAfterChildren(
 
 bool TwoPointSiBianUI::CreatePreview()
 {
+    ScopedPreviewDisplaySuppressor silentDisplay;
     AppendDebugLog("CreatePreview entered");
 
     // A face selected while the old preview exists may belong to the preview's
@@ -5007,6 +5255,9 @@ void TwoPointSiBianUI::CommitPreview()
     hasSmartEndpointCache_ = false;
     smartEndpointBodyTag_ = NULL_TAG;
     retainSmartEndpointCacheOnUndo_ = false;
+    hasSelectionThicknessCache_ = false;
+    selectionThicknessBodyTag_ = NULL_TAG;
+    selectionThickness_ = 0.0;
 }
 
 void TwoPointSiBianUI::FinalizeCommittedPreview()
@@ -5282,7 +5533,37 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
     inputs.endEdge = inputs.endPositiveYEdge;
     if (inputs.thickness <= kPointTolerance)
     {
-        inputs.thickness = EstimateSheetThickness(inputs.targetBody, inputs.baseFace);
+        const tag_t currentBodyTag = inputs.targetBody != nullptr
+                                         ? inputs.targetBody->Tag()
+                                         : NULL_TAG;
+        const bool sameCachedDirection =
+            Distance(inputs.startPoint, selectionThicknessP1_) <= kPointTolerance &&
+            Distance(inputs.endPoint, selectionThicknessP2_) <= kPointTolerance;
+        const bool reverseCachedDirection =
+            Distance(inputs.startPoint, selectionThicknessP2_) <= kPointTolerance &&
+            Distance(inputs.endPoint, selectionThicknessP1_) <= kPointTolerance;
+        if (hasSelectionThicknessCache_ &&
+            selectionThickness_ > kPointTolerance &&
+            currentBodyTag == selectionThicknessBodyTag_ &&
+            (sameCachedDirection || reverseCachedDirection))
+        {
+            inputs.thickness = selectionThickness_;
+            AppendDebugLog("ReadInputs reused selection-locked sheet thickness=" +
+                           FormatExpressionNumber(inputs.thickness) +
+                           ", body=" + std::to_string(currentBodyTag));
+        }
+        else
+        {
+            inputs.thickness = EstimateSheetThickness(inputs.targetBody, inputs.baseFace);
+        }
+    }
+    if (inputs.thickness > kPointTolerance && inputs.targetBody != nullptr)
+    {
+        hasSelectionThicknessCache_ = true;
+        selectionThicknessBodyTag_ = inputs.targetBody->Tag();
+        selectionThicknessP1_ = inputs.startPoint;
+        selectionThicknessP2_ = inputs.endPoint;
+        selectionThickness_ = inputs.thickness;
     }
     inputs.spanLength = Distance(inputs.startPoint, inputs.endPoint);
     inputs.clearanceValue = ReadStringBlockValue(clearanceBlock_, "string0", "0.2");
@@ -7966,10 +8247,14 @@ bool TwoPointSiBianUI::CreateReferenceRightCornerEdgeCut(
 {
     Part* workPart = session_ != nullptr ? session_->Parts()->Work() : nullptr;
     Vector3d inwardNormal;
+    Point3d inwardNormalSample;
     if (workPart == nullptr || inputs.targetBody == nullptr || cornerEdge == nullptr ||
-        !ComputeReferenceInwardNormal(inputs.targetBody, referenceFace, inwardNormal))
+        !ComputeFaceInwardNormalByContainment(inputs.targetBody,
+                                              referenceFace,
+                                              inwardNormalSample,
+                                              inwardNormal))
     {
-        errorMessage = "Reference chamfer: the 90-degree reference edge or face is unavailable.";
+        errorMessage = "Reference chamfer: the 90-degree reference face has no valid interior point or its inward normal could not be resolved by the 0.05 body-containment probes.";
         return false;
     }
     double clearance = 0.0;
@@ -8069,6 +8354,8 @@ bool TwoPointSiBianUI::CreateReferenceRightCornerEdgeCut(
         AppendDebugLog("reference 90-degree corner-edge cut completed: edge=" +
                        std::to_string(cornerEdge->Tag()) +
                        ", face=" + std::to_string(referenceFace->Tag()) +
+                       ", inwardSample=" + FormatPoint(inwardNormalSample) +
+                       ", inwardNormal=" + FormatVector(inwardNormal) +
                        ", subtract=" + std::to_string(subtractTag));
         return true;
     }
@@ -8264,6 +8551,84 @@ bool TwoPointSiBianUI::CreateReferenceCornerEdgeCut(const InferredInputs& inputs
         errorMessage = "Reference chamfer: corner-edge endpoints are unavailable.";
         return false;
     }
+
+    if (isRightAngle &&
+        (inputs.featureMode == FeatureMode::NinetyLeft ||
+         inputs.featureMode == FeatureMode::NinetyRight))
+    {
+        Vector3d localX = Subtract(inputs.endPoint, inputs.startPoint);
+        const Point3d baseNormalPoint(
+            (inputs.startPoint.X + inputs.endPoint.X) * 0.5,
+            (inputs.startPoint.Y + inputs.endPoint.Y) * 0.5,
+            (inputs.startPoint.Z + inputs.endPoint.Z) * 0.5);
+        Vector3d localZ;
+        if (inputs.baseFace == nullptr ||
+            !Normalize(localX) ||
+            !FaceNormalAtPoint(inputs.baseFace, baseNormalPoint, localZ))
+        {
+            errorMessage = "Reference chamfer: the P1-P2 local X/Z directions could not be resolved for the 90-degree Y-side face selection.";
+            return false;
+        }
+        OrientNormalAwayFromOppositeFace(inputs.targetBody,
+                                         inputs.baseFace,
+                                         baseNormalPoint,
+                                         localZ);
+        Vector3d localY = Cross(localZ, localX);
+        Vector3d cornerDirection = Subtract(cornerSecond, cornerFirst);
+        if (!Normalize(localY) || !Normalize(cornerDirection))
+        {
+            errorMessage = "Reference chamfer: the local Y direction or corner-edge direction is invalid for the 90-degree face selection.";
+            return false;
+        }
+
+        const Point3d cornerMidpoint(
+            (cornerFirst.X + cornerSecond.X) * 0.5,
+            (cornerFirst.Y + cornerSecond.Y) * 0.5,
+            (cornerFirst.Z + cornerSecond.Z) * 0.5);
+        std::array<Point3d, 2> faceSamples;
+        std::array<double, 2> faceYScores = {0.0, 0.0};
+        for (std::size_t faceIndex = 0; faceIndex < 2; ++faceIndex)
+        {
+            if (!FindFaceInteriorPoint(faces[faceIndex], faceSamples[faceIndex]))
+            {
+                errorMessage = "Reference chamfer: an adjacent 90-degree face has no valid interior sample outside its holes.";
+                return false;
+            }
+            Vector3d fromCorner = Subtract(faceSamples[faceIndex], cornerMidpoint);
+            const Vector3d alongCorner =
+                ScaleVector(cornerDirection,
+                            Dot(fromCorner, cornerDirection));
+            fromCorner = Vector3d(fromCorner.X - alongCorner.X,
+                                  fromCorner.Y - alongCorner.Y,
+                                  fromCorner.Z - alongCorner.Z);
+            faceYScores[faceIndex] = Dot(fromCorner, localY);
+        }
+
+        const bool selectPositiveY =
+            inputs.featureMode == FeatureMode::NinetyLeft;
+        const std::size_t selectedFaceIndex =
+            selectPositiveY
+                ? (faceYScores[0] >= faceYScores[1] ? 0U : 1U)
+                : (faceYScores[0] <= faceYScores[1] ? 0U : 1U);
+        preferredFace = faces[selectedFaceIndex];
+
+        std::ostringstream faceTrace;
+        faceTrace << "reference 90-degree Y-side face selection: mode="
+                  << (selectPositiveY ? "left/Y+" : "right/Y-")
+                  << ", localX=" << FormatVector(localX)
+                  << ", localY=" << FormatVector(localY)
+                  << ", localZ=" << FormatVector(localZ)
+                  << ", cornerMidpoint=" << FormatPoint(cornerMidpoint)
+                  << ", face0=" << faces[0]->Tag()
+                  << ", sample0=" << FormatPoint(faceSamples[0])
+                  << ", yScore0=" << faceYScores[0]
+                  << ", face1=" << faces[1]->Tag()
+                  << ", sample1=" << FormatPoint(faceSamples[1])
+                  << ", yScore1=" << faceYScores[1]
+                  << ", selectedFace=" << preferredFace->Tag();
+        AppendDebugLog(faceTrace.str());
+    }
+
     pending.point = Distance(cornerFirst, inputs.endPoint) >
                             Distance(cornerSecond, inputs.endPoint) + 0.05
                         ? cornerFirst
@@ -11092,7 +11457,20 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
             body->Tag() != (inputs.targetBody != nullptr ? inputs.targetBody->Tag() : NULL_TAG) &&
             bodyTagsBeforeUdf.find(body->Tag()) == bodyTagsBeforeUdf.end())
         {
-            createdToolBodies.push_back(body);
+            const bool isSolid = body->IsSolidBody();
+            AppendDebugLog("UDF created body classification: tag=" +
+                           std::to_string(body->Tag()) +
+                           ", solid=" + (isSolid ? "true" : "false") +
+                           ", sheet=" + (body->IsSheetBody() ? "true" : "false"));
+            if (isSolid)
+            {
+                createdToolBodies.push_back(body);
+            }
+            else
+            {
+                AppendDebugLog("UDF created sheet/reference body excluded from Boolean subtraction: tag=" +
+                               std::to_string(body->Tag()));
+            }
         }
     }
 
@@ -11104,7 +11482,8 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
             for (Body* body : udfFeature->GetBodies())
             {
                 if (body != nullptr &&
-                    body->Tag() != (inputs.targetBody != nullptr ? inputs.targetBody->Tag() : NULL_TAG))
+                    body->Tag() != (inputs.targetBody != nullptr ? inputs.targetBody->Tag() : NULL_TAG) &&
+                    body->IsSolidBody())
                 {
                     createdToolBodies.push_back(body);
                 }
@@ -11166,6 +11545,8 @@ bool TwoPointSiBianUI::SubtractToolBodies(Body* targetBody,
     Features::BooleanBuilder* builder = nullptr;
     try
     {
+        std::vector<Body*> toolBodies;
+        toolBodies.reserve(toolBodyTags.size());
         for (tag_t toolTag : toolBodyTags)
         {
             Body* toolBody = dynamic_cast<Body*>(NXObjectManager::Get(toolTag));
@@ -11174,7 +11555,66 @@ bool TwoPointSiBianUI::SubtractToolBodies(Body* targetBody,
                 errorMessage = "A deferred UDF tool body is no longer available for subtraction.";
                 return false;
             }
+            toolBodies.push_back(toolBody);
+        }
 
+        if (toolBodies.size() > 1)
+        {
+            // Subtract every UDF tool in one Boolean operation.  Sequential
+            // subtraction lets the first overlapping tool create a coincident
+            // boundary for the second tool, which NX then rejects as a
+            // zero-thickness result when the preview changes template mode.
+            builder = workPart->Features()->CreateBooleanBuilderUsingCollector(nullptr);
+            builder->SetTolerance(0.0001);
+            builder->SetCopyTargets(false);
+            builder->SetCopyTools(false);
+            builder->SetOperation(Features::Feature::BooleanTypeSubtract);
+
+            ScCollector* targetCollector = workPart->ScCollectors()->CreateCollector();
+            SelectionIntentRuleOptions* targetOptions =
+                workPart->ScRuleFactory()->CreateRuleOptions();
+            targetOptions->SetSelectedFromInactive(false);
+            std::vector<Body*> targetBodies(1, targetBody);
+            BodyDumbRule* targetRule = workPart->ScRuleFactory()->CreateRuleBodyDumb(
+                targetBodies, true, targetOptions);
+            delete targetOptions;
+            std::vector<SelectionIntentRule*> targetRules(1, targetRule);
+            targetCollector->ReplaceRules(targetRules, false);
+            builder->SetTargetBodyCollector(targetCollector);
+
+            ScCollector* toolCollector = workPart->ScCollectors()->CreateCollector();
+            SelectionIntentRuleOptions* toolOptions =
+                workPart->ScRuleFactory()->CreateRuleOptions();
+            toolOptions->SetSelectedFromInactive(false);
+            BodyDumbRule* toolRule = workPart->ScRuleFactory()->CreateRuleBodyDumb(
+                toolBodies, true, toolOptions);
+            delete toolOptions;
+            std::vector<SelectionIntentRule*> toolRules(1, toolRule);
+            toolCollector->ReplaceRules(toolRules, false);
+            builder->SetToolBodyCollector(toolCollector);
+
+            NXObject* result = builder->Commit();
+            resultFeatureTag = result != nullptr ? result->Tag() : NULL_TAG;
+            builder->Destroy();
+            builder = nullptr;
+
+            std::ostringstream trace;
+            trace << "final grouped subtraction: target=" << targetBody->Tag()
+                  << ", toolCount=" << toolBodyTags.size() << ", tools=";
+            for (std::size_t index = 0; index < toolBodyTags.size(); ++index)
+            {
+                if (index > 0)
+                {
+                    trace << ',';
+                }
+                trace << toolBodyTags[index];
+            }
+            trace << ", resultFeature=" << resultFeatureTag;
+            AppendDebugLog(trace.str());
+        }
+        else
+        {
+            Body* toolBody = toolBodies.front();
             builder = workPart->Features()->CreateBooleanBuilder(nullptr);
             builder->SetOperation(Features::Feature::BooleanTypeSubtract);
             builder->SetTarget(targetBody);
@@ -11188,14 +11628,16 @@ bool TwoPointSiBianUI::SubtractToolBodies(Body* targetBody,
             resultFeatureTag = result != nullptr ? result->Tag() : NULL_TAG;
             builder->Destroy();
             builder = nullptr;
-            if (resultFeatureTag == NULL_TAG)
-            {
-                errorMessage = "NX returned no feature from the final Boolean Subtract.";
-                return false;
-            }
-            AppendDebugLog("final deferred subtraction: target=" + std::to_string(targetBody->Tag()) +
-                           ", tool=" + std::to_string(toolTag) +
+            AppendDebugLog("final deferred subtraction: target=" +
+                           std::to_string(targetBody->Tag()) +
+                           ", tool=" + std::to_string(toolBodyTags.front()) +
                            ", resultFeature=" + std::to_string(resultFeatureTag));
+        }
+
+        if (resultFeatureTag == NULL_TAG)
+        {
+            errorMessage = "NX returned no feature from the final Boolean Subtract.";
+            return false;
         }
     }
     catch (const NXException& ex)
@@ -11211,6 +11653,73 @@ bool TwoPointSiBianUI::SubtractToolBodies(Body* targetBody,
             }
             builder = nullptr;
         }
+
+        if (toolBodyTags.size() > 1)
+        {
+            AppendDebugLog("final grouped subtraction failed; falling back to individual tools and skipping rejected tools. NX=" +
+                           NxExceptionText(ex));
+            for (tag_t toolTag : toolBodyTags)
+            {
+                try
+                {
+                    Body* toolBody = dynamic_cast<Body*>(NXObjectManager::Get(toolTag));
+                    if (toolBody == nullptr || toolBody == targetBody || !toolBody->IsSolidBody())
+                    {
+                        AppendDebugLog("final subtraction fallback skipped unavailable/non-solid tool=" +
+                                       std::to_string(toolTag));
+                        continue;
+                    }
+
+                    builder = workPart->Features()->CreateBooleanBuilder(nullptr);
+                    builder->SetOperation(Features::Feature::BooleanTypeSubtract);
+                    builder->SetTarget(targetBody);
+#pragma warning(push)
+#pragma warning(disable : 4996)
+                    builder->SetTool(toolBody);
+#pragma warning(pop)
+                    builder->SetRetainTarget(false);
+                    builder->SetRetainTool(false);
+                    NXObject* result = builder->Commit();
+                    const tag_t fallbackResultTag =
+                        result != nullptr ? result->Tag() : NULL_TAG;
+                    builder->Destroy();
+                    builder = nullptr;
+                    if (fallbackResultTag != NULL_TAG)
+                    {
+                        resultFeatureTag = fallbackResultTag;
+                        AppendDebugLog("final subtraction fallback succeeded: target=" +
+                                       std::to_string(targetBody->Tag()) +
+                                       ", tool=" + std::to_string(toolTag) +
+                                       ", resultFeature=" +
+                                       std::to_string(fallbackResultTag));
+                    }
+                }
+                catch (const NXException& toolEx)
+                {
+                    if (builder != nullptr)
+                    {
+                        try
+                        {
+                            builder->Destroy();
+                        }
+                        catch (...)
+                        {
+                        }
+                        builder = nullptr;
+                    }
+                    AppendDebugLog("final subtraction fallback skipped rejected tool=" +
+                                   std::to_string(toolTag) +
+                                   ", NX=" + NxExceptionText(toolEx));
+                }
+            }
+            if (resultFeatureTag != NULL_TAG)
+            {
+                errorMessage.clear();
+                AppendDebugLog("final subtraction fallback completed with at least one successful tool; rejected tools were ignored.");
+                return true;
+            }
+        }
+
         errorMessage = "Final subtraction of the UDF tool bodies failed.\n" + NxExceptionText(ex);
         AppendDebugLog(errorMessage);
         return false;

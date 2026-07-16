@@ -309,6 +309,11 @@ private:
     NXOpen::Point3d smartCachedP1_;
     NXOpen::Point3d smartCachedP2_;
     bool retainSmartEndpointCacheOnUndo_;
+    mutable bool hasSelectionThicknessCache_;
+    mutable tag_t selectionThicknessBodyTag_;
+    mutable NXOpen::Point3d selectionThicknessP1_;
+    mutable NXOpen::Point3d selectionThicknessP2_;
+    mutable double selectionThickness_;
     bool hasPreview_;
     bool previewCommitted_;
     bool isUpdatingPreview_;
