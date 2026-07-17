@@ -5326,6 +5326,7 @@ namespace
     MarkerLineScanInfo ScanMarkerLineOnFace(Face* face, double markerGapTolerance)
     {
         const double markerMinEdgeLength = 2.0;
+        const double markerMinParallelGap = 0.0005;
         MarkerLineScanInfo info;
         if (face == NULL)
         {
@@ -5420,14 +5421,14 @@ namespace
                     info.bestParallel = parallel;
                     info.bestDistance = distance;
                 }
-                if (distance > 1e-9 && distance < info.closestParallelDistance)
+                if (distance > markerMinParallelGap && distance < info.closestParallelDistance)
                 {
                     info.closestParallel = parallel;
                     info.closestParallelDistance = distance;
                     info.closestLengthA = lenA;
                     info.closestLengthB = lenB;
                 }
-                if (distance > 1e-9 && distance <= markerGapTolerance)
+                if (distance > markerMinParallelGap && distance <= markerGapTolerance)
                 {
                     info.matched = true;
                     info.matchedParallel = parallel;
@@ -5443,9 +5444,17 @@ namespace
         if (info.bestDistance < std::numeric_limits<double>::max())
         {
             std::ostringstream reason;
-            reason << "closest positive parallel distance "
-                   << (info.closestParallelDistance < std::numeric_limits<double>::max() ? info.closestParallelDistance : -1.0)
-                   << " exceeds marker gap tolerance";
+            if (info.closestParallelDistance == std::numeric_limits<double>::max())
+            {
+                reason << "parallel edge gap " << info.bestDistance
+                       << " is at or below marker minimum " << markerMinParallelGap;
+            }
+            else
+            {
+                reason << "closest valid parallel distance "
+                       << info.closestParallelDistance
+                       << " exceeds marker gap tolerance";
+            }
             info.reason = reason.str();
         }
         else
@@ -8169,7 +8178,12 @@ namespace
                 {
                     throw std::runtime_error("Embedded DLX resource missing: PiLianZuanBanJinRulesTable.dlx");
                 }
-                dialog_ = ui_->CreateDialog(U8(dlxPath));
+                // ExtractDlxToRandomPath returns a path encoded with the current
+                // Windows ANSI code page. Passing it through U8() reinterprets
+                // those bytes as UTF-8 and corrupts TEMP paths containing Chinese
+                // user names. Keep the same locale-path handling as the manual
+                // sheet-metal rules dialog.
+                dialog_ = ui_->CreateDialog(dlxPath.c_str());
                 dialog_->AddInitializeHandler(make_callback(this, &PiLianRulesTableDialog::initialize_cb));
                 dialog_->AddDialogShownHandler(make_callback(this, &PiLianRulesTableDialog::dialogShown_cb));
                 dialog_->AddUpdateHandler(make_callback(this, &PiLianRulesTableDialog::update_cb));
