@@ -3360,9 +3360,9 @@ int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
     if (block == reverseCutButton_)
     {
         reverseChamfer270Cut_ = !reverseChamfer270Cut_;
-        AppendDebugLog(std::string("cut-direction reverse button clicked: chamfer-270 reverse=") +
+        AppendDebugLog(std::string("cut-direction reverse button clicked: chamfer >180 P2Q+2T reverse=") +
                        (reverseChamfer270Cut_ ? "true" : "false") +
-                       "; B1/B2 90-degree branches remain unchanged.");
+                       "; all other branches remain unchanged.");
     }
     if (enable_ok_cb())
     {
@@ -9806,6 +9806,25 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
     // primary UDF -> P2-Q rip -> subtract primary tool -> two offsets -> -60.
     // The 90-degree chamfer branch and every other path retain their existing
     // operation order.
+    const bool reverseConcaveChamferP2Q2T =
+        useConcaveStripBranch &&
+        inputs.featureMode == FeatureMode::Chamfer &&
+        secondFeatureCornerAngle >
+            kConvexCornerMaximumAngleDegrees + 1.0e-6 &&
+        inputs.reverseChamfer270Cut;
+    AppendDebugLog(
+        std::string("concave P2Q+2T reverse-Y decision: requested=") +
+        (inputs.reverseChamfer270Cut ? "true" : "false") +
+        ", branch=" + (useConcaveStripBranch ? "true" : "false") +
+        ", selectedP2Angle=" +
+        FormatExpressionNumber(secondFeatureCornerAngle) +
+        ", angleGreaterThan180=" +
+        (secondFeatureCornerAngle >
+                 kConvexCornerMaximumAngleDegrees + 1.0e-6
+             ? "true"
+             : "false") +
+        ", effective=" +
+        (reverseConcaveChamferP2Q2T ? "true" : "false"));
     const bool useEarlyPrimaryChamfer270P2Q2T =
         useConcaveStripBranch &&
         concaveQ3HasThicknessEdge &&
@@ -10014,8 +10033,11 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                 else
                 {
                     tag_t stripSubtractTag = NULL_TAG;
+                    const bool useNegativeYReference =
+                        inputs.featureMode == FeatureMode::NinetyRight ||
+                        reverseConcaveChamferP2Q2T;
                     Edge* rectangleReferenceBEdge =
-                        inputs.featureMode == FeatureMode::NinetyRight
+                        useNegativeYReference
                             ? secondaryQEdge
                             : confirmingEdge;
                     if (rectangleReferenceBEdge == nullptr)
@@ -10036,16 +10058,20 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                         return false;
                     }
                     AppendDebugLog("TryCreateSecondPointRip created B-edge-directed clearance rectangle for non-90/270 P2Q+2T branch, mode=" +
-                                   std::string(inputs.featureMode == FeatureMode::NinetyLeft
-                                                   ? "90-left"
-                                                   : (inputs.featureMode == FeatureMode::NinetyRight
-                                                          ? "90-right"
-                                                          : "chamfer")) +
-                                   ", reference=" +
-                                   (inputs.featureMode == FeatureMode::NinetyRight
-                                        ? "B2"
-                                        : "B1") +
-                                   ", referenceEdge=" +
+                                    std::string(inputs.featureMode == FeatureMode::NinetyLeft
+                                                    ? "90-left"
+                                                    : (inputs.featureMode == FeatureMode::NinetyRight
+                                                           ? "90-right"
+                                                           : "chamfer")) +
+                                    ", reference=" +
+                                    (useNegativeYReference
+                                         ? "B2"
+                                         : "B1") +
+                                    ", reverseGreaterThan180=" +
+                                    (reverseConcaveChamferP2Q2T
+                                         ? "true"
+                                         : "false") +
+                                    ", referenceEdge=" +
                                    std::to_string(rectangleReferenceBEdge->Tag()) +
                                    ", feature=" +
                                    std::to_string(stripSubtractTag));
