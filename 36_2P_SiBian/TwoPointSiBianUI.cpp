@@ -4,6 +4,11 @@
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_StringBlock.hxx>
 #include <NXOpen/BlockStyler_Toggle.hxx>
+#include <NXOpen/CartesianCoordinateSystem.hxx>
+#include <NXOpen/CoordinateSystemCollection.hxx>
+#include <NXOpen/Curve.hxx>
+#include <NXOpen/CurveCollection.hxx>
+#include <NXOpen/CurveFeatureRule.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
 #include <NXOpen/DisplayableObject.hxx>
@@ -19,6 +24,7 @@
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
 #include <NXOpen/Features_OffsetFaceBuilder.hxx>
+#include <NXOpen/Features_SketchFeature.hxx>
 #include <NXOpen/Features_SheetMetal_EdgeRipBuilder.hxx>
 #include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
 #include <NXOpen/EdgeDumbRule.hxx>
@@ -33,7 +39,9 @@
 #include <NXOpen/GeometricUtilities_FeatureOptions.hxx>
 #include <NXOpen/GeometricUtilities_Limits.hxx>
 #include <NXOpen/GeometricUtilities_SmartVolumeProfileBuilder.hxx>
+#include <NXOpen/Line.hxx>
 #include <NXOpen/NXException.hxx>
+#include <NXOpen/NXMatrix.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObjectManager.hxx>
 #include <NXOpen/Part.hxx>
@@ -47,9 +55,13 @@
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
 #include <NXOpen/SmartObject.hxx>
+#include <NXOpen/Sketch.hxx>
+#include <NXOpen/SketchCollection.hxx>
+#include <NXOpen/SimpleSketchInPlaceBuilder.hxx>
 #include <NXOpen/TaggedObject.hxx>
 #include <NXOpen/Unit.hxx>
 #include <NXOpen/UnitCollection.hxx>
+#include <NXOpen/Update.hxx>
 
 #include <uf.h>
 #include <uf_assem.h>
@@ -126,6 +138,7 @@ struct ThicknessCandidate
     Face* face = nullptr;
     double planeDistance = 0.0;
     double signedPlaneDistance = 0.0;
+    double normalDot = 0.0;
 };
 
 struct BoundaryPointCandidate
@@ -2052,6 +2065,287 @@ bool FaceProjectionAxes(Face* face, const Vector3d& normal, Vector3d& xAxis, Vec
     return Normalize(yAxis);
 }
 
+bool FindFaceInteriorSamplePoint(Face* face, Point3d& samplePoint)
+{
+    Point3d planeOrigin;
+    Vector3d planeNormal;
+    if (face == nullptr || !FacePlaneData(face, planeOrigin, planeNormal))
+    {
+        return false;
+    }
+
+    auto isStrictlyInsideFace = [face](const Point3d& candidate) {
+        int status = 0;
+        return PointContainmentOnFace(face, candidate, status) &&
+               status == 1;
+    };
+
+    // The untrimmed planar origin can fall outside a concave face or inside
+    // one of its holes, so accept it only after trimmed-face containment.
+    if (isStrictlyInsideFace(planeOrigin))
+    {
+        samplePoint = planeOrigin;
+        return true;
+    }
+
+    std::vector<Point3d> boundaryPoints;
+    if (!FaceBoundaryPoints(face, boundaryPoints) || boundaryPoints.empty())
+    {
+        return false;
+    }
+
+    Point3d boundaryCentroid(0.0, 0.0, 0.0);
+    for (const Point3d& point : boundaryPoints)
+    {
+        boundaryCentroid.X += point.X;
+        boundaryCentroid.Y += point.Y;
+        boundaryCentroid.Z += point.Z;
+    }
+    const double pointCount = static_cast<double>(boundaryPoints.size());
+    boundaryCentroid.X /= pointCount;
+    boundaryCentroid.Y /= pointCount;
+    boundaryCentroid.Z /= pointCount;
+    if (isStrictlyInsideFace(boundaryCentroid))
+    {
+        samplePoint = boundaryCentroid;
+        return true;
+    }
+
+    // Move inward from outer-loop vertices. Containment status 1 guarantees
+    // that the accepted point is in the trimmed face region, not on an edge
+    // and not in a hole.
+    constexpr std::array<double, 12> inwardFractions = {
+        0.002, 0.005, 0.01, 0.02, 0.04, 0.08,
+        0.15, 0.25, 0.40, 0.55, 0.70, 0.85};
+    for (const Point3d& boundaryPoint : boundaryPoints)
+    {
+        const Vector3d towardCentroid =
+            Subtract(boundaryCentroid, boundaryPoint);
+        for (double fraction : inwardFractions)
+        {
+            const Point3d candidate =
+                AddVector(boundaryPoint,
+                          ScaleVector(towardCentroid, fraction));
+            if (isStrictlyInsideFace(candidate))
+            {
+                samplePoint = candidate;
+                return true;
+            }
+        }
+    }
+
+    // Final fallback for strongly concave faces: sample the planar bounding
+    // rectangle and let NX's trimmed-face containment reject holes/outside.
+    Vector3d xAxis;
+    Vector3d yAxis;
+    if (!FaceProjectionAxes(face, planeNormal, xAxis, yAxis))
+    {
+        return false;
+    }
+    double minimumX = std::numeric_limits<double>::max();
+    double maximumX = -std::numeric_limits<double>::max();
+    double minimumY = std::numeric_limits<double>::max();
+    double maximumY = -std::numeric_limits<double>::max();
+    for (const Point3d& point : boundaryPoints)
+    {
+        const ProjectionPoint2d projected =
+            ProjectToPlane2d(point, planeOrigin, xAxis, yAxis);
+        minimumX = std::min(minimumX, projected.x);
+        maximumX = std::max(maximumX, projected.x);
+        minimumY = std::min(minimumY, projected.y);
+        maximumY = std::max(maximumY, projected.y);
+    }
+    if (maximumX - minimumX <= kPointTolerance ||
+        maximumY - minimumY <= kPointTolerance)
+    {
+        return false;
+    }
+
+    struct GridCandidate
+    {
+        Point3d point;
+        double centerDistanceSquared = 0.0;
+    };
+    std::vector<GridCandidate> gridCandidates;
+    constexpr int gridDivisionCount = 20;
+    const double centerX = (minimumX + maximumX) * 0.5;
+    const double centerY = (minimumY + maximumY) * 0.5;
+    for (int xIndex = 1; xIndex < gridDivisionCount; ++xIndex)
+    {
+        const double x = minimumX +
+                         (maximumX - minimumX) *
+                             static_cast<double>(xIndex) /
+                             static_cast<double>(gridDivisionCount);
+        for (int yIndex = 1; yIndex < gridDivisionCount; ++yIndex)
+        {
+            const double y = minimumY +
+                             (maximumY - minimumY) *
+                                 static_cast<double>(yIndex) /
+                                 static_cast<double>(gridDivisionCount);
+            GridCandidate candidate;
+            candidate.point =
+                AddVector(AddVector(planeOrigin, ScaleVector(xAxis, x)),
+                          ScaleVector(yAxis, y));
+            const double deltaX = x - centerX;
+            const double deltaY = y - centerY;
+            candidate.centerDistanceSquared =
+                deltaX * deltaX + deltaY * deltaY;
+            gridCandidates.push_back(candidate);
+        }
+    }
+    std::sort(gridCandidates.begin(), gridCandidates.end(),
+              [](const GridCandidate& first,
+                 const GridCandidate& second) {
+                  return first.centerDistanceSquared <
+                         second.centerDistanceSquared;
+              });
+    for (const GridCandidate& candidate : gridCandidates)
+    {
+        if (isStrictlyInsideFace(candidate.point))
+        {
+            samplePoint = candidate.point;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool BuildFaceInteriorGridSamples(Face* face,
+                                  const Point3d& planeOrigin,
+                                  const Vector3d& xAxis,
+                                  const Vector3d& yAxis,
+                                  int divisionCount,
+                                  std::vector<Point3d>& samples)
+{
+    samples.clear();
+    if (face == nullptr || divisionCount < 2)
+    {
+        return false;
+    }
+
+    std::vector<Point3d> boundaryPoints;
+    if (!FaceBoundaryPoints(face, boundaryPoints) ||
+        boundaryPoints.size() < 2)
+    {
+        return false;
+    }
+
+    double minimumX = std::numeric_limits<double>::max();
+    double maximumX = -std::numeric_limits<double>::max();
+    double minimumY = std::numeric_limits<double>::max();
+    double maximumY = -std::numeric_limits<double>::max();
+    for (const Point3d& point : boundaryPoints)
+    {
+        const ProjectionPoint2d projected =
+            ProjectToPlane2d(point, planeOrigin, xAxis, yAxis);
+        minimumX = std::min(minimumX, projected.x);
+        maximumX = std::max(maximumX, projected.x);
+        minimumY = std::min(minimumY, projected.y);
+        maximumY = std::max(maximumY, projected.y);
+    }
+    if (maximumX - minimumX <= kPointTolerance ||
+        maximumY - minimumY <= kPointTolerance)
+    {
+        return false;
+    }
+
+    auto addUniqueSample = [&samples](const Point3d& point) {
+        for (const Point3d& existing : samples)
+        {
+            if (AlmostSamePoint(existing, point))
+            {
+                return;
+            }
+        }
+        samples.push_back(point);
+    };
+
+    // Cell-center sampling avoids deliberately placing points on trimming
+    // edges. NX face containment removes concave cut-outs and all inner holes.
+    for (int xIndex = 0; xIndex < divisionCount; ++xIndex)
+    {
+        const double x = minimumX +
+                         (maximumX - minimumX) *
+                             (static_cast<double>(xIndex) + 0.5) /
+                             static_cast<double>(divisionCount);
+        for (int yIndex = 0; yIndex < divisionCount; ++yIndex)
+        {
+            const double y = minimumY +
+                             (maximumY - minimumY) *
+                                 (static_cast<double>(yIndex) + 0.5) /
+                                 static_cast<double>(divisionCount);
+            const Point3d candidate =
+                AddVector(AddVector(planeOrigin, ScaleVector(xAxis, x)),
+                          ScaleVector(yAxis, y));
+            int status = 0;
+            if (PointContainmentOnFace(face, candidate, status) &&
+                status == 1)
+            {
+                addUniqueSample(candidate);
+            }
+        }
+    }
+
+    Point3d guaranteedInteriorPoint;
+    if (FindFaceInteriorSamplePoint(face, guaranteedInteriorPoint))
+    {
+        addUniqueSample(guaranteedInteriorPoint);
+    }
+    return !samples.empty();
+}
+
+double ProjectedFaceGroupCoverage(
+    const std::vector<Point3d>& baseSamples,
+    const Vector3d& baseNormal,
+    const std::vector<ThicknessCandidate>& groupCandidates,
+    std::size_t* coveredSampleCount = nullptr)
+{
+    if (coveredSampleCount != nullptr)
+    {
+        *coveredSampleCount = 0;
+    }
+    if (baseSamples.empty() || groupCandidates.empty())
+    {
+        return 0.0;
+    }
+
+    std::size_t covered = 0;
+    for (const Point3d& baseSample : baseSamples)
+    {
+        bool sampleCovered = false;
+        for (const ThicknessCandidate& candidate : groupCandidates)
+        {
+            if (candidate.face == nullptr)
+            {
+                continue;
+            }
+            const Point3d projected =
+                AddVector(baseSample,
+                          ScaleVector(baseNormal,
+                                      candidate.signedPlaneDistance));
+            int status = 0;
+            if (PointContainmentOnFace(candidate.face, projected, status) &&
+                (status == 1 || status == 3))
+            {
+                sampleCovered = true;
+                break;
+            }
+        }
+        if (sampleCovered)
+        {
+            ++covered;
+        }
+    }
+
+    if (coveredSampleCount != nullptr)
+    {
+        *coveredSampleCount = covered;
+    }
+    return static_cast<double>(covered) /
+           static_cast<double>(baseSamples.size());
+}
+
 double ProjectedOverlapRatio(Face* baseFace,
                              Face* candidateFace,
                              const Point3d& origin,
@@ -2838,6 +3132,7 @@ TwoPointSiBianUI::TwoPointSiBianUI()
       previewReferenceTags_(),
       hasSmartEndpointCache_(false),
       smartEndpointBodyTag_(NULL_TAG),
+      smartEndpointFaceTag_(NULL_TAG),
       smartCachedP1_(),
       smartCachedP2_(),
       retainSmartEndpointCacheOnUndo_(false),
@@ -3037,6 +3332,7 @@ int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
         const bool smartMode = IsSmartModeEnabled();
         hasSmartEndpointCache_ = false;
         smartEndpointBodyTag_ = NULL_TAG;
+        smartEndpointFaceTag_ = NULL_TAG;
         retainSmartEndpointCacheOnUndo_ = false;
         try
         {
@@ -3084,7 +3380,12 @@ int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
     }
     else
     {
-        UndoPreview();
+        if (!UndoPreview())
+        {
+            ShowError("The previous preview could not be restored completely. "
+                      "The new preview was stopped to protect the model.");
+            return false;
+        }
     }
     return 0;
 }
@@ -3583,11 +3884,16 @@ bool TwoPointSiBianUI::CreatePreview()
         smartEndpointBodyTag_ = cacheInputs.targetBody != nullptr
                                     ? cacheInputs.targetBody->Tag()
                                     : inputs.targetBody->Tag();
+        smartEndpointFaceTag_ = cacheInputs.baseFace != nullptr
+                                    ? cacheInputs.baseFace->Tag()
+                                    : NULL_TAG;
         hasSmartEndpointCache_ = true;
         AppendDebugLog(std::string("CreatePreview retained smart endpoints: policy=") +
                        "all-smart original pre-rip" +
                        ", body=" +
                        std::to_string(smartEndpointBodyTag_) +
+                       ", face=" +
+                       std::to_string(smartEndpointFaceTag_) +
                        ", P1=" + FormatPoint(smartCachedP1_) +
                        ", P2=" + FormatPoint(smartCachedP2_));
     }
@@ -3636,17 +3942,18 @@ void TwoPointSiBianUI::CapturePreviewCreatedFeatureTags()
                    std::to_string(previewCreatedFeatureTags_.size()));
 }
 
-void TwoPointSiBianUI::UndoPreview(bool includeCommitted)
+bool TwoPointSiBianUI::UndoPreview(bool includeCommitted)
 {
     if (!retainSmartEndpointCacheOnUndo_)
     {
         hasSmartEndpointCache_ = false;
         smartEndpointBodyTag_ = NULL_TAG;
+        smartEndpointFaceTag_ = NULL_TAG;
     }
 
     if (previewCommitted_ && !includeCommitted)
     {
-        return;
+        return true;
     }
     if (!hasPreview_ &&
         !previewCommitted_ &&
@@ -3656,7 +3963,7 @@ void TwoPointSiBianUI::UndoPreview(bool includeCommitted)
         previewCreatedFeatureTags_.empty() &&
         previewUndoMark_ == static_cast<Session::UndoMarkId>(0))
     {
-        return;
+        return true;
     }
 
     bool undoSucceeded = false;
@@ -3664,10 +3971,26 @@ void TwoPointSiBianUI::UndoPreview(bool includeCommitted)
     {
         if (previewUndoMark_ != static_cast<Session::UndoMarkId>(0))
         {
-            AppendDebugLog("UndoPreview undoing mark=" + std::to_string(static_cast<int>(previewUndoMark_)));
-            session_->UndoToMark(previewUndoMark_, "2P_SiBian Preview");
-            session_->DeleteUndoMark(previewUndoMark_, "2P_SiBian Preview");
-            undoSucceeded = true;
+            const bool markExists =
+                session_->DoesUndoMarkExist(previewUndoMark_, "2P_SiBian Preview");
+            AppendDebugLog("UndoPreview mark=" +
+                           std::to_string(static_cast<int>(previewUndoMark_)) +
+                           ", exists=" + (markExists ? "true" : "false"));
+            if (markExists)
+            {
+                AppendDebugLog("UndoPreview undoing mark=" +
+                               std::to_string(static_cast<int>(previewUndoMark_)));
+                session_->UndoToMark(previewUndoMark_, "2P_SiBian Preview");
+                if (session_->DoesUndoMarkExist(previewUndoMark_, "2P_SiBian Preview"))
+                {
+                    session_->DeleteUndoMark(previewUndoMark_, "2P_SiBian Preview");
+                }
+                undoSucceeded = true;
+            }
+            else
+            {
+                AppendDebugLog("UndoPreview mark was recycled by NX; using dependency-aware feature cleanup.");
+            }
         }
     }
     catch (const NXException& ex)
@@ -3679,59 +4002,127 @@ void TwoPointSiBianUI::UndoPreview(bool includeCommitted)
         AppendDebugLog("UndoPreview unknown exception");
     }
 
+    bool dependencyCleanupSucceeded = false;
     if (!undoSucceeded)
     {
-        // Re-scan here as well as on successful creation.  This makes a
-        // partially-created UDF rollback-safe when creation fails before the
-        // normal created-feature list can be captured.
-        const std::set<tag_t> baseline(previewBaselineFeatureTags_.begin(),
-                                       previewBaselineFeatureTags_.end());
-        std::vector<tag_t> createdFeatureTags;
-        std::set<tag_t> alreadyQueued;
-        for (tag_t featureTag : CurrentWorkPartFeatureTags())
+        try
         {
-            if (baseline.find(featureTag) == baseline.end() && alreadyQueued.insert(featureTag).second)
+            Part* workPart = session_ != nullptr ? session_->Parts()->Work() : nullptr;
+            NXOpen::Update* updateManager =
+                session_ != nullptr ? session_->UpdateManager() : nullptr;
+            if (workPart == nullptr || workPart->Features() == nullptr ||
+                updateManager == nullptr)
             {
-                createdFeatureTags.push_back(featureTag);
+                throw std::runtime_error("No work part or NX update manager is available.");
             }
-        }
-        for (tag_t featureTag : previewCreatedFeatureTags_)
-        {
-            if (featureTag != NULL_TAG && alreadyQueued.insert(featureTag).second)
-            {
-                createdFeatureTags.push_back(featureTag);
-            }
-        }
-        if (previewUdfTag_ != NULL_TAG && alreadyQueued.insert(previewUdfTag_).second)
-        {
-            createdFeatureTags.push_back(previewUdfTag_);
-        }
 
-        AppendDebugLog("UndoPreview fallback deleting created feature count=" +
-                       std::to_string(createdFeatureTags.size()));
-        for (auto iterator = createdFeatureTags.rbegin();
-             iterator != createdFeatureTags.rend();
-             ++iterator)
-        {
-            const int deleteResult = UF_OBJ_delete_object(*iterator);
-            AppendDebugLog("UndoPreview fallback delete created feature tag=" + std::to_string(*iterator) +
-                           ", result=" + std::to_string(deleteResult) +
-                           " " + UfMessage(deleteResult));
-        }
-
-        for (tag_t referenceTag : previewReferenceTags_)
-        {
-            if (referenceTag == NULL_TAG)
+            // The previous raw UF_OBJ_delete_object fallback could delete a
+            // boolean before its internal sketch/UDF children had been
+            // reconciled.  That left a partially-modified sheet body and made
+            // the recorded P2 topologically invalid.  Queue every live feature
+            // created after the baseline in one NX update transaction so NX
+            // resolves parent/child deletion in dependency order.
+            const std::set<tag_t> baseline(previewBaselineFeatureTags_.begin(),
+                                           previewBaselineFeatureTags_.end());
+            std::set<tag_t> queuedTags;
+            std::vector<TaggedObject*> deleteObjects;
+            Features::FeatureCollection* features = workPart->Features();
+            for (auto iterator = features->begin(); iterator != features->end(); ++iterator)
             {
-                continue;
+                Features::Feature* feature = *iterator;
+                if (feature == nullptr || feature->Tag() == NULL_TAG ||
+                    baseline.find(feature->Tag()) != baseline.end() ||
+                    !queuedTags.insert(feature->Tag()).second)
+                {
+                    continue;
+                }
+                deleteObjects.push_back(feature);
             }
-            const int deleteResult = UF_OBJ_delete_object(referenceTag);
-            AppendDebugLog("UndoPreview fallback delete reference tag=" + std::to_string(referenceTag) +
-                           ", result=" + std::to_string(deleteResult) +
-                           " " + UfMessage(deleteResult));
+
+            auto queueLiveTaggedObject = [&](tag_t objectTag)
+            {
+                if (objectTag == NULL_TAG || !queuedTags.insert(objectTag).second)
+                {
+                    return;
+                }
+                try
+                {
+                    TaggedObject* object =
+                        dynamic_cast<TaggedObject*>(NXObjectManager::Get(objectTag));
+                    if (object != nullptr)
+                    {
+                        deleteObjects.push_back(object);
+                    }
+                }
+                catch (...)
+                {
+                    // The object may already have been removed with an owning
+                    // feature.  Do not call UF_OBJ_delete_object on a stale tag.
+                }
+            };
+            for (tag_t referenceTag : previewReferenceTags_)
+            {
+                queueLiveTaggedObject(referenceTag);
+            }
+
+            AppendDebugLog("UndoPreview dependency cleanup queued object count=" +
+                           std::to_string(deleteObjects.size()));
+            if (deleteObjects.empty())
+            {
+                dependencyCleanupSucceeded = true;
+            }
+            else
+            {
+                const Session::UndoMarkId cleanupMark =
+                    session_->SetUndoMark(Session::MarkVisibilityInvisible,
+                                          "2P_SiBian Preview Cleanup");
+                updateManager->ClearDeleteList();
+                updateManager->ClearErrorList();
+                const int addErrors =
+                    updateManager->AddObjectsToDeleteList(deleteObjects);
+                const int updateErrors = updateManager->DoUpdate(cleanupMark);
+                if (session_->DoesUndoMarkExist(cleanupMark,
+                                                "2P_SiBian Preview Cleanup"))
+                {
+                    session_->DeleteUndoMark(cleanupMark,
+                                             "2P_SiBian Preview Cleanup");
+                }
+
+                std::vector<tag_t> remainingFeatureTags;
+                for (tag_t featureTag : CurrentWorkPartFeatureTags())
+                {
+                    if (baseline.find(featureTag) == baseline.end())
+                    {
+                        remainingFeatureTags.push_back(featureTag);
+                    }
+                }
+                dependencyCleanupSucceeded = remainingFeatureTags.empty();
+                AppendDebugLog("UndoPreview dependency cleanup completed: addErrors=" +
+                               std::to_string(addErrors) +
+                               ", updateErrors=" + std::to_string(updateErrors) +
+                               ", remainingCreatedFeatures=" +
+                               std::to_string(remainingFeatureTags.size()) +
+                               ", restored=" +
+                               (dependencyCleanupSucceeded ? "true" : "false"));
+            }
+        }
+        catch (const NXException& ex)
+        {
+            AppendDebugLog("UndoPreview dependency cleanup NXException: " +
+                           NxExceptionText(ex));
+        }
+        catch (const std::exception& ex)
+        {
+            AppendDebugLog(std::string("UndoPreview dependency cleanup exception: ") +
+                           ex.what());
+        }
+        catch (...)
+        {
+            AppendDebugLog("UndoPreview dependency cleanup unknown exception");
         }
     }
 
+    const bool rollbackSucceeded = undoSucceeded || dependencyCleanupSucceeded;
     hasPreview_ = false;
     previewCommitted_ = false;
     previewUndoMark_ = static_cast<Session::UndoMarkId>(0);
@@ -3739,6 +4130,7 @@ void TwoPointSiBianUI::UndoPreview(bool includeCommitted)
     previewReferenceTags_.clear();
     previewBaselineFeatureTags_.clear();
     previewCreatedFeatureTags_.clear();
+    return rollbackSucceeded;
 }
 
 void TwoPointSiBianUI::CommitPreview()
@@ -3755,6 +4147,7 @@ void TwoPointSiBianUI::CommitPreview()
     previewCommitted_ = true;
     hasSmartEndpointCache_ = false;
     smartEndpointBodyTag_ = NULL_TAG;
+    smartEndpointFaceTag_ = NULL_TAG;
     retainSmartEndpointCacheOnUndo_ = false;
 }
 
@@ -3869,9 +4262,44 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
             inputs.startPoint = smartCachedP1_;
             inputs.endPoint = smartCachedP2_;
             inputs.targetBody = clickBody;
-            inputs.baseFace = FindPlanarFaceContainingPoints(clickBody,
-                                                             inputs.startPoint,
-                                                             inputs.endPoint);
+            inputs.baseFace = nullptr;
+            if (smartEndpointFaceTag_ != NULL_TAG)
+            {
+                try
+                {
+                    Face* cachedFace = dynamic_cast<Face*>(
+                        NXObjectManager::Get(smartEndpointFaceTag_));
+                    if (cachedFace != nullptr &&
+                        cachedFace->GetBody() != nullptr &&
+                        cachedFace->GetBody()->Tag() == clickBody->Tag() &&
+                        cachedFace->SolidFaceType() == Face::FaceTypePlanar &&
+                        PointOnFacePlane(cachedFace, inputs.startPoint) &&
+                        PointOnFacePlane(cachedFace, inputs.endPoint))
+                    {
+                        inputs.baseFace = cachedFace;
+                        AppendDebugLog(
+                            "ReadInputs reused recorded smart face: face=" +
+                            std::to_string(cachedFace->Tag()));
+                    }
+                }
+                catch (const NXException& ex)
+                {
+                    AppendDebugLog(
+                        "ReadInputs recorded smart face is unavailable: " +
+                        UfMessage(ex.ErrorCode()));
+                }
+                catch (...)
+                {
+                    AppendDebugLog(
+                        "ReadInputs recorded smart face is unavailable: unknown exception.");
+                }
+            }
+            if (inputs.baseFace == nullptr)
+            {
+                inputs.baseFace = FindPlanarFaceContainingPoints(clickBody,
+                                                                 inputs.startPoint,
+                                                                 inputs.endPoint);
+            }
             if (inputs.baseFace == nullptr)
             {
                 AppendDebugLog("ReadInputs smart endpoint cache rejected: cached P1/P2 no longer share a planar face.");
@@ -4120,12 +4548,35 @@ bool TwoPointSiBianUI::RefreshSmartInputsAfterRips(const InferredInputs& origina
         return false;
     }
 
-    Face* face = FindPlanarFaceContainingPoints(body,
-                                                originalInputs.startPoint,
-                                                originalInputs.endPoint);
-    if (face == nullptr)
+    Face* face = originalInputs.baseFace;
+    bool recordedFaceIsUsable = false;
+    if (face != nullptr)
     {
-        face = originalInputs.baseFace;
+        try
+        {
+            recordedFaceIsUsable =
+                face->GetBody() != nullptr &&
+                face->GetBody()->Tag() == body->Tag() &&
+                face->SolidFaceType() == Face::FaceTypePlanar &&
+                PointOnFacePlane(face, originalInputs.startPoint) &&
+                PointOnFacePlane(face, originalInputs.endPoint);
+        }
+        catch (...)
+        {
+            recordedFaceIsUsable = false;
+        }
+    }
+    if (!recordedFaceIsUsable)
+    {
+        face = FindPlanarFaceContainingPoints(body,
+                                              originalInputs.startPoint,
+                                              originalInputs.endPoint);
+    }
+    else
+    {
+        AppendDebugLog(
+            "RefreshSmartInputsAfterRips retained recorded selection face=" +
+            std::to_string(face->Tag()));
     }
     if (face == nullptr || face->SolidFaceType() != Face::FaceTypePlanar)
     {
@@ -4166,6 +4617,91 @@ bool TwoPointSiBianUI::RefreshSmartInputsAfterRips(const InferredInputs& origina
         AppendDebugLog("RefreshSmartInputsAfterRips failed: no updated peripheral endpoints were found.");
         return false;
     }
+
+    const double maximumSnapDistance =
+        std::max(5.0, originalInputs.thickness * 5.0);
+    const std::size_t filteredBoundaryPointCount =
+        boundaryPoints.size();
+    auto addUniqueBoundaryPoint = [&boundaryPoints](const Point3d& point)
+    {
+        for (const Point3d& existing : boundaryPoints)
+        {
+            if (Distance(existing, point) <= kPointTolerance)
+            {
+                return false;
+            }
+        }
+        boundaryPoints.push_back(point);
+        return true;
+    };
+
+    // Smart selection intentionally rejects small inner loops so holes near the
+    // mouse do not replace the true peripheral endpoints.  A sheet-metal rip,
+    // however, can turn the original P2 into a small new relief loop.  After the
+    // rip only, admit topology endpoints local to the recorded P1/P2.  The
+    // bounded search keeps the original smart-selection rule intact and avoids
+    // snapping to an unrelated distant hole.
+    std::size_t localPostRipPointCount = 0;
+    try
+    {
+        for (Edge* edge : body->GetEdges())
+        {
+            if (edge == nullptr)
+            {
+                continue;
+            }
+            Point3d first;
+            Point3d second;
+            edge->GetVertices(&first, &second);
+            for (const Point3d& endpoint :
+                 std::array<Point3d, 2>{first, second})
+            {
+                const bool nearRecordedEndpoint =
+                    Distance(endpoint, originalInputs.startPoint) <=
+                        maximumSnapDistance ||
+                    Distance(endpoint, originalInputs.endPoint) <=
+                        maximumSnapDistance;
+                const bool onOriginalEndpointPlane =
+                    PointOnFacePlane(face, endpoint);
+                if (nearRecordedEndpoint &&
+                    onOriginalEndpointPlane &&
+                    addUniqueBoundaryPoint(endpoint))
+                {
+                    ++localPostRipPointCount;
+                    AppendDebugLog(
+                        "RefreshSmartInputsAfterRips added local body-edge endpoint: edge=" +
+                        std::to_string(edge->Tag()) +
+                        ", point=" + FormatPoint(endpoint) +
+                        ", distanceToP1=" +
+                        FormatExpressionNumber(
+                            Distance(endpoint,
+                                     originalInputs.startPoint)) +
+                        ", distanceToP2=" +
+                        FormatExpressionNumber(
+                            Distance(endpoint,
+                                     originalInputs.endPoint)));
+                }
+            }
+        }
+    }
+    catch (const NXException& ex)
+    {
+        AppendDebugLog(
+            "RefreshSmartInputsAfterRips local post-rip endpoint scan NXException: " +
+            UfMessage(ex.ErrorCode()));
+    }
+    catch (...)
+    {
+        AppendDebugLog(
+            "RefreshSmartInputsAfterRips local post-rip endpoint scan unknown exception.");
+    }
+    AppendDebugLog(
+        "RefreshSmartInputsAfterRips endpoint pool: filteredBoundaryPoints=" +
+        std::to_string(filteredBoundaryPointCount) +
+        ", addedLocalPostRipPoints=" +
+        std::to_string(localPostRipPointCount) +
+        ", maximumSnapDistance=" +
+        FormatExpressionNumber(maximumSnapDistance));
 
     struct EndpointCandidate
     {
@@ -4209,7 +4745,6 @@ bool TwoPointSiBianUI::RefreshSmartInputsAfterRips(const InferredInputs& origina
         buildCandidates(originalInputs.startPoint);
     const std::vector<EndpointCandidate> endCandidates =
         buildCandidates(originalInputs.endPoint);
-    const double maximumSnapDistance = std::max(5.0, originalInputs.thickness * 5.0);
     double bestScore = std::numeric_limits<double>::max();
     bool found = false;
 
@@ -4230,9 +4765,13 @@ bool TwoPointSiBianUI::RefreshSmartInputsAfterRips(const InferredInputs& origina
             InferredInputs candidate = originalInputs;
             candidate.startPoint = start.point;
             candidate.endPoint = end.point;
-            candidate.baseFace = FindPlanarFaceContainingPoints(body,
-                                                                candidate.startPoint,
-                                                                candidate.endPoint);
+            candidate.baseFace =
+                PointOnFacePlane(face, candidate.startPoint) &&
+                        PointOnFacePlane(face, candidate.endPoint)
+                    ? face
+                    : FindPlanarFaceContainingPoints(body,
+                                                     candidate.startPoint,
+                                                     candidate.endPoint);
             candidate.startEdge = nullptr;
             candidate.endEdge = nullptr;
             candidate.startPositiveYEdge = nullptr;
@@ -4503,6 +5042,17 @@ bool TwoPointSiBianUI::InferEndpointsFromFaceClick(TaggedObject* selectedObject,
         inputs.thickness > kPointTolerance
             ? inputs.thickness
             : EstimateSheetThickness(body, face);
+    if (inputs.thickness <= kPointTolerance &&
+        expectedThickness > kPointTolerance)
+    {
+        // Keep the first valid measurement. ReadInputs and all post-rip
+        // refreshes must reuse this value instead of measuring a topologically
+        // changed body again.
+        inputs.thickness = expectedThickness;
+        AppendDebugLog("InferEndpointsFromFaceClick cached the one-time "
+                       "sheet thickness=" +
+                       FormatExpressionNumber(inputs.thickness));
+    }
     std::vector<BoundaryPointCandidate> candidates;
     candidates.reserve(boundaryPoints.size());
     for (const Point3d& point : boundaryPoints)
@@ -4747,6 +5297,9 @@ Face* TwoPointSiBianUI::FindPlanarFaceAtPoint(Body* body, const Point3d& point) 
 
     Face* bestFace = nullptr;
     double bestDistance = std::numeric_limits<double>::max();
+    Face* bestContainingFace = nullptr;
+    double bestContainingDistance = std::numeric_limits<double>::max();
+    int bestContainmentStatus = 0;
     for (Face* face : body->GetFaces())
     {
         if (face == nullptr || face->SolidFaceType() != Face::FaceTypePlanar)
@@ -4767,8 +5320,60 @@ Face* TwoPointSiBianUI::FindPlanarFaceAtPoint(Body* body, const Point3d& point) 
             bestDistance = distance;
             bestFace = face;
         }
+        if (distance > kPlaneTolerance)
+        {
+            continue;
+        }
+
+        const double signedDistance =
+            Dot(Subtract(point, planePoint), normal);
+        const Point3d projectedPoint(
+            point.X - normal.X * signedDistance,
+            point.Y - normal.Y * signedDistance,
+            point.Z - normal.Z * signedDistance);
+        int containmentStatus = 0;
+        if (!PointContainmentOnFace(face,
+                                    projectedPoint,
+                                    containmentStatus) ||
+            (containmentStatus != 1 && containmentStatus != 3))
+        {
+            continue;
+        }
+
+        const bool betterContainment =
+            bestContainingFace == nullptr ||
+            (containmentStatus == 1 && bestContainmentStatus != 1) ||
+            (containmentStatus == bestContainmentStatus &&
+             distance < bestContainingDistance);
+        if (betterContainment)
+        {
+            bestContainingFace = face;
+            bestContainingDistance = distance;
+            bestContainmentStatus = containmentStatus;
+        }
     }
 
+    if (bestContainingFace != nullptr)
+    {
+        AppendDebugLog(
+            "FindPlanarFaceAtPoint selected containing face=" +
+            std::to_string(bestContainingFace->Tag()) +
+            ", containmentStatus=" +
+            std::to_string(bestContainmentStatus) +
+            ", planeDistance=" +
+            FormatExpressionNumber(bestContainingDistance) +
+            ", click=" + FormatPoint(point));
+        return bestContainingFace;
+    }
+    if (bestDistance <= kPlaneTolerance && bestFace != nullptr)
+    {
+        AppendDebugLog(
+            "FindPlanarFaceAtPoint containment unavailable; using nearest-plane fallback face=" +
+            std::to_string(bestFace->Tag()) +
+            ", planeDistance=" +
+            FormatExpressionNumber(bestDistance) +
+            ", click=" + FormatPoint(point));
+    }
     return bestDistance <= kPlaneTolerance ? bestFace : nullptr;
 }
 
@@ -5863,20 +6468,82 @@ bool TwoPointSiBianUI::ComputeReferenceInwardNormal(Body* body,
     {
         return false;
     }
-    double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-    if (UF_MODL_ask_bounding_box(body->Tag(), box) != 0)
+
+    Point3d samplePoint;
+    if (!FindFaceInteriorSamplePoint(face, samplePoint))
+    {
+        AppendDebugLog("reference inward-normal containment failed to find "
+                       "a point strictly inside the trimmed face: body=" +
+                       std::to_string(body->Tag()) +
+                       ", face=" + std::to_string(face->Tag()));
+        return false;
+    }
+
+    Vector3d surfaceNormal;
+    if (!FaceNormalAtPoint(face, samplePoint, surfaceNormal))
+    {
+        surfaceNormal = planeNormal;
+    }
+    if (!Normalize(surfaceNormal))
     {
         return false;
     }
-    const Point3d bodyCenter((box[0] + box[3]) * 0.5,
-                             (box[1] + box[4]) * 0.5,
-                             (box[2] + box[5]) * 0.5);
-    if (Dot(planeNormal, Subtract(bodyCenter, planeOrigin)) < 0.0)
+
+    constexpr double probeLength = 0.05;
+    const Point3d positiveProbe =
+        AddVector(samplePoint,
+                  ScaleVector(surfaceNormal, probeLength));
+    const Point3d negativeProbe =
+        AddVector(samplePoint,
+                  ScaleVector(surfaceNormal, -probeLength));
+    double positiveCoordinates[3] = {
+        positiveProbe.X, positiveProbe.Y, positiveProbe.Z};
+    double negativeCoordinates[3] = {
+        negativeProbe.X, negativeProbe.Y, negativeProbe.Z};
+    int positiveStatus = 0;
+    int negativeStatus = 0;
+    const int positiveResult =
+        UF_MODL_ask_point_containment(positiveCoordinates,
+                                      body->Tag(),
+                                      &positiveStatus);
+    const int negativeResult =
+        UF_MODL_ask_point_containment(negativeCoordinates,
+                                      body->Tag(),
+                                      &negativeStatus);
+    const bool positiveInside =
+        positiveResult == 0 && positiveStatus == 1;
+    const bool negativeInside =
+        negativeResult == 0 && negativeStatus == 1;
+
+    std::ostringstream trace;
+    trace << "reference inward-normal containment:"
+          << " body=" << body->Tag()
+          << ", face=" << face->Tag()
+          << ", sample=" << FormatPoint(samplePoint)
+          << ", surfaceNormal=" << FormatVector(surfaceNormal)
+          << ", probeLength=" << probeLength
+          << ", positiveProbe=" << FormatPoint(positiveProbe)
+          << ", positiveResult=" << positiveResult
+          << ", positiveStatus=" << positiveStatus
+          << ", negativeProbe=" << FormatPoint(negativeProbe)
+          << ", negativeResult=" << negativeResult
+          << ", negativeStatus=" << negativeStatus;
+
+    if (positiveInside != negativeInside)
     {
-        planeNormal = ScaleVector(planeNormal, -1.0);
+        inwardNormal = positiveInside
+                           ? surfaceNormal
+                           : ScaleVector(surfaceNormal, -1.0);
+        trace << ", selected="
+              << (positiveInside ? "positive" : "negative")
+              << ", inwardNormal=" << FormatVector(inwardNormal);
+        AppendDebugLog(trace.str());
+        return true;
     }
-    inwardNormal = planeNormal;
-    return Normalize(inwardNormal);
+
+    trace << ", selected=ambiguous; inward normal rejected";
+    AppendDebugLog(trace.str());
+    return false;
 }
 
 bool TwoPointSiBianUI::ExtrudeReferenceCornerProfile(
@@ -5889,89 +6556,533 @@ bool TwoPointSiBianUI::ExtrudeReferenceCornerProfile(
     const char* operationName,
     std::string& errorMessage) const
 {
-    if (profilePoints.size() < 4 || inputs.targetBody == nullptr)
+    Part* workPart = session_ != nullptr ? session_->Parts()->Work() : nullptr;
+    if (workPart == nullptr || profilePoints.size() < 4 ||
+        inputs.targetBody == nullptr)
     {
         errorMessage = std::string(operationName) + ": invalid profile or target body.";
         return false;
     }
-    std::vector<tag_t> curveTags;
-    uf_list_p_t curveList = nullptr;
-    uf_list_p_t featureList = nullptr;
-    auto cleanup = [&]() {
-        if (curveList != nullptr) UF_MODL_delete_list(&curveList);
-        if (featureList != nullptr) UF_MODL_delete_list(&featureList);
-        for (tag_t curveTag : curveTags)
+
+    Vector3d profileNormal = direction;
+    if (!Normalize(profileNormal))
+    {
+        errorMessage = std::string(operationName) + ": the profile normal is invalid.";
+        return false;
+    }
+
+    Vector3d fixedPlaneXAxis;
+    bool hasFixedPlaneXAxis = false;
+    for (std::size_t pointIndex = 1;
+         pointIndex < profilePoints.size();
+         ++pointIndex)
+    {
+        fixedPlaneXAxis = ProjectVectorToPlane(
+            Subtract(profilePoints[pointIndex], profilePoints.front()),
+            profileNormal);
+        if (Normalize(fixedPlaneXAxis))
         {
-            if (curveTag != NULL_TAG && UF_OBJ_delete_object(curveTag) != 0)
+            hasFixedPlaneXAxis = true;
+            break;
+        }
+    }
+    if (!hasFixedPlaneXAxis)
+    {
+        Vector3d seed(std::fabs(profileNormal.X) < 0.9 ? 1.0 : 0.0,
+                      std::fabs(profileNormal.X) < 0.9 ? 0.0 : 1.0,
+                      0.0);
+        fixedPlaneXAxis = Cross(seed, profileNormal);
+        hasFixedPlaneXAxis = Normalize(fixedPlaneXAxis);
+    }
+    Vector3d fixedPlaneYAxis = Cross(profileNormal, fixedPlaneXAxis);
+    if (!hasFixedPlaneXAxis || !Normalize(fixedPlaneYAxis))
+    {
+        errorMessage = std::string(operationName) +
+                       ": the fixed sketch-plane axes are invalid.";
+        return false;
+    }
+    fixedPlaneXAxis = Cross(fixedPlaneYAxis, profileNormal);
+    if (!Normalize(fixedPlaneXAxis))
+    {
+        errorMessage = std::string(operationName) +
+                       ": the fixed sketch-plane X axis is invalid.";
+        return false;
+    }
+    Matrix3x3 fixedPlaneMatrix;
+    fixedPlaneMatrix.Xx = fixedPlaneXAxis.X;
+    fixedPlaneMatrix.Xy = fixedPlaneXAxis.Y;
+    fixedPlaneMatrix.Xz = fixedPlaneXAxis.Z;
+    fixedPlaneMatrix.Yx = fixedPlaneYAxis.X;
+    fixedPlaneMatrix.Yy = fixedPlaneYAxis.Y;
+    fixedPlaneMatrix.Yz = fixedPlaneYAxis.Z;
+    fixedPlaneMatrix.Zx = profileNormal.X;
+    fixedPlaneMatrix.Zy = profileNormal.Y;
+    fixedPlaneMatrix.Zz = profileNormal.Z;
+
+    SimpleSketchInPlaceBuilder* sketchBuilder = nullptr;
+    Sketch* profileSketch = nullptr;
+    Features::Feature* sketchFeature = nullptr;
+    Features::ExtrudeBuilder* extrudeBuilder = nullptr;
+    Features::Feature* extrudeFeature = nullptr;
+    tag_t sketchFeatureTag = NULL_TAG;
+    tag_t extrudeFeatureTag = NULL_TAG;
+    tag_t placementPointTag = NULL_TAG;
+    tag_t placementCsysTag = NULL_TAG;
+    tag_t extrusionDirectionTag = NULL_TAG;
+    std::vector<tag_t> sketchCurveTags;
+    Session::UndoMarkId localUndoMark = static_cast<Session::UndoMarkId>(0);
+    std::string failureStage = "initialization";
+    try
+    {
+        localUndoMark = session_->SetUndoMark(
+            Session::MarkVisibilityInvisible,
+            operationName);
+    }
+    catch (...)
+    {
+        localUndoMark = static_cast<Session::UndoMarkId>(0);
+    }
+
+    auto deleteFeatureIfAlive = [](tag_t featureTag) -> bool
+    {
+        if (featureTag == NULL_TAG || UF_OBJ_ask_status(featureTag) != UF_OBJ_ALIVE)
+        {
+            return true;
+        }
+        UF_OBJ_delete_object(featureTag);
+        return UF_OBJ_ask_status(featureTag) != UF_OBJ_ALIVE;
+    };
+    auto deleteLocalUndoMark = [&]()
+    {
+        if (localUndoMark == static_cast<Session::UndoMarkId>(0))
+        {
+            return;
+        }
+        try
+        {
+            session_->DeleteUndoMark(localUndoMark, operationName);
+        }
+        catch (...)
+        {
+        }
+        localUndoMark = static_cast<Session::UndoMarkId>(0);
+    };
+    auto cleanupFailedFeatures = [&]() -> bool
+    {
+        if (extrudeBuilder != nullptr)
+        {
+            try
             {
-                UF_OBJ_set_blank_status(curveTag, UF_OBJ_BLANKED);
+                extrudeBuilder->Destroy();
+            }
+            catch (...)
+            {
+            }
+            extrudeBuilder = nullptr;
+        }
+        if (sketchBuilder != nullptr)
+        {
+            try
+            {
+                sketchBuilder->Destroy();
+            }
+            catch (...)
+            {
+            }
+            sketchBuilder = nullptr;
+        }
+        if (localUndoMark != static_cast<Session::UndoMarkId>(0))
+        {
+            try
+            {
+                session_->UndoToMark(localUndoMark, operationName);
+                session_->DeleteUndoMark(localUndoMark, operationName);
+                localUndoMark = static_cast<Session::UndoMarkId>(0);
+                return true;
+            }
+            catch (const NXException& ex)
+            {
+                AppendDebugLog(std::string(operationName) +
+                               " local rollback warning: " + UfMessage(ex.ErrorCode()));
+                localUndoMark = static_cast<Session::UndoMarkId>(0);
+            }
+            catch (...)
+            {
+                AppendDebugLog(std::string(operationName) +
+                               " local rollback warning: unknown exception.");
+                localUndoMark = static_cast<Session::UndoMarkId>(0);
             }
         }
-    };
-    for (std::size_t index = 0; index + 1 < profilePoints.size(); ++index)
-    {
-        UF_CURVE_line_t lineData;
-        CopyPoint(profilePoints[index], lineData.start_point);
-        CopyPoint(profilePoints[index + 1], lineData.end_point);
-        tag_t lineTag = NULL_TAG;
-        if (UF_CURVE_create_line(&lineData, &lineTag) != 0 || lineTag == NULL_TAG)
+        const bool extrudeDeleted = deleteFeatureIfAlive(extrudeFeatureTag);
+        const bool sketchDeleted = extrudeDeleted && deleteFeatureIfAlive(sketchFeatureTag);
+        if (!sketchDeleted)
         {
-            errorMessage = std::string(operationName) + ": failed to create profile curves.";
-            cleanup();
+            AppendDebugLog(std::string(operationName) +
+                           " fallback cleanup retained live dependent sketch history to avoid dangling parents.");
             return false;
         }
-        curveTags.push_back(lineTag);
-    }
-    if (UF_MODL_create_list(&curveList) != 0 || curveList == nullptr)
+        bool cleanupComplete = true;
+        for (tag_t curveTag : sketchCurveTags)
+        {
+            if (curveTag != NULL_TAG && UF_OBJ_ask_status(curveTag) == UF_OBJ_ALIVE)
+            {
+                UF_OBJ_delete_object(curveTag);
+                cleanupComplete = cleanupComplete &&
+                                  UF_OBJ_ask_status(curveTag) != UF_OBJ_ALIVE;
+            }
+        }
+        if (extrusionDirectionTag != NULL_TAG &&
+            UF_OBJ_ask_status(extrusionDirectionTag) == UF_OBJ_ALIVE)
+        {
+            UF_OBJ_delete_object(extrusionDirectionTag);
+            cleanupComplete = cleanupComplete &&
+                              UF_OBJ_ask_status(extrusionDirectionTag) != UF_OBJ_ALIVE;
+        }
+        if (placementPointTag != NULL_TAG &&
+            UF_OBJ_ask_status(placementPointTag) == UF_OBJ_ALIVE)
+        {
+            UF_OBJ_delete_object(placementPointTag);
+            cleanupComplete = cleanupComplete &&
+                              UF_OBJ_ask_status(placementPointTag) != UF_OBJ_ALIVE;
+        }
+        if (placementCsysTag != NULL_TAG &&
+            UF_OBJ_ask_status(placementCsysTag) == UF_OBJ_ALIVE)
+        {
+            UF_OBJ_delete_object(placementCsysTag);
+            cleanupComplete = cleanupComplete &&
+                              UF_OBJ_ask_status(placementCsysTag) != UF_OBJ_ALIVE;
+        }
+        return cleanupComplete;
+    };
+
+    try
     {
-        errorMessage = std::string(operationName) + ": failed to allocate the curve list.";
-        cleanup();
-        return false;
+        failureStage = "fixed sketch coordinate-system creation";
+        CartesianCoordinateSystem* placementCsys =
+            workPart->CoordinateSystems()->CreateCoordinateSystem(
+                origin,
+                fixedPlaneMatrix,
+                true);
+        Point* placementPoint = workPart->Points()->CreatePoint(origin);
+        if (placementCsys == nullptr || placementPoint == nullptr)
+        {
+            throw std::runtime_error("NX did not create the corner-profile sketch placement.");
+        }
+        placementCsysTag = placementCsys->Tag();
+        placementPointTag = placementPoint->Tag();
+        placementPoint->SetVisibility(SmartObject::VisibilityOptionInvisible);
+
+        failureStage = "fixed sketch commit";
+        sketchBuilder = workPart->Sketches()->CreateSimpleSketchInPlaceBuilder();
+        sketchBuilder->SetUseWorkPartOrigin(false);
+        sketchBuilder->SetCoordinateSystem(placementCsys);
+        sketchBuilder->SetSketchOrigin(placementPoint);
+
+        NXObject* committedSketchObject = sketchBuilder->Commit();
+        profileSketch = dynamic_cast<Sketch*>(committedSketchObject);
+        Features::SketchFeature* committedSketchFeature =
+            dynamic_cast<Features::SketchFeature*>(committedSketchObject);
+        if (committedSketchFeature != nullptr)
+        {
+            sketchFeature = committedSketchFeature;
+            profileSketch = committedSketchFeature->Sketch();
+        }
+        if (sketchFeature == nullptr && profileSketch != nullptr)
+        {
+            sketchFeature = profileSketch->Feature();
+        }
+        if (sketchFeature != nullptr)
+        {
+            sketchFeatureTag = sketchFeature->Tag();
+        }
+        std::vector<NXObject*> committedSketchObjects = sketchBuilder->GetCommittedObjects();
+        for (NXObject* committedObject : committedSketchObjects)
+        {
+            if (profileSketch == nullptr)
+            {
+                profileSketch = dynamic_cast<Sketch*>(committedObject);
+            }
+            if (sketchFeature == nullptr)
+            {
+                Features::SketchFeature* candidate =
+                    dynamic_cast<Features::SketchFeature*>(committedObject);
+                if (candidate != nullptr)
+                {
+                    sketchFeature = candidate;
+                    sketchFeatureTag = candidate->Tag();
+                    profileSketch = candidate->Sketch();
+                }
+            }
+        }
+        sketchBuilder->Destroy();
+        sketchBuilder = nullptr;
+        if (profileSketch == nullptr)
+        {
+            throw std::runtime_error("NX did not create the corner-profile sketch.");
+        }
+        if (sketchFeature == nullptr)
+        {
+            sketchFeature = profileSketch->Feature();
+        }
+        if (sketchFeature == nullptr)
+        {
+            throw std::runtime_error("NX did not return the corner-profile sketch feature.");
+        }
+        sketchFeatureTag = sketchFeature->Tag();
+
+        failureStage = "sketch-plane coordinate resolution";
+        const Point3d sketchOrigin = profileSketch->Origin();
+        NXMatrix* sketchOrientationObject = profileSketch->Orientation();
+        if (sketchOrientationObject == nullptr)
+        {
+            throw std::runtime_error("NX did not return the corner-profile sketch orientation.");
+        }
+        const Matrix3x3 sketchOrientation = sketchOrientationObject->Element();
+        Vector3d sketchXAxis(sketchOrientation.Xx,
+                             sketchOrientation.Xy,
+                             sketchOrientation.Xz);
+        Vector3d sketchYAxis(sketchOrientation.Yx,
+                             sketchOrientation.Yy,
+                             sketchOrientation.Yz);
+        Vector3d sketchNormal(sketchOrientation.Zx,
+                              sketchOrientation.Zy,
+                              sketchOrientation.Zz);
+        AppendDebugLog(std::string(operationName) +
+                       " committed sketch orientation: origin=" +
+                       FormatPoint(sketchOrigin) +
+                       ", X=" + FormatVector(sketchXAxis) +
+                       ", Y=" + FormatVector(sketchYAxis) +
+                       ", Z=" + FormatVector(sketchNormal) +
+                       ", requestedZ=" + FormatVector(profileNormal));
+        if (!Normalize(sketchXAxis) ||
+            !Normalize(sketchYAxis) ||
+            !Normalize(sketchNormal) ||
+            std::fabs(Dot(sketchNormal, profileNormal)) < 0.999999)
+        {
+            throw std::runtime_error("NX created a sketch plane that does not match the corner-profile plane.");
+        }
+
+        std::vector<Point3d> projectedProfilePoints;
+        projectedProfilePoints.reserve(profilePoints.size());
+        double maximumInputPlaneOffset = 0.0;
+        double maximumProjectedPlaneOffset = 0.0;
+        for (const Point3d& profilePoint : profilePoints)
+        {
+            const Vector3d fromSketchOrigin = Subtract(profilePoint, sketchOrigin);
+            maximumInputPlaneOffset =
+                std::max(maximumInputPlaneOffset,
+                         std::fabs(Dot(fromSketchOrigin, sketchNormal)));
+            const Point3d projectedPoint = AddVector(
+                AddVector(sketchOrigin,
+                          ScaleVector(sketchXAxis,
+                                      Dot(fromSketchOrigin, sketchXAxis))),
+                ScaleVector(sketchYAxis,
+                            Dot(fromSketchOrigin, sketchYAxis)));
+            maximumProjectedPlaneOffset =
+                std::max(maximumProjectedPlaneOffset,
+                         std::fabs(Dot(Subtract(projectedPoint, sketchOrigin),
+                                       sketchNormal)));
+            projectedProfilePoints.push_back(projectedPoint);
+        }
+        AppendDebugLog(std::string(operationName) +
+                       " sketch-plane projection: requestedOrigin=" + FormatPoint(origin) +
+                       ", actualOrigin=" + FormatPoint(sketchOrigin) +
+                       ", requestedNormal=" + FormatVector(profileNormal) +
+                       ", actualNormal=" + FormatVector(sketchNormal) +
+                       ", normalDot=" +
+                       FormatExpressionNumber(Dot(sketchNormal, profileNormal)) +
+                       ", maximumInputOffset=" +
+                       FormatExpressionNumber(maximumInputPlaneOffset) +
+                       ", maximumProjectedOffset=" +
+                       FormatExpressionNumber(maximumProjectedPlaneOffset));
+
+        failureStage = "sketch geometry creation";
+        profileSketch->Activate(Sketch::ViewReorientFalse);
+        for (std::size_t index = 0; index + 1 < projectedProfilePoints.size(); ++index)
+        {
+            failureStage = "sketch geometry line " + std::to_string(index + 1);
+            Line* line = workPart->Curves()->CreateLine(projectedProfilePoints[index],
+                                                        projectedProfilePoints[index + 1]);
+            if (line == nullptr)
+            {
+                throw std::runtime_error("NX did not create a corner-profile sketch line.");
+            }
+            sketchCurveTags.push_back(line->Tag());
+            profileSketch->AddGeometry(line,
+                                       Sketch::InferConstraintsOptionInferNoConstraints);
+        }
+        failureStage = "sketch update";
+        profileSketch->Update();
+        profileSketch->UpdateNavigator();
+        profileSketch->Deactivate(Sketch::ViewReorientFalse,
+                                  Sketch::UpdateLevelModel);
+
+        std::vector<Curve*> profileCurves;
+        for (NXObject* geometry : profileSketch->GetAllGeometry())
+        {
+            Curve* curve = dynamic_cast<Curve*>(geometry);
+            if (curve != nullptr)
+            {
+                profileCurves.push_back(curve);
+            }
+        }
+        if (profileCurves.empty())
+        {
+            throw std::runtime_error("The corner-profile sketch contains no curves.");
+        }
+
+        failureStage = "extrusion setup";
+        extrudeBuilder = workPart->Features()->CreateExtrudeBuilder(nullptr);
+        Section* section = workPart->Sections()->CreateSection(9.5e-05, 0.0001, 0.5);
+        extrudeBuilder->SetSection(section);
+        extrudeBuilder->AllowSelfIntersectingSection(true);
+        extrudeBuilder->SetDistanceTolerance(0.0001);
+        extrudeBuilder->BooleanOperation()->SetType(
+            GeometricUtilities::BooleanOperation::BooleanTypeCreate);
+        extrudeBuilder->SmartVolumeProfile()->SetOpenProfileSmartVolumeOption(false);
+        extrudeBuilder->SmartVolumeProfile()->SetCloseProfileRule(
+            GeometricUtilities::SmartVolumeProfileBuilder::CloseProfileRuleTypeFci);
+        extrudeBuilder->Limits()->SetSymmetricOption(false);
+        extrudeBuilder->Limits()->StartExtend()->Value()->SetFormula(
+            FormatExpressionNumber(startLimitValue).c_str());
+        extrudeBuilder->Limits()->EndExtend()->Value()->SetFormula(
+            FormatExpressionNumber(endLimitValue).c_str());
+        extrudeBuilder->Limits()->StartExtend()->SetTrimType(
+            GeometricUtilities::Extend::ExtendTypeValue);
+        extrudeBuilder->Limits()->EndExtend()->SetTrimType(
+            GeometricUtilities::Extend::ExtendTypeValue);
+        extrudeBuilder->Offset()->SetOption(GeometricUtilities::TypeNoOffset);
+        extrudeBuilder->Offset()->StartOffset()->SetFormula("0");
+        extrudeBuilder->Offset()->EndOffset()->SetFormula("0");
+        extrudeBuilder->FeatureOptions()->SetBodyType(
+            GeometricUtilities::FeatureOptions::BodyStyleSolid);
+
+        section->SetDistanceTolerance(0.0001);
+        section->SetChainingTolerance(9.5e-05);
+        section->SetAllowedEntityTypes(Section::AllowTypesOnlyCurves);
+        section->AllowSelfIntersection(true);
+        section->AllowDegenerateCurves(false);
+
+        CurveFeatureRule* profileRule =
+            workPart->ScRuleFactory()->CreateRuleCurveFeature(
+                std::vector<Features::Feature*>{sketchFeature});
+        section->AddToSection(
+            std::vector<SelectionIntentRule*>{profileRule},
+            profileCurves.front(),
+            nullptr,
+            nullptr,
+            projectedProfilePoints.front(),
+            Section::ModeCreate,
+            false);
+
+        Direction* extrusionDirection = workPart->Directions()->CreateDirection(
+            origin,
+            profileNormal,
+            SmartObject::UpdateOptionWithinModeling);
+        if (extrusionDirection == nullptr)
+        {
+            throw std::runtime_error("NX did not create the corner-profile extrusion direction.");
+        }
+        extrusionDirectionTag = extrusionDirection->Tag();
+        extrudeBuilder->SetDirection(extrusionDirection);
+        extrudeBuilder->SetParentFeatureInternal(sketchFeature);
+
+        failureStage = "extrusion commit";
+        extrudeFeature = extrudeBuilder->CommitFeature();
+        if (extrudeFeature != nullptr)
+        {
+            extrudeFeatureTag = extrudeFeature->Tag();
+        }
+        extrudeBuilder->Destroy();
+        extrudeBuilder = nullptr;
+        if (extrudeFeature == nullptr)
+        {
+            throw std::runtime_error("NX did not create the corner-profile extrusion.");
+        }
+        try
+        {
+            if (!sketchFeature->IsInternal())
+            {
+                extrudeFeature->MakeSketchInternal();
+            }
+        }
+        catch (const NXException& ex)
+        {
+            AppendDebugLog(std::string(operationName) +
+                           " MakeSketchInternal warning: " + UfMessage(ex.ErrorCode()));
+        }
+        if (!sketchFeature->IsInternal())
+        {
+            throw std::runtime_error("NX did not place the profile sketch inside the extrusion.");
+        }
+
+        failureStage = "extrusion body resolution";
+        tag_t toolBodyTag = NULL_TAG;
+        const int bodyStatus = UF_MODL_ask_feat_body(extrudeFeatureTag, &toolBodyTag);
+        if (bodyStatus != 0 || toolBodyTag == NULL_TAG)
+        {
+            throw NXException::Create(bodyStatus != 0 ? bodyStatus : 1);
+        }
+
+        failureStage = "corner-profile subtraction";
+        tag_t subtractTag = NULL_TAG;
+        if (!SubtractToolBodies(inputs.targetBody,
+                                std::vector<tag_t>{toolBodyTag},
+                                subtractTag,
+                                errorMessage))
+        {
+            if (!cleanupFailedFeatures())
+            {
+                errorMessage = "Internal corner-profile rollback failed; canceling the entire preview.\n" +
+                               errorMessage;
+            }
+            return false;
+        }
+        deleteLocalUndoMark();
+        AppendDebugLog(std::string(operationName) +
+                       " completed with internal sketch: sketch=" +
+                       std::to_string(sketchFeatureTag) +
+                       ", extrude=" + std::to_string(extrudeFeatureTag) +
+                       ", subtract=" + std::to_string(subtractTag));
+        return true;
     }
-    for (tag_t curveTag : curveTags) UF_MODL_put_list_item(curveList, curveTag);
-    const std::string startLimit = FormatExpressionNumber(startLimitValue);
-    const std::string endLimit = FormatExpressionNumber(endLimitValue);
-    char taper[] = "0.0";
-    char* limits[2] = {const_cast<char*>(startLimit.c_str()),
-                       const_cast<char*>(endLimit.c_str())};
-    double originData[3] = {origin.X, origin.Y, origin.Z};
-    double directionData[3] = {direction.X, direction.Y, direction.Z};
-    const int result = UF_MODL_create_extruded(curveList,
-                                                taper,
-                                                limits,
-                                                originData,
-                                                directionData,
-                                                UF_NULLSIGN,
-                                                &featureList);
-    tag_t featureTag = NULL_TAG;
-    tag_t toolBodyTag = NULL_TAG;
-    int count = 0;
-    if (result == 0 && featureList != nullptr &&
-        UF_MODL_ask_list_count(featureList, &count) == 0 && count > 0)
+    catch (const NXException& ex)
     {
-        UF_MODL_ask_list_item(featureList, 0, &featureTag);
-        UF_MODL_ask_feat_body(featureTag, &toolBodyTag);
+        errorMessage = std::string(operationName) +
+                       ": failed to create the internal-sketch extrusion at " +
+                       failureStage + ".\n" +
+                       NxExceptionText(ex);
     }
-    if (toolBodyTag == NULL_TAG)
+    catch (const std::exception& ex)
     {
-        errorMessage = std::string(operationName) + ": failed to extrude the corner profile.\n" +
-                       UfMessage(result);
-        cleanup();
-        return false;
+        errorMessage = std::string(operationName) +
+                       ": failed to create the internal-sketch extrusion at " +
+                       failureStage + ".\n" + ex.what();
     }
-    tag_t subtractTag = NULL_TAG;
-    const bool subtracted = SubtractToolBodies(inputs.targetBody,
-                                                std::vector<tag_t>{toolBodyTag},
-                                                subtractTag,
-                                                errorMessage);
-    cleanup();
-    if (subtracted)
+    catch (...)
     {
-        AppendDebugLog(std::string(operationName) + " completed: extrude=" +
-                       std::to_string(featureTag) + ", subtract=" +
-                       std::to_string(subtractTag));
+        errorMessage = std::string(operationName) +
+                       ": failed to create the internal-sketch extrusion at " +
+                       failureStage + ".";
     }
-    return subtracted;
+    try
+    {
+        if (profileSketch != nullptr && profileSketch->IsActive())
+        {
+            profileSketch->Deactivate(Sketch::ViewReorientFalse,
+                                      Sketch::UpdateLevelModel);
+        }
+    }
+    catch (...)
+    {
+    }
+    if (!cleanupFailedFeatures())
+    {
+        errorMessage = "Internal corner-profile rollback failed; canceling the entire preview.\n" +
+                       errorMessage;
+    }
+    AppendDebugLog(errorMessage);
+    return false;
 }
 
 bool TwoPointSiBianUI::CreateReferenceNonRightCornerEdgeCut(
@@ -6341,6 +7452,68 @@ bool TwoPointSiBianUI::CreateReferenceRightCornerEdgeCut(
         {
         }
     }
+
+    // NX occasionally rejects an open edge with symmetric offset even though
+    // the edge, direction and distances are valid ("section values and
+    // direction may be incompatible").  Preserve the reference-project
+    // geometry by replacing that representation with its exact closed-profile
+    // equivalent: the corner edge offset by one sheet thickness on both sides,
+    // then extruded with the same start/end limits.
+    Vector3d edgeDirection = Subtract(second, first);
+    Vector3d lateralDirection = Cross(inwardNormal, edgeDirection);
+    if (Normalize(edgeDirection) && Normalize(lateralDirection))
+    {
+        const Vector3d lateralOffset =
+            ScaleVector(lateralDirection, inputs.thickness);
+        const std::vector<Point3d> fallbackProfile{
+            Point3d(first.X - lateralOffset.X,
+                    first.Y - lateralOffset.Y,
+                    first.Z - lateralOffset.Z),
+            Point3d(second.X - lateralOffset.X,
+                    second.Y - lateralOffset.Y,
+                    second.Z - lateralOffset.Z),
+            Point3d(second.X + lateralOffset.X,
+                    second.Y + lateralOffset.Y,
+                    second.Z + lateralOffset.Z),
+            Point3d(first.X + lateralOffset.X,
+                    first.Y + lateralOffset.Y,
+                    first.Z + lateralOffset.Z)};
+        std::string fallbackError;
+        AppendDebugLog(
+            "reference 90-degree corner-edge cut retrying with equivalent closed profile: edge=" +
+            std::to_string(cornerEdge->Tag()) +
+            ", face=" + std::to_string(referenceFace->Tag()) +
+            ", inwardNormal=" + FormatVector(inwardNormal) +
+            ", lateralHalfWidth=" +
+            FormatExpressionNumber(inputs.thickness) +
+            ", startLimit=" +
+            FormatExpressionNumber(inputs.thickness) +
+            ", endLimit=" +
+            FormatExpressionNumber(inputs.thickness + clearance));
+        if (ExtrudeReferenceCornerProfile(
+                inputs,
+                fallbackProfile,
+                helpPoint,
+                inwardNormal,
+                inputs.thickness,
+                inputs.thickness + clearance,
+                "reference 90-degree closed-profile corner-edge cut",
+                fallbackError))
+        {
+            AppendDebugLog(
+                "reference 90-degree corner-edge cut completed with closed-profile fallback: edge=" +
+                std::to_string(cornerEdge->Tag()) +
+                ", face=" + std::to_string(referenceFace->Tag()));
+            return true;
+        }
+        errorMessage +=
+            "\nClosed-profile fallback failed: " + fallbackError;
+    }
+    else
+    {
+        errorMessage +=
+            "\nClosed-profile fallback failed: the edge/lateral direction is invalid.";
+    }
     return false;
 }
 
@@ -6366,21 +7539,50 @@ bool TwoPointSiBianUI::CreateReferenceTopCornerCut(
     clearance = std::fabs(clearance);
     bendRadius = std::fabs(bendRadius);
     const double cutLength = inputs.thickness + bendRadius;
-    Vector3d centerDirection =
+    Vector3d selectionDirection =
         ProjectVectorToPlane(Subtract(inputs.endPoint, inputs.startPoint), cornerEdgeDirection);
-    if (!Normalize(centerDirection) || cutLength <= kPointTolerance)
+    edge1Direction = ProjectVectorToPlane(edge1Direction, cornerEdgeDirection);
+    edge2Direction = ProjectVectorToPlane(edge2Direction, cornerEdgeDirection);
+    if (!Normalize(selectionDirection) ||
+        !Normalize(edge1Direction) ||
+        !Normalize(edge2Direction) ||
+        cutLength <= kPointTolerance)
     {
         errorMessage = "Reference chamfer: invalid top-corner center direction.";
         return false;
     }
-    if (Dot(centerDirection, edge1Direction) < 0.0)
+    if (Dot(selectionDirection, edge1Direction) < 0.0)
     {
         edge1Direction = ScaleVector(edge1Direction, -1.0);
     }
-    if (Dot(centerDirection, edge2Direction) < 0.0)
+    if (Dot(selectionDirection, edge2Direction) < 0.0)
     {
         edge2Direction = ScaleVector(edge2Direction, -1.0);
     }
+    // P1->P2 only identifies which rays point into the selected region.  It
+    // is not generally the angle bisector of the two far-end boundary edges.
+    // Using it as the profile center line leaves a nonzero minimum B-D gap
+    // (1.500225 in the reported case), so a requested 0.1 gap is impossible.
+    // Build the profile on the actual inward angular bisector instead.
+    Vector3d centerDirection(edge1Direction.X + edge2Direction.X,
+                             edge1Direction.Y + edge2Direction.Y,
+                             edge1Direction.Z + edge2Direction.Z);
+    centerDirection = ProjectVectorToPlane(centerDirection, cornerEdgeDirection);
+    if (!Normalize(centerDirection))
+    {
+        errorMessage = "Reference chamfer: the two far-end edges have no valid inward angular bisector.";
+        return false;
+    }
+    if (Dot(centerDirection, selectionDirection) < 0.0)
+    {
+        centerDirection = ScaleVector(centerDirection, -1.0);
+    }
+    AppendDebugLog("reference top-corner directions: selection=" +
+                   FormatVector(selectionDirection) +
+                   ", edge1=" + FormatVector(edge1Direction) +
+                   ", edge2=" + FormatVector(edge2Direction) +
+                   ", bisector=" + FormatVector(centerDirection) +
+                   ", cutLength=" + FormatExpressionNumber(cutLength));
 
     std::vector<Point3d> profilePoints;
     auto evaluate = [&](double centerDistance,
@@ -6413,19 +7615,23 @@ bool TwoPointSiBianUI::CreateReferenceTopCornerCut(
         return true;
     };
 
+    // Keep the lower bound at the first geometrically-too-small distance.
+    // The previous loop advanced lowDistance until a valid profile existed,
+    // then copied that same value to highDistance.  When its first valid gap
+    // already exceeded the requested clearance, both bounds were identical
+    // and the binary search returned an oversized far-end cut.
     double lowDistance = cutLength + kPointTolerance;
-    double lowGap = 0.0;
+    double highDistance = lowDistance;
+    double highGap = 0.0;
     for (int index = 0; index < 80; ++index)
     {
-        if (evaluate(lowDistance, nullptr, &lowGap)) break;
-        lowDistance *= 1.25;
-    }
-    double highDistance = lowDistance;
-    double highGap = lowGap;
-    for (int index = 0; index < 80 && highGap < clearance; ++index)
-    {
-        highDistance *= 1.5;
-        if (!evaluate(highDistance, nullptr, &highGap)) highGap = 0.0;
+        if (evaluate(highDistance, nullptr, &highGap) &&
+            highGap >= clearance)
+        {
+            break;
+        }
+        highDistance *= 1.25;
+        highGap = 0.0;
     }
     if (highGap < clearance || clearance <= kPointTolerance)
     {
@@ -6453,7 +7659,9 @@ bool TwoPointSiBianUI::CreateReferenceTopCornerCut(
     }
     AppendDebugLog("reference top-corner profile=OABCDEO, targetGap=" +
                    FormatExpressionNumber(clearance) +
-                   ", actualGap=" + FormatExpressionNumber(finalGap));
+                   ", actualGap=" + FormatExpressionNumber(finalGap) +
+                   ", lowerDistance=" + FormatExpressionNumber(lowDistance) +
+                   ", upperDistance=" + FormatExpressionNumber(highDistance));
     return ExtrudeReferenceCornerProfile(inputs,
                                          profilePoints,
                                          point,
@@ -8978,28 +10186,31 @@ double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) cons
         }
 
         const double baseArea = MeasureFaceArea(baseFace);
-        const double minProjectedOverlapRatio = kThicknessProjectionOverlapRatio;
-        std::vector<ProjectionPoint2d> basePolygon;
-        if (!FaceProjectionPolygon(baseFace, basePlanePoint, projectionXAxis, projectionYAxis, basePolygon))
+        if (baseArea <= kPointTolerance)
         {
-            AppendDebugLog("EstimateSheetThickness failed to build base projection polygon.");
+            AppendDebugLog("EstimateSheetThickness failed: the selected face area is zero.");
             return 0.0;
         }
-        const double baseProjectedArea = PolygonArea(basePolygon);
-        const double baseProjectionAreaErrorRatio =
-            baseArea > kPointTolerance
-                ? std::fabs(baseProjectedArea - baseArea) / baseArea
-                : std::numeric_limits<double>::max();
-        const bool baseProjectionIsReliable =
-            baseProjectionAreaErrorRatio <= kThicknessProjectionAreaErrorRatio;
+
+        std::vector<Point3d> coarseSamples;
+        if (!BuildFaceInteriorGridSamples(baseFace,
+                                          basePlanePoint,
+                                          projectionXAxis,
+                                          projectionYAxis,
+                                          5,
+                                          coarseSamples))
+        {
+            AppendDebugLog("EstimateSheetThickness failed to sample the selected face.");
+            return 0.0;
+        }
 
         std::ostringstream trace;
         trace << "EstimateSheetThickness baseFace=" << baseFace->Tag()
-              << ", baseArea=" << baseArea
-              << ", baseProjectedArea=" << baseProjectedArea
-              << ", baseProjectionAreaErrorRatio=" << baseProjectionAreaErrorRatio
-              << ", baseProjectionIsReliable=" << (baseProjectionIsReliable ? "true" : "false")
-              << ", minProjectedOverlapRatio=" << minProjectedOverlapRatio
+               << ", baseArea=" << baseArea
+              << ", overlapMethod=grouped NX face-containment sampling"
+              << ", coarseGrid=5x5"
+              << ", coarseInteriorSamples=" << coarseSamples.size()
+              << ", minimumCoverage=" << kThicknessProjectionOverlapRatio
               << ", basePlanePoint=" << FormatPoint(basePlanePoint)
               << ", projectionX=" << FormatVector(projectionXAxis)
               << ", projectionY=" << FormatVector(projectionYAxis);
@@ -9019,7 +10230,8 @@ double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) cons
             {
                 continue;
             }
-            const double parallel = std::fabs(Dot(baseNormal, faceNormal));
+            const double normalDot = Dot(baseNormal, faceNormal);
+            const double parallel = std::fabs(normalDot);
             if (parallel < 0.999)
             {
                 continue;
@@ -9032,82 +10244,171 @@ double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) cons
                 continue;
             }
 
-            candidates.push_back({face, planeDistance, signedPlaneDistance});
+            // The material lies behind the selected face's oriented normal.
+            // Do not require the candidate's reported face normal to be
+            // opposite: imported/boolean-modified NX bodies can report the
+            // same UF normal direction for both sides. Actual overlap is
+            // established below by trimmed-face containment sampling.
+            if (signedPlaneDistance >= -kPlaneTolerance)
+            {
+                trace << "\n  skip parallel face=" << face->Tag()
+                      << " planeDistance=" << planeDistance
+                      << " signedPlaneDistance=" << signedPlaneDistance
+                      << " normalDot=" << normalDot
+                      << " reason=not behind the selected face";
+                continue;
+            }
+
+            candidates.push_back(
+                {face, planeDistance, signedPlaneDistance, normalDot});
         }
 
         std::sort(candidates.begin(), candidates.end(), [](const ThicknessCandidate& first, const ThicknessCandidate& second) {
             return first.planeDistance < second.planeDistance;
         });
 
-        trace << "\n  parallelPlaneCandidates=" << candidates.size();
+        struct ThicknessPlaneGroup
+        {
+            double signedPlaneDistance = 0.0;
+            double planeDistance = 0.0;
+            double totalArea = 0.0;
+            std::vector<ThicknessCandidate> candidates;
+        };
+
+        std::vector<ThicknessPlaneGroup> groups;
+        const double groupDistanceTolerance =
+            std::max(kPlaneTolerance * 5.0, 1.0e-3);
         for (const ThicknessCandidate& candidate : candidates)
         {
-            const double candidateArea = MeasureFaceArea(candidate.face);
-            const double candidateToBaseAreaRatio =
-                baseArea > kPointTolerance ? candidateArea / baseArea : 0.0;
-            if (candidateToBaseAreaRatio + 1.0e-9 < minProjectedOverlapRatio)
+            ThicknessPlaneGroup* matchingGroup = nullptr;
+            for (ThicknessPlaneGroup& group : groups)
             {
-                trace << "\n  skip face=" << candidate.face->Tag()
-                      << " planeDistance=" << candidate.planeDistance
-                      << " reason=candidate area too small"
-                      << " candidateArea=" << candidateArea
-                      << " candidateToBaseAreaRatio=" << candidateToBaseAreaRatio;
+                if (std::fabs(group.signedPlaneDistance -
+                              candidate.signedPlaneDistance) <=
+                    groupDistanceTolerance)
+                {
+                    matchingGroup = &group;
+                    break;
+                }
+            }
+            if (matchingGroup == nullptr)
+            {
+                ThicknessPlaneGroup group;
+                group.signedPlaneDistance =
+                    candidate.signedPlaneDistance;
+                group.planeDistance = candidate.planeDistance;
+                groups.push_back(group);
+                matchingGroup = &groups.back();
+            }
+            matchingGroup->candidates.push_back(candidate);
+            matchingGroup->planeDistance =
+                std::min(matchingGroup->planeDistance,
+                         candidate.planeDistance);
+            matchingGroup->totalArea +=
+                MeasureFaceArea(candidate.face);
+        }
+
+        std::sort(groups.begin(), groups.end(),
+                  [](const ThicknessPlaneGroup& first,
+                     const ThicknessPlaneGroup& second) {
+                      return first.planeDistance <
+                             second.planeDistance;
+                  });
+        trace << "\n  oppositeParallelFaces=" << candidates.size()
+              << ", planeGroups=" << groups.size();
+
+        std::vector<Point3d> fineSamples;
+        bool fineSamplesBuilt = false;
+        for (const ThicknessPlaneGroup& group : groups)
+        {
+            const double groupToBaseAreaRatio =
+                group.totalArea / baseArea;
+            if (groupToBaseAreaRatio + 1.0e-9 <
+                kThicknessProjectionOverlapRatio)
+            {
+                trace << "\n  skip group distance="
+                      << group.planeDistance
+                      << " signedDistance="
+                      << group.signedPlaneDistance
+                      << " faceCount="
+                      << group.candidates.size()
+                      << " totalArea=" << group.totalArea
+                      << " groupToBaseAreaRatio="
+                      << groupToBaseAreaRatio
+                      << " reason=combined face area cannot reach coverage threshold";
                 continue;
             }
 
-            double overlapArea = 0.0;
-            double candidateProjectedArea = 0.0;
-            const double projectedOverlapRatio = ProjectedOverlapRatioWithBase(basePolygon,
-                                                                                baseProjectedArea,
-                                                                                candidate.face,
-                                                                                basePlanePoint,
-                                                                                projectionXAxis,
-                                                                                projectionYAxis,
-                                                                                overlapArea,
-                                                                                candidateProjectedArea);
-            const double candidateProjectionAreaErrorRatio =
-                candidateArea > kPointTolerance
-                    ? std::fabs(candidateProjectedArea - candidateArea) / candidateArea
-                    : std::numeric_limits<double>::max();
-            const bool candidateProjectionIsReliable =
-                candidateProjectionAreaErrorRatio <= kThicknessProjectionAreaErrorRatio;
-            const bool projectionIsReliable =
-                baseProjectionIsReliable && candidateProjectionIsReliable;
-            const double overlapRatio =
-                baseArea > kPointTolerance ? overlapArea / baseArea : projectedOverlapRatio;
-            if (projectionIsReliable &&
-                overlapRatio + 1.0e-9 < minProjectedOverlapRatio)
+            std::size_t coarseCovered = 0;
+            const double coarseCoverage =
+                ProjectedFaceGroupCoverage(coarseSamples,
+                                           baseNormal,
+                                           group.candidates,
+                                           &coarseCovered);
+            trace << "\n  group distance=" << group.planeDistance
+                  << " signedDistance=" << group.signedPlaneDistance
+                  << " faceCount=" << group.candidates.size()
+                  << " totalArea=" << group.totalArea
+                  << " groupToBaseAreaRatio=" << groupToBaseAreaRatio
+                  << " coarseCovered=" << coarseCovered
+                  << "/" << coarseSamples.size()
+                  << " coarseCoverage=" << coarseCoverage;
+
+            // A strong coarse result is enough. A zero result is an early
+            // rejection. Only uncertain groups pay for the 11x11 pass.
+            if (coarseSamples.size() >= 5 &&
+                coarseCoverage >=
+                    kThicknessProjectionOverlapRatio + 0.15)
             {
-                trace << "\n  skip face=" << candidate.face->Tag()
-                      << " planeDistance=" << candidate.planeDistance
-                      << " reason=reliable projected overlap is too small"
-                      << " overlapRatio=" << overlapRatio
-                      << " projectedOverlapRatio=" << projectedOverlapRatio
-                      << " overlapArea=" << overlapArea
-                      << " baseArea=" << baseArea
-                      << " baseProjectedArea=" << baseProjectedArea
-                      << " candidateArea=" << candidateArea
-                      << " candidateProjectedArea=" << candidateProjectedArea;
+                bestDistance = group.planeDistance;
+                trace << " selectionRule=coarse grouped containment";
+                break;
+            }
+            if (coarseCoverage <= 1.0e-9 &&
+                coarseSamples.size() >= 5)
+            {
+                trace << " refined=false reason=no coarse overlap";
                 continue;
             }
 
-            trace << "\n  selected candidate face=" << candidate.face->Tag()
-                  << " planeDistance=" << candidate.planeDistance
-                  << " signedPlaneDistance=" << candidate.signedPlaneDistance
-                  << " selectionRule="
-                  << (projectionIsReliable ? "projected overlap" : "nearest parallel face with sufficient area")
-                  << " candidateArea=" << candidateArea
-                  << " candidateToBaseAreaRatio=" << candidateToBaseAreaRatio
-                  << " overlapRatio=" << overlapRatio
-                  << " projectedOverlapRatio=" << projectedOverlapRatio
-                  << " overlapArea=" << overlapArea
-                  << " baseArea=" << baseArea
-                  << " baseProjectedArea=" << baseProjectedArea
-                  << " baseProjectionAreaErrorRatio=" << baseProjectionAreaErrorRatio
-                  << " candidateProjectedArea=" << candidateProjectedArea
-                  << " candidateProjectionAreaErrorRatio=" << candidateProjectionAreaErrorRatio;
-            bestDistance = candidate.planeDistance;
-            break;
+            if (!fineSamplesBuilt)
+            {
+                fineSamplesBuilt =
+                    BuildFaceInteriorGridSamples(baseFace,
+                                                 basePlanePoint,
+                                                 projectionXAxis,
+                                                 projectionYAxis,
+                                                 11,
+                                                 fineSamples);
+                trace << "\n  fineGrid=11x11"
+                      << ", fineInteriorSamples="
+                      << fineSamples.size()
+                      << ", built="
+                      << (fineSamplesBuilt ? "true" : "false");
+            }
+            if (!fineSamplesBuilt || fineSamples.empty())
+            {
+                continue;
+            }
+
+            std::size_t fineCovered = 0;
+            const double fineCoverage =
+                ProjectedFaceGroupCoverage(fineSamples,
+                                           baseNormal,
+                                           group.candidates,
+                                           &fineCovered);
+            trace << "\n    refined group distance="
+                  << group.planeDistance
+                  << " covered=" << fineCovered
+                  << "/" << fineSamples.size()
+                  << " coverage=" << fineCoverage;
+            if (fineCoverage + 1.0e-9 >=
+                kThicknessProjectionOverlapRatio)
+            {
+                bestDistance = group.planeDistance;
+                trace << " selectionRule=refined grouped containment";
+                break;
+            }
         }
         trace << "\n  selected thickness="
               << (bestDistance == std::numeric_limits<double>::max() ? 0.0 : bestDistance);

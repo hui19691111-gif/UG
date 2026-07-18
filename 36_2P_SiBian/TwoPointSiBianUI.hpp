@@ -261,7 +261,7 @@ private:
                             tag_t& resultFeatureTag,
                             std::string& errorMessage) const;
     bool CreatePreview();
-    void UndoPreview(bool includeCommitted = false);
+    bool UndoPreview(bool includeCommitted = false);
     void CommitPreview();
     void FinalizeCommittedPreview();
     std::vector<tag_t> CurrentWorkPartFeatureTags() const;
@@ -294,6 +294,7 @@ private:
     std::vector<tag_t> previewCreatedFeatureTags_;
     bool hasSmartEndpointCache_;
     tag_t smartEndpointBodyTag_;
+    tag_t smartEndpointFaceTag_;
     NXOpen::Point3d smartCachedP1_;
     NXOpen::Point3d smartCachedP2_;
     bool retainSmartEndpointCacheOnUndo_;
