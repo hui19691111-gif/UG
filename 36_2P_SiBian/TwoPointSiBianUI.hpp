@@ -3,6 +3,7 @@
 #include "TwoPointSiBianShared.hpp"
 
 #include <NXOpen/BlockStyler_BlockDialog.hxx>
+#include <NXOpen/BlockStyler_Button.hxx>
 #include <NXOpen/BlockStyler_Enumeration.hxx>
 #include <NXOpen/BlockStyler_SelectObject.hxx>
 #include <NXOpen/BlockStyler_StringBlock.hxx>
@@ -57,6 +58,7 @@ private:
         bool inferredFromSingleClick = false;
         bool smartMode = false;
         bool chamferEdgeMode = true;
+        bool reverseChamfer270Cut = false;
         bool useNinetyClearanceGrooveTemplate = false;
         bool useNinetyClearanceGrooveRightTemplate = false;
         NXOpen::Point3d selectionClickPoint;
@@ -73,8 +75,6 @@ private:
     int ok_cb();
     int cancel_cb();
     int close_cb();
-    void LoadDialogMemory();
-    void SaveDialogMemory() const;
 
     bool ReadInputs(InferredInputs& inputs,
                     NXOpen::TaggedObject* singleClickObjectOverride = nullptr,
@@ -88,8 +88,8 @@ private:
                                      const NXOpen::Point3d& clickPoint,
                                      InferredInputs& inputs) const;
     bool CompleteInputsForEndpoints(InferredInputs& inputs) const;
-    bool RefreshInputsAfterRips(const InferredInputs& originalInputs,
-                                InferredInputs& refreshedInputs) const;
+    bool RefreshSmartInputsAfterRips(const InferredInputs& originalInputs,
+                                     InferredInputs& refreshedInputs) const;
     bool ConstrainRightAnglePrimaryP2ToOffsetSharedEdges(
         const InferredInputs& originalInputs,
         const InferredInputs& currentInputs,
@@ -209,7 +209,8 @@ private:
                                     NXOpen::Face* commonFace,
                                     const std::vector<tag_t>& offsetFeatureTags,
                                     tag_t& offsetFeatureTag,
-                                    std::string& errorMessage) const;
+                                    std::string& errorMessage,
+                                    bool resolveCurrentCoplanarFragments = false) const;
     bool FindAuxiliaryRipPair(NXOpen::Body* body,
                               NXOpen::Face* commonFace,
                               NXOpen::Edge* b1,
@@ -227,10 +228,11 @@ private:
                                     NXOpen::Features::Feature* ripFeature,
                                     double cornerInteriorAngle,
                                     tag_t& firstOffsetTag,
-                                     tag_t& secondOffsetTag,
-                                     std::string& errorMessage,
-                                     bool swapDirectionalOffsetGroups = false,
-                                     bool forceDirectionalOffsetGroups = false) const;
+                                    tag_t& secondOffsetTag,
+                                    std::string& errorMessage,
+                                    bool swapDirectionalOffsetGroups = false,
+                                    bool forceDirectionalOffsetGroups = false,
+                                    bool largestOnlyForSecondDirectionalGroup = false) const;
     bool TryCreateSecondPointRip(const InferredInputs& inputs,
                                  bool allowContinuationInputs,
                                  bool& ripCreated,
@@ -245,6 +247,9 @@ private:
                                  double& deferredRightAngleRipAngle,
                                  std::vector<tag_t>& createdRightAngleOffsetTags,
                                  bool& createdRightAngle90SecondFeaturePath,
+                                 bool& primaryUdfCreatedBeforeRip,
+                                 tag_t& primarySubtractTag,
+                                 std::vector<tag_t>& primaryReferenceTags,
                                  std::string& errorMessage) const;
     bool CreateUserDefinedFeature(const InferredInputs& inputs,
                                   std::string& errorMessage,
@@ -256,15 +261,6 @@ private:
                             tag_t& resultFeatureTag,
                             std::string& errorMessage) const;
     bool CreatePreview();
-    bool LoadEditedFeatureState();
-    bool DetachEditedFeatureOutputs(std::string& errorMessage);
-    bool CommitCompositeFeature(const InferredInputs& inputs,
-                                const std::vector<tag_t>& childFeatureTags,
-                                const std::vector<tag_t>& referenceTags,
-                                std::string& errorMessage);
-    std::vector<tag_t> FindOwnedFeatureTags(const std::string& ownerId) const;
-    bool ReorderEditedCompositeAfterChildren(const std::vector<tag_t>& featureTags,
-                                             std::string& errorMessage);
     void UndoPreview(bool includeCommitted = false);
     void CommitPreview();
     void FinalizeCommittedPreview();
@@ -286,18 +282,10 @@ private:
     NXOpen::BlockStyler::StringBlock* bendRadiusBlock_;
     NXOpen::BlockStyler::Toggle* smartModeBlock_;
     NXOpen::BlockStyler::Toggle* chamferEdgeToggleBlock_;
+    NXOpen::BlockStyler::Button* reverseCutButton_;
     NXOpen::BlockStyler::Enumeration* featureModeBlock_;
     NXOpen::Features::CustomFeatureClassManager* customFeatureManager_;
     NXOpen::Features::CustomFeature* editedFeature_;
-    tag_t editedFeatureTag_;
-    tag_t editedInternalGroupTag_;
-    tag_t editedSavedCurrentFeatureTag_;
-    tag_t editedInsertionAnchorTag_;
-    bool editedCurrentFeatureRepositioned_;
-    std::string editedOwnerId_;
-    bool hasEditedEndpointCache_;
-    NXOpen::Point3d editedCachedP1_;
-    NXOpen::Point3d editedCachedP2_;
     NXOpen::Features::CustomFeatureClass* featureClass_;
     NXOpen::Session::UndoMarkId previewUndoMark_;
     tag_t previewUdfTag_;
@@ -309,17 +297,8 @@ private:
     NXOpen::Point3d smartCachedP1_;
     NXOpen::Point3d smartCachedP2_;
     bool retainSmartEndpointCacheOnUndo_;
-    mutable bool hasSelectionThicknessCache_;
-    mutable tag_t selectionThicknessBodyTag_;
-    mutable NXOpen::Point3d selectionThicknessP1_;
-    mutable NXOpen::Point3d selectionThicknessP2_;
-    mutable double selectionThickness_;
     bool hasPreview_;
     bool previewCommitted_;
     bool isUpdatingPreview_;
-    bool editedOutputsDetached_;
+    bool reverseChamfer270Cut_;
 };
-
-// Embedded PRT resources are extracted only below this process-specific root.
-// Calling this after the dialog and during unload removes any crash-safe leftovers.
-void CleanupTwoPointSiBianTemporaryTemplates();

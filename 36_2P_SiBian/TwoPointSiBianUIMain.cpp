@@ -51,10 +51,8 @@ extern "C" DllExport void ufusr(char* param, int* returnCode, int rlen)
 
     try
     {
-        CleanupTwoPointSiBianTemporaryTemplates();
         TwoPointSiBianUI dialog;
         dialog.Launch();
-        CleanupTwoPointSiBianTemporaryTemplates();
     }
     catch (const NXOpen::NXException& ex)
     {
@@ -76,13 +74,10 @@ extern "C" DllExport void ufusr(char* param, int* returnCode, int rlen)
         }
     }
 
-    CleanupTwoPointSiBianTemporaryTemplates();
-
     UF_terminate();
 }
 
 extern "C" DllExport int ufusr_ask_unload(void)
 {
-    CleanupTwoPointSiBianTemporaryTemplates();
     return UF_UNLOAD_IMMEDIATELY;
 }

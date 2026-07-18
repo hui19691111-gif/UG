@@ -1,20 +1,13 @@
 #include "TwoPointSiBianShared.hpp"
 
 #include <NXOpen/Features_CustomDoubleAttribute.hxx>
-#include <NXOpen/Features_CustomIntegerAttribute.hxx>
 #include <NXOpen/Features_CustomFeature.hxx>
 #include <NXOpen/Features_CustomFeatureClass.hxx>
 #include <NXOpen/Features_CustomFeatureClassManager.hxx>
 #include <NXOpen/Features_CustomFeatureCreateFeatureGeometryEvent.hxx>
 #include <NXOpen/Features_CustomFeatureData.hxx>
 #include <NXOpen/Features_CustomFeatureInformationEvent.hxx>
-#include <NXOpen/Features_CustomFeaturePostUpdateEvent.hxx>
-#include <NXOpen/Features_CustomFeaturePreUpdateEvent.hxx>
-#include <NXOpen/Features_ConstructionFeatureData.hxx>
-#include <NXOpen/Features_CustomTagArrayAttribute.hxx>
 #include <NXOpen/Features_CustomTagAttribute.hxx>
-#include <NXOpen/Features_OutputFeatureData.hxx>
-#include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/Session.hxx>
@@ -30,8 +23,6 @@ using namespace NXOpen;
 
 namespace
 {
-bool g_callbacksRegistered = false;
-
 const char* NxErrorText(const NXException& ex, char message[133])
 {
     UF_get_fail_message(ex.ErrorCode(), message);
@@ -84,35 +75,6 @@ int InformationCallback(Features::CustomFeatureInformationEvent* event)
     event->SetInformation("2P_SiBian: user selects two endpoints; body, face, edges and thickness are inferred by the NXOpen plug-in.");
     return 0;
 }
-
-int PreUpdateCallback(Features::CustomFeaturePreUpdateEvent* event)
-{
-    Features::CustomFeature* feature = event->GetCustomFeature();
-    Features::CustomFeatureData* data = feature != nullptr ? feature->FeatureData() : nullptr;
-    if (feature == nullptr || data == nullptr)
-    {
-        return 1;
-    }
-
-    // Geometry is rebuilt explicitly by the UI from persisted XYZ/scalar
-    // values.  The only retained relation is the CustomFeatureBuilder's
-    // internal-parent ownership of one hidden FeatureGroup.  Construction or
-    // output registration would add an update dependency and can recreate the
-    // historical self-cycle, so both lists always stay empty.
-    std::vector<Features::ConstructionFeatureData*> constructionFeatures;
-    event->SetConstructionFeatures(constructionFeatures);
-    return 0;
-}
-
-int PostUpdateCallback(Features::CustomFeaturePostUpdateEvent* event)
-{
-    // Clear legacy output ownership.  Builds prior to schema 2 incorrectly
-    // registered the upstream construction chain as outputs, which is the
-    // source of the "object depends on itself" circular update.
-    std::vector<Features::OutputFeatureData*> outputs;
-    event->SetOutputFeatures(outputs);
-    return 0;
-}
 }
 
 extern "C" DllExport void ufusr(char* param, int* returnCode, int rlen)
@@ -137,16 +99,10 @@ extern "C" DllExport void ufusr(char* param, int* returnCode, int rlen)
 
     try
     {
-        if (!g_callbacksRegistered)
-        {
-            Features::CustomFeatureClassManager* manager = Session::GetSession()->CustomFeatureClassManager();
-            Features::CustomFeatureClass* featureClass = manager->GetClassFromName(zhihui_twopoint_sibian::kFeatureClassName);
-            featureClass->AddCreateFeatureGeometryHandler(make_callback(&CreateGeometryCallback));
-            featureClass->AddPreUpdateHandler(make_callback(&PreUpdateCallback));
-            featureClass->AddPostUpdateHandler(make_callback(&PostUpdateCallback));
-            featureClass->AddInformationHandler(make_callback(&InformationCallback));
-            g_callbacksRegistered = true;
-        }
+        Features::CustomFeatureClassManager* manager = Session::GetSession()->CustomFeatureClassManager();
+        Features::CustomFeatureClass* featureClass = manager->GetClassFromName(zhihui_twopoint_sibian::kFeatureClassName);
+        featureClass->AddCreateFeatureGeometryHandler(make_callback(&CreateGeometryCallback));
+        featureClass->AddInformationHandler(make_callback(&InformationCallback));
     }
     catch (const NXException& ex)
     {
@@ -173,8 +129,5 @@ extern "C" DllExport void ufusr(char* param, int* returnCode, int rlen)
 
 extern "C" DllExport int ufusr_ask_unload(void)
 {
-    // Registered custom-feature callbacks remain callable for the lifetime of
-    // the NX session.  Unloading this DLL immediately would leave NX holding
-    // invalid callback addresses and cause intermittent edit/update crashes.
-    return UF_UNLOAD_UG_TERMINATE;
+    return UF_UNLOAD_IMMEDIATELY;
 }

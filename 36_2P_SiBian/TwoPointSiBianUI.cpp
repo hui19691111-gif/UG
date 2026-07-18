@@ -1,40 +1,24 @@
 ﻿#include "TwoPointSiBianUI.hpp"
 
-#include "../../common/ZhihuiDialogMemory.hpp"
-
 #include <NXOpen/BlockStyler_Enumeration.hxx>
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_StringBlock.hxx>
 #include <NXOpen/BlockStyler_Toggle.hxx>
-#include <NXOpen/BodyDumbRule.hxx>
-#include <NXOpen/CartesianCoordinateSystem.hxx>
-#include <NXOpen/CoordinateSystemCollection.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
 #include <NXOpen/DisplayableObject.hxx>
-#include <NXOpen/Curve.hxx>
-#include <NXOpen/CurveCollection.hxx>
-#include <NXOpen/CurveFeatureRule.hxx>
 #include <NXOpen/Features_CustomAttribute.hxx>
 #include <NXOpen/Features_CustomAttributeCollection.hxx>
 #include <NXOpen/Features_CustomDoubleAttribute.hxx>
-#include <NXOpen/Features_CustomIntegerAttribute.hxx>
-#include <NXOpen/Features_CustomLogicalAttribute.hxx>
-#include <NXOpen/Features_CustomStringAttribute.hxx>
-#include <NXOpen/Features_CustomTagArrayAttribute.hxx>
 #include <NXOpen/Features_BooleanBuilder.hxx>
-#include <NXOpen/Features_BooleanFeature.hxx>
 #include <NXOpen/Features_CustomFeatureBuilder.hxx>
 #include <NXOpen/Features_CustomFeatureData.hxx>
 #include <NXOpen/Features_CustomFeatureDataCollection.hxx>
-#include <NXOpen/Features_ConstructionFeatureData.hxx>
 #include <NXOpen/Features_CustomTagAttribute.hxx>
 #include <NXOpen/Features_ExtrudeBuilder.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
-#include <NXOpen/Features_FeatureGroup.hxx>
 #include <NXOpen/Features_OffsetFaceBuilder.hxx>
-#include <NXOpen/Features_SketchFeature.hxx>
 #include <NXOpen/Features_SheetMetal_EdgeRipBuilder.hxx>
 #include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
 #include <NXOpen/EdgeDumbRule.hxx>
@@ -49,36 +33,23 @@
 #include <NXOpen/GeometricUtilities_FeatureOptions.hxx>
 #include <NXOpen/GeometricUtilities_Limits.hxx>
 #include <NXOpen/GeometricUtilities_SmartVolumeProfileBuilder.hxx>
-#include <NXOpen/IBaseCurve.hxx>
-#include <NXOpen/Line.hxx>
 #include <NXOpen/NXException.hxx>
-#include <NXOpen/NXMatrix.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObjectManager.hxx>
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
-#include <NXOpen/Plane.hxx>
-#include <NXOpen/PlaneCollection.hxx>
-#include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/Point.hxx>
 #include <NXOpen/PointCollection.hxx>
 #include <NXOpen/Section.hxx>
 #include <NXOpen/SectionCollection.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
-#include <NXOpen/ScCollector.hxx>
-#include <NXOpen/ScCollectorCollection.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
 #include <NXOpen/SmartObject.hxx>
-#include <NXOpen/Sketch.hxx>
-#include <NXOpen/SketchCollection.hxx>
-#include <NXOpen/SketchInPlaceBuilder.hxx>
-#include <NXOpen/SimpleSketchInPlaceBuilder.hxx>
 #include <NXOpen/TaggedObject.hxx>
 #include <NXOpen/Unit.hxx>
 #include <NXOpen/UnitCollection.hxx>
-#include <NXOpen/Update.hxx>
 
 #include <uf.h>
 #include <uf_assem.h>
@@ -95,7 +66,6 @@
 #include <uf_part.h>
 #include <uf_point.h>
 #include <uf_ui.h>
-#include <uf_view.h>
 
 #include <windows.h>
 #include <objbase.h>
@@ -133,7 +103,6 @@ constexpr double kPointTolerance = 1.0e-4;
 constexpr double kPlaneTolerance = 1.0e-3;
 constexpr double kSmartInnerLoopMinimumAreaRatio = 0.15;
 constexpr double kCornerExtensionDistance = 0.05;
-constexpr double kFaceNormalProbeDistance = 0.05;
 constexpr double kThicknessProjectionOverlapRatio = 0.60;
 constexpr double kThicknessProjectionAreaErrorRatio = 0.05;
 constexpr double kEndpointPairMinimumAngleDegrees = 150.0;
@@ -328,72 +297,6 @@ void AppendDebugLog(const std::string& message)
     }
 }
 
-class ScopedPreviewDisplaySuppressor
-{
-public:
-    ScopedPreviewDisplaySuppressor()
-        : previousDisplayCode_(UF_DISP_UNSUPPRESS_DISPLAY),
-          previousStateKnown_(UF_DISP_ask_display(&previousDisplayCode_) == 0),
-          changedDisplayState_(false),
-          workView_(NULL_TAG),
-          workViewKnown_(UF_VIEW_ask_work_view(&workView_) == 0 &&
-                         workView_ != NULL_TAG)
-    {
-        if (!previousStateKnown_ ||
-            previousDisplayCode_ != UF_DISP_SUPPRESS_DISPLAY)
-        {
-            changedDisplayState_ =
-                UF_DISP_set_display(UF_DISP_SUPPRESS_DISPLAY) == 0;
-        }
-        AppendDebugLog("CreatePreview silent display begin: previousStateKnown=" +
-                       std::string(previousStateKnown_ ? "true" : "false") +
-                       ", previousState=" + std::to_string(previousDisplayCode_) +
-                       ", suppressedByPreview=" +
-                       std::string(changedDisplayState_ ? "true" : "false"));
-    }
-
-    ~ScopedPreviewDisplaySuppressor()
-    {
-        if (!changedDisplayState_)
-        {
-            return;
-        }
-
-        const int restoreCode = previousStateKnown_
-                                    ? previousDisplayCode_
-                                    : UF_DISP_UNSUPPRESS_DISPLAY;
-        UF_DISP_set_display(restoreCode);
-        if (restoreCode != UF_DISP_SUPPRESS_DISPLAY)
-        {
-            // Regenerating the complete display also repaints Block Styler and
-            // produces a visible flash.  Only the modeling work view changed
-            // while preview display was suppressed, so update that view only.
-            if (workViewKnown_)
-            {
-                UF_DISP_regenerate_view(workView_);
-            }
-        }
-        AppendDebugLog("CreatePreview silent display end: restoredState=" +
-                       std::to_string(restoreCode) +
-                       ", workViewRegenerated=" +
-                       std::string(restoreCode != UF_DISP_SUPPRESS_DISPLAY &&
-                                           workViewKnown_
-                                       ? "true"
-                                       : "false") +
-                       ", workViewTag=" + std::to_string(workView_));
-    }
-
-    ScopedPreviewDisplaySuppressor(const ScopedPreviewDisplaySuppressor&) = delete;
-    ScopedPreviewDisplaySuppressor& operator=(const ScopedPreviewDisplaySuppressor&) = delete;
-
-private:
-    int previousDisplayCode_;
-    bool previousStateKnown_;
-    bool changedDisplayState_;
-    tag_t workView_;
-    bool workViewKnown_;
-};
-
 void BeginDebugLogSection()
 {
     std::ostringstream trace;
@@ -497,27 +400,6 @@ std::wstring MakeUniqueId()
     return fallback.str();
 }
 
-std::string MakeOwnerId()
-{
-    const std::wstring wide = MakeUniqueId();
-    // MakeUniqueId is a GUID (or a decimal fallback), so every character is
-    // ASCII and can be copied without locale-dependent conversion.
-    std::string result;
-    result.reserve(wide.size());
-    for (wchar_t character : wide)
-    {
-        result.push_back(static_cast<char>(character & 0x7f));
-    }
-    return result;
-}
-
-std::filesystem::path CurrentProcessTemplateRoot()
-{
-    return std::filesystem::temp_directory_path() /
-           std::filesystem::path(kTempTemplateRoot) /
-           std::filesystem::path(std::to_wstring(GetCurrentProcessId()));
-}
-
 class ExtractedTemplatePart
 {
 public:
@@ -565,7 +447,8 @@ public:
         try
         {
             const std::wstring uniqueId = MakeUniqueId();
-            directory_ = CurrentProcessTemplateRoot() /
+            directory_ = std::filesystem::temp_directory_path() /
+                         std::filesystem::path(kTempTemplateRoot) /
                          std::filesystem::path(uniqueId);
             std::filesystem::create_directories(directory_);
             file_ = directory_ / std::filesystem::path(std::wstring(spec.tempPrefix) + uniqueId + L".prt");
@@ -617,10 +500,6 @@ public:
             {
                 AppendDebugLog("failed to delete temp UDF template dir " + directory_.string() + ": " + error.message());
             }
-        }
-        {
-            std::error_code ignored;
-            std::filesystem::remove(CurrentProcessTemplateRoot(), ignored);
         }
         file_.clear();
         directory_.clear();
@@ -1330,10 +1209,11 @@ bool SampleLoopEdge(tag_t edgeTag, std::vector<Point3d>& samples)
             constexpr int sampleCount = 128;
             for (int sampleIndex = 0; sampleIndex <= sampleCount; ++sampleIndex)
             {
-                const double parameter = limits[0] +
-                                         (limits[1] - limits[0]) *
-                                             static_cast<double>(sampleIndex) /
-                                             static_cast<double>(sampleCount);
+                const double parameter =
+                    limits[0] +
+                    (limits[1] - limits[0]) *
+                        static_cast<double>(sampleIndex) /
+                        static_cast<double>(sampleCount);
                 double evaluatedPoint[3] = {0.0, 0.0, 0.0};
                 if (UF_EVAL_evaluate(evaluator,
                                      0,
@@ -1348,7 +1228,8 @@ bool SampleLoopEdge(tag_t edgeTag, std::vector<Point3d>& samples)
                 const Point3d point(evaluatedPoint[0],
                                     evaluatedPoint[1],
                                     evaluatedPoint[2]);
-                if (samples.empty() || !AlmostSamePoint(samples.back(), point))
+                if (samples.empty() ||
+                    !AlmostSamePoint(samples.back(), point))
                 {
                     samples.push_back(point);
                 }
@@ -1361,12 +1242,10 @@ bool SampleLoopEdge(tag_t edgeTag, std::vector<Point3d>& samples)
     samples.clear();
     try
     {
-        Edge* edge = dynamic_cast<Edge*>(NXOpen::NXObjectManager::Get(edgeTag));
-        if (edge == nullptr)
-        {
-            return false;
-        }
-        if (edge->SolidEdgeType() != Edge::EdgeTypeLinear)
+        Edge* edge =
+            dynamic_cast<Edge*>(NXObjectManager::Get(edgeTag));
+        if (edge == nullptr ||
+            edge->SolidEdgeType() != Edge::EdgeTypeLinear)
         {
             return false;
         }
@@ -1396,7 +1275,8 @@ bool BuildOrderedLoopPolyline(uf_list_p_t edgeList,
     }
 
     int edgeCount = 0;
-    if (UF_MODL_ask_list_count(edgeList, &edgeCount) != 0 || edgeCount <= 0)
+    if (UF_MODL_ask_list_count(edgeList, &edgeCount) != 0 ||
+        edgeCount <= 0)
     {
         return false;
     }
@@ -1407,7 +1287,9 @@ bool BuildOrderedLoopPolyline(uf_list_p_t edgeList,
     {
         tag_t edgeTag = NULL_TAG;
         std::vector<Point3d> samples;
-        if (UF_MODL_ask_list_item(edgeList, edgeIndex, &edgeTag) == 0 &&
+        if (UF_MODL_ask_list_item(edgeList,
+                                  edgeIndex,
+                                  &edgeTag) == 0 &&
             SampleLoopEdge(edgeTag, samples))
         {
             edgeSamples.push_back(std::move(samples));
@@ -1433,14 +1315,17 @@ bool BuildOrderedLoopPolyline(uf_list_p_t edgeList,
              candidateIndex < edgeSamples.size();
              ++candidateIndex)
         {
-            if (used[candidateIndex] || edgeSamples[candidateIndex].empty())
+            if (used[candidateIndex] ||
+                edgeSamples[candidateIndex].empty())
             {
                 continue;
             }
             const double frontDistance =
-                Distance(currentEnd, edgeSamples[candidateIndex].front());
+                Distance(currentEnd,
+                         edgeSamples[candidateIndex].front());
             const double backDistance =
-                Distance(currentEnd, edgeSamples[candidateIndex].back());
+                Distance(currentEnd,
+                         edgeSamples[candidateIndex].back());
             if (frontDistance < bestDistance)
             {
                 bestDistance = frontDistance;
@@ -1454,7 +1339,8 @@ bool BuildOrderedLoopPolyline(uf_list_p_t edgeList,
                 reverseBest = true;
             }
         }
-        if (bestIndex >= edgeSamples.size() || bestDistance > kPlaneTolerance * 10.0)
+        if (bestIndex >= edgeSamples.size() ||
+            bestDistance > kPlaneTolerance * 10.0)
         {
             orderedPoints.clear();
             return false;
@@ -1465,9 +1351,12 @@ bool BuildOrderedLoopPolyline(uf_list_p_t edgeList,
         {
             std::reverse(samples.begin(), samples.end());
         }
-        for (std::size_t pointIndex = 1; pointIndex < samples.size(); ++pointIndex)
+        for (std::size_t pointIndex = 1;
+             pointIndex < samples.size();
+             ++pointIndex)
         {
-            if (!AlmostSamePoint(orderedPoints.back(), samples[pointIndex]))
+            if (!AlmostSamePoint(orderedPoints.back(),
+                                 samples[pointIndex]))
             {
                 orderedPoints.push_back(samples[pointIndex]);
             }
@@ -1476,7 +1365,8 @@ bool BuildOrderedLoopPolyline(uf_list_p_t edgeList,
     }
 
     if (orderedPoints.size() < 3 ||
-        !AlmostSamePoint(orderedPoints.front(), orderedPoints.back()))
+        !AlmostSamePoint(orderedPoints.front(),
+                         orderedPoints.back()))
     {
         orderedPoints.clear();
         return false;
@@ -1485,7 +1375,9 @@ bool BuildOrderedLoopPolyline(uf_list_p_t edgeList,
     return orderedPoints.size() >= 3;
 }
 
-bool PlanarLoopArea(Face* face, uf_list_p_t edgeList, double& area)
+bool PlanarLoopArea(Face* face,
+                    uf_list_p_t edgeList,
+                    double& area)
 {
     area = 0.0;
     Point3d planeOrigin;
@@ -1517,14 +1409,18 @@ bool PlanarLoopArea(Face* face, uf_list_p_t edgeList, double& area)
          ++pointIndex)
     {
         const Point3d& first = loopPoints[pointIndex];
-        const Point3d& second = loopPoints[(pointIndex + 1) % loopPoints.size()];
-        const Vector3d firstOffset = Subtract(first, planeOrigin);
-        const Vector3d secondOffset = Subtract(second, planeOrigin);
+        const Point3d& second =
+            loopPoints[(pointIndex + 1) % loopPoints.size()];
+        const Vector3d firstOffset =
+            Subtract(first, planeOrigin);
+        const Vector3d secondOffset =
+            Subtract(second, planeOrigin);
         const double firstX = Dot(firstOffset, xAxis);
         const double firstY = Dot(firstOffset, yAxis);
         const double secondX = Dot(secondOffset, xAxis);
         const double secondY = Dot(secondOffset, yAxis);
-        twiceArea += firstX * secondY - secondX * firstY;
+        twiceArea +=
+            firstX * secondY - secondX * firstY;
     }
     area = std::fabs(twiceArea) * 0.5;
     return area > kPointTolerance;
@@ -1533,7 +1429,8 @@ bool PlanarLoopArea(Face* face, uf_list_p_t edgeList, double& area)
 bool FaceBoundaryPoints(
     Face* face,
     std::vector<Point3d>& points,
-    double minimumAcceptedInnerLoopArea = std::numeric_limits<double>::infinity())
+    double minimumAcceptedInnerLoopArea =
+        std::numeric_limits<double>::infinity())
 {
     points.clear();
     if (face == nullptr)
@@ -1554,7 +1451,8 @@ bool FaceBoundaryPoints(
 
     uf_loop_p_t loopList = nullptr;
     int loopResult = 1;
-    auto releaseLoopList = [&loopList]() {
+    auto releaseLoopList = [&loopList]()
+    {
         if (loopList != nullptr)
         {
             UF_MODL_delete_loop_list(&loopList);
@@ -1564,7 +1462,8 @@ bool FaceBoundaryPoints(
 
     try
     {
-        loopResult = UF_MODL_ask_face_loops(face->Tag(), &loopList);
+        loopResult =
+            UF_MODL_ask_face_loops(face->Tag(), &loopList);
         if (loopResult == 0 && loopList != nullptr)
         {
             int loopCount = 0;
@@ -1574,17 +1473,22 @@ bool FaceBoundaryPoints(
             {
                 int loopType = 0;
                 uf_list_p_t edgeList = nullptr;
-                if (UF_MODL_ask_loop_list_item(loopList, loopIndex, &loopType, &edgeList) != 0 ||
+                if (UF_MODL_ask_loop_list_item(loopList,
+                                               loopIndex,
+                                               &loopType,
+                                               &edgeList) != 0 ||
                     edgeList == nullptr)
                 {
                     continue;
                 }
 
                 bool acceptLoop = loopType == 1;
-                if (loopType == 2 && std::isfinite(minimumAcceptedInnerLoopArea))
+                if (loopType == 2 &&
+                    std::isfinite(minimumAcceptedInnerLoopArea))
                 {
                     double loopArea = 0.0;
-                    const bool measured = PlanarLoopArea(face, edgeList, loopArea);
+                    const bool measured =
+                        PlanarLoopArea(face, edgeList, loopArea);
                     const double selectedFaceArea =
                         minimumAcceptedInnerLoopArea /
                         kSmartInnerLoopMinimumAreaRatio;
@@ -1592,17 +1496,23 @@ bool FaceBoundaryPoints(
                         selectedFaceArea > kPointTolerance
                             ? loopArea / selectedFaceArea
                             : 0.0;
-                    acceptLoop = measured &&
-                                 areaRatio + 1.0e-9 >=
-                                     kSmartInnerLoopMinimumAreaRatio;
+                    acceptLoop =
+                        measured &&
+                        areaRatio + 1.0e-9 >=
+                            kSmartInnerLoopMinimumAreaRatio;
                     std::ostringstream loopTrace;
-                    loopTrace << "FaceBoundaryPoints inner loop: face=" << face->Tag()
-                              << ", loopIndex=" << loopIndex
-                              << ", area=" << loopArea
-                              << ", ratioToSelectedFace=" << areaRatio
-                              << ", minimumArea=" << minimumAcceptedInnerLoopArea
-                              << ", accepted=" << (acceptLoop ? "true" : "false")
-                              << ", measured=" << (measured ? "true" : "false");
+                    loopTrace
+                        << "FaceBoundaryPoints inner loop: face="
+                        << face->Tag()
+                        << ", loopIndex=" << loopIndex
+                        << ", area=" << loopArea
+                        << ", ratioToSelectedFace=" << areaRatio
+                        << ", minimumArea="
+                        << minimumAcceptedInnerLoopArea
+                        << ", accepted="
+                        << (acceptLoop ? "true" : "false")
+                        << ", measured="
+                        << (measured ? "true" : "false");
                     AppendDebugLog(loopTrace.str());
                 }
                 if (!acceptLoop)
@@ -1611,8 +1521,11 @@ bool FaceBoundaryPoints(
                 }
 
                 std::vector<Point3d> loopEndpoints;
-                auto addUniqueLoopEndpoint = [&loopEndpoints](const Point3d& point) {
-                    for (const Point3d& existing : loopEndpoints)
+                auto addUniqueLoopEndpoint =
+                    [&loopEndpoints](const Point3d& point)
+                {
+                    for (const Point3d& existing :
+                         loopEndpoints)
                     {
                         if (AlmostSamePoint(existing, point))
                         {
@@ -1643,11 +1556,14 @@ bool FaceBoundaryPoints(
                     addUniqueLoopEndpoint(first);
                     addUniqueLoopEndpoint(second);
                 }
-                if (loopType == 2 && loopEndpoints.size() < 2)
+                if (loopType == 2 &&
+                    loopEndpoints.size() < 2)
                 {
-                    AppendDebugLog("FaceBoundaryPoints accepted inner loop ignored because it has fewer than two distinct topology endpoints: face=" +
-                                   std::to_string(face->Tag()) +
-                                   ", loopIndex=" + std::to_string(loopIndex));
+                    AppendDebugLog(
+                        "FaceBoundaryPoints accepted inner loop ignored because it has fewer than two distinct topology endpoints: face=" +
+                        std::to_string(face->Tag()) +
+                        ", loopIndex=" +
+                        std::to_string(loopIndex));
                     continue;
                 }
                 for (const Point3d& endpoint : loopEndpoints)
@@ -1663,11 +1579,13 @@ bool FaceBoundaryPoints(
             releaseLoopList();
             if (points.size() >= 2)
             {
-                AppendDebugLog("FaceBoundaryPoints used accepted loop points=" +
-                               std::to_string(points.size()) +
-                               " face=" + std::to_string(face->Tag()) +
-                               ", acceptedInnerLoops=" +
-                               std::to_string(acceptedInnerLoopCount));
+                AppendDebugLog(
+                    "FaceBoundaryPoints used accepted loop points=" +
+                    std::to_string(points.size()) +
+                    " face=" +
+                    std::to_string(face->Tag()) +
+                    ", acceptedInnerLoops=" +
+                    std::to_string(acceptedInnerLoopCount));
                 return true;
             }
         }
@@ -1691,7 +1609,8 @@ bool FaceBoundaryPoints(
 
     if (std::isfinite(minimumAcceptedInnerLoopArea))
     {
-        AppendDebugLog("FaceBoundaryPoints filtered smart selection stopped because classified face loops were unavailable; all-edge fallback was intentionally disabled.");
+        AppendDebugLog(
+            "FaceBoundaryPoints filtered smart selection stopped because classified face loops were unavailable; all-edge fallback was intentionally disabled.");
         return false;
     }
 
@@ -1769,172 +1688,6 @@ bool PointContainmentOnFace(Face* face, const Point3d& point, int& status)
 
     double coordinates[3] = {point.X, point.Y, point.Z};
     return UF_MODL_ask_point_containment(coordinates, face->Tag(), &status) == 0;
-}
-
-bool FindFaceInteriorPoint(Face* face, Point3d& interiorPoint)
-{
-    if (face == nullptr || face->SolidFaceType() != Face::FaceTypePlanar)
-    {
-        return false;
-    }
-
-    double uvBounds[4] = {0.0, 0.0, 0.0, 0.0};
-    if (UF_MODL_ask_face_uv_minmax(face->Tag(), uvBounds) != 0 ||
-        uvBounds[1] <= uvBounds[0] || uvBounds[3] <= uvBounds[2])
-    {
-        AppendDebugLog("FindFaceInteriorPoint failed to read UV bounds: face=" +
-                       std::to_string(face->Tag()));
-        return false;
-    }
-
-    struct UvCandidate
-    {
-        double u = 0.0;
-        double v = 0.0;
-        double centerDistanceSquared = 0.0;
-    };
-    constexpr int gridCount = 25;
-    std::vector<UvCandidate> candidates;
-    candidates.reserve(gridCount * gridCount);
-    for (int uIndex = 0; uIndex < gridCount; ++uIndex)
-    {
-        const double uFraction =
-            (static_cast<double>(uIndex) + 0.5) / static_cast<double>(gridCount);
-        for (int vIndex = 0; vIndex < gridCount; ++vIndex)
-        {
-            const double vFraction =
-                (static_cast<double>(vIndex) + 0.5) / static_cast<double>(gridCount);
-            const double uDelta = uFraction - 0.5;
-            const double vDelta = vFraction - 0.5;
-            candidates.push_back(
-                {uvBounds[0] + (uvBounds[1] - uvBounds[0]) * uFraction,
-                 uvBounds[2] + (uvBounds[3] - uvBounds[2]) * vFraction,
-                 uDelta * uDelta + vDelta * vDelta});
-        }
-    }
-    std::sort(candidates.begin(), candidates.end(),
-              [](const UvCandidate& left, const UvCandidate& right) {
-                  return left.centerDistanceSquared < right.centerDistanceSquared;
-              });
-
-    for (const UvCandidate& candidate : candidates)
-    {
-        double u = candidate.u;
-        double v = candidate.v;
-        int faceStatus = 0;
-        if (UF_MODL_ask_uv_points_containment(1,
-                                              &u,
-                                              &v,
-                                              face->Tag(),
-                                              &faceStatus) != 0 ||
-            faceStatus != 1)
-        {
-            continue;
-        }
-
-        double parameter[2] = {u, v};
-        double point[3] = {0.0, 0.0, 0.0};
-        double u1[3] = {0.0, 0.0, 0.0};
-        double v1[3] = {0.0, 0.0, 0.0};
-        double u2[3] = {0.0, 0.0, 0.0};
-        double v2[3] = {0.0, 0.0, 0.0};
-        double unitNormal[3] = {0.0, 0.0, 0.0};
-        double radii[2] = {0.0, 0.0};
-        if (UF_MODL_ask_face_props(face->Tag(),
-                                   parameter,
-                                   point,
-                                   u1,
-                                   v1,
-                                   u2,
-                                   v2,
-                                   unitNormal,
-                                   radii) != 0)
-        {
-            continue;
-        }
-
-        const Point3d candidatePoint(point[0], point[1], point[2]);
-        int pointStatus = 0;
-        if (!PointContainmentOnFace(face, candidatePoint, pointStatus) ||
-            pointStatus != 1)
-        {
-            continue;
-        }
-
-        interiorPoint = candidatePoint;
-        AppendDebugLog("FindFaceInteriorPoint OK: face=" +
-                       std::to_string(face->Tag()) +
-                       ", point=" + FormatPoint(interiorPoint) +
-                       ", uv=(" + std::to_string(u) + "," +
-                       std::to_string(v) + ")");
-        return true;
-    }
-
-    AppendDebugLog("FindFaceInteriorPoint found no UV sample inside the trimmed face: face=" +
-                   std::to_string(face->Tag()));
-    return false;
-}
-
-bool ComputeFaceInwardNormalByContainment(Body* body,
-                                          Face* face,
-                                          Point3d& interiorPoint,
-                                          Vector3d& inwardNormal)
-{
-    Vector3d faceNormal;
-    if (body == nullptr ||
-        !FindFaceInteriorPoint(face, interiorPoint) ||
-        !FaceNormalAtPoint(face, interiorPoint, faceNormal))
-    {
-        return false;
-    }
-
-    const Point3d positiveProbe =
-        AddVector(interiorPoint, ScaleVector(faceNormal, kFaceNormalProbeDistance));
-    const Point3d negativeProbe =
-        AddVector(interiorPoint, ScaleVector(faceNormal, -kFaceNormalProbeDistance));
-    double positiveCoordinates[3] = {
-        positiveProbe.X, positiveProbe.Y, positiveProbe.Z};
-    double negativeCoordinates[3] = {
-        negativeProbe.X, negativeProbe.Y, negativeProbe.Z};
-    int positiveStatus = 0;
-    int negativeStatus = 0;
-    const int positiveResult =
-        UF_MODL_ask_point_containment(positiveCoordinates,
-                                      body->Tag(),
-                                      &positiveStatus);
-    const int negativeResult =
-        UF_MODL_ask_point_containment(negativeCoordinates,
-                                      body->Tag(),
-                                      &negativeStatus);
-    const bool positiveInside = positiveResult == 0 && positiveStatus == 1;
-    const bool negativeInside = negativeResult == 0 && negativeStatus == 1;
-
-    std::ostringstream trace;
-    trace << "ComputeFaceInwardNormalByContainment: face=" << face->Tag()
-          << ", sample=" << FormatPoint(interiorPoint)
-          << ", outwardNormal=" << FormatVector(faceNormal)
-          << ", probeDistance=" << kFaceNormalProbeDistance
-          << ", positiveProbe=" << FormatPoint(positiveProbe)
-          << ", positiveResult=" << positiveResult
-          << ", positiveStatus=" << positiveStatus
-          << ", negativeProbe=" << FormatPoint(negativeProbe)
-          << ", negativeResult=" << negativeResult
-          << ", negativeStatus=" << negativeStatus;
-
-    if (positiveInside == negativeInside)
-    {
-        trace << ", result=ambiguous";
-        AppendDebugLog(trace.str());
-        return false;
-    }
-
-    inwardNormal = positiveInside
-                       ? faceNormal
-                       : ScaleVector(faceNormal, -1.0);
-    trace << ", result=" << (positiveInside ? "positive" : "negative")
-          << ", inwardNormal=" << FormatVector(inwardNormal);
-    AppendDebugLog(trace.str());
-    return Normalize(inwardNormal);
 }
 
 bool CornerExtensionPointsOnBody(Body* body,
@@ -2413,6 +2166,7 @@ Features::CustomTagAttribute* CreateTagAttribute(Features::CustomAttributeCollec
     {
         props.push_back(Features::CustomAttribute::PropertyIsReferencingTargetBody);
     }
+
     Features::CustomTagAttribute* attr = attrs->CreateCustomTagAttribute(name, props);
     attr->SetValue(value);
     return attr;
@@ -2425,47 +2179,6 @@ Features::CustomDoubleAttribute* CreateDoubleAttribute(Features::CustomAttribute
     std::vector<Features::CustomAttribute::Property> props;
     Features::CustomDoubleAttribute* attr = attrs->CreateCustomDoubleAttribute(name, props);
     attr->SetValue(value);
-    return attr;
-}
-
-Features::CustomIntegerAttribute* CreateIntegerAttribute(Features::CustomAttributeCollection* attrs,
-                                                         const char* name,
-                                                         int value)
-{
-    std::vector<Features::CustomAttribute::Property> props;
-    Features::CustomIntegerAttribute* attr = attrs->CreateCustomIntegerAttribute(name, props);
-    attr->SetValue(value);
-    return attr;
-}
-
-Features::CustomLogicalAttribute* CreateLogicalAttribute(Features::CustomAttributeCollection* attrs,
-                                                         const char* name,
-                                                         bool value)
-{
-    std::vector<Features::CustomAttribute::Property> props;
-    Features::CustomLogicalAttribute* attr = attrs->CreateCustomLogicalAttribute(name, props);
-    attr->SetValue(value);
-    return attr;
-}
-
-Features::CustomStringAttribute* CreateStringAttribute(Features::CustomAttributeCollection* attrs,
-                                                       const char* name,
-                                                       const std::string& value)
-{
-    std::vector<Features::CustomAttribute::Property> props;
-    Features::CustomStringAttribute* attr = attrs->CreateCustomStringAttribute(name, props);
-    attr->SetValue(NXString(value.c_str(), NXString::UTF8));
-    return attr;
-}
-
-Features::CustomTagArrayAttribute* CreateTagArrayAttribute(
-    Features::CustomAttributeCollection* attrs,
-    const char* name,
-    const std::vector<TaggedObject*>& values)
-{
-    std::vector<Features::CustomAttribute::Property> props;
-    Features::CustomTagArrayAttribute* attr = attrs->CreateCustomTagArrayAttribute(name, props);
-    attr->SetValues(values);
     return attr;
 }
 
@@ -3104,24 +2817,6 @@ std::string DescribeExpressions(const UF_MODL_udf_exp_data_t& expData)
 }
 }
 
-void CleanupTwoPointSiBianTemporaryTemplates()
-{
-    try
-    {
-        std::error_code error;
-        const std::filesystem::path root = CurrentProcessTemplateRoot();
-        std::filesystem::remove_all(root, error);
-        if (error)
-        {
-            AppendDebugLog("failed to clean process UDF temp root " + root.string() + ": " + error.message());
-        }
-    }
-    catch (...)
-    {
-        AppendDebugLog("failed to clean process UDF temp root: unknown exception.");
-    }
-}
-
 TwoPointSiBianUI::TwoPointSiBianUI()
     : session_(Session::GetSession()),
       ui_(UI::GetUI()),
@@ -3133,18 +2828,10 @@ TwoPointSiBianUI::TwoPointSiBianUI()
       bendRadiusBlock_(nullptr),
       smartModeBlock_(nullptr),
       chamferEdgeToggleBlock_(nullptr),
+      reverseCutButton_(nullptr),
       featureModeBlock_(nullptr),
       customFeatureManager_(nullptr),
       editedFeature_(nullptr),
-      editedFeatureTag_(NULL_TAG),
-      editedInternalGroupTag_(NULL_TAG),
-      editedSavedCurrentFeatureTag_(NULL_TAG),
-      editedInsertionAnchorTag_(NULL_TAG),
-      editedCurrentFeatureRepositioned_(false),
-      editedOwnerId_(),
-      hasEditedEndpointCache_(false),
-      editedCachedP1_(),
-      editedCachedP2_(),
       featureClass_(nullptr),
       previewUndoMark_(static_cast<Session::UndoMarkId>(0)),
       previewUdfTag_(NULL_TAG),
@@ -3154,20 +2841,13 @@ TwoPointSiBianUI::TwoPointSiBianUI()
       smartCachedP1_(),
       smartCachedP2_(),
       retainSmartEndpointCacheOnUndo_(false),
-      hasSelectionThicknessCache_(false),
-      selectionThicknessBodyTag_(NULL_TAG),
-      selectionThicknessP1_(),
-      selectionThicknessP2_(),
-      selectionThickness_(0.0),
       hasPreview_(false),
       previewCommitted_(false),
       isUpdatingPreview_(false),
-      editedOutputsDetached_(false)
+      reverseChamfer270Cut_(false)
 {
     customFeatureManager_ = session_->CustomFeatureClassManager();
     editedFeature_ = customFeatureManager_->GetEditedCustomFeature();
-    editedFeatureTag_ = editedFeature_ != nullptr ? editedFeature_->Tag() : NULL_TAG;
-    editedOwnerId_ = editedFeature_ != nullptr ? std::string() : MakeOwnerId();
     featureClass_ = customFeatureManager_->GetClassFromName(zhihui_twopoint_sibian::kFeatureClassName);
 
     dialog_ = ui_->CreateDialog("TwoPointSiBian.dlx");
@@ -3200,6 +2880,7 @@ void TwoPointSiBianUI::initialize_cb()
     bendRadiusBlock_ = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(dialog_->TopBlock()->FindBlock("string01"));
     smartModeBlock_ = dynamic_cast<NXOpen::BlockStyler::Toggle*>(dialog_->TopBlock()->FindBlock("smartModeToggle"));
     chamferEdgeToggleBlock_ = dynamic_cast<NXOpen::BlockStyler::Toggle*>(dialog_->TopBlock()->FindBlock("gapOnlyToggle"));
+    reverseCutButton_ = dynamic_cast<NXOpen::BlockStyler::Button*>(dialog_->TopBlock()->FindBlock("reverseCutButton"));
     featureModeBlock_ = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(dialog_->TopBlock()->FindBlock("wrapCornerMode"));
 
     if (chamferEdgeToggleBlock_ != nullptr)
@@ -3229,168 +2910,6 @@ void TwoPointSiBianUI::initialize_cb()
 
     ConfigurePointSelection(startPointBlock_);
     ConfigurePointSelection(endPointBlock_);
-
-    if (editedFeature_ != nullptr)
-    {
-        LoadEditedFeatureState();
-    }
-    else
-    {
-        LoadDialogMemory();
-    }
-}
-
-void TwoPointSiBianUI::LoadDialogMemory()
-{
-    const wchar_t* fileName = L"TwoPointSiBian_state.ini";
-    zhihui_dialog_memory::LoadLogical(fileName, L"smartMode", smartModeBlock_);
-    zhihui_dialog_memory::LoadLogical(fileName, L"chamferEdge", chamferEdgeToggleBlock_);
-
-    int mode = zhihui_dialog_memory::ReadInt(fileName, L"featureMode", 0);
-    mode = std::max(0, std::min(2, mode));
-    zhihui_dialog_memory::TrySetEnum(featureModeBlock_, mode);
-
-    if (clearanceBlock_ != nullptr)
-    {
-        const std::string value = zhihui_dialog_memory::ReadString(
-            fileName,
-            L"clearance",
-            ReadStringBlockValue(clearanceBlock_, "string0", "0.2"));
-        clearanceBlock_->SetValue(NXString(value.c_str(), NXString::UTF8));
-    }
-    if (bendRadiusBlock_ != nullptr)
-    {
-        const std::string value = zhihui_dialog_memory::ReadString(
-            fileName,
-            L"bendRadius",
-            ReadStringBlockValue(bendRadiusBlock_, "string01", "0.5"));
-        bendRadiusBlock_->SetValue(NXString(value.c_str(), NXString::UTF8));
-    }
-
-    AppendDebugLog("dialog memory loaded: file=TwoPointSiBian_state.ini, smartMode=" +
-                   std::string(IsSmartModeEnabled() ? "true" : "false") +
-                   ", featureMode=" + std::to_string(mode) +
-                   ", clearance=" +
-                   ReadStringBlockValue(clearanceBlock_, "string0", "0.2") +
-                   ", bendRadius=" +
-                   ReadStringBlockValue(bendRadiusBlock_, "string01", "0.5") +
-                   ", chamferEdge=" +
-                   std::string(chamferEdgeToggleBlock_ != nullptr &&
-                                       chamferEdgeToggleBlock_->Value()
-                                   ? "true"
-                                   : "false"));
-}
-
-void TwoPointSiBianUI::SaveDialogMemory() const
-{
-    // Editing already persists every value in the feature itself.  Do not let
-    // the edit-only hidden smart toggle overwrite the user's creation default.
-    if (editedFeatureTag_ != NULL_TAG)
-    {
-        AppendDebugLog("dialog memory save skipped for feature edit; the feature data owns its values.");
-        return;
-    }
-
-    const wchar_t* fileName = L"TwoPointSiBian_state.ini";
-    zhihui_dialog_memory::SaveLogical(fileName, L"smartMode", smartModeBlock_);
-    zhihui_dialog_memory::SaveLogical(fileName, L"chamferEdge", chamferEdgeToggleBlock_);
-    zhihui_dialog_memory::SaveEnum(fileName, L"featureMode", featureModeBlock_);
-    zhihui_dialog_memory::WriteString(
-        fileName,
-        L"clearance",
-        ReadStringBlockValue(clearanceBlock_, "string0", "0.2"));
-    zhihui_dialog_memory::WriteString(
-        fileName,
-        L"bendRadius",
-        ReadStringBlockValue(bendRadiusBlock_, "string01", "0.5"));
-    AppendDebugLog("dialog memory saved: file=TwoPointSiBian_state.ini");
-}
-
-bool TwoPointSiBianUI::LoadEditedFeatureState()
-{
-    try
-    {
-        Features::CustomFeatureData* data = editedFeature_->FeatureData();
-        if (data == nullptr)
-        {
-            return false;
-        }
-
-        editedCachedP1_ = Point3d(
-            data->CustomDoubleAttributeByName(zhihui_twopoint_sibian::kAttrStartX)->Value(),
-            data->CustomDoubleAttributeByName(zhihui_twopoint_sibian::kAttrStartY)->Value(),
-            data->CustomDoubleAttributeByName(zhihui_twopoint_sibian::kAttrStartZ)->Value());
-        editedCachedP2_ = Point3d(
-            data->CustomDoubleAttributeByName(zhihui_twopoint_sibian::kAttrEndX)->Value(),
-            data->CustomDoubleAttributeByName(zhihui_twopoint_sibian::kAttrEndY)->Value(),
-            data->CustomDoubleAttributeByName(zhihui_twopoint_sibian::kAttrEndZ)->Value());
-        hasEditedEndpointCache_ =
-            Distance(editedCachedP1_, editedCachedP2_) > kPointTolerance;
-        try
-        {
-            const NXString ownerValue = data->CustomStringAttributeByName(
-                zhihui_twopoint_sibian::kAttrOwnerId)->Value();
-            const char* ownerText = ownerValue.GetUTF8Text();
-            editedOwnerId_ = ownerText != nullptr ? ownerText : "";
-        }
-        catch (...)
-        {
-            editedOwnerId_.clear();
-        }
-        if (editedOwnerId_.empty())
-        {
-            editedOwnerId_ = MakeOwnerId();
-        }
-
-        if (clearanceBlock_ != nullptr)
-        {
-            clearanceBlock_->SetValue(data->CustomStringAttributeByName(
-                zhihui_twopoint_sibian::kAttrClearance)->Value());
-        }
-        if (bendRadiusBlock_ != nullptr)
-        {
-            bendRadiusBlock_->SetValue(data->CustomStringAttributeByName(
-                zhihui_twopoint_sibian::kAttrBendRadius)->Value());
-        }
-        if (chamferEdgeToggleBlock_ != nullptr)
-        {
-            chamferEdgeToggleBlock_->SetValue(data->CustomLogicalAttributeByName(
-                zhihui_twopoint_sibian::kAttrChamferEdgeMode)->Value());
-        }
-
-        const int mode = data->CustomIntegerAttributeByName(
-            zhihui_twopoint_sibian::kAttrFeatureMode)->Value();
-        if (featureModeBlock_ != nullptr)
-        {
-            const char* modeText = mode == static_cast<int>(FeatureMode::NinetyLeft)
-                                       ? "直角左"
-                                       : (mode == static_cast<int>(FeatureMode::NinetyRight)
-                                              ? "直角右"
-                                              : "斜角");
-            featureModeBlock_->SetValueAsString(NXString(modeText, NXString::UTF8));
-        }
-
-        // Editing uses the persisted resolved P1/P2.  This is deliberately
-        // manual even if the original creation used one-click inference: the
-        // inferred endpoints are the stable associative inputs of the feature.
-        if (smartModeBlock_ != nullptr)
-        {
-            smartModeBlock_->SetValue(false);
-        }
-        ConfigureInputMode(false, false);
-        AppendDebugLog("loaded detached composite inputs; edit mode uses persisted XYZ P1/P2, ownerId=" +
-                       editedOwnerId_ + ".");
-        return true;
-    }
-    catch (const NXException& ex)
-    {
-        AppendDebugLog("failed to load edited composite feature: " + UfMessage(ex.ErrorCode()));
-    }
-    catch (...)
-    {
-        AppendDebugLog("failed to load edited composite feature: unknown exception.");
-    }
-    return false;
 }
 
 TwoPointSiBianUI::FeatureMode TwoPointSiBianUI::ReadFeatureMode() const
@@ -3445,7 +2964,7 @@ void TwoPointSiBianUI::dialogShown_cb()
     try
     {
         ConfigureInputMode(IsSmartModeEnabled(), false);
-        if (editedFeatureTag_ == NULL_TAG && startPointBlock_ != nullptr)
+        if (startPointBlock_ != nullptr)
         {
             startPointBlock_->Focus();
         }
@@ -3471,11 +2990,6 @@ bool TwoPointSiBianUI::enable_ok_cb()
     if (IsSmartModeEnabled())
     {
         return hasStart || hasEnd;
-    }
-    if (!hasStart && !hasEnd && hasEditedEndpointCache_ &&
-        Distance(editedCachedP1_, editedCachedP2_) > kPointTolerance)
-    {
-        return true;
     }
     if (hasStart && hasEnd && Distance(startPoint, endPoint) > kPointTolerance)
     {
@@ -3524,9 +3038,6 @@ int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
         hasSmartEndpointCache_ = false;
         smartEndpointBodyTag_ = NULL_TAG;
         retainSmartEndpointCacheOnUndo_ = false;
-        hasSelectionThicknessCache_ = false;
-        selectionThicknessBodyTag_ = NULL_TAG;
-        selectionThickness_ = 0.0;
         try
         {
             ConfigureInputMode(smartMode, true);
@@ -3550,20 +3061,13 @@ int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
                            ? "update_cb feature mode changed after Apply; keeping the applied chain and starting a new preview."
                            : "update_cb feature mode changed; replacing the complete uncommitted preview chain.");
     }
-
-    // UDF instantiation can remove NX's preview undo mark.  In edit mode an
-    // automatic live preview would then have no reliable way to restore the
-    // original internal history, and the old fallback could even delete the
-    // CustomFeature that NX is actively editing.  Defer edit-mode rebuilding
-    // to Apply/OK.  Apply remains a real commit boundary and can be pressed
-    // repeatedly to review another set of values.
-    if (editedFeatureTag_ != NULL_TAG)
+    if (block == reverseCutButton_)
     {
-        AppendDebugLog("update_cb edit mode: inputs accepted; rebuild deferred until Apply/OK to preserve the fixed NX edit target.");
-        UnhighlightSelectionObjects();
-        return 0;
+        reverseChamfer270Cut_ = !reverseChamfer270Cut_;
+        AppendDebugLog(std::string("cut-direction reverse button clicked: chamfer-270 reverse=") +
+                       (reverseChamfer270Cut_ ? "true" : "false") +
+                       "; B1/B2 90-degree branches remain unchanged.");
     }
-
     if (enable_ok_cb())
     {
         if (!isUpdatingPreview_)
@@ -3601,7 +3105,6 @@ int TwoPointSiBianUI::apply_cb()
         }
 
         CommitPreview();
-        SaveDialogMemory();
         return 0;
     }
     catch (const NXException& ex)
@@ -3659,977 +3162,8 @@ int TwoPointSiBianUI::close_cb()
     return 0;
 }
 
-std::vector<tag_t> TwoPointSiBianUI::FindOwnedFeatureTags(const std::string& ownerId) const
-{
-    std::vector<tag_t> tags;
-    if (ownerId.empty())
-    {
-        return tags;
-    }
-    Part* workPart = session_ != nullptr ? session_->Parts()->Work() : nullptr;
-    if (workPart == nullptr || workPart->Features() == nullptr)
-    {
-        return tags;
-    }
-
-    for (auto iterator = workPart->Features()->begin();
-         iterator != workPart->Features()->end();
-         ++iterator)
-    {
-        Features::Feature* feature = *iterator;
-        if (feature == nullptr || feature->Tag() == editedFeatureTag_)
-        {
-            continue;
-        }
-        try
-        {
-            if (!feature->HasUserAttribute(zhihui_twopoint_sibian::kOwnedFeatureAttribute,
-                                           NXObject::AttributeTypeString,
-                                           -1))
-            {
-                continue;
-            }
-            const NXString value = feature->GetStringUserAttribute(
-                zhihui_twopoint_sibian::kOwnedFeatureAttribute,
-                -1);
-            const char* text = value.GetUTF8Text();
-            if (text != nullptr && ownerId == text)
-            {
-                tags.push_back(feature->Tag());
-            }
-        }
-        catch (...)
-        {
-            // A stale feature left by an interrupted preview is ignored; the
-            // remaining owner-marked features still rebuild independently.
-        }
-    }
-    return tags;
-}
-
-bool TwoPointSiBianUI::DetachEditedFeatureOutputs(std::string& errorMessage)
-{
-    if (editedOutputsDetached_ || editedFeatureTag_ == NULL_TAG)
-    {
-        return true;
-    }
-    try
-    {
-        if (editedFeature_ == nullptr)
-        {
-            editedFeature_ = dynamic_cast<Features::CustomFeature*>(
-                NXObjectManager::Get(editedFeatureTag_));
-        }
-        if (editedFeature_ == nullptr)
-        {
-            errorMessage = "The edited 2P_SiBian feature could not be restored before rebuilding.";
-            return false;
-        }
-        Part* workPart = session_->Parts()->Work();
-        Features::CustomFeatureData* oldData = editedFeature_->FeatureData();
-        if (workPart == nullptr || oldData == nullptr)
-        {
-            errorMessage = "The edited 2P_SiBian feature data is unavailable.";
-            return false;
-        }
-
-        // Schema 4 keeps one FeatureGroup as the custom feature's internal
-        // parent.  During edit the CustomFeature itself is NX's fixed edit
-        // target and must never be deleted or replaced.  Reuse the same group,
-        // remove only its old members, and let the surrounding undo mark
-        // restore the old membership when Preview is cancelled.
-        Features::FeatureGroup* persistentGroup = nullptr;
-        try
-        {
-            TaggedObject* groupObject = oldData->CustomTagAttributeByName(
-                zhihui_twopoint_sibian::kAttrInternalGroup)->Value();
-            persistentGroup = dynamic_cast<Features::FeatureGroup*>(groupObject);
-        }
-        catch (...)
-        {
-        }
-        if (persistentGroup == nullptr)
-        {
-            try
-            {
-                std::vector<Features::Feature*> slaves;
-                editedFeature_->ShowSlaveFeatures(slaves);
-                for (Features::Feature* slave : slaves)
-                {
-                    persistentGroup = dynamic_cast<Features::FeatureGroup*>(slave);
-                    if (persistentGroup != nullptr)
-                    {
-                        break;
-                    }
-                }
-            }
-            catch (...)
-            {
-            }
-        }
-        if (persistentGroup != nullptr &&
-            persistentGroup->Tag() != NULL_TAG &&
-            UF_OBJ_ask_status(persistentGroup->Tag()) == UF_OBJ_ALIVE)
-        {
-            editedInternalGroupTag_ = persistentGroup->Tag();
-            std::set<tag_t> oldMemberSet;
-            for (tag_t tag : FindOwnedFeatureTags(editedOwnerId_))
-            {
-                if (tag != NULL_TAG && tag != editedFeatureTag_ &&
-                    tag != editedInternalGroupTag_)
-                {
-                    oldMemberSet.insert(tag);
-                }
-            }
-            std::vector<Features::Feature*> oldGroupMembers;
-            persistentGroup->GetMembers(oldGroupMembers);
-            for (Features::Feature* member : oldGroupMembers)
-            {
-                if (member != nullptr && member->Tag() != NULL_TAG &&
-                    member->Tag() != editedFeatureTag_)
-                {
-                    oldMemberSet.insert(member->Tag());
-                }
-            }
-
-            editedSavedCurrentFeatureTag_ = NULL_TAG;
-            editedInsertionAnchorTag_ = NULL_TAG;
-            editedCurrentFeatureRepositioned_ = false;
-            const int askCurrentStatus = UF_MODL_ask_current_feature(
-                workPart->Tag(), &editedSavedCurrentFeatureTag_);
-            if (askCurrentStatus != 0)
-            {
-                errorMessage = "Failed to save the current NX history position before editing: " +
-                               UfMessage(askCurrentStatus);
-                return false;
-            }
-
-            int minimumOldTimestamp = (std::numeric_limits<int>::max)();
-            for (tag_t tag : oldMemberSet)
-            {
-                if (tag == NULL_TAG || UF_OBJ_ask_status(tag) != UF_OBJ_ALIVE)
-                {
-                    continue;
-                }
-                try
-                {
-                    Features::Feature* feature =
-                        dynamic_cast<Features::Feature*>(NXObjectManager::Get(tag));
-                    if (feature != nullptr)
-                    {
-                        minimumOldTimestamp = std::min(minimumOldTimestamp,
-                                                       feature->Timestamp());
-                    }
-                }
-                catch (...)
-                {
-                }
-            }
-            if (minimumOldTimestamp == (std::numeric_limits<int>::max)())
-            {
-                errorMessage = "The original 2P_SiBian history members could not be located.";
-                return false;
-            }
-
-            int anchorTimestamp = -1;
-            for (Features::Feature* feature : workPart->Features()->GetFeatures())
-            {
-                if (feature == nullptr || feature->Tag() == NULL_TAG ||
-                    feature->Tag() == editedFeatureTag_ ||
-                    feature->Tag() == editedInternalGroupTag_ ||
-                    UF_OBJ_ask_status(feature->Tag()) != UF_OBJ_ALIVE)
-                {
-                    continue;
-                }
-                try
-                {
-                    const int timestamp = feature->Timestamp();
-                    if (timestamp < minimumOldTimestamp && timestamp > anchorTimestamp &&
-                        !feature->IsInternal() && feature->IsBrowsableFeature())
-                    {
-                        anchorTimestamp = timestamp;
-                        editedInsertionAnchorTag_ = feature->Tag();
-                    }
-                }
-                catch (...)
-                {
-                }
-            }
-            if (editedInsertionAnchorTag_ == NULL_TAG)
-            {
-                errorMessage = "No safe NX history insertion point exists before the original 2P_SiBian chain.";
-                return false;
-            }
-
-            Features::CustomFeatureBuilder* groupEditBuilder = nullptr;
-            bool groupShownForEdit = false;
-            try
-            {
-                groupEditBuilder = workPart->Features()->CreateCustomFeatureBuilder(editedFeature_);
-                groupEditBuilder->ShowInternalParentFeatureForEdit(persistentGroup);
-                groupShownForEdit = true;
-                persistentGroup->SetAllowDeleteMembers(false);
-                persistentGroup->RemoveAllMembers();
-                groupEditBuilder->HideInternalParentFeatureAfterEdit(persistentGroup);
-                groupShownForEdit = false;
-                groupEditBuilder->Destroy();
-                groupEditBuilder = nullptr;
-            }
-            catch (...)
-            {
-                if (groupEditBuilder != nullptr)
-                {
-                    if (groupShownForEdit)
-                    {
-                        try
-                        {
-                            groupEditBuilder->HideInternalParentFeatureAfterEdit(persistentGroup);
-                        }
-                        catch (...)
-                        {
-                        }
-                    }
-                    try
-                    {
-                        groupEditBuilder->Destroy();
-                    }
-                    catch (...)
-                    {
-                    }
-                }
-                throw;
-            }
-
-            std::vector<tag_t> oldMembers(oldMemberSet.begin(), oldMemberSet.end());
-            std::sort(oldMembers.begin(), oldMembers.end(), [](tag_t lhs, tag_t rhs)
-            {
-                try
-                {
-                    Features::Feature* left =
-                        dynamic_cast<Features::Feature*>(NXObjectManager::Get(lhs));
-                    Features::Feature* right =
-                        dynamic_cast<Features::Feature*>(NXObjectManager::Get(rhs));
-                    return (left != nullptr ? left->Timestamp() : -1) <
-                           (right != nullptr ? right->Timestamp() : -1);
-                }
-                catch (...)
-                {
-                    return lhs < rhs;
-                }
-            });
-            int failedDeleteCount = 0;
-            for (auto iterator = oldMembers.rbegin(); iterator != oldMembers.rend(); ++iterator)
-            {
-                if (*iterator == NULL_TAG || *iterator == editedFeatureTag_ ||
-                    *iterator == editedInternalGroupTag_ ||
-                    UF_OBJ_ask_status(*iterator) != UF_OBJ_ALIVE)
-                {
-                    continue;
-                }
-                const int deleteStatus = UF_OBJ_delete_object(*iterator);
-                AppendDebugLog("edit rebuild deleted old persistent-group member tag=" +
-                               std::to_string(*iterator) + ", result=" +
-                               std::to_string(deleteStatus) + " " +
-                               UfMessage(deleteStatus));
-                if (deleteStatus != 0 && UF_OBJ_ask_status(*iterator) == UF_OBJ_ALIVE)
-                {
-                    ++failedDeleteCount;
-                }
-            }
-            if (failedDeleteCount != 0)
-            {
-                errorMessage = "The old 2P_SiBian group members could not be fully removed before rebuilding.";
-                return false;
-            }
-
-            const int setCurrentStatus = UF_MODL_set_current_feature(
-                editedInsertionAnchorTag_);
-            if (setCurrentStatus != 0)
-            {
-                errorMessage = "Failed to restore the original 2P_SiBian history insertion point: " +
-                               UfMessage(setCurrentStatus);
-                return false;
-            }
-            editedCurrentFeatureRepositioned_ = true;
-
-            editedOutputsDetached_ = true;
-            AppendDebugLog("persistent-group edit rollback complete: customTag=" +
-                           std::to_string(editedFeatureTag_) + ", groupTag=" +
-                           std::to_string(editedInternalGroupTag_) +
-                           ", removedFeatureCount=" + std::to_string(oldMembers.size()) +
-                           ", savedCurrentTag=" +
-                           std::to_string(editedSavedCurrentFeatureTag_) +
-                           ", insertionAnchorTag=" +
-                           std::to_string(editedInsertionAnchorTag_) +
-                           ", insertionAnchorTimestamp=" +
-                           std::to_string(anchorTimestamp) +
-                           "; custom edit target and internal group were preserved.");
-            return true;
-        }
-
-        editedInternalGroupTag_ = NULL_TAG;
-
-        std::set<tag_t> ownedFeatureSet;
-        for (tag_t tag : FindOwnedFeatureTags(editedOwnerId_))
-        {
-            ownedFeatureSet.insert(tag);
-        }
-        std::vector<Features::Feature*> internalParentFeatures;
-        std::set<tag_t> internalParentTags;
-        std::vector<Features::FeatureGroup*> groupsToEmpty;
-        std::set<tag_t> groupTagsToEmpty;
-        const auto addInternalParent = [&](Features::Feature* feature)
-        {
-            if (feature == nullptr || feature->Tag() == NULL_TAG ||
-                feature->Tag() == editedFeatureTag_ ||
-                !internalParentTags.insert(feature->Tag()).second)
-            {
-                return;
-            }
-            internalParentFeatures.push_back(feature);
-            ownedFeatureSet.insert(feature->Tag());
-            Features::FeatureGroup* group = dynamic_cast<Features::FeatureGroup*>(feature);
-            if (group != nullptr)
-            {
-                if (groupTagsToEmpty.insert(group->Tag()).second)
-                {
-                    groupsToEmpty.push_back(group);
-                }
-                std::vector<Features::Feature*> members;
-                group->GetMembers(members);
-                for (Features::Feature* member : members)
-                {
-                    if (member != nullptr && member->Tag() != editedFeatureTag_)
-                    {
-                        ownedFeatureSet.insert(member->Tag());
-                    }
-                }
-            }
-        };
-        try
-        {
-            TaggedObject* groupObject = oldData->CustomTagAttributeByName(
-                zhihui_twopoint_sibian::kAttrInternalGroup)->Value();
-            addInternalParent(dynamic_cast<Features::Feature*>(groupObject));
-        }
-        catch (...)
-        {
-        }
-        try
-        {
-            std::vector<Features::Feature*> slaves;
-            editedFeature_->ShowSlaveFeatures(slaves);
-            for (Features::Feature* slave : slaves)
-            {
-                addInternalParent(slave);
-            }
-        }
-        catch (...)
-        {
-        }
-
-        // Migrate composites created by the earlier associated implementation.
-        // Read its one-time tag list and ConstructionFeatures before the
-        // scalar-only commit clears those relationships.
-        try
-        {
-            const std::vector<TaggedObject*> legacyChildren =
-                oldData->CustomTagArrayAttributeByName(
-                    zhihui_twopoint_sibian::kAttrChildFeatures)->GetValues();
-            for (TaggedObject* child : legacyChildren)
-            {
-                Features::Feature* feature = dynamic_cast<Features::Feature*>(child);
-                if (feature != nullptr && feature->Tag() != editedFeatureTag_)
-                {
-                    ownedFeatureSet.insert(feature->Tag());
-                }
-            }
-        }
-        catch (...)
-        {
-        }
-        try
-        {
-            for (Features::ConstructionFeatureData* construction :
-                 editedFeature_->GetConstructionFeatures())
-            {
-                Features::Feature* feature =
-                    construction != nullptr ? construction->GetFeature() : nullptr;
-                if (feature != nullptr && feature->Tag() != editedFeatureTag_)
-                {
-                    ownedFeatureSet.insert(feature->Tag());
-                }
-            }
-        }
-        catch (...)
-        {
-        }
-
-        // Remove the temporary Feature Set created by the previous attempt.
-        // Its member list is also a migration source, but the set itself must
-        // disappear so Part Navigator is left with only the custom node.
-        tag_t* sets = nullptr;
-        int setCount = 0;
-        if (UF_MODL_ask_sets_of_member(editedFeatureTag_, &sets, &setCount) == 0 &&
-            sets != nullptr)
-        {
-            for (int index = 0; index < setCount; ++index)
-            {
-                char setName[UF_OBJ_NAME_BUFSIZE] = {};
-                if (UF_OBJ_ask_name(sets[index], setName) != 0 ||
-                    std::string(setName) != zhihui_twopoint_sibian::kFeatureDisplayName)
-                {
-                    continue;
-                }
-                tag_t* members = nullptr;
-                int memberCount = 0;
-                std::vector<tag_t> membersWithoutComposite;
-                if (UF_MODL_ask_all_members_of_set(sets[index], &members, &memberCount) == 0 &&
-                    members != nullptr)
-                {
-                    for (int memberIndex = 0; memberIndex < memberCount; ++memberIndex)
-                    {
-                        if (members[memberIndex] != editedFeatureTag_)
-                        {
-                            ownedFeatureSet.insert(members[memberIndex]);
-                            membersWithoutComposite.push_back(members[memberIndex]);
-                        }
-                    }
-                    UF_free(members);
-                }
-                if (!membersWithoutComposite.empty())
-                {
-                    UF_MODL_edit_set_members(sets[index],
-                                             membersWithoutComposite.data(),
-                                             static_cast<int>(membersWithoutComposite.size()));
-                }
-                Features::FeatureGroup* legacyGroup =
-                    dynamic_cast<Features::FeatureGroup*>(NXObjectManager::Get(sets[index]));
-                if (legacyGroup != nullptr && groupTagsToEmpty.insert(legacyGroup->Tag()).second)
-                {
-                    groupsToEmpty.push_back(legacyGroup);
-                }
-                ownedFeatureSet.insert(sets[index]);
-                AppendDebugLog("detached composite from legacy navigator feature set tag=" +
-                               std::to_string(sets[index]) +
-                               "; group queued for controlled deletion.");
-            }
-            UF_free(sets);
-        }
-
-        // Commit scalar data only.  There are deliberately no point, body,
-        // edge, child or output tag attributes, hence no modeling dependency
-        // from the record node to the generated history chain.
-        Features::CustomAttributeCollection* attrs =
-            workPart->Features()->CustomAttributeCollection();
-        std::vector<Features::CustomAttribute*> values;
-        const double startX = oldData->CustomDoubleAttributeByName(
-            zhihui_twopoint_sibian::kAttrStartX)->Value();
-        const double startY = oldData->CustomDoubleAttributeByName(
-            zhihui_twopoint_sibian::kAttrStartY)->Value();
-        const double startZ = oldData->CustomDoubleAttributeByName(
-            zhihui_twopoint_sibian::kAttrStartZ)->Value();
-        const double endX = oldData->CustomDoubleAttributeByName(
-            zhihui_twopoint_sibian::kAttrEndX)->Value();
-        const double endY = oldData->CustomDoubleAttributeByName(
-            zhihui_twopoint_sibian::kAttrEndY)->Value();
-        const double endZ = oldData->CustomDoubleAttributeByName(
-            zhihui_twopoint_sibian::kAttrEndZ)->Value();
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrStartX, startX));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrStartY, startY));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrStartZ, startZ));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrEndX, endX));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrEndY, endY));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrEndZ, endZ));
-        values.push_back(CreateDoubleAttribute(attrs,
-                                               zhihui_twopoint_sibian::kAttrSpanLength,
-                                               oldData->CustomDoubleAttributeByName(
-                                                   zhihui_twopoint_sibian::kAttrSpanLength)->Value()));
-        values.push_back(CreateDoubleAttribute(attrs,
-                                               zhihui_twopoint_sibian::kAttrThickness,
-                                               oldData->CustomDoubleAttributeByName(
-                                                   zhihui_twopoint_sibian::kAttrThickness)->Value()));
-        values.push_back(CreateStringAttribute(attrs,
-                                               zhihui_twopoint_sibian::kAttrOwnerId,
-                                               editedOwnerId_));
-        Features::CustomFeatureData* detachedData =
-            workPart->Features()->CustomFeatureDataCollection()->CreateData(featureClass_, values);
-
-        Features::CustomFeatureBuilder* builder =
-            workPart->Features()->CreateCustomFeatureBuilder(editedFeature_);
-        for (Features::Feature* internalParent : internalParentFeatures)
-        {
-            try
-            {
-                builder->ShowInternalParentFeatureForEdit(internalParent);
-                builder->UnsetParentFeatureInternal(internalParent);
-            }
-            catch (const NXException& ex)
-            {
-                AppendDebugLog("failed to externalize old internal parent tag=" +
-                               std::to_string(internalParent->Tag()) + ": " +
-                               UfMessage(ex.ErrorCode()));
-            }
-        }
-        builder->SetFeatureData(detachedData);
-        builder->CommitFeature();
-        builder->Destroy();
-
-        for (Features::FeatureGroup* group : groupsToEmpty)
-        {
-            if (group == nullptr || UF_OBJ_ask_status(group->Tag()) != UF_OBJ_ALIVE)
-            {
-                continue;
-            }
-            try
-            {
-                group->SetAllowDeleteMembers(false);
-                group->RemoveAllMembers();
-            }
-            catch (const NXException& ex)
-            {
-                AppendDebugLog("failed to empty old internal group tag=" +
-                               std::to_string(group->Tag()) + ": " +
-                               UfMessage(ex.ErrorCode()));
-            }
-        }
-
-        std::vector<tag_t> ownedFeatures(ownedFeatureSet.begin(), ownedFeatureSet.end());
-        std::sort(ownedFeatures.begin(), ownedFeatures.end(), [](tag_t lhs, tag_t rhs)
-        {
-            try
-            {
-                Features::Feature* left = dynamic_cast<Features::Feature*>(NXObjectManager::Get(lhs));
-                Features::Feature* right = dynamic_cast<Features::Feature*>(NXObjectManager::Get(rhs));
-                return (left != nullptr ? left->Timestamp() : -1) <
-                       (right != nullptr ? right->Timestamp() : -1);
-            }
-            catch (...)
-            {
-                return lhs < rhs;
-            }
-        });
-        int failedDeleteCount = 0;
-        for (auto iterator = ownedFeatures.rbegin(); iterator != ownedFeatures.rend(); ++iterator)
-        {
-            if (*iterator == NULL_TAG || *iterator == editedFeatureTag_ ||
-                UF_OBJ_ask_status(*iterator) != UF_OBJ_ALIVE)
-            {
-                continue;
-            }
-            const int deleteStatus = UF_OBJ_delete_object(*iterator);
-            AppendDebugLog("edit rollback deleted detached owned feature tag=" +
-                           std::to_string(*iterator) + ", result=" +
-                           std::to_string(deleteStatus) + " " +
-                           UfMessage(deleteStatus));
-            if (deleteStatus != 0 && UF_OBJ_ask_status(*iterator) == UF_OBJ_ALIVE)
-            {
-                ++failedDeleteCount;
-            }
-        }
-        if (failedDeleteCount != 0)
-        {
-            errorMessage = "The old 2P_SiBian result could not be fully rolled back before rebuilding.";
-            return false;
-        }
-        editedOutputsDetached_ = true;
-        AppendDebugLog("legacy detached edit rollback complete without deleting the NX edit target: ownerId=" +
-                       editedOwnerId_ +
-                       ", deletedFeatureCount=" + std::to_string(ownedFeatures.size()) +
-                       ", associative tag count=0.");
-        return true;
-    }
-    catch (const NXException& ex)
-    {
-        errorMessage = "Failed to detach the old composite output chain: " + UfMessage(ex.ErrorCode());
-    }
-    catch (...)
-    {
-        errorMessage = "Failed to detach the old composite output chain.";
-    }
-    return false;
-}
-
-bool TwoPointSiBianUI::CommitCompositeFeature(const InferredInputs& inputs,
-                                              const std::vector<tag_t>& childFeatureTags,
-                                              const std::vector<tag_t>& referenceTags,
-                                              std::string& errorMessage)
-{
-    try
-    {
-        Part* workPart = session_->Parts()->Work();
-        if (workPart == nullptr || featureClass_ == nullptr)
-        {
-            errorMessage = "The 2P_SiBian custom-feature class is unavailable.";
-            return false;
-        }
-
-        (void)referenceTags;
-        if (editedOwnerId_.empty())
-        {
-            editedOwnerId_ = MakeOwnerId();
-        }
-
-        std::vector<tag_t> groupMemberTags;
-        std::vector<Features::Feature*> allOwnedFeatures;
-        std::set<tag_t> seen;
-        for (tag_t tag : childFeatureTags)
-        {
-            if (tag == NULL_TAG || tag == editedFeatureTag_ || !seen.insert(tag).second)
-            {
-                continue;
-            }
-            try
-            {
-                Features::Feature* feature =
-                    dynamic_cast<Features::Feature*>(NXObjectManager::Get(tag));
-                if (feature == nullptr)
-                {
-                    continue;
-                }
-                allOwnedFeatures.push_back(feature);
-                feature->SetUserAttribute(zhihui_twopoint_sibian::kOwnedFeatureAttribute,
-                                          -1,
-                                          editedOwnerId_.c_str(),
-                                          Update::OptionLater);
-                const NXString featureTypeValue = feature->FeatureType();
-                const char* featureTypeText = featureTypeValue.GetUTF8Text();
-                const std::string featureType = featureTypeText != nullptr ? featureTypeText : "";
-                if (featureType == "FEATURE_SET" || feature->IsInternal() ||
-                    !feature->IsBrowsableFeature())
-                {
-                    continue;
-                }
-                groupMemberTags.push_back(tag);
-            }
-            catch (...)
-            {
-                // UDF implementation children may be transient.  They remain
-                // owned by the nearest live top-level feature in the group.
-            }
-        }
-        if (groupMemberTags.empty())
-        {
-            errorMessage = "No browsable internal history features were available for 2P_SiBian.";
-            return false;
-        }
-
-        tag_t groupTag = NULL_TAG;
-        Features::FeatureGroup* internalGroup = nullptr;
-        const bool editingExistingComposite =
-            editedFeatureTag_ != NULL_TAG && editedFeature_ != nullptr;
-        const bool reusingEditedGroup =
-            editingExistingComposite && editedInternalGroupTag_ != NULL_TAG &&
-            UF_OBJ_ask_status(editedInternalGroupTag_) == UF_OBJ_ALIVE;
-        if (editingExistingComposite && !reusingEditedGroup)
-        {
-            errorMessage = "This legacy 2P_SiBian feature has no persistent internal history group. "
-                           "Recreate it once before using in-place editing.";
-            return false;
-        }
-        if (reusingEditedGroup)
-        {
-            groupTag = editedInternalGroupTag_;
-            internalGroup = dynamic_cast<Features::FeatureGroup*>(
-                NXObjectManager::Get(groupTag));
-        }
-        else
-        {
-            char groupName[] = "2P_SiBian_Internal";
-            const int groupStatus = UF_MODL_create_set_of_feature(
-                groupName,
-                groupMemberTags.data(),
-                static_cast<int>(groupMemberTags.size()),
-                TRUE,
-                &groupTag);
-            if (groupStatus != 0 || groupTag == NULL_TAG)
-            {
-                errorMessage = "Failed to create the internal 2P_SiBian history container: " +
-                               UfMessage(groupStatus);
-                return false;
-            }
-            internalGroup = dynamic_cast<Features::FeatureGroup*>(
-                NXObjectManager::Get(groupTag));
-        }
-        if (internalGroup == nullptr)
-        {
-            errorMessage = "NX did not return the internal 2P_SiBian history container.";
-            return false;
-        }
-        internalGroup->SetUserAttribute(zhihui_twopoint_sibian::kOwnedFeatureAttribute,
-                                        -1,
-                                        editedOwnerId_.c_str(),
-                                        Update::OptionLater);
-
-        Features::CustomAttributeCollection* attrs =
-            workPart->Features()->CustomAttributeCollection();
-        std::vector<Features::CustomAttribute*> values;
-        values.push_back(CreateTagAttribute(attrs,
-                                            zhihui_twopoint_sibian::kAttrInternalGroup,
-                                            internalGroup,
-                                            true));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrStartX, inputs.startPoint.X));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrStartY, inputs.startPoint.Y));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrStartZ, inputs.startPoint.Z));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrEndX, inputs.endPoint.X));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrEndY, inputs.endPoint.Y));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrEndZ, inputs.endPoint.Z));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrThickness, inputs.thickness));
-        values.push_back(CreateDoubleAttribute(attrs, zhihui_twopoint_sibian::kAttrSpanLength, inputs.spanLength));
-        values.push_back(CreateStringAttribute(attrs, zhihui_twopoint_sibian::kAttrClearance,
-                                               inputs.clearanceValue));
-        values.push_back(CreateStringAttribute(attrs, zhihui_twopoint_sibian::kAttrBendRadius,
-                                               inputs.bendRadiusValue));
-        values.push_back(CreateIntegerAttribute(attrs, zhihui_twopoint_sibian::kAttrFeatureMode,
-                                                static_cast<int>(inputs.featureMode)));
-        values.push_back(CreateLogicalAttribute(attrs, zhihui_twopoint_sibian::kAttrSmartMode,
-                                                inputs.smartMode));
-        values.push_back(CreateLogicalAttribute(attrs, zhihui_twopoint_sibian::kAttrChamferEdgeMode,
-                                                inputs.chamferEdgeMode));
-        values.push_back(CreateStringAttribute(attrs,
-                                               zhihui_twopoint_sibian::kAttrOwnerId,
-                                               editedOwnerId_));
-        values.push_back(CreateIntegerAttribute(attrs,
-                                                zhihui_twopoint_sibian::kAttrSchemaVersion,
-                                                4));
-        Features::CustomFeatureData* data =
-            workPart->Features()->CustomFeatureDataCollection()->CreateData(featureClass_, values);
-        // NX's CustomFeature edit manager keeps the original feature as a
-        // fixed transaction target.  Edit it in place and reuse its original
-        // internal group; replacing or deleting that node invalidates the
-        // edit context during Apply/Cancel.
-        Features::CustomFeatureBuilder* builder = nullptr;
-        Features::Feature* committed = nullptr;
-        bool groupShownForEdit = false;
-        try
-        {
-            if (reusingEditedGroup && editedCurrentFeatureRepositioned_)
-            {
-                const int activateCustomStatus = UF_MODL_set_current_feature(editedFeatureTag_);
-                if (activateCustomStatus != 0)
-                {
-                    throw NXException::Create(activateCustomStatus);
-                }
-            }
-            builder = workPart->Features()->CreateCustomFeatureBuilder(
-                editingExistingComposite ? editedFeature_ : nullptr);
-            if (reusingEditedGroup)
-            {
-                builder->ShowInternalParentFeatureForEdit(internalGroup);
-                groupShownForEdit = true;
-                const int memberStatus = UF_MODL_edit_set_members(
-                    groupTag,
-                    groupMemberTags.data(),
-                    static_cast<int>(groupMemberTags.size()));
-                if (memberStatus != 0)
-                {
-                    throw NXException::Create(memberStatus);
-                }
-                internalGroup->SetAllowDeleteMembers(true);
-            }
-            builder->SetFeatureData(data);
-            if (!reusingEditedGroup)
-            {
-                internalGroup->SetAllowDeleteMembers(true);
-                builder->SetParentFeatureInternal(internalGroup);
-            }
-            committed = builder->CommitFeature();
-            builder->Destroy();
-            builder = nullptr;
-            groupShownForEdit = false;
-        }
-        catch (...)
-        {
-            if (builder != nullptr)
-            {
-                if (groupShownForEdit)
-                {
-                    try
-                    {
-                        builder->HideInternalParentFeatureAfterEdit(internalGroup);
-                    }
-                    catch (...)
-                    {
-                    }
-                }
-                try
-                {
-                    builder->Destroy();
-                }
-                catch (...)
-                {
-                }
-            }
-            throw;
-        }
-        Features::CustomFeature* composite = dynamic_cast<Features::CustomFeature*>(committed);
-        if (composite == nullptr)
-        {
-            errorMessage = "NX did not return the 2P_SiBian composite feature.";
-            return false;
-        }
-        if (editingExistingComposite && composite->Tag() != editedFeatureTag_)
-        {
-            errorMessage = "NX did not preserve the original 2P_SiBian edit target.";
-            return false;
-        }
-        composite->SetName(zhihui_twopoint_sibian::kFeatureDisplayName);
-        composite->SetUserAttribute(zhihui_twopoint_sibian::kOwnedFeatureAttribute,
-                                    -1,
-                                    editedOwnerId_.c_str(),
-                                    Update::OptionLater);
-        if (inputs.targetBody != nullptr)
-        {
-            inputs.targetBody->Unblank();
-        }
-        previewUdfTag_ = composite->Tag();
-        tag_t restoredCurrentTag = NULL_TAG;
-        if (reusingEditedGroup && editedCurrentFeatureRepositioned_)
-        {
-            restoredCurrentTag = editedSavedCurrentFeatureTag_;
-            if (restoredCurrentTag == NULL_TAG ||
-                restoredCurrentTag == editedInternalGroupTag_ ||
-                UF_OBJ_ask_status(restoredCurrentTag) != UF_OBJ_ALIVE)
-            {
-                restoredCurrentTag = composite->Tag();
-            }
-            const int restoreCurrentStatus = UF_MODL_set_current_feature(restoredCurrentTag);
-            if (restoreCurrentStatus != 0)
-            {
-                errorMessage = "Failed to restore the NX history position after editing 2P_SiBian: " +
-                               UfMessage(restoreCurrentStatus);
-                return false;
-            }
-            editedCurrentFeatureRepositioned_ = false;
-        }
-        if (!internalGroup->IsInternal())
-        {
-            errorMessage = "NX did not internalize the 2P_SiBian history container.";
-            return false;
-        }
-        std::vector<Features::Feature*> actualGroupMembers;
-        internalGroup->GetMembers(actualGroupMembers);
-        int hiddenGroupMemberCount = 0;
-        int latestMemberTimestamp = -1;
-        for (Features::Feature* member : actualGroupMembers)
-        {
-            if (member == nullptr)
-            {
-                continue;
-            }
-            latestMemberTimestamp = std::max(latestMemberTimestamp, member->Timestamp());
-            logical hiddenMember = FALSE;
-            if (UF_MODL_is_feature_a_hidden_set_member(member->Tag(), &hiddenMember) == 0 &&
-                hiddenMember)
-            {
-                ++hiddenGroupMemberCount;
-            }
-        }
-        AppendDebugLog(std::string(editingExistingComposite
-                                       ? "updated composite in place"
-                                       : "created new composite") +
-                       ": customTag=" + std::to_string(composite->Tag()) +
-                       ", groupTag=" + std::to_string(groupTag) +
-                       ", reusedGroup=" +
-                       std::string(reusingEditedGroup ? "true" : "false") +
-                       ", latestMemberTimestamp=" + std::to_string(latestMemberTimestamp) +
-                       ", groupTimestamp=" + std::to_string(internalGroup->Timestamp()) +
-                       ", customTimestamp=" + std::to_string(composite->Timestamp()) +
-                       ", restoredCurrentTag=" + std::to_string(restoredCurrentTag) +
-                       "; NX edit target was never deleted or reordered and the rebuilt chain was inserted before it.");
-        AppendDebugLog("committed persistent internal-history composite tag=" +
-                       std::to_string(composite->Tag()) +
-                       ", ownerId=" + editedOwnerId_ +
-                       ", createdFeatureCount=" + std::to_string(allOwnedFeatures.size()) +
-                       ", groupMemberCount=" + std::to_string(groupMemberTags.size()) +
-                       ", actualGroupMemberCount=" + std::to_string(actualGroupMembers.size()) +
-                       ", hiddenGroupMemberCount=" + std::to_string(hiddenGroupMemberCount) +
-                       ", internalGroupTag=" + std::to_string(groupTag) +
-                       ", groupIsInternal=" +
-                       std::string(internalGroup->IsInternal() ? "true" : "false") +
-                       ", customIsBrowsable=" +
-                       std::string(composite->IsBrowsableFeature() ? "true" : "false") +
-                       ", construction/output dependency count=0");
-        return true;
-    }
-    catch (const NXException& ex)
-    {
-        errorMessage = "Failed to create the editable 2P_SiBian composite feature: " +
-                       UfMessage(ex.ErrorCode());
-    }
-    catch (...)
-    {
-        errorMessage = "Failed to create the editable 2P_SiBian composite feature.";
-    }
-    return false;
-}
-
-bool TwoPointSiBianUI::ReorderEditedCompositeAfterChildren(
-    const std::vector<tag_t>& featureTags,
-    std::string& errorMessage)
-{
-    if (editedFeature_ == nullptr)
-    {
-        return true;
-    }
-    try
-    {
-        Features::Feature* latest = nullptr;
-        int latestTimestamp = -1;
-        for (tag_t tag : featureTags)
-        {
-            Features::Feature* feature = dynamic_cast<Features::Feature*>(NXObjectManager::Get(tag));
-            if (feature == nullptr || feature == editedFeature_)
-            {
-                continue;
-            }
-            const int timestamp = feature->Timestamp();
-            if (timestamp > latestTimestamp)
-            {
-                latestTimestamp = timestamp;
-                latest = feature;
-            }
-        }
-        if (latest == nullptr)
-        {
-            return true;
-        }
-
-        Features::FeatureCollection* features = session_->Parts()->Work()->Features();
-        features->SuspendModelDelayBeforeReorder();
-        try
-        {
-            features->ReorderFeature(std::vector<Features::Feature*>{editedFeature_},
-                                     latest,
-                                     Features::FeatureCollection::ReorderTypeAfter);
-        }
-        catch (...)
-        {
-            features->RestoreModelDelayAfterReorder();
-            throw;
-        }
-        features->RestoreModelDelayAfterReorder();
-        AppendDebugLog("reordered existing composite after replacement children: composite=" +
-                       std::to_string(editedFeature_->Tag()) +
-                       ", target=" + std::to_string(latest->Tag()) +
-                       ", targetTimestamp=" + std::to_string(latestTimestamp));
-        return true;
-    }
-    catch (const NXException& ex)
-    {
-        errorMessage = "Failed to move the edited composite behind its rebuilt children: " +
-                       UfMessage(ex.ErrorCode());
-    }
-    catch (...)
-    {
-        errorMessage = "Failed to move the edited composite behind its rebuilt children.";
-    }
-    return false;
-}
-
 bool TwoPointSiBianUI::CreatePreview()
 {
-    ScopedPreviewDisplaySuppressor silentDisplay;
     AppendDebugLog("CreatePreview entered");
 
     // A face selected while the old preview exists may belong to the preview's
@@ -4673,19 +3207,6 @@ bool TwoPointSiBianUI::CreatePreview()
         UndoPreview();
     }
 
-    if (editedFeatureTag_ != NULL_TAG)
-    {
-        try
-        {
-            editedFeature_ = dynamic_cast<Features::CustomFeature*>(
-                NXObjectManager::Get(editedFeatureTag_));
-        }
-        catch (...)
-        {
-            editedFeature_ = nullptr;
-        }
-    }
-
     // NX can discard our undo mark while a UDF is being instantiated.  Keep a
     // feature snapshot as an independent rollback boundary so enumeration
     // changes also remove UDF-owned extrudes, rips, offsets and booleans.
@@ -4695,14 +3216,6 @@ bool TwoPointSiBianUI::CreatePreview()
                    std::to_string(previewBaselineFeatureTags_.size()));
 
     previewUndoMark_ = session_->SetUndoMark(Session::MarkVisibilityVisible, "2P_SiBian Preview");
-
-    std::string editDetachError;
-    if (!DetachEditedFeatureOutputs(editDetachError))
-    {
-        UndoPreview();
-        ShowError(editDetachError);
-        return false;
-    }
 
     TaggedObject* rollbackSafeClickObject = nullptr;
     if (hasRollbackSafeSingleClick)
@@ -4747,13 +3260,10 @@ bool TwoPointSiBianUI::CreatePreview()
     std::vector<InferredInputs> deferredSecondUdfInputsList;
     std::vector<tag_t> rightAngleOffsetFeatureTags;
     bool hasRightAngle90SecondFeaturePath = false;
-    // Explicitly selected P1/P2 are already fully resolved endpoint inputs.
-    // They must run through the same rip, second-UDF and continuation engine
-    // as the endpoints inferred from a smart face click.
+    bool primaryUdfCreatedBeforeRip = false;
+    tag_t earlyPrimarySubtractTag = NULL_TAG;
+    if (inputs.inferredFromSingleClick)
     {
-        AppendDebugLog(std::string("CreatePreview starting second-UDF/rip continuation for ") +
-                       (inputs.inferredFromSingleClick ? "smart inferred endpoints." :
-                                                        "manual explicit endpoints."));
         constexpr int kMaximumContinuationCount = 16;
         std::vector<std::pair<Point3d, Point3d>> processedPointPairs;
         InferredInputs iterationInputs = inputs;
@@ -4775,6 +3285,9 @@ bool TwoPointSiBianUI::CreatePreview()
             double deferredRightAngleRipAngle = 0.0;
             std::vector<tag_t> createdRightAngleOffsetTags;
             bool createdRightAngle90SecondFeaturePath = false;
+            bool iterationPrimaryUdfCreatedBeforeRip = false;
+            tag_t iterationPrimarySubtractTag = NULL_TAG;
+            std::vector<tag_t> iterationPrimaryReferenceTags;
             std::string ripError;
             AppendDebugLog("CreatePreview continuation iteration=" + std::to_string(iteration + 1) +
                            ", start=" + FormatPoint(iterationInputs.startPoint) +
@@ -4793,6 +3306,9 @@ bool TwoPointSiBianUI::CreatePreview()
                                          deferredRightAngleRipAngle,
                                          createdRightAngleOffsetTags,
                                          createdRightAngle90SecondFeaturePath,
+                                         iterationPrimaryUdfCreatedBeforeRip,
+                                         iterationPrimarySubtractTag,
+                                         iterationPrimaryReferenceTags,
                                          ripError))
             {
                 UndoPreview();
@@ -4812,6 +3328,14 @@ bool TwoPointSiBianUI::CreatePreview()
             hasRightAngle90SecondFeaturePath =
                 hasRightAngle90SecondFeaturePath ||
                 createdRightAngle90SecondFeaturePath;
+            if (iterationPrimaryUdfCreatedBeforeRip)
+            {
+                primaryUdfCreatedBeforeRip = true;
+                earlyPrimarySubtractTag = iterationPrimarySubtractTag;
+                allReferenceTags.insert(allReferenceTags.end(),
+                                        iterationPrimaryReferenceTags.begin(),
+                                        iterationPrimaryReferenceTags.end());
+            }
             if (deferredSecondUdfRequested)
             {
                 bool alreadyDeferred = false;
@@ -4895,19 +3419,15 @@ bool TwoPointSiBianUI::CreatePreview()
             }
         }
 
-        if (anyRipCreated)
+        if (anyRipCreated && !primaryUdfCreatedBeforeRip)
         {
             AppendDebugLog("CreatePreview continuation rips committed; refreshing the original endpoints without recalculating sheet thickness.");
             const double lockedSheetThickness = inputs.thickness;
             InferredInputs refreshedInputs;
             refreshedInputs.thickness = lockedSheetThickness;
-            // Manual selection is the canonical endpoint workflow.  Smart mode
-            // only infers the same P1/P2 pair from one face click.  Once a rip
-            // changes/splits the selected edges, neither mode may read the
-            // selection blocks again: those blocks still reference the old
-            // topology and can move P2 onto a newly shortened edge.  Rebuild
-            // both modes from the recorded pre-rip P1/P2 instead.
-            const bool refreshed = RefreshInputsAfterRips(inputs, refreshedInputs);
+            const bool refreshed = inputs.smartMode && inputs.inferredFromSingleClick
+                                       ? RefreshSmartInputsAfterRips(inputs, refreshedInputs)
+                                       : ReadInputs(refreshedInputs);
             if (!refreshed)
             {
                 UndoPreview();
@@ -4967,32 +3487,40 @@ bool TwoPointSiBianUI::CreatePreview()
     tag_t firstUdfTag = NULL_TAG;
     std::vector<tag_t> firstReferenceTags;
     std::vector<tag_t> firstToolBodyTags;
-    if (!CreateUserDefinedFeature(inputs,
-                                  errorMessage,
-                                  &firstUdfTag,
-                                  &firstReferenceTags,
-                                  &firstToolBodyTags))
+    tag_t finalSubtractTag = earlyPrimarySubtractTag;
+    if (!primaryUdfCreatedBeforeRip)
     {
-        UndoPreview();
-        ShowError(errorMessage);
-        return false;
-    }
-    allToolBodyTags.insert(allToolBodyTags.end(),
-                           firstToolBodyTags.begin(),
-                           firstToolBodyTags.end());
-    allReferenceTags.insert(allReferenceTags.end(),
-                            firstReferenceTags.begin(),
-                            firstReferenceTags.end());
+        if (!CreateUserDefinedFeature(inputs,
+                                      errorMessage,
+                                      &firstUdfTag,
+                                      &firstReferenceTags,
+                                      &firstToolBodyTags))
+        {
+            UndoPreview();
+            ShowError(errorMessage);
+            return false;
+        }
+        allToolBodyTags.insert(allToolBodyTags.end(),
+                               firstToolBodyTags.begin(),
+                               firstToolBodyTags.end());
+        allReferenceTags.insert(allReferenceTags.end(),
+                                firstReferenceTags.begin(),
+                                firstReferenceTags.end());
 
-    tag_t finalSubtractTag = NULL_TAG;
-    if (!SubtractToolBodies(inputs.targetBody,
-                            allToolBodyTags,
-                            finalSubtractTag,
-                            errorMessage))
+        if (!SubtractToolBodies(inputs.targetBody,
+                                allToolBodyTags,
+                                finalSubtractTag,
+                                errorMessage))
+        {
+            UndoPreview();
+            ShowError(errorMessage);
+            return false;
+        }
+    }
+    else
     {
-        UndoPreview();
-        ShowError(errorMessage);
-        return false;
+        AppendDebugLog("CreatePreview retained the early primary-UDF subtraction for the chamfer 90/270 P2Q+2T branch: subtract=" +
+                       std::to_string(finalSubtractTag));
     }
 
     tag_t finalResultTag = finalSubtractTag;
@@ -5039,6 +3567,7 @@ bool TwoPointSiBianUI::CreatePreview()
         }
     }
 
+    previewUdfTag_ = finalResultTag;
     previewReferenceTags_ = allReferenceTags;
     if (inputs.smartMode && inputs.inferredFromSingleClick && inputs.targetBody != nullptr)
     {
@@ -5061,14 +3590,6 @@ bool TwoPointSiBianUI::CreatePreview()
                        std::to_string(smartEndpointBodyTag_) +
                        ", P1=" + FormatPoint(smartCachedP1_) +
                        ", P2=" + FormatPoint(smartCachedP2_));
-    }
-    CapturePreviewCreatedFeatureTags();
-    const std::vector<tag_t> compositeChildren = previewCreatedFeatureTags_;
-    if (!CommitCompositeFeature(inputs, compositeChildren, firstReferenceTags, errorMessage))
-    {
-        UndoPreview();
-        ShowError(errorMessage);
-        return false;
     }
     CapturePreviewCreatedFeatureTags();
     hasPreview_ = true;
@@ -5169,28 +3690,19 @@ void TwoPointSiBianUI::UndoPreview(bool includeCommitted)
         std::set<tag_t> alreadyQueued;
         for (tag_t featureTag : CurrentWorkPartFeatureTags())
         {
-            if (featureTag != editedFeatureTag_ &&
-                featureTag != editedInternalGroupTag_ &&
-                baseline.find(featureTag) == baseline.end() &&
-                alreadyQueued.insert(featureTag).second)
+            if (baseline.find(featureTag) == baseline.end() && alreadyQueued.insert(featureTag).second)
             {
                 createdFeatureTags.push_back(featureTag);
             }
         }
         for (tag_t featureTag : previewCreatedFeatureTags_)
         {
-            if (featureTag != NULL_TAG &&
-                featureTag != editedFeatureTag_ &&
-                featureTag != editedInternalGroupTag_ &&
-                alreadyQueued.insert(featureTag).second)
+            if (featureTag != NULL_TAG && alreadyQueued.insert(featureTag).second)
             {
                 createdFeatureTags.push_back(featureTag);
             }
         }
-        if (previewUdfTag_ != NULL_TAG &&
-            previewUdfTag_ != editedFeatureTag_ &&
-            previewUdfTag_ != editedInternalGroupTag_ &&
-            alreadyQueued.insert(previewUdfTag_).second)
+        if (previewUdfTag_ != NULL_TAG && alreadyQueued.insert(previewUdfTag_).second)
         {
             createdFeatureTags.push_back(previewUdfTag_);
         }
@@ -5201,13 +3713,6 @@ void TwoPointSiBianUI::UndoPreview(bool includeCommitted)
              iterator != createdFeatureTags.rend();
              ++iterator)
         {
-            if (*iterator == editedFeatureTag_ ||
-                *iterator == editedInternalGroupTag_ ||
-                *iterator == NULL_TAG ||
-                UF_OBJ_ask_status(*iterator) != UF_OBJ_ALIVE)
-            {
-                continue;
-            }
             const int deleteResult = UF_OBJ_delete_object(*iterator);
             AppendDebugLog("UndoPreview fallback delete created feature tag=" + std::to_string(*iterator) +
                            ", result=" + std::to_string(deleteResult) +
@@ -5234,10 +3739,6 @@ void TwoPointSiBianUI::UndoPreview(bool includeCommitted)
     previewReferenceTags_.clear();
     previewBaselineFeatureTags_.clear();
     previewCreatedFeatureTags_.clear();
-    editedOutputsDetached_ = false;
-    editedSavedCurrentFeatureTag_ = NULL_TAG;
-    editedInsertionAnchorTag_ = NULL_TAG;
-    editedCurrentFeatureRepositioned_ = false;
 }
 
 void TwoPointSiBianUI::CommitPreview()
@@ -5255,9 +3756,6 @@ void TwoPointSiBianUI::CommitPreview()
     hasSmartEndpointCache_ = false;
     smartEndpointBodyTag_ = NULL_TAG;
     retainSmartEndpointCacheOnUndo_ = false;
-    hasSelectionThicknessCache_ = false;
-    selectionThicknessBodyTag_ = NULL_TAG;
-    selectionThickness_ = 0.0;
 }
 
 void TwoPointSiBianUI::FinalizeCommittedPreview()
@@ -5284,26 +3782,12 @@ void TwoPointSiBianUI::FinalizeCommittedPreview()
         AppendDebugLog("FinalizeCommittedPreview unknown exception");
     }
 
-    if (editedFeatureTag_ != NULL_TAG && previewUdfTag_ != NULL_TAG)
-    {
-        editedFeatureTag_ = previewUdfTag_;
-    }
-    else if (editedFeatureTag_ == NULL_TAG)
-    {
-        // Apply may keep the dialog open for another independent operation.
-        // Never reuse one ownership marker for two separate custom features.
-        editedOwnerId_ = MakeOwnerId();
-    }
     previewCommitted_ = false;
     previewUndoMark_ = static_cast<Session::UndoMarkId>(0);
     previewUdfTag_ = NULL_TAG;
     previewReferenceTags_.clear();
     previewBaselineFeatureTags_.clear();
     previewCreatedFeatureTags_.clear();
-    editedOutputsDetached_ = false;
-    editedSavedCurrentFeatureTag_ = NULL_TAG;
-    editedInsertionAnchorTag_ = NULL_TAG;
-    editedCurrentFeatureRepositioned_ = false;
 }
 bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
                                   TaggedObject* singleClickObjectOverride,
@@ -5311,6 +3795,7 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
 {
     inputs.smartMode = IsSmartModeEnabled();
     inputs.featureMode = ReadFeatureMode();
+    inputs.reverseChamfer270Cut = reverseChamfer270Cut_;
 
     TaggedObject* selectedStartObject = nullptr;
     TaggedObject* selectedEndObject = nullptr;
@@ -5318,17 +3803,6 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
     Point3d selectedEndPoint;
     bool hasStart = ReadSelectedPoint(startPointBlock_, selectedStartObject, selectedStartPoint);
     bool hasEnd = ReadSelectedPoint(endPointBlock_, selectedEndObject, selectedEndPoint);
-
-    if (!inputs.smartMode && !hasStart && !hasEnd && hasEditedEndpointCache_)
-    {
-        selectedStartPoint = editedCachedP1_;
-        selectedEndPoint = editedCachedP2_;
-        hasStart = true;
-        hasEnd = true;
-        AppendDebugLog("ReadInputs restored detached edit endpoints from persisted XYZ values: P1=" +
-                       FormatPoint(selectedStartPoint) + ", P2=" +
-                       FormatPoint(selectedEndPoint));
-    }
 
     if (singleClickObjectOverride != nullptr && singleClickPointOverride != nullptr)
     {
@@ -5533,37 +4007,7 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
     inputs.endEdge = inputs.endPositiveYEdge;
     if (inputs.thickness <= kPointTolerance)
     {
-        const tag_t currentBodyTag = inputs.targetBody != nullptr
-                                         ? inputs.targetBody->Tag()
-                                         : NULL_TAG;
-        const bool sameCachedDirection =
-            Distance(inputs.startPoint, selectionThicknessP1_) <= kPointTolerance &&
-            Distance(inputs.endPoint, selectionThicknessP2_) <= kPointTolerance;
-        const bool reverseCachedDirection =
-            Distance(inputs.startPoint, selectionThicknessP2_) <= kPointTolerance &&
-            Distance(inputs.endPoint, selectionThicknessP1_) <= kPointTolerance;
-        if (hasSelectionThicknessCache_ &&
-            selectionThickness_ > kPointTolerance &&
-            currentBodyTag == selectionThicknessBodyTag_ &&
-            (sameCachedDirection || reverseCachedDirection))
-        {
-            inputs.thickness = selectionThickness_;
-            AppendDebugLog("ReadInputs reused selection-locked sheet thickness=" +
-                           FormatExpressionNumber(inputs.thickness) +
-                           ", body=" + std::to_string(currentBodyTag));
-        }
-        else
-        {
-            inputs.thickness = EstimateSheetThickness(inputs.targetBody, inputs.baseFace);
-        }
-    }
-    if (inputs.thickness > kPointTolerance && inputs.targetBody != nullptr)
-    {
-        hasSelectionThicknessCache_ = true;
-        selectionThicknessBodyTag_ = inputs.targetBody->Tag();
-        selectionThicknessP1_ = inputs.startPoint;
-        selectionThicknessP2_ = inputs.endPoint;
-        selectionThickness_ = inputs.thickness;
+        inputs.thickness = EstimateSheetThickness(inputs.targetBody, inputs.baseFace);
     }
     inputs.spanLength = Distance(inputs.startPoint, inputs.endPoint);
     inputs.clearanceValue = ReadStringBlockValue(clearanceBlock_, "string0", "0.2");
@@ -5589,7 +4033,8 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
           << ", thickness=" << inputs.thickness
           << "\n  clearanceValue=" << inputs.clearanceValue
           << ", bendRadiusValue=" << inputs.bendRadiusValue
-          << ", chamferEdge=" << (inputs.chamferEdgeMode ? 1 : 0);
+          << ", chamferEdge=" << (inputs.chamferEdgeMode ? 1 : 0)
+          << ", reverseChamfer270Cut=" << (inputs.reverseChamfer270Cut ? 1 : 0);
     AppendDebugLog(trace.str());
     return true;
 }
@@ -5611,47 +4056,6 @@ bool TwoPointSiBianUI::ReadSelectedPoint(NXOpen::BlockStyler::SelectObject* bloc
 
     selectedObject = selected.front();
     point = block->PickPoint();
-
-    // In manual mode the selection controls represent edge endpoints, but
-    // Block Styler reports the cursor position on the selected edge.  That
-    // position is usually somewhere inside the edge and therefore is not a
-    // topological vertex; all downstream B1/B2 searches require an exact
-    // endpoint.  Resolve the selected edge to the endpoint nearest the pick.
-    if (!IsSmartModeEnabled())
-    {
-        Edge* selectedEdge = dynamic_cast<Edge*>(selectedObject);
-        if (selectedEdge != nullptr)
-        {
-            try
-            {
-                const Point3d rawPick = point;
-                Point3d first;
-                Point3d second;
-                selectedEdge->GetVertices(&first, &second);
-                const double firstDistance = Distance(rawPick, first);
-                const double secondDistance = Distance(rawPick, second);
-                point = firstDistance <= secondDistance ? first : second;
-                AppendDebugLog("manual edge pick snapped to nearest endpoint: edge=" +
-                               std::to_string(selectedEdge->Tag()) +
-                               ", raw=" + FormatPoint(rawPick) +
-                               ", endpoint=" + FormatPoint(point) +
-                               ", distance=" +
-                               FormatExpressionNumber(std::min(firstDistance, secondDistance)));
-            }
-            catch (const NXException& ex)
-            {
-                AppendDebugLog("manual edge pick endpoint resolution failed: edge=" +
-                               std::to_string(selectedEdge->Tag()) +
-                               ", error=" + UfMessage(ex.ErrorCode()));
-                return false;
-            }
-            catch (...)
-            {
-                AppendDebugLog("manual edge pick endpoint resolution failed: unknown exception.");
-                return false;
-            }
-        }
-    }
     return true;
 }
 
@@ -5707,8 +4111,8 @@ bool TwoPointSiBianUI::CompleteInputsForEndpoints(InferredInputs& inputs) const
     return inputs.thickness > kPointTolerance;
 }
 
-bool TwoPointSiBianUI::RefreshInputsAfterRips(const InferredInputs& originalInputs,
-                                              InferredInputs& refreshedInputs) const
+bool TwoPointSiBianUI::RefreshSmartInputsAfterRips(const InferredInputs& originalInputs,
+                                                   InferredInputs& refreshedInputs) const
 {
     Body* body = originalInputs.targetBody;
     if (body == nullptr)
@@ -5725,14 +4129,41 @@ bool TwoPointSiBianUI::RefreshInputsAfterRips(const InferredInputs& originalInpu
     }
     if (face == nullptr || face->SolidFaceType() != Face::FaceTypePlanar)
     {
-        AppendDebugLog("RefreshInputsAfterRips failed: the original endpoint plane is unavailable.");
+        AppendDebugLog("RefreshSmartInputsAfterRips failed: the original endpoint plane is unavailable.");
         return false;
     }
 
+    const double selectedFaceAreaSquareMillimeters =
+        MeasureFaceArea(face);
+    Part* workPart = session_->Parts()->Work();
+    const double selectedFaceArea =
+        SquareMillimetersToPartSquareUnits(
+            workPart,
+            selectedFaceAreaSquareMillimeters);
+    const double minimumAcceptedInnerLoopArea =
+        selectedFaceArea > kPointTolerance
+            ? selectedFaceArea *
+                  kSmartInnerLoopMinimumAreaRatio
+            : std::numeric_limits<double>::infinity();
+    AppendDebugLog(
+        "RefreshSmartInputsAfterRips inner-loop filter: face=" +
+        std::to_string(face->Tag()) +
+        ", faceAreaSquareMillimeters=" +
+        FormatExpressionNumber(
+            selectedFaceAreaSquareMillimeters) +
+        ", faceAreaPartUnits=" +
+        FormatExpressionNumber(selectedFaceArea) +
+        ", minimumAcceptedInnerLoopArea=" +
+        FormatExpressionNumber(
+            minimumAcceptedInnerLoopArea));
+
     std::vector<Point3d> boundaryPoints;
-    if (!FaceBoundaryPoints(face, boundaryPoints) || boundaryPoints.empty())
+    if (!FaceBoundaryPoints(face,
+                            boundaryPoints,
+                            minimumAcceptedInnerLoopArea) ||
+        boundaryPoints.empty())
     {
-        AppendDebugLog("RefreshInputsAfterRips failed: no updated peripheral endpoints were found.");
+        AppendDebugLog("RefreshSmartInputsAfterRips failed: no updated peripheral endpoints were found.");
         return false;
     }
 
@@ -5828,11 +4259,11 @@ bool TwoPointSiBianUI::RefreshInputsAfterRips(const InferredInputs& originalInpu
 
     if (!found)
     {
-        AppendDebugLog("RefreshInputsAfterRips failed: no valid updated edge pair exists near the recorded P1/P2.");
+        AppendDebugLog("RefreshSmartInputsAfterRips failed: no valid updated edge pair exists near the recorded P1/P2.");
         return false;
     }
 
-    AppendDebugLog("RefreshInputsAfterRips OK: recordedP1=" +
+    AppendDebugLog("RefreshSmartInputsAfterRips OK: recordedP1=" +
                    FormatPoint(originalInputs.startPoint) +
                    ", recordedP2=" + FormatPoint(originalInputs.endPoint) +
                    ", updatedP1=" + FormatPoint(refreshedInputs.startPoint) +
@@ -6034,7 +4465,8 @@ bool TwoPointSiBianUI::InferEndpointsFromFaceClick(TaggedObject* selectedObject,
     }
     OrientNormalAwayFromOppositeFace(body, face, clickPoint, faceNormal);
 
-    const double selectedFaceAreaSquareMillimeters = MeasureFaceArea(face);
+    const double selectedFaceAreaSquareMillimeters =
+        MeasureFaceArea(face);
     Part* workPart = session_->Parts()->Work();
     const double selectedFaceArea =
         SquareMillimetersToPartSquareUnits(
@@ -6042,16 +4474,20 @@ bool TwoPointSiBianUI::InferEndpointsFromFaceClick(TaggedObject* selectedObject,
             selectedFaceAreaSquareMillimeters);
     const double minimumAcceptedInnerLoopArea =
         selectedFaceArea > kPointTolerance
-            ? selectedFaceArea * kSmartInnerLoopMinimumAreaRatio
+            ? selectedFaceArea *
+                  kSmartInnerLoopMinimumAreaRatio
             : std::numeric_limits<double>::infinity();
-    AppendDebugLog("InferEndpointsFromFaceClick inner-loop filter: face=" +
-                   std::to_string(face->Tag()) +
-                   ", faceAreaSquareMillimeters=" +
-                   FormatExpressionNumber(selectedFaceAreaSquareMillimeters) +
-                   ", faceAreaPartUnits=" +
-                   FormatExpressionNumber(selectedFaceArea) +
-                   ", minimumAcceptedInnerLoopArea=" +
-                   FormatExpressionNumber(minimumAcceptedInnerLoopArea));
+    AppendDebugLog(
+        "InferEndpointsFromFaceClick inner-loop filter: face=" +
+        std::to_string(face->Tag()) +
+        ", faceAreaSquareMillimeters=" +
+        FormatExpressionNumber(
+            selectedFaceAreaSquareMillimeters) +
+        ", faceAreaPartUnits=" +
+        FormatExpressionNumber(selectedFaceArea) +
+        ", minimumAcceptedInnerLoopArea=" +
+        FormatExpressionNumber(
+            minimumAcceptedInnerLoopArea));
 
     std::vector<Point3d> boundaryPoints;
     if (!FaceBoundaryPoints(face,
@@ -7453,555 +5889,89 @@ bool TwoPointSiBianUI::ExtrudeReferenceCornerProfile(
     const char* operationName,
     std::string& errorMessage) const
 {
-    Part* workPart = session_ != nullptr ? session_->Parts()->Work() : nullptr;
-    if (workPart == nullptr || profilePoints.size() < 4 ||
-        inputs.targetBody == nullptr)
+    if (profilePoints.size() < 4 || inputs.targetBody == nullptr)
     {
         errorMessage = std::string(operationName) + ": invalid profile or target body.";
         return false;
     }
-
-    Vector3d profileNormal = direction;
-    if (!Normalize(profileNormal))
-    {
-        errorMessage = std::string(operationName) + ": the profile normal is invalid.";
-        return false;
-    }
-
-    Vector3d fixedPlaneXAxis;
-    bool hasFixedPlaneXAxis = false;
-    for (std::size_t pointIndex = 1;
-         pointIndex < profilePoints.size();
-         ++pointIndex)
-    {
-        fixedPlaneXAxis = ProjectVectorToPlane(
-            Subtract(profilePoints[pointIndex], profilePoints.front()),
-            profileNormal);
-        if (Normalize(fixedPlaneXAxis))
+    std::vector<tag_t> curveTags;
+    uf_list_p_t curveList = nullptr;
+    uf_list_p_t featureList = nullptr;
+    auto cleanup = [&]() {
+        if (curveList != nullptr) UF_MODL_delete_list(&curveList);
+        if (featureList != nullptr) UF_MODL_delete_list(&featureList);
+        for (tag_t curveTag : curveTags)
         {
-            hasFixedPlaneXAxis = true;
-            break;
+            if (curveTag != NULL_TAG && UF_OBJ_delete_object(curveTag) != 0)
+            {
+                UF_OBJ_set_blank_status(curveTag, UF_OBJ_BLANKED);
+            }
         }
-    }
-    if (!hasFixedPlaneXAxis)
-    {
-        Vector3d seed(std::fabs(profileNormal.X) < 0.9 ? 1.0 : 0.0,
-                      std::fabs(profileNormal.X) < 0.9 ? 0.0 : 1.0,
-                      0.0);
-        fixedPlaneXAxis = Cross(seed, profileNormal);
-        hasFixedPlaneXAxis = Normalize(fixedPlaneXAxis);
-    }
-    Vector3d fixedPlaneYAxis = Cross(profileNormal, fixedPlaneXAxis);
-    if (!hasFixedPlaneXAxis || !Normalize(fixedPlaneYAxis))
-    {
-        errorMessage = std::string(operationName) +
-                       ": the fixed sketch-plane axes are invalid.";
-        return false;
-    }
-    fixedPlaneXAxis = Cross(fixedPlaneYAxis, profileNormal);
-    if (!Normalize(fixedPlaneXAxis))
-    {
-        errorMessage = std::string(operationName) +
-                       ": the fixed sketch-plane X axis is invalid.";
-        return false;
-    }
-    Matrix3x3 fixedPlaneMatrix;
-    fixedPlaneMatrix.Xx = fixedPlaneXAxis.X;
-    fixedPlaneMatrix.Xy = fixedPlaneXAxis.Y;
-    fixedPlaneMatrix.Xz = fixedPlaneXAxis.Z;
-    fixedPlaneMatrix.Yx = fixedPlaneYAxis.X;
-    fixedPlaneMatrix.Yy = fixedPlaneYAxis.Y;
-    fixedPlaneMatrix.Yz = fixedPlaneYAxis.Z;
-    fixedPlaneMatrix.Zx = profileNormal.X;
-    fixedPlaneMatrix.Zy = profileNormal.Y;
-    fixedPlaneMatrix.Zz = profileNormal.Z;
-
-    SimpleSketchInPlaceBuilder* sketchBuilder = nullptr;
-    Sketch* profileSketch = nullptr;
-    Features::Feature* sketchFeature = nullptr;
-    Features::ExtrudeBuilder* extrudeBuilder = nullptr;
-    Features::Feature* extrudeFeature = nullptr;
-    tag_t sketchFeatureTag = NULL_TAG;
-    tag_t extrudeFeatureTag = NULL_TAG;
-    tag_t placementPlaneTag = NULL_TAG;
-    tag_t placementPointTag = NULL_TAG;
-    tag_t placementCsysTag = NULL_TAG;
-    tag_t extrusionDirectionTag = NULL_TAG;
-    std::vector<tag_t> sketchCurveTags;
-    Session::UndoMarkId localUndoMark = static_cast<Session::UndoMarkId>(0);
-    std::string failureStage = "initialization";
-    try
-    {
-        localUndoMark = session_->SetUndoMark(
-            Session::MarkVisibilityInvisible,
-            operationName);
-    }
-    catch (...)
-    {
-        localUndoMark = static_cast<Session::UndoMarkId>(0);
-    }
-
-    auto deleteFeatureIfAlive = [](tag_t featureTag) -> bool
-    {
-        if (featureTag == NULL_TAG || UF_OBJ_ask_status(featureTag) != UF_OBJ_ALIVE)
-        {
-            return true;
-        }
-        UF_OBJ_delete_object(featureTag);
-        return UF_OBJ_ask_status(featureTag) != UF_OBJ_ALIVE;
     };
-    auto deleteLocalUndoMark = [&]()
+    for (std::size_t index = 0; index + 1 < profilePoints.size(); ++index)
     {
-        if (localUndoMark == static_cast<Session::UndoMarkId>(0))
+        UF_CURVE_line_t lineData;
+        CopyPoint(profilePoints[index], lineData.start_point);
+        CopyPoint(profilePoints[index + 1], lineData.end_point);
+        tag_t lineTag = NULL_TAG;
+        if (UF_CURVE_create_line(&lineData, &lineTag) != 0 || lineTag == NULL_TAG)
         {
-            return;
-        }
-        try
-        {
-            session_->DeleteUndoMark(localUndoMark, operationName);
-        }
-        catch (...)
-        {
-        }
-        localUndoMark = static_cast<Session::UndoMarkId>(0);
-    };
-    auto cleanupFailedFeatures = [&]() -> bool
-    {
-        if (extrudeBuilder != nullptr)
-        {
-            try
-            {
-                extrudeBuilder->Destroy();
-            }
-            catch (...)
-            {
-            }
-            extrudeBuilder = nullptr;
-        }
-        if (sketchBuilder != nullptr)
-        {
-            try
-            {
-                sketchBuilder->Destroy();
-            }
-            catch (...)
-            {
-            }
-            sketchBuilder = nullptr;
-        }
-        if (localUndoMark != static_cast<Session::UndoMarkId>(0))
-        {
-            try
-            {
-                session_->UndoToMark(localUndoMark, operationName);
-                session_->DeleteUndoMark(localUndoMark, operationName);
-                localUndoMark = static_cast<Session::UndoMarkId>(0);
-                return true;
-            }
-            catch (const NXException& ex)
-            {
-                AppendDebugLog(std::string(operationName) +
-                               " local rollback warning: " + UfMessage(ex.ErrorCode()));
-                localUndoMark = static_cast<Session::UndoMarkId>(0);
-            }
-            catch (...)
-            {
-                AppendDebugLog(std::string(operationName) +
-                               " local rollback warning: unknown exception.");
-                localUndoMark = static_cast<Session::UndoMarkId>(0);
-            }
-        }
-        // The far-end cut is optional.  Delete partial history here so a
-        // failed optional cut cannot leave a loose sketch or tool extrusion.
-        const bool extrudeDeleted = deleteFeatureIfAlive(extrudeFeatureTag);
-        const bool sketchDeleted = extrudeDeleted && deleteFeatureIfAlive(sketchFeatureTag);
-        if (!sketchDeleted)
-        {
-            AppendDebugLog(std::string(operationName) +
-                           " fallback cleanup retained live dependent sketch history to avoid dangling parents.");
+            errorMessage = std::string(operationName) + ": failed to create profile curves.";
+            cleanup();
             return false;
         }
-        bool cleanupComplete = true;
-        for (tag_t curveTag : sketchCurveTags)
-        {
-            if (curveTag != NULL_TAG && UF_OBJ_ask_status(curveTag) == UF_OBJ_ALIVE)
-            {
-                UF_OBJ_delete_object(curveTag);
-                cleanupComplete = cleanupComplete &&
-                                  UF_OBJ_ask_status(curveTag) != UF_OBJ_ALIVE;
-            }
-        }
-        if (extrusionDirectionTag != NULL_TAG &&
-            UF_OBJ_ask_status(extrusionDirectionTag) == UF_OBJ_ALIVE)
-        {
-            UF_OBJ_delete_object(extrusionDirectionTag);
-            cleanupComplete = cleanupComplete &&
-                              UF_OBJ_ask_status(extrusionDirectionTag) != UF_OBJ_ALIVE;
-        }
-        if (placementPointTag != NULL_TAG &&
-            UF_OBJ_ask_status(placementPointTag) == UF_OBJ_ALIVE)
-        {
-            UF_OBJ_delete_object(placementPointTag);
-            cleanupComplete = cleanupComplete &&
-                                   UF_OBJ_ask_status(placementPointTag) != UF_OBJ_ALIVE;
-        }
-        if (placementCsysTag != NULL_TAG &&
-            UF_OBJ_ask_status(placementCsysTag) == UF_OBJ_ALIVE)
-        {
-            UF_OBJ_delete_object(placementCsysTag);
-            cleanupComplete = cleanupComplete &&
-                              UF_OBJ_ask_status(placementCsysTag) != UF_OBJ_ALIVE;
-        }
-        if (placementPlaneTag != NULL_TAG &&
-            UF_OBJ_ask_status(placementPlaneTag) == UF_OBJ_ALIVE)
-        {
-            UF_OBJ_delete_object(placementPlaneTag);
-            cleanupComplete = cleanupComplete &&
-                              UF_OBJ_ask_status(placementPlaneTag) != UF_OBJ_ALIVE;
-        }
-        return cleanupComplete;
-    };
-
-    try
-    {
-        failureStage = "fixed sketch coordinate-system creation";
-        // A SketchInPlaceBuilder with a transient Plane was committing an XY
-        // sketch even when the requested normal was Y.  Feed the full matrix
-        // through the simple builder's coordinate-system input instead, which
-        // avoids plane inference and remains independent of changing body
-        // topology after the first corner cut.
-        CartesianCoordinateSystem* placementCsys =
-            workPart->CoordinateSystems()->CreateCoordinateSystem(
-                origin,
-                fixedPlaneMatrix,
-                true);
-        Point* placementPoint = workPart->Points()->CreatePoint(origin);
-        if (placementCsys == nullptr || placementPoint == nullptr)
-        {
-            throw std::runtime_error("NX did not create the corner-profile sketch placement.");
-        }
-        placementCsysTag = placementCsys->Tag();
-        placementPointTag = placementPoint->Tag();
-        placementPoint->SetVisibility(SmartObject::VisibilityOptionInvisible);
-
-        failureStage = "fixed sketch commit";
-        sketchBuilder = workPart->Sketches()->CreateSimpleSketchInPlaceBuilder();
-        sketchBuilder->SetUseWorkPartOrigin(false);
-        sketchBuilder->SetCoordinateSystem(placementCsys);
-        sketchBuilder->SetSketchOrigin(placementPoint);
-
-        NXObject* committedSketchObject = sketchBuilder->Commit();
-        profileSketch = dynamic_cast<Sketch*>(committedSketchObject);
-        Features::SketchFeature* committedSketchFeature =
-            dynamic_cast<Features::SketchFeature*>(committedSketchObject);
-        if (committedSketchFeature != nullptr)
-        {
-            sketchFeature = committedSketchFeature;
-            profileSketch = committedSketchFeature->Sketch();
-        }
-        if (sketchFeature == nullptr && profileSketch != nullptr)
-        {
-            sketchFeature = profileSketch->Feature();
-        }
-        if (sketchFeature != nullptr)
-        {
-            sketchFeatureTag = sketchFeature->Tag();
-        }
-        std::vector<NXObject*> committedSketchObjects = sketchBuilder->GetCommittedObjects();
-        for (NXObject* committedObject : committedSketchObjects)
-        {
-            if (profileSketch == nullptr)
-            {
-                profileSketch = dynamic_cast<Sketch*>(committedObject);
-            }
-            if (sketchFeature == nullptr)
-            {
-                Features::SketchFeature* candidate =
-                    dynamic_cast<Features::SketchFeature*>(committedObject);
-                if (candidate != nullptr)
-                {
-                    sketchFeature = candidate;
-                    sketchFeatureTag = candidate->Tag();
-                    profileSketch = candidate->Sketch();
-                }
-            }
-        }
-        sketchBuilder->Destroy();
-        sketchBuilder = nullptr;
-        if (profileSketch == nullptr)
-        {
-            throw std::runtime_error("NX did not create the corner-profile sketch.");
-        }
-        if (sketchFeature == nullptr)
-        {
-            sketchFeature = profileSketch->Feature();
-        }
-        if (sketchFeature == nullptr)
-        {
-            throw std::runtime_error("NX did not return the corner-profile sketch feature.");
-        }
-        sketchFeatureTag = sketchFeature->Tag();
-
-        failureStage = "sketch-plane coordinate resolution";
-        const Point3d sketchOrigin = profileSketch->Origin();
-        NXMatrix* sketchOrientationObject = profileSketch->Orientation();
-        if (sketchOrientationObject == nullptr)
-        {
-            throw std::runtime_error("NX did not return the corner-profile sketch orientation.");
-        }
-        const Matrix3x3 sketchOrientation = sketchOrientationObject->Element();
-        Vector3d sketchXAxis(sketchOrientation.Xx,
-                             sketchOrientation.Xy,
-                             sketchOrientation.Xz);
-        Vector3d sketchYAxis(sketchOrientation.Yx,
-                             sketchOrientation.Yy,
-                             sketchOrientation.Yz);
-        Vector3d sketchNormal(sketchOrientation.Zx,
-                              sketchOrientation.Zy,
-                              sketchOrientation.Zz);
-        AppendDebugLog(std::string(operationName) +
-                       " committed sketch orientation: origin=" +
-                       FormatPoint(sketchOrigin) +
-                       ", X=" + FormatVector(sketchXAxis) +
-                       ", Y=" + FormatVector(sketchYAxis) +
-                       ", Z=" + FormatVector(sketchNormal) +
-                       ", requestedZ=" + FormatVector(profileNormal));
-        if (!Normalize(sketchXAxis) ||
-            !Normalize(sketchYAxis) ||
-            !Normalize(sketchNormal) ||
-            std::fabs(Dot(sketchNormal, profileNormal)) < 0.999999)
-        {
-            throw std::runtime_error("NX created a sketch plane that does not match the corner-profile plane.");
-        }
-
-        // NX may re-evaluate the transient plane during sketch commit. Map
-        // every vertex through the sketch's returned X/Y axes so the far-end
-        // profile is exactly coplanar with the real sketch, not merely with
-        // the originally requested plane.
-        std::vector<Point3d> projectedProfilePoints;
-        projectedProfilePoints.reserve(profilePoints.size());
-        double maximumInputPlaneOffset = 0.0;
-        double maximumProjectedPlaneOffset = 0.0;
-        for (const Point3d& profilePoint : profilePoints)
-        {
-            const Vector3d fromSketchOrigin = Subtract(profilePoint, sketchOrigin);
-            maximumInputPlaneOffset =
-                std::max(maximumInputPlaneOffset,
-                         std::fabs(Dot(fromSketchOrigin, sketchNormal)));
-            const Point3d projectedPoint = AddVector(
-                AddVector(sketchOrigin,
-                          ScaleVector(sketchXAxis,
-                                      Dot(fromSketchOrigin, sketchXAxis))),
-                ScaleVector(sketchYAxis,
-                            Dot(fromSketchOrigin, sketchYAxis)));
-            maximumProjectedPlaneOffset =
-                std::max(maximumProjectedPlaneOffset,
-                         std::fabs(Dot(Subtract(projectedPoint, sketchOrigin),
-                                       sketchNormal)));
-            projectedProfilePoints.push_back(projectedPoint);
-        }
-        AppendDebugLog(std::string(operationName) +
-                       " sketch-plane projection: requestedOrigin=" + FormatPoint(origin) +
-                       ", actualOrigin=" + FormatPoint(sketchOrigin) +
-                       ", requestedNormal=" + FormatVector(profileNormal) +
-                       ", actualNormal=" + FormatVector(sketchNormal) +
-                       ", normalDot=" +
-                       FormatExpressionNumber(Dot(sketchNormal, profileNormal)) +
-                       ", maximumInputOffset=" +
-                       FormatExpressionNumber(maximumInputPlaneOffset) +
-                       ", maximumProjectedOffset=" +
-                       FormatExpressionNumber(maximumProjectedPlaneOffset));
-
-        failureStage = "sketch geometry creation";
-        profileSketch->Activate(Sketch::ViewReorientFalse);
-        for (std::size_t index = 0; index + 1 < projectedProfilePoints.size(); ++index)
-        {
-            failureStage = "sketch geometry line " + std::to_string(index + 1);
-            Line* line = workPart->Curves()->CreateLine(projectedProfilePoints[index],
-                                                        projectedProfilePoints[index + 1]);
-            if (line == nullptr)
-            {
-                throw std::runtime_error("NX did not create a corner-profile sketch line.");
-            }
-            sketchCurveTags.push_back(line->Tag());
-            profileSketch->AddGeometry(line,
-                                       Sketch::InferConstraintsOptionInferNoConstraints);
-        }
-        failureStage = "sketch update";
-        profileSketch->Update();
-        profileSketch->UpdateNavigator();
-        profileSketch->Deactivate(Sketch::ViewReorientFalse,
-                                  Sketch::UpdateLevelModel);
-
-        std::vector<Curve*> profileCurves;
-        for (NXObject* geometry : profileSketch->GetAllGeometry())
-        {
-            Curve* curve = dynamic_cast<Curve*>(geometry);
-            if (curve != nullptr)
-            {
-                profileCurves.push_back(curve);
-            }
-        }
-        if (profileCurves.empty())
-        {
-            throw std::runtime_error("The corner-profile sketch contains no curves.");
-        }
-
-        failureStage = "extrusion setup";
-        extrudeBuilder = workPart->Features()->CreateExtrudeBuilder(nullptr);
-        Section* section = workPart->Sections()->CreateSection(9.5e-05, 0.0001, 0.5);
-        extrudeBuilder->SetSection(section);
-        extrudeBuilder->AllowSelfIntersectingSection(true);
-        extrudeBuilder->SetDistanceTolerance(0.0001);
-        extrudeBuilder->BooleanOperation()->SetType(
-            GeometricUtilities::BooleanOperation::BooleanTypeCreate);
-        extrudeBuilder->SmartVolumeProfile()->SetOpenProfileSmartVolumeOption(false);
-        extrudeBuilder->SmartVolumeProfile()->SetCloseProfileRule(
-            GeometricUtilities::SmartVolumeProfileBuilder::CloseProfileRuleTypeFci);
-        extrudeBuilder->Limits()->SetSymmetricOption(false);
-        extrudeBuilder->Limits()->StartExtend()->Value()->SetFormula(
-            FormatExpressionNumber(startLimitValue).c_str());
-        extrudeBuilder->Limits()->EndExtend()->Value()->SetFormula(
-            FormatExpressionNumber(endLimitValue).c_str());
-        extrudeBuilder->Limits()->StartExtend()->SetTrimType(
-            GeometricUtilities::Extend::ExtendTypeValue);
-        extrudeBuilder->Limits()->EndExtend()->SetTrimType(
-            GeometricUtilities::Extend::ExtendTypeValue);
-        extrudeBuilder->Offset()->SetOption(GeometricUtilities::TypeNoOffset);
-        extrudeBuilder->Offset()->StartOffset()->SetFormula("0");
-        extrudeBuilder->Offset()->EndOffset()->SetFormula("0");
-        extrudeBuilder->FeatureOptions()->SetBodyType(
-            GeometricUtilities::FeatureOptions::BodyStyleSolid);
-
-        section->SetDistanceTolerance(0.0001);
-        section->SetChainingTolerance(9.5e-05);
-        section->SetAllowedEntityTypes(Section::AllowTypesOnlyCurves);
-        section->AllowSelfIntersection(true);
-        section->AllowDegenerateCurves(false);
-
-        CurveFeatureRule* profileRule =
-            workPart->ScRuleFactory()->CreateRuleCurveFeature(
-                std::vector<Features::Feature*>{sketchFeature});
-        section->AddToSection(
-            std::vector<SelectionIntentRule*>{profileRule},
-            profileCurves.front(),
-            nullptr,
-            nullptr,
-            projectedProfilePoints.front(),
-            Section::ModeCreate,
-            false);
-
-        Direction* extrusionDirection = workPart->Directions()->CreateDirection(
-            origin,
-            profileNormal,
-            SmartObject::UpdateOptionWithinModeling);
-        if (extrusionDirection == nullptr)
-        {
-            throw std::runtime_error("NX did not create the corner-profile extrusion direction.");
-        }
-        extrusionDirectionTag = extrusionDirection->Tag();
-        extrudeBuilder->SetDirection(extrusionDirection);
-        if (sketchFeature != nullptr)
-        {
-            extrudeBuilder->SetParentFeatureInternal(sketchFeature);
-        }
-
-        failureStage = "extrusion commit";
-        extrudeFeature = extrudeBuilder->CommitFeature();
-        if (extrudeFeature != nullptr)
-        {
-            extrudeFeatureTag = extrudeFeature->Tag();
-        }
-        extrudeBuilder->Destroy();
-        extrudeBuilder = nullptr;
-        if (extrudeFeature == nullptr)
-        {
-            throw std::runtime_error("NX did not create the corner-profile extrusion.");
-        }
-        try
-        {
-            if (!sketchFeature->IsInternal())
-            {
-                extrudeFeature->MakeSketchInternal();
-            }
-        }
-        catch (const NXException& ex)
-        {
-            AppendDebugLog(std::string(operationName) +
-                           " MakeSketchInternal warning: " + UfMessage(ex.ErrorCode()));
-        }
-        if (!sketchFeature->IsInternal())
-        {
-            throw std::runtime_error("NX did not place the profile sketch inside the extrusion.");
-        }
-
-        failureStage = "extrusion body resolution";
-        tag_t toolBodyTag = NULL_TAG;
-        const int bodyStatus = UF_MODL_ask_feat_body(extrudeFeatureTag, &toolBodyTag);
-        if (bodyStatus != 0 || toolBodyTag == NULL_TAG)
-        {
-            throw NXException::Create(bodyStatus != 0 ? bodyStatus : 1);
-        }
-
-        failureStage = "corner-profile subtraction";
-        tag_t subtractTag = NULL_TAG;
-        if (!SubtractToolBodies(inputs.targetBody,
-                                std::vector<tag_t>{toolBodyTag},
-                                subtractTag,
-                                errorMessage))
-        {
-            if (!cleanupFailedFeatures())
-            {
-                errorMessage = "Internal corner-profile rollback failed; canceling the entire preview.\n" +
-                               errorMessage;
-            }
-            return false;
-        }
-        deleteLocalUndoMark();
-        AppendDebugLog(std::string(operationName) +
-                       " completed with internal sketch: sketch=" +
-                       std::to_string(sketchFeatureTag) +
-                       ", extrude=" + std::to_string(extrudeFeatureTag) +
-                       ", subtract=" + std::to_string(subtractTag));
-        return true;
+        curveTags.push_back(lineTag);
     }
-    catch (const NXException& ex)
+    if (UF_MODL_create_list(&curveList) != 0 || curveList == nullptr)
     {
-        errorMessage = std::string(operationName) +
-                       ": failed to create the internal-sketch extrusion at " +
-                       failureStage + ".\n" +
-                       NxExceptionText(ex);
+        errorMessage = std::string(operationName) + ": failed to allocate the curve list.";
+        cleanup();
+        return false;
     }
-    catch (const std::exception& ex)
+    for (tag_t curveTag : curveTags) UF_MODL_put_list_item(curveList, curveTag);
+    const std::string startLimit = FormatExpressionNumber(startLimitValue);
+    const std::string endLimit = FormatExpressionNumber(endLimitValue);
+    char taper[] = "0.0";
+    char* limits[2] = {const_cast<char*>(startLimit.c_str()),
+                       const_cast<char*>(endLimit.c_str())};
+    double originData[3] = {origin.X, origin.Y, origin.Z};
+    double directionData[3] = {direction.X, direction.Y, direction.Z};
+    const int result = UF_MODL_create_extruded(curveList,
+                                                taper,
+                                                limits,
+                                                originData,
+                                                directionData,
+                                                UF_NULLSIGN,
+                                                &featureList);
+    tag_t featureTag = NULL_TAG;
+    tag_t toolBodyTag = NULL_TAG;
+    int count = 0;
+    if (result == 0 && featureList != nullptr &&
+        UF_MODL_ask_list_count(featureList, &count) == 0 && count > 0)
     {
-        errorMessage = std::string(operationName) +
-                       ": failed to create the internal-sketch extrusion at " +
-                       failureStage + ".\n" + ex.what();
+        UF_MODL_ask_list_item(featureList, 0, &featureTag);
+        UF_MODL_ask_feat_body(featureTag, &toolBodyTag);
     }
-    catch (...)
+    if (toolBodyTag == NULL_TAG)
     {
-        errorMessage = std::string(operationName) +
-                       ": failed to create the internal-sketch extrusion at " +
-                       failureStage + ".";
+        errorMessage = std::string(operationName) + ": failed to extrude the corner profile.\n" +
+                       UfMessage(result);
+        cleanup();
+        return false;
     }
-    try
+    tag_t subtractTag = NULL_TAG;
+    const bool subtracted = SubtractToolBodies(inputs.targetBody,
+                                                std::vector<tag_t>{toolBodyTag},
+                                                subtractTag,
+                                                errorMessage);
+    cleanup();
+    if (subtracted)
     {
-        if (profileSketch != nullptr && profileSketch->IsActive())
-        {
-            profileSketch->Deactivate(Sketch::ViewReorientFalse,
-                                      Sketch::UpdateLevelModel);
-        }
+        AppendDebugLog(std::string(operationName) + " completed: extrude=" +
+                       std::to_string(featureTag) + ", subtract=" +
+                       std::to_string(subtractTag));
     }
-    catch (...)
-    {
-    }
-    if (!cleanupFailedFeatures())
-    {
-        errorMessage = "Internal corner-profile rollback failed; canceling the entire preview.\n" +
-                       errorMessage;
-    }
-    AppendDebugLog(errorMessage);
-    return false;
+    return subtracted;
 }
 
 bool TwoPointSiBianUI::CreateReferenceNonRightCornerEdgeCut(
@@ -8247,14 +6217,10 @@ bool TwoPointSiBianUI::CreateReferenceRightCornerEdgeCut(
 {
     Part* workPart = session_ != nullptr ? session_->Parts()->Work() : nullptr;
     Vector3d inwardNormal;
-    Point3d inwardNormalSample;
     if (workPart == nullptr || inputs.targetBody == nullptr || cornerEdge == nullptr ||
-        !ComputeFaceInwardNormalByContainment(inputs.targetBody,
-                                              referenceFace,
-                                              inwardNormalSample,
-                                              inwardNormal))
+        !ComputeReferenceInwardNormal(inputs.targetBody, referenceFace, inwardNormal))
     {
-        errorMessage = "Reference chamfer: the 90-degree reference face has no valid interior point or its inward normal could not be resolved by the 0.05 body-containment probes.";
+        errorMessage = "Reference chamfer: the 90-degree reference edge or face is unavailable.";
         return false;
     }
     double clearance = 0.0;
@@ -8354,8 +6320,6 @@ bool TwoPointSiBianUI::CreateReferenceRightCornerEdgeCut(
         AppendDebugLog("reference 90-degree corner-edge cut completed: edge=" +
                        std::to_string(cornerEdge->Tag()) +
                        ", face=" + std::to_string(referenceFace->Tag()) +
-                       ", inwardSample=" + FormatPoint(inwardNormalSample) +
-                       ", inwardNormal=" + FormatVector(inwardNormal) +
                        ", subtract=" + std::to_string(subtractTag));
         return true;
     }
@@ -8551,84 +6515,6 @@ bool TwoPointSiBianUI::CreateReferenceCornerEdgeCut(const InferredInputs& inputs
         errorMessage = "Reference chamfer: corner-edge endpoints are unavailable.";
         return false;
     }
-
-    if (isRightAngle &&
-        (inputs.featureMode == FeatureMode::NinetyLeft ||
-         inputs.featureMode == FeatureMode::NinetyRight))
-    {
-        Vector3d localX = Subtract(inputs.endPoint, inputs.startPoint);
-        const Point3d baseNormalPoint(
-            (inputs.startPoint.X + inputs.endPoint.X) * 0.5,
-            (inputs.startPoint.Y + inputs.endPoint.Y) * 0.5,
-            (inputs.startPoint.Z + inputs.endPoint.Z) * 0.5);
-        Vector3d localZ;
-        if (inputs.baseFace == nullptr ||
-            !Normalize(localX) ||
-            !FaceNormalAtPoint(inputs.baseFace, baseNormalPoint, localZ))
-        {
-            errorMessage = "Reference chamfer: the P1-P2 local X/Z directions could not be resolved for the 90-degree Y-side face selection.";
-            return false;
-        }
-        OrientNormalAwayFromOppositeFace(inputs.targetBody,
-                                         inputs.baseFace,
-                                         baseNormalPoint,
-                                         localZ);
-        Vector3d localY = Cross(localZ, localX);
-        Vector3d cornerDirection = Subtract(cornerSecond, cornerFirst);
-        if (!Normalize(localY) || !Normalize(cornerDirection))
-        {
-            errorMessage = "Reference chamfer: the local Y direction or corner-edge direction is invalid for the 90-degree face selection.";
-            return false;
-        }
-
-        const Point3d cornerMidpoint(
-            (cornerFirst.X + cornerSecond.X) * 0.5,
-            (cornerFirst.Y + cornerSecond.Y) * 0.5,
-            (cornerFirst.Z + cornerSecond.Z) * 0.5);
-        std::array<Point3d, 2> faceSamples;
-        std::array<double, 2> faceYScores = {0.0, 0.0};
-        for (std::size_t faceIndex = 0; faceIndex < 2; ++faceIndex)
-        {
-            if (!FindFaceInteriorPoint(faces[faceIndex], faceSamples[faceIndex]))
-            {
-                errorMessage = "Reference chamfer: an adjacent 90-degree face has no valid interior sample outside its holes.";
-                return false;
-            }
-            Vector3d fromCorner = Subtract(faceSamples[faceIndex], cornerMidpoint);
-            const Vector3d alongCorner =
-                ScaleVector(cornerDirection,
-                            Dot(fromCorner, cornerDirection));
-            fromCorner = Vector3d(fromCorner.X - alongCorner.X,
-                                  fromCorner.Y - alongCorner.Y,
-                                  fromCorner.Z - alongCorner.Z);
-            faceYScores[faceIndex] = Dot(fromCorner, localY);
-        }
-
-        const bool selectPositiveY =
-            inputs.featureMode == FeatureMode::NinetyLeft;
-        const std::size_t selectedFaceIndex =
-            selectPositiveY
-                ? (faceYScores[0] >= faceYScores[1] ? 0U : 1U)
-                : (faceYScores[0] <= faceYScores[1] ? 0U : 1U);
-        preferredFace = faces[selectedFaceIndex];
-
-        std::ostringstream faceTrace;
-        faceTrace << "reference 90-degree Y-side face selection: mode="
-                  << (selectPositiveY ? "left/Y+" : "right/Y-")
-                  << ", localX=" << FormatVector(localX)
-                  << ", localY=" << FormatVector(localY)
-                  << ", localZ=" << FormatVector(localZ)
-                  << ", cornerMidpoint=" << FormatPoint(cornerMidpoint)
-                  << ", face0=" << faces[0]->Tag()
-                  << ", sample0=" << FormatPoint(faceSamples[0])
-                  << ", yScore0=" << faceYScores[0]
-                  << ", face1=" << faces[1]->Tag()
-                  << ", sample1=" << FormatPoint(faceSamples[1])
-                  << ", yScore1=" << faceYScores[1]
-                  << ", selectedFace=" << preferredFace->Tag();
-        AppendDebugLog(faceTrace.str());
-    }
-
     pending.point = Distance(cornerFirst, inputs.endPoint) >
                             Distance(cornerSecond, inputs.endPoint) + 0.05
                         ? cornerFirst
@@ -8768,11 +6654,6 @@ bool TwoPointSiBianUI::CreateReferenceCornerEdgeCut(const InferredInputs& inputs
                                          pending.secondDirection,
                                          topError))
         {
-            if (topError.find("Internal corner-profile rollback failed;") == 0)
-            {
-                errorMessage = topError;
-                return false;
-            }
             // The reference project treats the far-end top cut as optional.
             AppendDebugLog("reference optional far-end top-corner cut skipped: " + topError);
         }
@@ -9050,7 +6931,8 @@ bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
     Face* commonFace,
     const std::vector<tag_t>& offsetFeatureTags,
     tag_t& offsetFeatureTag,
-    std::string& errorMessage) const
+    std::string& errorMessage,
+    bool resolveCurrentCoplanarFragments) const
 {
     offsetFeatureTag = NULL_TAG;
     errorMessage.clear();
@@ -9102,23 +6984,113 @@ bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
     double bestClearanceError = std::numeric_limits<double>::max();
     double selectedFacePerimeter = 0.0;
     double bestPerimeterError = std::numeric_limits<double>::max();
-    for (Edge* planeEdge : commonFace->GetEdges())
+    std::vector<Face*> commonPlaneFaces(1, commonFace);
+    if (resolveCurrentCoplanarFragments)
     {
-        if (planeEdge == nullptr)
+        Point3d originalPlanePoint;
+        Vector3d originalPlaneNormal;
+        if (FacePlaneData(commonFace,
+                          originalPlanePoint,
+                          originalPlaneNormal) &&
+            Normalize(originalPlaneNormal))
         {
-            continue;
-        }
-        const double edgeLength = planeEdge->GetLength();
-        const double error = std::fabs(edgeLength - clearance);
-        if (error > clearanceTolerance || error >= bestClearanceError)
-        {
-            continue;
-        }
-        for (Face* adjacentFace : planeEdge->GetFaces())
-        {
-            if (adjacentFace != nullptr && adjacentFace != commonFace &&
-                offsetFaceTags.find(adjacentFace->Tag()) != offsetFaceTags.end())
+            commonPlaneFaces.clear();
+            for (Face* candidateFace : inputs.targetBody->GetFaces())
             {
+                if (candidateFace == nullptr ||
+                    candidateFace->SolidFaceType() != Face::FaceTypePlanar)
+                {
+                    continue;
+                }
+                Point3d candidatePlanePoint;
+                Vector3d candidatePlaneNormal;
+                if (!FacePlaneData(candidateFace,
+                                   candidatePlanePoint,
+                                   candidatePlaneNormal) ||
+                    !Normalize(candidatePlaneNormal))
+                {
+                    continue;
+                }
+                const double normalAlignment =
+                    std::fabs(Dot(originalPlaneNormal,
+                                  candidatePlaneNormal));
+                const double planeDistance =
+                    std::fabs(Dot(Subtract(candidatePlanePoint,
+                                           originalPlanePoint),
+                                  originalPlaneNormal));
+                if (normalAlignment >= 1.0 - 1.0e-6 &&
+                    planeDistance <= kPlaneTolerance)
+                {
+                    commonPlaneFaces.push_back(candidateFace);
+                    AppendDebugLog(
+                        "OffsetConcaveClearanceFace current coplanar fragment for chamfer-270: originalFace=" +
+                        std::to_string(commonFace->Tag()) +
+                        ", currentFace=" +
+                        std::to_string(candidateFace->Tag()) +
+                        ", planeDistance=" +
+                        FormatExpressionNumber(planeDistance));
+                }
+            }
+        }
+        if (commonPlaneFaces.empty())
+        {
+            commonPlaneFaces.push_back(commonFace);
+        }
+    }
+
+    std::set<tag_t> commonPlaneFaceTags;
+    for (Face* planeFace : commonPlaneFaces)
+    {
+        if (planeFace != nullptr)
+        {
+            commonPlaneFaceTags.insert(planeFace->Tag());
+        }
+    }
+    std::set<tag_t> visitedPlaneEdges;
+    tag_t nearestPlaneEdgeTag = NULL_TAG;
+    double nearestPlaneEdgeLength = 0.0;
+    double nearestPlaneEdgeError = std::numeric_limits<double>::max();
+    for (Face* currentPlaneFace : commonPlaneFaces)
+    {
+        if (currentPlaneFace == nullptr)
+        {
+            continue;
+        }
+        for (Edge* planeEdge : currentPlaneFace->GetEdges())
+        {
+            if (planeEdge == nullptr ||
+                !visitedPlaneEdges.insert(planeEdge->Tag()).second)
+            {
+                continue;
+            }
+            const double edgeLength = planeEdge->GetLength();
+            const double error = std::fabs(edgeLength - clearance);
+            if (error < nearestPlaneEdgeError)
+            {
+                nearestPlaneEdgeError = error;
+                nearestPlaneEdgeTag = planeEdge->Tag();
+                nearestPlaneEdgeLength = edgeLength;
+            }
+            if (error > clearanceTolerance || error >= bestClearanceError)
+            {
+                continue;
+            }
+            for (Face* adjacentFace : planeEdge->GetFaces())
+            {
+                const bool adjacentIsCommonPlane =
+                    adjacentFace != nullptr &&
+                    commonPlaneFaceTags.find(adjacentFace->Tag()) !=
+                        commonPlaneFaceTags.end();
+                const bool isReportedOffsetFace =
+                    adjacentFace != nullptr &&
+                    offsetFaceTags.find(adjacentFace->Tag()) !=
+                        offsetFaceTags.end();
+                if (adjacentFace == nullptr || adjacentIsCommonPlane ||
+                    (!resolveCurrentCoplanarFragments &&
+                     !isReportedOffsetFace))
+                {
+                    continue;
+                }
                 double facePerimeter = 0.0;
                 for (Edge* faceEdge : adjacentFace->GetEdges())
                 {
@@ -9129,6 +7101,19 @@ bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
                 }
                 const double perimeterError =
                     std::fabs(facePerimeter - requiredFacePerimeter);
+                AppendDebugLog(
+                    "OffsetConcaveClearanceFace chamfer-270 candidate: face=" +
+                    std::to_string(adjacentFace->Tag()) +
+                    ", sharedEdge=" +
+                    std::to_string(planeEdge->Tag()) +
+                    ", sharedEdgeLength=" +
+                    FormatExpressionNumber(edgeLength) +
+                    ", perimeter=" +
+                    FormatExpressionNumber(facePerimeter) +
+                    ", requiredPerimeter=" +
+                    FormatExpressionNumber(requiredFacePerimeter) +
+                    ", reportedByOffsetFeature=" +
+                    (isReportedOffsetFace ? "true" : "false"));
                 if (perimeterError > perimeterTolerance)
                 {
                     AppendDebugLog("OffsetConcaveClearanceFace rejected face by perimeter: face=" +
@@ -9161,7 +7146,15 @@ bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
                        ", clearance=" + FormatExpressionNumber(clearance) +
                        ", requiredPerimeter=" +
                        FormatExpressionNumber(requiredFacePerimeter) +
-                       ", offsetFaceCount=" + std::to_string(offsetFaceTags.size()));
+                       ", offsetFaceCount=" + std::to_string(offsetFaceTags.size()) +
+                       ", currentCommonPlaneFaceCount=" +
+                       std::to_string(commonPlaneFaces.size()) +
+                       ", nearestPlaneEdge=" +
+                       std::to_string(nearestPlaneEdgeTag) +
+                       ", nearestPlaneEdgeLength=" +
+                       FormatExpressionNumber(nearestPlaneEdgeLength) +
+                       ", nearestPlaneEdgeError=" +
+                       FormatExpressionNumber(nearestPlaneEdgeError));
         return false;
     }
 
@@ -9631,7 +7624,8 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
                                                    tag_t& secondOffsetTag,
                                                    std::string& errorMessage,
                                                    bool swapDirectionalOffsetGroups,
-                                                   bool forceDirectionalOffsetGroups) const
+                                                   bool forceDirectionalOffsetGroups,
+                                                   bool largestOnlyForSecondDirectionalGroup) const
 {
     firstOffsetTag = NULL_TAG;
     secondOffsetTag = NULL_TAG;
@@ -9774,6 +7768,32 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
             const std::vector<Face*>& largeOffsetFaces = smallOffsetOnPositiveY
                                                               ? negativeYFaces
                                                               : positiveYFaces;
+            std::vector<Face*> selectedLargeOffsetFaces = largeOffsetFaces;
+            if (largestOnlyForSecondDirectionalGroup)
+            {
+                Face* largestSecondGroupFace = nullptr;
+                double largestSecondGroupArea = -1.0;
+                for (Face* face : largeOffsetFaces)
+                {
+                    const double area = MeasureFaceArea(face);
+                    if (face != nullptr && area > largestSecondGroupArea)
+                    {
+                        largestSecondGroupFace = face;
+                        largestSecondGroupArea = area;
+                    }
+                }
+                if (largestSecondGroupFace == nullptr)
+                {
+                    errorMessage = "No largest face was available in the second directional rip-offset group.";
+                    return false;
+                }
+                selectedLargeOffsetFaces.assign(1, largestSecondGroupFace);
+                AppendDebugLog(std::string(modeName) +
+                               " selected the largest face from the second directional group: face=" +
+                               std::to_string(largestSecondGroupFace->Tag()) +
+                               ", area=" +
+                               FormatExpressionNumber(largestSecondGroupArea));
+            }
             const char* smallSideName = smallOffsetOnPositiveY ? "Y-positive" : "Y-negative";
             const char* largeSideName = smallOffsetOnPositiveY ? "Y-negative" : "Y-positive";
 
@@ -9802,7 +7822,7 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
             secondBuilder->Distance()->SetFormula(largeOffsetFormula.c_str());
             secondBuilder->SetDirection(false);
             FaceDumbRule* largeOffsetRule =
-                workPart->ScRuleFactory()->CreateRuleFaceDumb(largeOffsetFaces);
+                workPart->ScRuleFactory()->CreateRuleFaceDumb(selectedLargeOffsetFaces);
             std::vector<SelectionIntentRule*> largeOffsetRules(1, largeOffsetRule);
             secondBuilder->FaceCollector()->ReplaceRules(largeOffsetRules, false);
             Features::Feature* secondOffsetFeature = secondBuilder->CommitFeature();
@@ -9930,6 +7950,9 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                                                  double& deferredRightAngleRipAngle,
                                                  std::vector<tag_t>& createdRightAngleOffsetTags,
                                                  bool& createdRightAngle90SecondFeaturePath,
+                                                 bool& primaryUdfCreatedBeforeRip,
+                                                 tag_t& primarySubtractTag,
+                                                 std::vector<tag_t>& primaryReferenceTags,
                                                  std::string& errorMessage) const
 {
     ripCreated = false;
@@ -9942,8 +7965,12 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
     deferredRightAngleRipAngle = 0.0;
     createdRightAngleOffsetTags.clear();
     createdRightAngle90SecondFeaturePath = false;
+    primaryUdfCreatedBeforeRip = false;
+    primarySubtractTag = NULL_TAG;
+    primaryReferenceTags.clear();
     errorMessage.clear();
-    if (inputs.targetBody == nullptr ||
+    if ((!inputs.inferredFromSingleClick && !allowContinuationInputs) ||
+        inputs.targetBody == nullptr ||
         inputs.baseFace == nullptr ||
         inputs.thickness <= kPointTolerance)
     {
@@ -10566,6 +8593,34 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                        ", continue=" + (continuationCreated ? "true" : "false"));
     }
 
+    // Only the chamfer-mode reflex corner whose parallel rip edge is
+    // P2-Q + 2*thickness uses the requested early-primary sequence:
+    // primary UDF -> P2-Q rip -> subtract primary tool -> two offsets -> -60.
+    // The 90-degree chamfer branch and every other path retain their existing
+    // operation order.
+    const bool useEarlyPrimaryChamfer270P2Q2T =
+        useConcaveStripBranch &&
+        concaveQ3HasThicknessEdge &&
+        inputs.featureMode == FeatureMode::Chamfer &&
+        qCornerIs270;
+    tag_t earlyPrimaryUdfTag = NULL_TAG;
+    std::vector<tag_t> earlyPrimaryToolBodyTags;
+    if (useEarlyPrimaryChamfer270P2Q2T)
+    {
+        if (!CreateUserDefinedFeature(inputs,
+                                      errorMessage,
+                                      &earlyPrimaryUdfTag,
+                                      &primaryReferenceTags,
+                                      &earlyPrimaryToolBodyTags))
+        {
+            return false;
+        }
+        AppendDebugLog("TryCreateSecondPointRip created the primary UDF before the chamfer-270 P2-Q rip: udf=" +
+                       std::to_string(earlyPrimaryUdfTag) +
+                       ", toolBodies=" +
+                       std::to_string(earlyPrimaryToolBodyTags.size()));
+    }
+
     Features::SheetMetal::EdgeRipBuilder* builder = nullptr;
     Section* section = nullptr;
     try
@@ -10607,6 +8662,22 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
             errorMessage = "NX did not return a feature after creating the sheet-metal rip.";
             return false;
         }
+        if (useEarlyPrimaryChamfer270P2Q2T)
+        {
+            if (!SubtractToolBodies(inputs.targetBody,
+                                    earlyPrimaryToolBodyTags,
+                                    primarySubtractTag,
+                                    errorMessage))
+            {
+                return false;
+            }
+            primaryUdfCreatedBeforeRip = true;
+            AppendDebugLog("TryCreateSecondPointRip subtracted the early primary UDF immediately after the chamfer-270 P2-Q rip: udf=" +
+                           std::to_string(earlyPrimaryUdfTag) +
+                           ", rip=" + std::to_string(createdRipTag) +
+                           ", subtract=" +
+                           std::to_string(primarySubtractTag));
+        }
         const bool forceImmediateConcaveChamferOffsets =
             useConcaveStripBranch &&
             inputs.featureMode == FeatureMode::Chamfer &&
@@ -10617,14 +8688,38 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         {
             tag_t firstOffsetTag = NULL_TAG;
             tag_t secondOffsetTag = NULL_TAG;
+            // The dialog reversal is intentionally limited to the chamfer
+            // P2Q+2T branch when B1/B2 form a reflex 270-degree corner.
+            // A 90-degree B1/B2 corner and every straight-left/right branch
+            // retain the established directional assignment.
+            const bool reverseOnlyChamfer270 =
+                useConcaveStripBranch &&
+                inputs.featureMode == FeatureMode::Chamfer &&
+                qCornerIs270 &&
+                inputs.reverseChamfer270Cut;
+            const bool swapDirectionalOffsetGroups =
+                (useConcaveStripBranch && qCornerIs270) != reverseOnlyChamfer270;
+            AppendDebugLog(std::string("chamfer-270 cut-direction decision: requested=") +
+                           (inputs.reverseChamfer270Cut ? "true" : "false") +
+                           ", applicable=" +
+                           ((useConcaveStripBranch &&
+                             inputs.featureMode == FeatureMode::Chamfer &&
+                             qCornerIs270)
+                                ? "true"
+                                : "false") +
+                           ", effectiveSwap=" +
+                           (swapDirectionalOffsetGroups ? "true" : "false") +
+                           ", cornerAngle=" +
+                           FormatExpressionNumber(qCornerInteriorAngle));
             if (!OffsetRightAngleRipFeature(inputs,
                                             createdRip,
                                             qCornerInteriorAngle,
                                             firstOffsetTag,
                                             secondOffsetTag,
                                             errorMessage,
-                                            useConcaveStripBranch && qCornerIs270,
-                                            forceImmediateConcaveChamferOffsets))
+                                            swapDirectionalOffsetGroups,
+                                            forceImmediateConcaveChamferOffsets,
+                                            useEarlyPrimaryChamfer270P2Q2T))
             {
                 return false;
             }
@@ -10700,7 +8795,8 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                                                     concaveSecondInputs.baseFace,
                                                     createdRightAngleOffsetTags,
                                                     clearanceOffsetFeatureTag,
-                                                    errorMessage))
+                                                    errorMessage,
+                                                    useEarlyPrimaryChamfer270P2Q2T))
                     {
                         return false;
                     }
@@ -11457,20 +9553,7 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
             body->Tag() != (inputs.targetBody != nullptr ? inputs.targetBody->Tag() : NULL_TAG) &&
             bodyTagsBeforeUdf.find(body->Tag()) == bodyTagsBeforeUdf.end())
         {
-            const bool isSolid = body->IsSolidBody();
-            AppendDebugLog("UDF created body classification: tag=" +
-                           std::to_string(body->Tag()) +
-                           ", solid=" + (isSolid ? "true" : "false") +
-                           ", sheet=" + (body->IsSheetBody() ? "true" : "false"));
-            if (isSolid)
-            {
-                createdToolBodies.push_back(body);
-            }
-            else
-            {
-                AppendDebugLog("UDF created sheet/reference body excluded from Boolean subtraction: tag=" +
-                               std::to_string(body->Tag()));
-            }
+            createdToolBodies.push_back(body);
         }
     }
 
@@ -11482,8 +9565,7 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
             for (Body* body : udfFeature->GetBodies())
             {
                 if (body != nullptr &&
-                    body->Tag() != (inputs.targetBody != nullptr ? inputs.targetBody->Tag() : NULL_TAG) &&
-                    body->IsSolidBody())
+                    body->Tag() != (inputs.targetBody != nullptr ? inputs.targetBody->Tag() : NULL_TAG))
                 {
                     createdToolBodies.push_back(body);
                 }
@@ -11542,11 +9624,8 @@ bool TwoPointSiBianUI::SubtractToolBodies(Body* targetBody,
         return false;
     }
 
-    Features::BooleanBuilder* builder = nullptr;
     try
     {
-        std::vector<Body*> toolBodies;
-        toolBodies.reserve(toolBodyTags.size());
         for (tag_t toolTag : toolBodyTags)
         {
             Body* toolBody = dynamic_cast<Body*>(NXObjectManager::Get(toolTag));
@@ -11555,67 +9634,8 @@ bool TwoPointSiBianUI::SubtractToolBodies(Body* targetBody,
                 errorMessage = "A deferred UDF tool body is no longer available for subtraction.";
                 return false;
             }
-            toolBodies.push_back(toolBody);
-        }
 
-        if (toolBodies.size() > 1)
-        {
-            // Subtract every UDF tool in one Boolean operation.  Sequential
-            // subtraction lets the first overlapping tool create a coincident
-            // boundary for the second tool, which NX then rejects as a
-            // zero-thickness result when the preview changes template mode.
-            builder = workPart->Features()->CreateBooleanBuilderUsingCollector(nullptr);
-            builder->SetTolerance(0.0001);
-            builder->SetCopyTargets(false);
-            builder->SetCopyTools(false);
-            builder->SetOperation(Features::Feature::BooleanTypeSubtract);
-
-            ScCollector* targetCollector = workPart->ScCollectors()->CreateCollector();
-            SelectionIntentRuleOptions* targetOptions =
-                workPart->ScRuleFactory()->CreateRuleOptions();
-            targetOptions->SetSelectedFromInactive(false);
-            std::vector<Body*> targetBodies(1, targetBody);
-            BodyDumbRule* targetRule = workPart->ScRuleFactory()->CreateRuleBodyDumb(
-                targetBodies, true, targetOptions);
-            delete targetOptions;
-            std::vector<SelectionIntentRule*> targetRules(1, targetRule);
-            targetCollector->ReplaceRules(targetRules, false);
-            builder->SetTargetBodyCollector(targetCollector);
-
-            ScCollector* toolCollector = workPart->ScCollectors()->CreateCollector();
-            SelectionIntentRuleOptions* toolOptions =
-                workPart->ScRuleFactory()->CreateRuleOptions();
-            toolOptions->SetSelectedFromInactive(false);
-            BodyDumbRule* toolRule = workPart->ScRuleFactory()->CreateRuleBodyDumb(
-                toolBodies, true, toolOptions);
-            delete toolOptions;
-            std::vector<SelectionIntentRule*> toolRules(1, toolRule);
-            toolCollector->ReplaceRules(toolRules, false);
-            builder->SetToolBodyCollector(toolCollector);
-
-            NXObject* result = builder->Commit();
-            resultFeatureTag = result != nullptr ? result->Tag() : NULL_TAG;
-            builder->Destroy();
-            builder = nullptr;
-
-            std::ostringstream trace;
-            trace << "final grouped subtraction: target=" << targetBody->Tag()
-                  << ", toolCount=" << toolBodyTags.size() << ", tools=";
-            for (std::size_t index = 0; index < toolBodyTags.size(); ++index)
-            {
-                if (index > 0)
-                {
-                    trace << ',';
-                }
-                trace << toolBodyTags[index];
-            }
-            trace << ", resultFeature=" << resultFeatureTag;
-            AppendDebugLog(trace.str());
-        }
-        else
-        {
-            Body* toolBody = toolBodies.front();
-            builder = workPart->Features()->CreateBooleanBuilder(nullptr);
+            Features::BooleanBuilder* builder = workPart->Features()->CreateBooleanBuilder(nullptr);
             builder->SetOperation(Features::Feature::BooleanTypeSubtract);
             builder->SetTarget(targetBody);
 #pragma warning(push)
@@ -11627,99 +9647,18 @@ bool TwoPointSiBianUI::SubtractToolBodies(Body* targetBody,
             NXObject* result = builder->Commit();
             resultFeatureTag = result != nullptr ? result->Tag() : NULL_TAG;
             builder->Destroy();
-            builder = nullptr;
-            AppendDebugLog("final deferred subtraction: target=" +
-                           std::to_string(targetBody->Tag()) +
-                           ", tool=" + std::to_string(toolBodyTags.front()) +
+            if (resultFeatureTag == NULL_TAG)
+            {
+                errorMessage = "NX returned no feature from the final Boolean Subtract.";
+                return false;
+            }
+            AppendDebugLog("final deferred subtraction: target=" + std::to_string(targetBody->Tag()) +
+                           ", tool=" + std::to_string(toolTag) +
                            ", resultFeature=" + std::to_string(resultFeatureTag));
-        }
-
-        if (resultFeatureTag == NULL_TAG)
-        {
-            errorMessage = "NX returned no feature from the final Boolean Subtract.";
-            return false;
         }
     }
     catch (const NXException& ex)
     {
-        if (builder != nullptr)
-        {
-            try
-            {
-                builder->Destroy();
-            }
-            catch (...)
-            {
-            }
-            builder = nullptr;
-        }
-
-        if (toolBodyTags.size() > 1)
-        {
-            AppendDebugLog("final grouped subtraction failed; falling back to individual tools and skipping rejected tools. NX=" +
-                           NxExceptionText(ex));
-            for (tag_t toolTag : toolBodyTags)
-            {
-                try
-                {
-                    Body* toolBody = dynamic_cast<Body*>(NXObjectManager::Get(toolTag));
-                    if (toolBody == nullptr || toolBody == targetBody || !toolBody->IsSolidBody())
-                    {
-                        AppendDebugLog("final subtraction fallback skipped unavailable/non-solid tool=" +
-                                       std::to_string(toolTag));
-                        continue;
-                    }
-
-                    builder = workPart->Features()->CreateBooleanBuilder(nullptr);
-                    builder->SetOperation(Features::Feature::BooleanTypeSubtract);
-                    builder->SetTarget(targetBody);
-#pragma warning(push)
-#pragma warning(disable : 4996)
-                    builder->SetTool(toolBody);
-#pragma warning(pop)
-                    builder->SetRetainTarget(false);
-                    builder->SetRetainTool(false);
-                    NXObject* result = builder->Commit();
-                    const tag_t fallbackResultTag =
-                        result != nullptr ? result->Tag() : NULL_TAG;
-                    builder->Destroy();
-                    builder = nullptr;
-                    if (fallbackResultTag != NULL_TAG)
-                    {
-                        resultFeatureTag = fallbackResultTag;
-                        AppendDebugLog("final subtraction fallback succeeded: target=" +
-                                       std::to_string(targetBody->Tag()) +
-                                       ", tool=" + std::to_string(toolTag) +
-                                       ", resultFeature=" +
-                                       std::to_string(fallbackResultTag));
-                    }
-                }
-                catch (const NXException& toolEx)
-                {
-                    if (builder != nullptr)
-                    {
-                        try
-                        {
-                            builder->Destroy();
-                        }
-                        catch (...)
-                        {
-                        }
-                        builder = nullptr;
-                    }
-                    AppendDebugLog("final subtraction fallback skipped rejected tool=" +
-                                   std::to_string(toolTag) +
-                                   ", NX=" + NxExceptionText(toolEx));
-                }
-            }
-            if (resultFeatureTag != NULL_TAG)
-            {
-                errorMessage.clear();
-                AppendDebugLog("final subtraction fallback completed with at least one successful tool; rejected tools were ignored.");
-                return true;
-            }
-        }
-
         errorMessage = "Final subtraction of the UDF tool bodies failed.\n" + NxExceptionText(ex);
         AppendDebugLog(errorMessage);
         return false;
@@ -11783,46 +9722,6 @@ void TwoPointSiBianUI::ConfigureInputMode(bool smartMode, bool clearSelections)
         }
     }
 
-    // Creation owns the topology-selection controls.  Editing owns only the
-    // persisted P1/P2 coordinates and rebuild parameters, so no face/edge/point
-    // selection is requested and no transient topology can replace the saved
-    // endpoints.  The user edits values, the mode enumeration and switches,
-    // then Apply/OK performs one controlled rebuild.
-    if (editedFeatureTag_ != NULL_TAG)
-    {
-        if (smartModeBlock_ != nullptr)
-        {
-            smartModeBlock_->SetShow(false);
-            smartModeBlock_->SetEnable(false);
-        }
-        if (featureModeBlock_ != nullptr)
-        {
-            featureModeBlock_->SetShow(true);
-            featureModeBlock_->SetEnable(true);
-        }
-        if (startPointBlock_ != nullptr)
-        {
-            startPointBlock_->SetShow(false);
-            startPointBlock_->SetEnable(false);
-            startPointBlock_->SetAutomaticProgression(false);
-        }
-        if (endPointBlock_ != nullptr)
-        {
-            endPointBlock_->SetShow(false);
-            endPointBlock_->SetEnable(false);
-            endPointBlock_->SetAutomaticProgression(false);
-        }
-        activeSmartSelectionBlock_ = nullptr;
-        AppendDebugLog("ConfigureInputMode edit: selection controls and smart-inference switch hidden; persisted P1/P2 plus values/mode switches drive Apply/OK.");
-        return;
-    }
-
-    if (smartModeBlock_ != nullptr)
-    {
-        smartModeBlock_->SetShow(true);
-        smartModeBlock_->SetEnable(true);
-    }
-
     if (featureModeBlock_ != nullptr)
     {
         featureModeBlock_->SetShow(!smartMode);
@@ -11833,10 +9732,6 @@ void TwoPointSiBianUI::ConfigureInputMode(bool smartMode, bool clearSelections)
         startPointBlock_->SetShow(true);
         startPointBlock_->SetEnable(true);
         startPointBlock_->SetAutomaticProgression(!smartMode);
-        // PointOverlay creates an on-the-fly NX Point at the cursor.  That is
-        // useful for the smart face click, but in manual mode it replaces the
-        // selected edge with a Point object and loses the edge endpoints.
-        startPointBlock_->SetPointOverlay(smartMode);
         startPointBlock_->SetLabelString(smartMode ? "选择面上点" : "第一条边端点");
         std::vector<Selection::MaskTriple> masks;
         if (smartMode)
@@ -11847,6 +9742,7 @@ void TwoPointSiBianUI::ConfigureInputMode(bool smartMode, bool clearSelections)
         }
         else
         {
+            masks.emplace_back(UF_point_type, UF_point_subtype, 0);
             masks.emplace_back(UF_solid_type,
                                UF_solid_body_subtype,
                                UF_UI_SEL_FEATURE_ANY_EDGE);
@@ -11860,11 +9756,11 @@ void TwoPointSiBianUI::ConfigureInputMode(bool smartMode, bool clearSelections)
         endPointBlock_->SetShow(!smartMode);
         endPointBlock_->SetEnable(!smartMode);
         endPointBlock_->SetAutomaticProgression(false);
-        endPointBlock_->SetPointOverlay(false);
         endPointBlock_->SetLabelString("第二条边端点");
         if (!smartMode)
         {
             std::vector<Selection::MaskTriple> masks;
+            masks.emplace_back(UF_point_type, UF_point_subtype, 0);
             masks.emplace_back(UF_solid_type,
                                UF_solid_body_subtype,
                                UF_UI_SEL_FEATURE_ANY_EDGE);

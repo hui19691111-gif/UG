@@ -19,14 +19,4 @@ constexpr const char* kAttrEndY = "endY";
 constexpr const char* kAttrEndZ = "endZ";
 constexpr const char* kAttrThickness = "sheetThickness";
 constexpr const char* kAttrSpanLength = "spanLength";
-constexpr const char* kAttrClearance = "clearance";
-constexpr const char* kAttrBendRadius = "bendRadius";
-constexpr const char* kAttrFeatureMode = "featureMode";
-constexpr const char* kAttrSmartMode = "smartMode";
-constexpr const char* kAttrChamferEdgeMode = "chamferEdgeMode";
-constexpr const char* kAttrChildFeatures = "childFeatures";
-constexpr const char* kAttrInternalGroup = "internalGroup";
-constexpr const char* kAttrOwnerId = "ownerId";
-constexpr const char* kAttrSchemaVersion = "schemaVersion";
-constexpr const char* kOwnedFeatureAttribute = "ZH_2P_SIBIAN_OWNER";
 }
