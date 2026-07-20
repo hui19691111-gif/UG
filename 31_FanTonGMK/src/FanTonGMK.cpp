@@ -38,6 +38,12 @@
 
 #include <NXOpen/Features_OffsetFaceBuilder.hxx>
 
+#include <NXOpen/Features_ToolingBox.hxx>
+
+#include <NXOpen/Features_ToolingBoxBuilder.hxx>
+
+#include <NXOpen/Features_ToolingFeatureCollection.hxx>
+
 #include <NXOpen/NXException.hxx>
 
 #include <NXOpen/NXMessageBox.hxx>
@@ -58,6 +64,8 @@
 
 #include <NXOpen/SelectFace.hxx>
 
+#include <NXOpen/SelectNXObjectList.hxx>
+
 #include <NXOpen/SelectionIntentRule.hxx>
 
 #include <NXOpen/Selection.hxx>
@@ -71,12 +79,6 @@
 #include <NXOpen/Expression.hxx>
 
 #include <NXOpen/SelectBodyList.hxx>
-
-#include <NXOpen/Tooling_StockSizeBuilder.hxx>
-
-#include <NXOpen/Tooling_StockSizeCollection.hxx>
-
-#include <NXOpen/Tooling_ToolingManager.hxx>
 
 #include <NXOpen/UI.hxx>
 
@@ -648,6 +650,8 @@ struct FacePlacement
 
     double center[3];
 
+    double pickPoint[3];
+
     double normal[3];
 
     double widthAxis[3];
@@ -1016,6 +1020,12 @@ bool AskPlanarFacePlacement(NXOpen::Face* face, const double pickPoint[3], FaceP
     }
 
     placement.faceTag = face->Tag();
+
+    placement.pickPoint[0] = pickPoint[0];
+
+    placement.pickPoint[1] = pickPoint[1];
+
+    placement.pickPoint[2] = pickPoint[2];
 
     ThrowUfError(UF_MODL_ask_face_body(placement.faceTag, &placement.bodyTag), "UF_MODL_ask_face_body");
 
@@ -1665,7 +1675,7 @@ bool AskPickDirectedLongestFaceAxis(tag_t faceTag, const double pickPoint[3], do
 
     {
 
-        xAxis[axis] = nearPoint[axis] - farPoint[axis];
+        xAxis[axis] = farPoint[axis] - nearPoint[axis];
 
     }
 
@@ -1677,7 +1687,7 @@ tag_t CreateSelectedBodyStockBox(
 
     const SelectedFaceInfo& selection,
 
-    double positiveXOffset)
+    double positiveXExtension)
 
 {
 
@@ -1799,181 +1809,147 @@ tag_t CreateSelectedBodyStockBox(
 
     matrix.Zz = zAxis[2];
 
-    (void)matrix;
+    const double xExtension = std::max(0.0, positiveXExtension) + 5.0;
 
-    uf_list_p_t edgeList = NULL;
+    NXOpen::Point3d position = {
 
-    if (UF_MODL_ask_body_edges(body->Tag(), &edgeList) != 0 || edgeList == NULL)
+        placement.center[0],
 
-    {
+        placement.center[1],
 
-        return NULL_TAG;
+        placement.center[2]
 
-    }
+    };
 
-    const std::vector<tag_t> edgeTags = UfListToTags(edgeList);
+    NXOpen::Features::ToolingBoxBuilder* toolingBoxBuilder = NULL;
 
-    UF_MODL_delete_list(&edgeList);
-
-    bool hasPoint = false;
-
-    double minX = DBL_MAX;
-
-    double maxX = -DBL_MAX;
-
-    double minY = DBL_MAX;
-
-    double maxY = -DBL_MAX;
-
-    double minZ = DBL_MAX;
-
-    double maxZ = -DBL_MAX;
-
-    for (std::size_t index = 0; index < edgeTags.size(); ++index)
-
-    {
-
-        double point1[3] = {0.0, 0.0, 0.0};
-
-        double point2[3] = {0.0, 0.0, 0.0};
-
-        int vertexCount = 0;
-
-        if (UF_MODL_ask_edge_verts(edgeTags[index], point1, point2, &vertexCount) != 0 ||
-
-            vertexCount <= 0)
-
-        {
-
-            continue;
-
-        }
-
-        const double* points[2] = {point1, point2};
-
-        const int pointCount = vertexCount >= 2 ? 2 : 1;
-
-        for (int pointIndex = 0; pointIndex < pointCount; ++pointIndex)
-
-        {
-
-            const double x = Dot3(points[pointIndex], xAxis);
-
-            const double y = Dot3(points[pointIndex], yAxis);
-
-            const double z = Dot3(points[pointIndex], zAxis);
-
-            minX = std::min(minX, x);
-
-            maxX = std::max(maxX, x);
-
-            minY = std::min(minY, y);
-
-            maxY = std::max(maxY, y);
-
-            minZ = std::min(minZ, z);
-
-            maxZ = std::max(maxZ, z);
-
-            hasPoint = true;
-
-        }
-
-    }
-
-    if (!hasPoint)
-
-    {
-
-        return NULL_TAG;
-
-    }
-
-    maxX += std::max(0.0, positiveXOffset);
-
-    const double length = maxX - minX;
-
-    const double width = maxY - minY;
-
-    const double height = maxZ - minZ;
-
-    if (length <= 0.05 || width <= 0.05 || height <= 0.05)
-
-    {
-
-        return NULL_TAG;
-
-    }
-
-    NXOpen::Point3d origin;
-
-    origin.X = xAxis[0] * minX + yAxis[0] * minY + zAxis[0] * minZ;
-
-    origin.Y = xAxis[1] * minX + yAxis[1] * minY + zAxis[1] * minZ;
-
-    origin.Z = xAxis[2] * minX + yAxis[2] * minY + zAxis[2] * minZ;
-
-    NXOpen::Vector3d nxXAxis = {xAxis[0], xAxis[1], xAxis[2]};
-
-    NXOpen::Vector3d nxYAxis = {yAxis[0], yAxis[1], yAxis[2]};
-
-    NXOpen::Features::BlockFeatureBuilder* blockBuilder =
-
-        workPart->Features()->CreateBlockFeatureBuilder(NULL);
-
-    if (blockBuilder == NULL)
-
-    {
-
-        return NULL_TAG;
-
-    }
-
-    NXOpen::NXObject* blockObject = NULL;
-
-    tag_t blockBodyTag = NULL_TAG;
+    tag_t toolingBodyTag = NULL_TAG;
 
     try
 
     {
 
-        blockBuilder->SetType(NXOpen::Features::BlockFeatureBuilder::TypesOriginAndEdgeLengths);
+        NXOpen::Features::ToolingBox* nullToolingBox = NULL;
 
-        blockBuilder->SetOrigin(origin);
+        toolingBoxBuilder =
 
-        blockBuilder->SetOrientation(nxXAxis, nxYAxis);
+            workPart->Features()->ToolingFeatureCollection()->CreateToolingBoxBuilder(
 
-        blockBuilder->SetLength(FormatDouble(length).c_str());
+                nullToolingBox);
 
-        blockBuilder->SetWidth(FormatDouble(width).c_str());
-
-        blockBuilder->SetHeight(FormatDouble(height).c_str());
-
-        blockBuilder->SetBooleanOperationAndTarget(
-
-            NXOpen::Features::Feature::BooleanTypeCreate,
-
-            NULL);
-
-        blockObject = blockBuilder->Commit();
-
-        NXOpen::Body* blockBody = dynamic_cast<NXOpen::Body*>(blockObject);
-
-        if (blockBody != NULL)
+        if (toolingBoxBuilder == NULL)
 
         {
 
-            blockBodyTag = blockBody->Tag();
+            throw std::runtime_error("Failed to create NX Tooling Box builder.");
 
         }
 
-        else if (blockObject != NULL)
+        toolingBoxBuilder->SetType(
+
+            NXOpen::Features::ToolingBoxBuilder::TypesBoundedBlock);
+
+        toolingBoxBuilder->SetBoxMatrixAndPosition(matrix, position);
+
+        toolingBoxBuilder->SetReferenceCsysType(
+
+            NXOpen::Features::ToolingBoxBuilder::RefCsysTypeAbsoluteinDisplayedPart);
+
+        toolingBoxBuilder->SetAlignedType(
+
+            NXOpen::Features::ToolingBoxBuilder::AlignedBlockTypeCsys);
+
+        toolingBoxBuilder->SetCsysAssociative(false);
+
+        toolingBoxBuilder->SetShowDimension(false);
+
+        toolingBoxBuilder->SetSingleOffset(false);
+
+        toolingBoxBuilder->Clearance()->SetFormula("0");
+
+        toolingBoxBuilder->OffsetPositiveX()->SetFormula(
+
+            FormatDouble(xExtension).c_str());
+
+        toolingBoxBuilder->OffsetNegativeX()->SetFormula(
+
+            FormatDouble(xExtension).c_str());
+
+        toolingBoxBuilder->OffsetPositiveY()->SetFormula("0");
+
+        toolingBoxBuilder->OffsetNegativeY()->SetFormula("0");
+
+        toolingBoxBuilder->OffsetPositiveZ()->SetFormula("0");
+
+        toolingBoxBuilder->OffsetNegativeZ()->SetFormula("0");
+
+        NXOpen::BodyDumbRule* bodyRule =
+
+            workPart->ScRuleFactory()->CreateRuleBodyDumb(
+
+                std::vector<NXOpen::Body*>(1, body),
+
+                true);
+
+        std::vector<NXOpen::SelectionIntentRule*> bodyRules(1, bodyRule);
+
+        toolingBoxBuilder->BoundedObject()->ReplaceRules(bodyRules, false);
+
+        std::vector<NXOpen::NXObject*> selectedOccurrences(1, body);
+
+        std::vector<NXOpen::NXObject*> deselectedOccurrences;
+
+        toolingBoxBuilder->SetSelectedOccurrences(
+
+            selectedOccurrences,
+
+            deselectedOccurrences);
+
+        NXOpen::SelectNXObjectList* facetBodies = toolingBoxBuilder->FacetBodies();
+
+        if (facetBodies != NULL)
 
         {
 
-            UF_MODL_ask_feat_body(blockObject->Tag(), &blockBodyTag);
+            std::vector<NXOpen::NXObject*> facetObjects;
+
+            facetBodies->Add(facetObjects);
 
         }
+
+        toolingBoxBuilder->CalculateBoxSize();
+
+        NXOpen::NXObject* toolingObject = toolingBoxBuilder->Commit();
+
+        NXOpen::Features::Feature* toolingFeature = toolingBoxBuilder->GetFeature();
+
+        if (toolingFeature != NULL)
+
+        {
+
+            const std::vector<NXOpen::Body*> createdBodies = toolingFeature->GetBodies();
+
+            if (!createdBodies.empty() && createdBodies[0] != NULL)
+
+            {
+
+                toolingBodyTag = createdBodies[0]->Tag();
+
+            }
+
+        }
+
+        if (toolingBodyTag == NULL_TAG && toolingObject != NULL)
+
+        {
+
+            UF_MODL_ask_feat_body(toolingObject->Tag(), &toolingBodyTag);
+
+        }
+
+        toolingBoxBuilder->Destroy();
+
+        toolingBoxBuilder = NULL;
 
     }
 
@@ -1981,17 +1957,29 @@ tag_t CreateSelectedBodyStockBox(
 
     {
 
-        blockBuilder->Destroy();
+        if (toolingBoxBuilder != NULL)
+
+        {
+
+            toolingBoxBuilder->Destroy();
+
+        }
 
         throw;
 
     }
 
-    blockBuilder->Destroy();
+    if (toolingBodyTag == NULL_TAG)
 
-    HideProcessObject(blockBodyTag);
+    {
 
-    return blockBodyTag;
+        throw std::runtime_error("NX Tooling Box did not create a solid body.");
+
+    }
+
+    HideProcessObject(toolingBodyTag);
+
+    return toolingBodyTag;
 
 }
 
@@ -2031,9 +2019,18 @@ tag_t CreateLineBetweenPoints(const double startPoint[3], const double endPoint[
 
 double AskTubeOuterCornerRadius(const FacePlacement& placement);
 
-tag_t CreateExtrudedToolBody(const std::vector<tag_t>& profileCurves, const double direction[3], double startLimitValue, double endLimitValue);
+tag_t CreateExtrudedToolBody(
+    const std::vector<tag_t>& profileCurves,
+    const double direction[3],
+    double startLimitValue,
+    double endLimitValue,
+    bool removeParameters = true);
 
-bool TrySubtractToolBody(tag_t& targetBody, tag_t toolBody, const char* label);
+bool TrySubtractToolBody(
+    tag_t& targetBody,
+    tag_t toolBody,
+    const char* label,
+    bool deleteToolOnFailure = true);
 
 bool TryUniteToolBody(tag_t& targetBody, tag_t toolBody, const char* label);
 
@@ -3077,17 +3074,25 @@ std::vector<tag_t> CreateBevelJointSketchCurves(
 
     }
 
-    double firstLongDir[3] =
+    double firstLongDir[3] = {0.0, 0.0, 0.0};
+
+    if (!AskPickDirectedLongestFaceAxis(
+
+            firstPlacement.faceTag,
+
+            firstPlacement.pickPoint,
+
+            firstLongDir))
 
     {
 
-        firstPlacement.lengthAxis[0] * firstPlacement.inwardSign,
+        firstLongDir[0] = firstPlacement.lengthAxis[0] * firstPlacement.inwardSign;
 
-        firstPlacement.lengthAxis[1] * firstPlacement.inwardSign,
+        firstLongDir[1] = firstPlacement.lengthAxis[1] * firstPlacement.inwardSign;
 
-        firstPlacement.lengthAxis[2] * firstPlacement.inwardSign
+        firstLongDir[2] = firstPlacement.lengthAxis[2] * firstPlacement.inwardSign;
 
-    };
+    }
 
     if (!Normalize3(firstLongDir))
 
@@ -3351,13 +3356,22 @@ std::vector<tag_t> CreateBevelJointSketchCurves(
 
         {
 
-            toolBody = CreateExtrudedToolBody(curveTags, firstInnerNormal, 0.0, firstChainDepth);
+            // Extrude through both sides of the profile plane so the bevel cut
+            // remains valid even when the selected face normal is reversed.
+            toolBody = CreateExtrudedToolBody(
+                curveTags,
+                firstInnerNormal,
+                -firstChainDepth,
+                firstChainDepth);
 
             tag_t targetBody = firstPlacement.bodyTag;
 
             const bool cutOk =
 
-                TrySubtractToolBody(targetBody, toolBody, "first-minus-bevel-sketch-tool");
+                TrySubtractToolBody(
+                    targetBody,
+                    toolBody,
+                    "first-minus-bevel-sketch-tool");
 
             tag_t efCutFace = NULL_TAG;
 
@@ -3523,15 +3537,24 @@ std::vector<tag_t> CreateBevelJointSketchCurves(
 
         {
 
+            // Use a symmetric tool for the same reason as the first bevel cut:
+            // the boolean must not depend on which way NX reports the face normal.
             secondToolBody =
 
-                CreateExtrudedToolBody(secondContourCurves, secondInnerNormal, 0.0, secondCutDepth);
+                CreateExtrudedToolBody(
+                    secondContourCurves,
+                    secondInnerNormal,
+                    -secondCutDepth,
+                    secondCutDepth);
 
             tag_t secondTargetBody = secondPlacement.bodyTag;
 
             const bool secondCutOk =
 
-                TrySubtractToolBody(secondTargetBody, secondToolBody, "second-minus-bevel-sketch-tool");
+                TrySubtractToolBody(
+                    secondTargetBody,
+                    secondToolBody,
+                    "second-minus-bevel-sketch-tool");
 
         }
 
@@ -3593,7 +3616,12 @@ void DeleteObjects(const std::vector<tag_t>& tags)
 
 }
 
-tag_t CreateExtrudedToolBody(const std::vector<tag_t>& profileCurves, const double direction[3], double startLimitValue, double endLimitValue)
+tag_t CreateExtrudedToolBody(
+    const std::vector<tag_t>& profileCurves,
+    const double direction[3],
+    double startLimitValue,
+    double endLimitValue,
+    bool removeParameters)
 
 {
 
@@ -3677,17 +3705,23 @@ tag_t CreateExtrudedToolBody(const std::vector<tag_t>& profileCurves, const doub
 
     }
 
-    uf_list_p_t bodyList = NULL;
+    if (removeParameters)
 
-    ThrowUfError(UF_MODL_create_list(&bodyList), "UF_MODL_create_list");
+    {
 
-    ThrowUfError(UF_MODL_put_list_item(bodyList, toolBody), "UF_MODL_put_list_item");
+        uf_list_p_t bodyList = NULL;
 
-    ThrowUfError(UF_MODL_delete_body_parms(bodyList), "UF_MODL_delete_body_parms");
+        ThrowUfError(UF_MODL_create_list(&bodyList), "UF_MODL_create_list");
 
-    ThrowUfError(UF_MODL_ask_list_item(bodyList, 0, &toolBody), "UF_MODL_ask_list_item");
+        ThrowUfError(UF_MODL_put_list_item(bodyList, toolBody), "UF_MODL_put_list_item");
 
-    UF_MODL_delete_list(&bodyList);
+        ThrowUfError(UF_MODL_delete_body_parms(bodyList), "UF_MODL_delete_body_parms");
+
+        ThrowUfError(UF_MODL_ask_list_item(bodyList, 0, &toolBody), "UF_MODL_ask_list_item");
+
+        UF_MODL_delete_list(&bodyList);
+
+    }
 
     return toolBody;
 
@@ -3697,7 +3731,11 @@ bool AskBodyBoundingBoxSafe(tag_t bodyTag, double box[6]);
 
 bool BodyBoundingBoxesOverlap(tag_t firstBody, tag_t secondBody, double tolerance);
 
-bool TrySubtractToolBody(tag_t& targetBody, tag_t toolBody, const char* label)
+bool TrySubtractToolBody(
+    tag_t& targetBody,
+    tag_t toolBody,
+    const char* label,
+    bool deleteToolOnFailure)
 
 {
 
@@ -3739,7 +3777,13 @@ bool TrySubtractToolBody(tag_t& targetBody, tag_t toolBody, const char* label)
 
     {
 
-        UF_OBJ_delete_object(toolBody);
+        if (deleteToolOnFailure)
+
+        {
+
+            UF_OBJ_delete_object(toolBody);
+
+        }
 
         return false;
 
@@ -3895,7 +3939,13 @@ bool TrySubtractToolBody(tag_t& targetBody, tag_t toolBody, const char* label)
 
     }
 
-    UF_OBJ_delete_object(toolBody);
+    if (deleteToolOnFailure)
+
+    {
+
+        UF_OBJ_delete_object(toolBody);
+
+    }
 
     return false;
 
