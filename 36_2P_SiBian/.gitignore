@@ -1,0 +1,13 @@
+bin/
+obj/
+template_backups/
+.agents/
+
+*.pdb
+*.ilk
+*.exp
+*.iobj
+*.ipdb
+
+feature_templates/*.log
+feature_templates/__*

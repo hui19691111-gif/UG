@@ -433,7 +433,7 @@
         </PropertyList>
       </Property>
       <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UI::Comp::WizardGroup" id="API Name" mask="16400" name="API Name" sname="BlockID" source="3" type="string" value="group0" />
-      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UI::Comp::WizardGroup" id="Title" mask="1" name="Title" sname="Label" source="1" type="utfstring" value="注意：创建成功后会移除目标体的参数" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UI::Comp::WizardGroup" id="Title" mask="1" name="Title" sname="Label" source="1" type="utfstring" value="创建成功后在特征树中显示为一个特征（保留参数）" />
       <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UI::Comp::WizardGroup" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
       <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UI::Comp::WizardGroup" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
       <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UI::Comp::WizardGroup" id="Group" mask="86020" name="Group" sname="Group" source="1" type="logical" value="True" />

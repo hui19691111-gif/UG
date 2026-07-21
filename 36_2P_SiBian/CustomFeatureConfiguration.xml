@@ -5,7 +5,7 @@
     <CustomFeature
         FeatureClass="NXOpen::CustomFeature::TwoPointSiBian"
         FeatureName="2P_SiBian"
-        FeatureIcon="2p_SiBian"
+        FeatureIcon="2P_BiLanCao"
         FeatureLibrary="TwoPointSiBianCore"
         FeatureUILibrary="TwoPointSiBianUI"
         IsWithoutBody="true"/>

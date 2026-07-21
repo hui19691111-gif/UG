@@ -51,7 +51,7 @@
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <SetChecksum>true</SetChecksum>
       <AdditionalLibraryDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libugopenint.lib;libufun.lib;libnxopencpp.lib;libnxopencpp_gateway.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopenuicpp.lib;user32.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libugopenint.lib;libufun.lib;libnxopencpp.lib;libnxopencpp_gateway.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_userdefinedtemplate.lib;libnxopenuicpp.lib;user32.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "$(ProjectDir)TwoPointSiBian.dlx" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)CustomFeatureConfiguration.xml" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2p_SiBian_1.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2p_SiBian_1.prt" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2P_SiBian_90.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2P_SiBian_90.prt" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2P_SiBian_90R.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)2P_SiBian_90R.prt" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)90JianXiCao.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)90JianXiCao.prt" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)90JianXiCaoR.cgm" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)90JianXiCaoR.prt" "$(OutDir)"</Command>
@@ -82,6 +82,11 @@
     <None Include="90JianXiCao.prt" />
     <None Include="90JianXiCaoR.cgm" />
     <None Include="90JianXiCaoR.prt" />
+    <None Include="feature_templates\2p_SiBian_1_FT.prt" />
+    <None Include="feature_templates\2P_SiBian_90_FT.prt" />
+    <None Include="feature_templates\2P_SiBian_90R_FT.prt" />
+    <None Include="feature_templates\90JianXiCao_FT.prt" />
+    <None Include="feature_templates\90JianXiCaoR_FT.prt" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

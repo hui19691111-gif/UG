@@ -15,14 +15,21 @@
 #include <NXOpen/Features_CustomAttribute.hxx>
 #include <NXOpen/Features_CustomAttributeCollection.hxx>
 #include <NXOpen/Features_CustomDoubleAttribute.hxx>
+#include <NXOpen/Features_CustomIntegerAttribute.hxx>
+#include <NXOpen/Features_CustomLogicalAttribute.hxx>
+#include <NXOpen/Features_CustomStringAttribute.hxx>
 #include <NXOpen/Features_BooleanBuilder.hxx>
+#include <NXOpen/Features_ConstructionFeatureData.hxx>
 #include <NXOpen/Features_CustomFeatureBuilder.hxx>
 #include <NXOpen/Features_CustomFeatureData.hxx>
 #include <NXOpen/Features_CustomFeatureDataCollection.hxx>
+#include <NXOpen/Features_CustomFeaturePreUpdateEvent.hxx>
 #include <NXOpen/Features_CustomTagAttribute.hxx>
+#include <NXOpen/Features_EditWithRollbackManager.hxx>
 #include <NXOpen/Features_ExtrudeBuilder.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_FeatureGroup.hxx>
 #include <NXOpen/Features_OffsetFaceBuilder.hxx>
 #include <NXOpen/Features_SketchFeature.hxx>
 #include <NXOpen/Features_SheetMetal_EdgeRipBuilder.hxx>
@@ -47,21 +54,33 @@
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
 #include <NXOpen/BodyCollection.hxx>
+#include <NXOpen/BodyDumbRule.hxx>
 #include <NXOpen/Point.hxx>
 #include <NXOpen/PointCollection.hxx>
+#include <NXOpen/Plane.hxx>
+#include <NXOpen/PlaneCollection.hxx>
 #include <NXOpen/Section.hxx>
 #include <NXOpen/SectionCollection.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
+#include <NXOpen/ScCollector.hxx>
+#include <NXOpen/ScCollectorCollection.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
 #include <NXOpen/SmartObject.hxx>
 #include <NXOpen/Sketch.hxx>
 #include <NXOpen/SketchCollection.hxx>
 #include <NXOpen/SimpleSketchInPlaceBuilder.hxx>
+#include <NXOpen/SketchInPlaceBuilder.hxx>
 #include <NXOpen/TaggedObject.hxx>
 #include <NXOpen/Unit.hxx>
 #include <NXOpen/UnitCollection.hxx>
 #include <NXOpen/Update.hxx>
+#include <NXOpen/Expression.hxx>
+#include <NXOpen/UserDefinedTemplate_Collection.hxx>
+#include <NXOpen/UserDefinedTemplate_Definition.hxx>
+#include <NXOpen/UserDefinedTemplate_DefinitionBuilder.hxx>
+#include <NXOpen/UserDefinedTemplate_Instantiation.hxx>
+#include <NXOpen/UserDefinedTemplate_InstantiationBuilder.hxx>
 
 #include <uf.h>
 #include <uf_assem.h>
@@ -111,6 +130,8 @@ using namespace NXOpen;
 
 namespace
 {
+TwoPointSiBianUI* gActiveTwoPointSiBianDialog = nullptr;
+
 constexpr double kPointTolerance = 1.0e-4;
 constexpr double kPlaneTolerance = 1.0e-3;
 constexpr double kSmartInnerLoopMinimumAreaRatio = 0.15;
@@ -125,7 +146,154 @@ constexpr const char* kTemplate90LeftPartName = "2P_SiBian_90.prt";
 constexpr const char* kTemplate90RightPartName = "2P_SiBian_90R.prt";
 constexpr const char* kTemplate90ClearanceGroovePartName = "90JianXiCao.prt";
 constexpr const char* kTemplate90ClearanceGrooveRightPartName = "90JianXiCaoR.prt";
+constexpr const char* kFeatureTemplatePartName = "2p_SiBian_1_FT.prt";
+constexpr const char* kFeatureTemplate90LeftPartName = "2P_SiBian_90_FT.prt";
+constexpr const char* kFeatureTemplate90RightPartName = "2P_SiBian_90R_FT.prt";
+constexpr const char* kFeatureTemplate90ClearanceGroovePartName = "90JianXiCao_FT.prt";
+constexpr const char* kFeatureTemplate90ClearanceGrooveRightPartName = "90JianXiCaoR_FT.prt";
 constexpr const wchar_t* kTempTemplateRoot = L"ZhihuiSheetMetal\\UDF\\36_2P_SiBian";
+
+void SetConstructionRole(Features::Feature* feature, const char* role)
+{
+    if (feature == nullptr || role == nullptr || *role == '\0')
+    {
+        return;
+    }
+    try
+    {
+        feature->SetUserAttribute(
+            zhihui_twopoint_sibian::kConstructionRoleAttribute,
+            -1,
+            role,
+            Update::OptionLater);
+    }
+    catch (...)
+    {
+        // The readable feature name below remains a compatibility fallback.
+    }
+    try
+    {
+        feature->SetName(role);
+    }
+    catch (...)
+    {
+        // Stable metadata improves deterministic editing, but its failure must
+        // not invalidate otherwise-valid initial geometry creation.
+    }
+}
+
+std::string ConstructionRole(Features::Feature* feature)
+{
+    if (feature == nullptr)
+    {
+        return {};
+    }
+    try
+    {
+        if (feature->HasUserAttribute(
+                zhihui_twopoint_sibian::kConstructionRoleAttribute,
+                NXObject::AttributeTypeString,
+                -1))
+        {
+            const NXString role = feature->GetStringUserAttribute(
+                zhihui_twopoint_sibian::kConstructionRoleAttribute,
+                -1);
+            const char* text = role.GetUTF8Text();
+            if (text != nullptr && *text != '\0')
+            {
+                return text;
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    const NXString name = feature->Name();
+    const char* text = name.GetLocaleText();
+    return text != nullptr ? text : "";
+}
+
+bool ResolvePrimaryUdfDirectedP2(Features::CustomFeature* customFeature,
+                                 Point3d& p2,
+                                 tag_t& edgeTag)
+{
+    edgeTag = NULL_TAG;
+    if (customFeature == nullptr)
+    {
+        return false;
+    }
+
+    // The primary UDF is the last UDF construction member.  Its third
+    // external reference is a(P2,Y+); the stored reverse flag identifies
+    // which natural edge endpoint was used as the directed P2 origin.
+    Features::Feature* primaryUdf = nullptr;
+    const std::vector<Features::ConstructionFeatureData*> construction =
+        customFeature->GetConstructionFeatures();
+    for (auto iterator = construction.rbegin();
+         iterator != construction.rend();
+         ++iterator)
+    {
+        Features::Feature* feature =
+            *iterator != nullptr ? (*iterator)->GetFeature() : nullptr;
+        if (feature == nullptr)
+        {
+            continue;
+        }
+        const char* typeText = feature->FeatureType().GetLocaleText();
+        std::string featureType = typeText != nullptr ? typeText : "";
+        std::transform(featureType.begin(),
+                       featureType.end(),
+                       featureType.begin(),
+                       [](unsigned char value)
+                       {
+                           return static_cast<char>(std::tolower(value));
+                       });
+        if (featureType.find("udf") != std::string::npos)
+        {
+            primaryUdf = feature;
+            break;
+        }
+    }
+    if (primaryUdf == nullptr)
+    {
+        return false;
+    }
+
+    UF_MODL_udf_exp_data_t expressionData;
+    UF_MODL_udf_ref_data_t referenceData;
+    UF_MODL_udf_init_exp_data(&expressionData);
+    UF_MODL_udf_init_ref_data(&referenceData);
+    const int askResult = UF_MODL_ask_instantiated_udf(
+        primaryUdf->Tag(), &expressionData, &referenceData);
+    bool resolved = false;
+    if (askResult == 0 && referenceData.num_refs > 2 &&
+        referenceData.old_refs != nullptr)
+    {
+        edgeTag = referenceData.old_refs[2];
+        try
+        {
+            Edge* edge = dynamic_cast<Edge*>(NXObjectManager::Get(edgeTag));
+            if (edge != nullptr && edge->SolidEdgeType() == Edge::EdgeTypeLinear)
+            {
+                Point3d naturalStart;
+                Point3d naturalEnd;
+                edge->GetVertices(&naturalStart, &naturalEnd);
+                const bool reversed =
+                    referenceData.reverse_refs_dir != nullptr &&
+                    referenceData.reverse_refs_dir[2] == UF_MODL_UDF_REVERSE_DIR;
+                p2 = reversed ? naturalEnd : naturalStart;
+                resolved = true;
+            }
+        }
+        catch (...)
+        {
+            resolved = false;
+        }
+    }
+    UF_MODL_udf_free_exp_data(&expressionData);
+    UF_MODL_udf_free_ref_data(&referenceData);
+    return resolved;
+}
 
 struct ProjectionPoint2d
 {
@@ -181,6 +349,41 @@ UdfTemplateSpec TemplateSpecForMode(TwoPointSiBianUI::FeatureMode mode,
     }
 
     return {IDR_UDF_TEMPLATE_PRT, L"2p_SiBian_1_", kTemplatePartName};
+}
+
+UdfTemplateSpec FeatureTemplateSpecForMode(
+    TwoPointSiBianUI::FeatureMode mode,
+    bool useNinetyClearanceGrooveTemplate,
+    bool useNinetyClearanceGrooveRightTemplate)
+{
+    if (useNinetyClearanceGrooveRightTemplate)
+    {
+        return {IDR_FEATURE_TEMPLATE_90_JIAN_XI_CAO_R_PRT,
+                L"90JianXiCaoR_FT_",
+                kFeatureTemplate90ClearanceGrooveRightPartName};
+    }
+    if (useNinetyClearanceGrooveTemplate)
+    {
+        return {IDR_FEATURE_TEMPLATE_90_JIAN_XI_CAO_PRT,
+                L"90JianXiCao_FT_",
+                kFeatureTemplate90ClearanceGroovePartName};
+    }
+    if (mode == TwoPointSiBianUI::FeatureMode::NinetyLeft)
+    {
+        return {IDR_FEATURE_TEMPLATE_90L_PRT,
+                L"2P_SiBian_90_FT_",
+                kFeatureTemplate90LeftPartName};
+    }
+    if (mode == TwoPointSiBianUI::FeatureMode::NinetyRight)
+    {
+        return {IDR_FEATURE_TEMPLATE_90R_PRT,
+                L"2P_SiBian_90R_FT_",
+                kFeatureTemplate90RightPartName};
+    }
+
+    return {IDR_FEATURE_TEMPLATE_PRT,
+            L"2p_SiBian_1_FT_",
+            kFeatureTemplatePartName};
 }
 
 std::string NarrowFromWide(const std::wstring& value)
@@ -426,13 +629,17 @@ public:
                  bool useNinetyClearanceGrooveTemplate,
                  bool useNinetyClearanceGrooveRightTemplate,
                  std::string& path,
-                 std::string& trace)
+                 std::string& trace,
+                 bool featureTemplate = false)
     {
         Cleanup();
-        const UdfTemplateSpec spec =
-            TemplateSpecForMode(mode,
-                                useNinetyClearanceGrooveTemplate,
-                                useNinetyClearanceGrooveRightTemplate);
+        const UdfTemplateSpec spec = featureTemplate
+            ? FeatureTemplateSpecForMode(mode,
+                                         useNinetyClearanceGrooveTemplate,
+                                         useNinetyClearanceGrooveRightTemplate)
+            : TemplateSpecForMode(mode,
+                                  useNinetyClearanceGrooveTemplate,
+                                  useNinetyClearanceGrooveRightTemplate);
 
         HMODULE module = CurrentModuleHandle();
         if (module == nullptr)
@@ -2476,6 +2683,42 @@ Features::CustomDoubleAttribute* CreateDoubleAttribute(Features::CustomAttribute
     return attr;
 }
 
+Features::CustomStringAttribute* CreateStringAttribute(
+    Features::CustomAttributeCollection* attrs,
+    const char* name,
+    const std::string& value)
+{
+    std::vector<Features::CustomAttribute::Property> props;
+    Features::CustomStringAttribute* attr =
+        attrs->CreateCustomStringAttribute(name, props);
+    attr->SetValue(NXString(value.c_str(), NXString::UTF8));
+    return attr;
+}
+
+Features::CustomIntegerAttribute* CreateIntegerAttribute(
+    Features::CustomAttributeCollection* attrs,
+    const char* name,
+    int value)
+{
+    std::vector<Features::CustomAttribute::Property> props;
+    Features::CustomIntegerAttribute* attr =
+        attrs->CreateCustomIntegerAttribute(name, props);
+    attr->SetValue(value);
+    return attr;
+}
+
+Features::CustomLogicalAttribute* CreateLogicalAttribute(
+    Features::CustomAttributeCollection* attrs,
+    const char* name,
+    bool value)
+{
+    std::vector<Features::CustomAttribute::Property> props;
+    Features::CustomLogicalAttribute* attr =
+        attrs->CreateCustomLogicalAttribute(name, props);
+    attr->SetValue(value);
+    return attr;
+}
+
 class WorkPartContextGuard
 {
 public:
@@ -3127,6 +3370,16 @@ TwoPointSiBianUI::TwoPointSiBianUI()
       customFeatureManager_(nullptr),
       editedFeature_(nullptr),
       featureClass_(nullptr),
+      editRollbackManager_(nullptr),
+      editRollbackMark_(static_cast<Session::UndoMarkId>(0)),
+      loadingEditedFeature_(false),
+      editedTargetBodyTag_(NULL_TAG),
+      editedBaseFaceTag_(NULL_TAG),
+      editedStartEdgeTag_(NULL_TAG),
+      editedEndEdgeTag_(NULL_TAG),
+      hasEditedEndpointCache_(false),
+      editedCachedP1_(),
+      editedCachedP2_(),
       previewUndoMark_(static_cast<Session::UndoMarkId>(0)),
       previewUdfTag_(NULL_TAG),
       previewTargetBodyTag_(NULL_TAG),
@@ -3140,11 +3393,21 @@ TwoPointSiBianUI::TwoPointSiBianUI()
       hasPreview_(false),
       previewCommitted_(false),
       isUpdatingPreview_(false),
-      reverseChamfer270Cut_(false)
+      reverseChamfer270Cut_(false),
+      hasLastPreviewInputs_(false),
+      lastPreviewInputs_(),
+      hasResolvedPrimaryP2ForPersistence_(false),
+      resolvedPrimaryP2ForPersistence_(),
+      hasEditedBaselineInputs_(false),
+      editedBaselineInputs_(),
+      editedLivePreviewDirty_(false),
+      buildingCustomFeature_(false),
+      customFeatureConstructionRebuilt_(false)
 {
     customFeatureManager_ = session_->CustomFeatureClassManager();
     editedFeature_ = customFeatureManager_->GetEditedCustomFeature();
     featureClass_ = customFeatureManager_->GetClassFromName(zhihui_twopoint_sibian::kFeatureClassName);
+    gActiveTwoPointSiBianDialog = this;
 
     dialog_ = ui_->CreateDialog("TwoPointSiBian.dlx");
     dialog_->AddInitializeHandler(make_callback(this, &TwoPointSiBianUI::initialize_cb));
@@ -3159,12 +3422,24 @@ TwoPointSiBianUI::TwoPointSiBianUI()
 
 TwoPointSiBianUI::~TwoPointSiBianUI()
 {
+    if (editRollbackManager_ != nullptr)
+    {
+        std::string rollbackError;
+        static_cast<void>(FinishEditedFeatureRollback(true, rollbackError));
+    }
+    if (gActiveTwoPointSiBianDialog == this)
+    {
+        gActiveTwoPointSiBianDialog = nullptr;
+    }
     delete dialog_;
 }
 
 NXOpen::BlockStyler::BlockDialog::DialogResponse TwoPointSiBianUI::Launch()
 {
-    return dialog_->Launch();
+    return dialog_->LaunchInDialogMode(
+        editedFeature_ != nullptr
+            ? NXOpen::BlockStyler::BlockDialog::DialogModeEdit
+            : NXOpen::BlockStyler::BlockDialog::DialogModeCreate);
 }
 
 void TwoPointSiBianUI::initialize_cb()
@@ -3206,6 +3481,290 @@ void TwoPointSiBianUI::initialize_cb()
 
     ConfigurePointSelection(startPointBlock_);
     ConfigurePointSelection(endPointBlock_);
+
+    if (editedFeature_ != nullptr)
+    {
+        loadingEditedFeature_ = true;
+        const bool loaded = LoadEditedFeatureState();
+        loadingEditedFeature_ = false;
+        if (loaded)
+        {
+            // Do not roll the model back and create a second UDF/rip chain
+            // merely to preview an existing CustomFeature.  NX owns the
+            // registered construction features; Apply/OK edits those members
+            // in place through InternalFeaturePreUpdateCallback.
+            AppendDebugLog(
+                "edit initialization loaded persisted inputs; the existing "
+                "construction chain remains active and no real-feature preview "
+                "was created.");
+        }
+    }
+}
+
+bool TwoPointSiBianUI::LoadEditedFeatureState()
+{
+    try
+    {
+        if (editedFeature_ == nullptr)
+        {
+            return false;
+        }
+        Features::CustomFeatureData* data = editedFeature_->FeatureData();
+        if (data == nullptr)
+        {
+            return false;
+        }
+
+        editedCachedP1_ = Point3d(
+            data->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrStartX)
+                ->Value(),
+            data->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrStartY)
+                ->Value(),
+            data->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrStartZ)
+                ->Value());
+        editedCachedP2_ = Point3d(
+            data->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrEndX)
+                ->Value(),
+            data->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrEndY)
+                ->Value(),
+            data->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrEndZ)
+                ->Value());
+        hasEditedEndpointCache_ =
+            Distance(editedCachedP1_, editedCachedP2_) > kPointTolerance;
+
+        auto tagValue = [&](const char* name) -> tag_t
+        {
+            TaggedObject* value = data->CustomTagAttributeByName(name)->Value();
+            return value != nullptr ? value->Tag() : NULL_TAG;
+        };
+        editedTargetBodyTag_ = tagValue(zhihui_twopoint_sibian::kAttrTargetBody);
+        editedBaseFaceTag_ = tagValue(zhihui_twopoint_sibian::kAttrBaseFace);
+        editedStartEdgeTag_ = tagValue(zhihui_twopoint_sibian::kAttrStartEdge);
+        editedEndEdgeTag_ = tagValue(zhihui_twopoint_sibian::kAttrEndEdge);
+
+        if (clearanceBlock_ != nullptr)
+        {
+            clearanceBlock_->SetValue(
+                data->CustomStringAttributeByName(
+                        zhihui_twopoint_sibian::kAttrClearance)
+                    ->Value());
+        }
+        if (bendRadiusBlock_ != nullptr)
+        {
+            bendRadiusBlock_->SetValue(
+                data->CustomStringAttributeByName(
+                        zhihui_twopoint_sibian::kAttrBendRadius)
+                    ->Value());
+        }
+        if (chamferEdgeToggleBlock_ != nullptr)
+        {
+            chamferEdgeToggleBlock_->SetValue(
+                data->CustomLogicalAttributeByName(
+                        zhihui_twopoint_sibian::kAttrChamferEdgeMode)
+                    ->Value());
+        }
+        reverseChamfer270Cut_ =
+            data->CustomLogicalAttributeByName(
+                    zhihui_twopoint_sibian::kAttrReverseCut)
+                ->Value();
+
+        const int mode = data->CustomIntegerAttributeByName(
+                                  zhihui_twopoint_sibian::kAttrFeatureMode)
+                             ->Value();
+        if (mode == static_cast<int>(FeatureMode::NinetyLeft) ||
+            mode == static_cast<int>(FeatureMode::NinetyRight))
+        {
+            Point3d directedPrimaryP2;
+            tag_t directedPrimaryP2Edge = NULL_TAG;
+            if (ResolvePrimaryUdfDirectedP2(editedFeature_,
+                                            directedPrimaryP2,
+                                            directedPrimaryP2Edge) &&
+                Distance(directedPrimaryP2, editedCachedP2_) >
+                    kPointTolerance)
+            {
+                const Point3d persistedP2 = editedCachedP2_;
+                editedCachedP2_ = directedPrimaryP2;
+                hasEditedEndpointCache_ =
+                    Distance(editedCachedP1_, editedCachedP2_) >
+                    kPointTolerance;
+                data->CustomDoubleAttributeByName(
+                        zhihui_twopoint_sibian::kAttrEndX)
+                    ->SetValue(editedCachedP2_.X);
+                data->CustomDoubleAttributeByName(
+                        zhihui_twopoint_sibian::kAttrEndY)
+                    ->SetValue(editedCachedP2_.Y);
+                data->CustomDoubleAttributeByName(
+                        zhihui_twopoint_sibian::kAttrEndZ)
+                    ->SetValue(editedCachedP2_.Z);
+                AppendDebugLog(
+                    "LoadEditedFeatureState repaired persisted right-angle P2 from the primary UDF directed edge: edge=" +
+                    std::to_string(directedPrimaryP2Edge) +
+                    ", savedP2=" + FormatPoint(persistedP2) +
+                    ", actualP2=" + FormatPoint(editedCachedP2_));
+            }
+        }
+        if (featureModeBlock_ != nullptr)
+        {
+            const char* modeText =
+                mode == static_cast<int>(FeatureMode::NinetyLeft)
+                    ? "直角左"
+                    : (mode == static_cast<int>(FeatureMode::NinetyRight)
+                           ? "直角右"
+                           : "斜角");
+            featureModeBlock_->SetValueAsString(
+                NXString(modeText, NXString::UTF8));
+        }
+
+        lastPreviewInputs_ = InferredInputs();
+        lastPreviewInputs_.startPoint = editedCachedP1_;
+        lastPreviewInputs_.endPoint = editedCachedP2_;
+        auto safeObject = [](tag_t objectTag) -> TaggedObject*
+        {
+            if (objectTag == NULL_TAG ||
+                UF_OBJ_ask_status(objectTag) != UF_OBJ_ALIVE)
+            {
+                return nullptr;
+            }
+            try
+            {
+                return NXObjectManager::Get(objectTag);
+            }
+            catch (...)
+            {
+                return nullptr;
+            }
+        };
+        lastPreviewInputs_.targetBody =
+            dynamic_cast<Body*>(safeObject(editedTargetBodyTag_));
+        lastPreviewInputs_.baseFace =
+            dynamic_cast<Face*>(safeObject(editedBaseFaceTag_));
+        lastPreviewInputs_.startEdge =
+            dynamic_cast<Edge*>(safeObject(editedStartEdgeTag_));
+        lastPreviewInputs_.endEdge =
+            dynamic_cast<Edge*>(safeObject(editedEndEdgeTag_));
+        lastPreviewInputs_.startObject = lastPreviewInputs_.startEdge;
+        lastPreviewInputs_.endObject = lastPreviewInputs_.endEdge;
+        lastPreviewInputs_.thickness =
+            data->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrThickness)
+                ->Value();
+        lastPreviewInputs_.spanLength =
+            data->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrSpanLength)
+                ->Value();
+        const NXString clearanceValue =
+            data->CustomStringAttributeByName(
+                    zhihui_twopoint_sibian::kAttrClearance)
+                ->Value();
+        const NXString bendRadiusValue =
+            data->CustomStringAttributeByName(
+                    zhihui_twopoint_sibian::kAttrBendRadius)
+                ->Value();
+        lastPreviewInputs_.clearanceValue =
+            clearanceValue.GetUTF8Text() != nullptr
+                ? clearanceValue.GetUTF8Text()
+                : "0.2";
+        lastPreviewInputs_.bendRadiusValue =
+            bendRadiusValue.GetUTF8Text() != nullptr
+                ? bendRadiusValue.GetUTF8Text()
+                : "0.2";
+        lastPreviewInputs_.featureMode = static_cast<FeatureMode>(mode);
+        lastPreviewInputs_.smartMode =
+            data->CustomLogicalAttributeByName(
+                    zhihui_twopoint_sibian::kAttrSmartMode)
+                ->Value();
+        lastPreviewInputs_.chamferEdgeMode =
+            data->CustomLogicalAttributeByName(
+                    zhihui_twopoint_sibian::kAttrChamferEdgeMode)
+                ->Value();
+        lastPreviewInputs_.reverseChamfer270Cut = reverseChamfer270Cut_;
+        lastPreviewInputs_.inferredFromSingleClick =
+            data->CustomLogicalAttributeByName(
+                    zhihui_twopoint_sibian::kAttrInferredFromSingleClick)
+                ->Value();
+        lastPreviewInputs_.selectionClickPoint = Point3d(
+            data->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrClickX)
+                ->Value(),
+            data->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrClickY)
+                ->Value(),
+            data->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrClickZ)
+                ->Value());
+        // Construction features can replace the original face/edge topology.
+        // Editing numeric attributes does not need those post-update wrappers;
+        // the existing construction members already own their references.
+        hasLastPreviewInputs_ = hasEditedEndpointCache_;
+        editedBaselineInputs_ = lastPreviewInputs_;
+        hasEditedBaselineInputs_ = hasLastPreviewInputs_;
+        editedLivePreviewDirty_ = false;
+
+        // Editing is driven by the persisted resolved P1/P2. The point
+        // controls stay empty, but parameter/mode changes rebuild the same
+        // associative target when Apply or OK is pressed.
+        if (smartModeBlock_ != nullptr)
+        {
+            smartModeBlock_->SetValue(false);
+        }
+        ConfigureInputMode(false, false);
+        if (smartModeBlock_ != nullptr)
+        {
+            smartModeBlock_->SetEnable(false);
+        }
+        if (featureModeBlock_ != nullptr)
+        {
+            featureModeBlock_->SetEnable(false);
+        }
+        if (chamferEdgeToggleBlock_ != nullptr)
+        {
+            chamferEdgeToggleBlock_->SetEnable(false);
+        }
+        if (reverseCutButton_ != nullptr)
+        {
+            reverseCutButton_->SetEnable(false);
+        }
+        AppendDebugLog("loaded editable CustomFeature data: feature=" +
+                       std::to_string(editedFeature_->Tag()) +
+                       ", targetBody=" +
+                       std::to_string(editedTargetBodyTag_) +
+                       ", P1=" + FormatPoint(editedCachedP1_) +
+                       ", P2=" + FormatPoint(editedCachedP2_));
+        return hasEditedEndpointCache_ && editedTargetBodyTag_ != NULL_TAG;
+    }
+    catch (const NXException& ex)
+    {
+        AppendDebugLog("failed to load edited CustomFeature data: " +
+                       NxExceptionText(ex));
+    }
+    catch (...)
+    {
+        AppendDebugLog("failed to load edited CustomFeature data: unknown exception.");
+    }
+    return false;
+}
+
+bool TwoPointSiBianUI::ReadCurrentEditedInputs(InferredInputs& inputs) const
+{
+    if (editedFeature_ == nullptr || !hasLastPreviewInputs_)
+    {
+        return false;
+    }
+
+    inputs = lastPreviewInputs_;
+    inputs.clearanceValue =
+        ReadStringBlockValue(clearanceBlock_, "string0", "0.2");
+    inputs.bendRadiusValue =
+        ReadStringBlockValue(bendRadiusBlock_, "string01", "0.2");
+    // Double-click editing deliberately exposes only clearance and bend R.
+    // Preserve every topology-driving value recorded at creation time.
+    return true;
 }
 
 TwoPointSiBianUI::FeatureMode TwoPointSiBianUI::ReadFeatureMode() const
@@ -3260,7 +3819,7 @@ void TwoPointSiBianUI::dialogShown_cb()
     try
     {
         ConfigureInputMode(IsSmartModeEnabled(), false);
-        if (startPointBlock_ != nullptr)
+        if (editedFeature_ == nullptr && startPointBlock_ != nullptr)
         {
             startPointBlock_->Focus();
         }
@@ -3287,6 +3846,10 @@ bool TwoPointSiBianUI::enable_ok_cb()
     {
         return hasStart || hasEnd;
     }
+    if (!hasStart && !hasEnd && hasEditedEndpointCache_)
+    {
+        return Distance(editedCachedP1_, editedCachedP2_) > kPointTolerance;
+    }
     if (hasStart && hasEnd && Distance(startPoint, endPoint) > kPointTolerance)
     {
         return true;
@@ -3296,6 +3859,10 @@ bool TwoPointSiBianUI::enable_ok_cb()
 
 int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
+    if (loadingEditedFeature_ || isUpdatingPreview_)
+    {
+        return 0;
+    }
     if (block == startPointBlock_ || block == endPointBlock_)
     {
         activeSmartSelectionBlock_ = static_cast<NXOpen::BlockStyler::SelectObject*>(block);
@@ -3365,6 +3932,62 @@ int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
                        (reverseChamfer270Cut_ ? "true" : "false") +
                        "; all other branches remain unchanged.");
     }
+    if (editedFeature_ != nullptr)
+    {
+        const bool affectsGeometry =
+            block == clearanceBlock_ || block == bendRadiusBlock_;
+        if (affectsGeometry)
+        {
+            InferredInputs previewInputs;
+            double previewClearance = 0.0;
+            double previewRadius = 0.0;
+            if (!ReadCurrentEditedInputs(previewInputs) ||
+                !TryParseExpressionNumber(previewInputs.clearanceValue,
+                                          previewClearance) ||
+                !TryParseExpressionNumber(previewInputs.bendRadiusValue,
+                                          previewRadius))
+            {
+                AppendDebugLog(
+                    "update_cb edit mode: waiting for valid numeric clearance and bend-R values.");
+                return 0;
+            }
+
+            const InferredInputs previousInputs = lastPreviewInputs_;
+            std::string previewError;
+            isUpdatingPreview_ = true;
+            const bool previewUpdated =
+                CommitCustomFeature(previewInputs, previewError);
+            isUpdatingPreview_ = false;
+            if (previewUpdated)
+            {
+                editedLivePreviewDirty_ = true;
+                AppendDebugLog(
+                    "update_cb edit mode: live in-place CustomFeature preview updated.");
+            }
+            else
+            {
+                std::string restoreError;
+                isUpdatingPreview_ = true;
+                static_cast<void>(CommitCustomFeature(previousInputs,
+                                                      restoreError));
+                isUpdatingPreview_ = false;
+                AppendDebugLog(
+                    "update_cb edit mode: live preview failed: " +
+                    previewError +
+                    (restoreError.empty()
+                         ? std::string()
+                         : "; restore warning: " + restoreError));
+                ShowError(previewError);
+            }
+        }
+        else
+        {
+            AppendDebugLog(
+                "update_cb edit mode: non-geometric control changed; no rebuild required.");
+        }
+        UnhighlightSelectionObjects();
+        return 0;
+    }
     if (enable_ok_cb())
     {
         if (!isUpdatingPreview_)
@@ -3394,31 +4017,74 @@ int TwoPointSiBianUI::update_cb(NXOpen::BlockStyler::UIBlock* block)
 int TwoPointSiBianUI::apply_cb()
 {
     BeginDebugLogSection();
-    AppendDebugLog("apply_cb entered; committing preview");
+    AppendDebugLog("apply_cb entered; committing one opaque CustomFeature node");
 
     try
     {
-        if (!hasPreview_)
+        InferredInputs inputs;
+        if (editedFeature_ != nullptr)
         {
-            if (!CreatePreview())
+            if (!ReadCurrentEditedInputs(inputs))
             {
-                throw std::runtime_error("Preview creation failed. See " + DebugLogPath());
+                throw std::runtime_error(
+                    "The saved 2P_SiBian endpoints could not be restored for editing.");
+            }
+            if (inputs.featureMode != lastPreviewInputs_.featureMode ||
+                inputs.chamferEdgeMode != lastPreviewInputs_.chamferEdgeMode ||
+                inputs.reverseChamfer270Cut !=
+                    lastPreviewInputs_.reverseChamfer270Cut)
+            {
+                throw std::runtime_error(
+                    "The current editable feature supports in-place changes to clearance and bend radius. "
+                    "Changing chamfer/right-angle branch, chamfer-edge creation, or cut direction changes "
+                    "the construction topology and requires a separate branch-rebuild implementation.");
+            }
+        }
+        else
+        {
+            if (!hasPreview_ && !CreatePreview())
+            {
+                throw std::runtime_error("Preview creation failed. See " +
+                                         DebugLogPath());
+            }
+            if (!hasLastPreviewInputs_)
+            {
+                throw std::runtime_error(
+                    "The resolved 2P_SiBian inputs were not retained from preview.");
+            }
+            inputs = lastPreviewInputs_;
+            if (!UndoPreview())
+            {
+                throw std::runtime_error(
+                    "The temporary preview could not be restored before creating the CustomFeature.");
             }
         }
 
-        std::string flattenError;
-        if (!FlattenPreviewTargetBody(flattenError))
+        // In edit mode a numeric block change has already committed the live
+        // in-place preview from update_cb.  Committing the identical data once
+        // more from Apply/OK starts a second CustomFeature update before NX has
+        // finished displaying the first one.  On the 90-left two-offset chain
+        // that duplicate pass stops at an intermediate subtraction and leaves
+        // the node failed until the user edits it again.  Accept the proven
+        // live preview directly; only commit here when no live update ran.
+        const bool acceptExistingLivePreview =
+            editedFeature_ != nullptr && editedLivePreviewDirty_;
+        std::string commitError;
+        if (!acceptExistingLivePreview &&
+            !CommitCustomFeature(inputs, commitError))
         {
-            const bool restored = UndoPreview();
-            if (!restored)
-            {
-                flattenError +=
-                    "\nThe preview rollback also failed; close the part without saving to protect the original model.";
-            }
-            throw std::runtime_error(flattenError);
+            throw std::runtime_error(commitError);
         }
-
-        CommitPreview();
+        if (editedFeature_ != nullptr)
+        {
+            editedBaselineInputs_ = inputs;
+            hasEditedBaselineInputs_ = true;
+            editedLivePreviewDirty_ = false;
+            AppendDebugLog(
+                acceptExistingLivePreview
+                    ? "apply_cb edit mode: accepted the already committed live preview without a duplicate CustomFeature update."
+                    : "apply_cb edit mode: committed current values and accepted them as the new cancel baseline.");
+        }
         return 0;
     }
     catch (const NXException& ex)
@@ -3448,6 +4114,19 @@ int TwoPointSiBianUI::ok_cb()
 
 int TwoPointSiBianUI::cancel_cb()
 {
+    if (editedFeature_ != nullptr)
+    {
+        std::string restoreError;
+        if (!RestoreEditedFeatureBaseline(restoreError))
+        {
+            AppendDebugLog("cancel_cb edit restore failed: " + restoreError);
+            ShowError(restoreError);
+            return 1;
+        }
+        AppendDebugLog(
+            "cancel_cb edit mode: restored the last applied CustomFeature values.");
+        return 0;
+    }
     if (previewCommitted_)
     {
         AppendDebugLog("cancel_cb entered after Apply; keeping the committed feature and finalizing its undo mark.");
@@ -3463,6 +4142,19 @@ int TwoPointSiBianUI::cancel_cb()
 
 int TwoPointSiBianUI::close_cb()
 {
+    if (editedFeature_ != nullptr)
+    {
+        std::string restoreError;
+        if (!RestoreEditedFeatureBaseline(restoreError))
+        {
+            AppendDebugLog("close_cb edit restore failed: " + restoreError);
+            ShowError(restoreError);
+            return 1;
+        }
+        AppendDebugLog(
+            "close_cb edit mode: restored the last applied CustomFeature values.");
+        return 0;
+    }
     if (previewCommitted_)
     {
         AppendDebugLog("close_cb entered after Apply; keeping the committed feature and finalizing its undo mark.");
@@ -3476,9 +4168,10 @@ int TwoPointSiBianUI::close_cb()
     return 0;
 }
 
-bool TwoPointSiBianUI::CreatePreview()
+bool TwoPointSiBianUI::CreatePreview(const InferredInputs* forcedInputs)
 {
-    AppendDebugLog("CreatePreview entered");
+    AppendDebugLog(std::string("CreatePreview entered, source=") +
+                   (forcedInputs != nullptr ? "CustomFeature data" : "dialog"));
 
     // A face selected while the old preview exists may belong to the preview's
     // boolean topology.  Save only its stable body tag and cursor position
@@ -3486,7 +4179,7 @@ bool TwoPointSiBianUI::CreatePreview()
     tag_t rollbackSafeBodyTag = NULL_TAG;
     Point3d rollbackSafeClickPoint;
     bool hasRollbackSafeSingleClick = false;
-    if (IsSmartModeEnabled())
+    if (forcedInputs == nullptr && IsSmartModeEnabled())
     {
         TaggedObject* clickedObject = nullptr;
         BlockStyler::SelectObject* clickedBlock = activeSmartSelectionBlock_;
@@ -3546,9 +4239,24 @@ bool TwoPointSiBianUI::CreatePreview()
     }
 
     InferredInputs inputs;
-    if (!ReadInputs(inputs,
-                    rollbackSafeClickObject,
-                    hasRollbackSafeSingleClick ? &rollbackSafeClickPoint : nullptr))
+    if (forcedInputs != nullptr)
+    {
+        inputs = *forcedInputs;
+        // Undoing the previous preview or rolling the model back can replace
+        // edge wrapper objects even when the body, face and endpoint
+        // coordinates remain stable.  Resolve every endpoint edge again on
+        // the now-current original topology before any branch examines it.
+        if (!CompleteInputsForEndpoints(inputs))
+        {
+            AppendDebugLog(
+                "CreatePreview could not refresh forced P1/P2 inputs on rollback topology.");
+            UndoPreview();
+            return false;
+        }
+    }
+    else if (!ReadInputs(inputs,
+                         rollbackSafeClickObject,
+                         hasRollbackSafeSingleClick ? &rollbackSafeClickPoint : nullptr))
     {
         AppendDebugLog("CreatePreview ReadInputs failed.");
         UndoPreview();
@@ -3558,6 +4266,9 @@ bool TwoPointSiBianUI::CreatePreview()
     // offsets may move/split P2, but a replacement preview must restart from
     // this original pair instead of a face exposed by the preview topology.
     const InferredInputs originalPreviewInputs = inputs;
+    lastPreviewInputs_ = originalPreviewInputs;
+    hasLastPreviewInputs_ = true;
+    hasResolvedPrimaryP2ForPersistence_ = false;
     Edge* referenceCornerEdge = nullptr;
     if (inputs.chamferEdgeMode)
     {
@@ -3575,6 +4286,7 @@ bool TwoPointSiBianUI::CreatePreview()
     std::vector<tag_t> rightAngleOffsetFeatureTags;
     bool hasRightAngle90SecondFeaturePath = false;
     bool primaryUdfCreatedBeforeRip = false;
+    bool earlyPrimaryHasPendingSecondTools = false;
     tag_t earlyPrimarySubtractTag = NULL_TAG;
     if (inputs.inferredFromSingleClick)
     {
@@ -3645,6 +4357,9 @@ bool TwoPointSiBianUI::CreatePreview()
             if (iterationPrimaryUdfCreatedBeforeRip)
             {
                 primaryUdfCreatedBeforeRip = true;
+                earlyPrimaryHasPendingSecondTools =
+                    earlyPrimaryHasPendingSecondTools ||
+                    !secondToolBodyTags.empty();
                 earlyPrimarySubtractTag = iterationPrimarySubtractTag;
                 allReferenceTags.insert(allReferenceTags.end(),
                                         iterationPrimaryReferenceTags.begin(),
@@ -3796,6 +4511,16 @@ bool TwoPointSiBianUI::CreatePreview()
             return false;
         }
         inputs = constrainedInputs;
+        // The editable node must persist the P2 actually fed to the primary
+        // right-angle UDF, not the original click-side endpoint captured
+        // before the rip offsets.  Otherwise edit mode reopens with the old
+        // point and the primary tool moves to a different end of the offset
+        // edge when clearance or bend R changes.
+        hasResolvedPrimaryP2ForPersistence_ = true;
+        resolvedPrimaryP2ForPersistence_ = inputs.endPoint;
+        AppendDebugLog(
+            "CreatePreview captured constrained primary P2 for persistence: P2=" +
+            FormatPoint(inputs.endPoint));
     }
 
     tag_t firstUdfTag = NULL_TAG;
@@ -3833,8 +4558,26 @@ bool TwoPointSiBianUI::CreatePreview()
     }
     else
     {
-        AppendDebugLog("CreatePreview retained the early primary-UDF subtraction for the chamfer 90/270 P2Q+2T branch: subtract=" +
+        AppendDebugLog("CreatePreview retained the early primary-UDF subtraction: subtract=" +
                        std::to_string(finalSubtractTag));
+        if (earlyPrimaryHasPendingSecondTools && !allToolBodyTags.empty())
+        {
+            tag_t secondFeatureSubtractTag = NULL_TAG;
+            if (!SubtractToolBodies(inputs.targetBody,
+                                    allToolBodyTags,
+                                    secondFeatureSubtractTag,
+                                    errorMessage))
+            {
+                UndoPreview();
+                ShowError(errorMessage);
+                return false;
+            }
+            finalSubtractTag = secondFeatureSubtractTag;
+            AppendDebugLog(
+                "CreatePreview subtracted the pending Q-first-equal second-UDF tool bodies after the early primary subtraction: toolBodyCount=" +
+                std::to_string(allToolBodyTags.size()) +
+                ", subtract=" + std::to_string(finalSubtractTag));
+        }
     }
 
     tag_t finalResultTag = finalSubtractTag;
@@ -4250,6 +4993,755 @@ bool TwoPointSiBianUI::FlattenPreviewTargetBody(std::string& errorMessage)
     return true;
 }
 
+void TwoPointSiBianUI::AssignCustomFeatureData(
+    Features::CustomFeatureData* data,
+    const InferredInputs& inputs) const
+{
+    if (data == nullptr)
+    {
+        throw std::runtime_error("The 2P_SiBian CustomFeature data is unavailable.");
+    }
+
+    data->CustomTagAttributeByName(
+            zhihui_twopoint_sibian::kAttrTargetBody)
+        ->SetValue(inputs.targetBody);
+    data->CustomTagAttributeByName(
+            zhihui_twopoint_sibian::kAttrBaseFace)
+        ->SetValue(inputs.baseFace);
+    data->CustomTagAttributeByName(
+            zhihui_twopoint_sibian::kAttrStartEdge)
+        ->SetValue(inputs.startEdge);
+    data->CustomTagAttributeByName(
+            zhihui_twopoint_sibian::kAttrEndEdge)
+        ->SetValue(inputs.endEdge);
+    data->CustomDoubleAttributeByName(
+            zhihui_twopoint_sibian::kAttrStartX)
+        ->SetValue(inputs.startPoint.X);
+    data->CustomDoubleAttributeByName(
+            zhihui_twopoint_sibian::kAttrStartY)
+        ->SetValue(inputs.startPoint.Y);
+    data->CustomDoubleAttributeByName(
+            zhihui_twopoint_sibian::kAttrStartZ)
+        ->SetValue(inputs.startPoint.Z);
+    data->CustomDoubleAttributeByName(
+            zhihui_twopoint_sibian::kAttrEndX)
+        ->SetValue(inputs.endPoint.X);
+    data->CustomDoubleAttributeByName(
+            zhihui_twopoint_sibian::kAttrEndY)
+        ->SetValue(inputs.endPoint.Y);
+    data->CustomDoubleAttributeByName(
+            zhihui_twopoint_sibian::kAttrEndZ)
+        ->SetValue(inputs.endPoint.Z);
+    data->CustomDoubleAttributeByName(
+            zhihui_twopoint_sibian::kAttrThickness)
+        ->SetValue(inputs.thickness);
+    data->CustomDoubleAttributeByName(
+            zhihui_twopoint_sibian::kAttrSpanLength)
+        ->SetValue(inputs.spanLength);
+    data->CustomStringAttributeByName(
+            zhihui_twopoint_sibian::kAttrClearance)
+        ->SetValue(NXString(inputs.clearanceValue.c_str(), NXString::UTF8));
+    data->CustomStringAttributeByName(
+            zhihui_twopoint_sibian::kAttrBendRadius)
+        ->SetValue(NXString(inputs.bendRadiusValue.c_str(), NXString::UTF8));
+    data->CustomIntegerAttributeByName(
+            zhihui_twopoint_sibian::kAttrFeatureMode)
+        ->SetValue(static_cast<int>(inputs.featureMode));
+    data->CustomLogicalAttributeByName(
+            zhihui_twopoint_sibian::kAttrSmartMode)
+        ->SetValue(inputs.smartMode);
+    data->CustomLogicalAttributeByName(
+            zhihui_twopoint_sibian::kAttrChamferEdgeMode)
+        ->SetValue(inputs.chamferEdgeMode);
+    data->CustomLogicalAttributeByName(
+            zhihui_twopoint_sibian::kAttrReverseCut)
+        ->SetValue(inputs.reverseChamfer270Cut);
+    data->CustomLogicalAttributeByName(
+            zhihui_twopoint_sibian::kAttrInferredFromSingleClick)
+        ->SetValue(inputs.inferredFromSingleClick);
+    data->CustomDoubleAttributeByName(
+            zhihui_twopoint_sibian::kAttrClickX)
+        ->SetValue(inputs.selectionClickPoint.X);
+    data->CustomDoubleAttributeByName(
+            zhihui_twopoint_sibian::kAttrClickY)
+        ->SetValue(inputs.selectionClickPoint.Y);
+    data->CustomDoubleAttributeByName(
+            zhihui_twopoint_sibian::kAttrClickZ)
+        ->SetValue(inputs.selectionClickPoint.Z);
+}
+
+bool TwoPointSiBianUI::BeginEditedFeatureRollback(std::string& errorMessage)
+{
+    errorMessage.clear();
+    if (editRollbackManager_ != nullptr)
+    {
+        return true;
+    }
+    if (editedFeature_ == nullptr || session_ == nullptr)
+    {
+        errorMessage = "No editable 2P_SiBian CustomFeature is active.";
+        return false;
+    }
+    Part* workPart = session_->Parts()->Work();
+    if (workPart == nullptr)
+    {
+        errorMessage = "No work part is active while starting rollback edit.";
+        return false;
+    }
+    try
+    {
+        editRollbackMark_ = session_->SetUndoMark(
+            // NX EditWithRollbackManager explicitly requires a visible mark;
+            // an invisible mark is rejected before the model is rolled back.
+            Session::MarkVisibilityVisible,
+            "2P_SiBian Edit With Rollback");
+        editRollbackManager_ =
+            workPart->Features()->StartEditWithRollbackManager(
+                editedFeature_, editRollbackMark_);
+        if (editRollbackManager_ == nullptr)
+        {
+            throw std::runtime_error(
+                "NX did not return an edit-with-rollback manager.");
+        }
+        AppendDebugLog(
+            "edit-with-rollback started before the 2P_SiBian CustomFeature; "
+            "saved P1/P2 now resolve on the original body topology.");
+        return true;
+    }
+    catch (const NXException& ex)
+    {
+        errorMessage = "Failed to start rollback editing for 2P_SiBian: " +
+                       NxExceptionText(ex);
+    }
+    catch (const std::exception& ex)
+    {
+        errorMessage = std::string(
+                           "Failed to start rollback editing for 2P_SiBian: ") +
+                       ex.what();
+    }
+    catch (...)
+    {
+        errorMessage = "Failed to start rollback editing for 2P_SiBian.";
+    }
+    editRollbackManager_ = nullptr;
+    if (editRollbackMark_ != static_cast<Session::UndoMarkId>(0))
+    {
+        try
+        {
+            session_->DeleteUndoMark(editRollbackMark_,
+                                     "2P_SiBian Edit With Rollback");
+        }
+        catch (...)
+        {
+        }
+        editRollbackMark_ = static_cast<Session::UndoMarkId>(0);
+    }
+    AppendDebugLog(errorMessage);
+    return false;
+}
+
+bool TwoPointSiBianUI::FinishEditedFeatureRollback(
+    bool errorDuringEdit,
+    std::string& errorMessage)
+{
+    errorMessage.clear();
+    if (editRollbackManager_ == nullptr)
+    {
+        return true;
+    }
+    try
+    {
+        editRollbackManager_->UpdateFeature(errorDuringEdit);
+        editRollbackManager_->Stop();
+        editRollbackManager_->Destroy();
+        editRollbackManager_ = nullptr;
+        if (editRollbackMark_ != static_cast<Session::UndoMarkId>(0))
+        {
+            session_->DeleteUndoMark(editRollbackMark_,
+                                     "2P_SiBian Edit With Rollback");
+            editRollbackMark_ = static_cast<Session::UndoMarkId>(0);
+        }
+        AppendDebugLog(
+            std::string("edit-with-rollback finished: ") +
+            (errorDuringEdit
+                 ? "original CustomFeature restored."
+                 : "edited CustomFeature accepted and model rolled forward."));
+        return true;
+    }
+    catch (const NXException& ex)
+    {
+        errorMessage = "Failed to finish rollback editing for 2P_SiBian: " +
+                       NxExceptionText(ex);
+    }
+    catch (const std::exception& ex)
+    {
+        errorMessage = std::string(
+                           "Failed to finish rollback editing for 2P_SiBian: ") +
+                       ex.what();
+    }
+    catch (...)
+    {
+        errorMessage = "Failed to finish rollback editing for 2P_SiBian.";
+    }
+    AppendDebugLog(errorMessage);
+    return false;
+}
+
+bool TwoPointSiBianUI::CommitCustomFeature(const InferredInputs& inputs,
+                                           std::string& errorMessage)
+{
+    errorMessage.clear();
+    Part* workPart = session_ != nullptr ? session_->Parts()->Work() : nullptr;
+    const bool editingExistingFeature = editedFeature_ != nullptr;
+    if (workPart == nullptr || featureClass_ == nullptr ||
+        (!editingExistingFeature &&
+         (inputs.targetBody == nullptr || inputs.baseFace == nullptr ||
+          inputs.startEdge == nullptr || inputs.endEdge == nullptr)))
+    {
+        errorMessage =
+            "The CustomFeature class or its resolved body/face/edge inputs are unavailable.";
+        return false;
+    }
+
+    Features::CustomFeatureBuilder* builder = nullptr;
+    try
+    {
+        builder = workPart->Features()->CreateCustomFeatureBuilder(editedFeature_);
+        Features::CustomFeatureData* data = nullptr;
+        if (editedFeature_ == nullptr)
+        {
+            Features::CustomAttributeCollection* attrs =
+                workPart->Features()->CustomAttributeCollection();
+            std::vector<Features::CustomAttribute*> values;
+            values.push_back(CreateTagAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrTargetBody,
+                inputs.targetBody,
+                true,
+                true));
+            values.push_back(CreateTagAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrBaseFace,
+                inputs.baseFace,
+                false));
+            values.push_back(CreateTagAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrStartEdge,
+                inputs.startEdge,
+                false));
+            values.push_back(CreateTagAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrEndEdge,
+                inputs.endEdge,
+                false));
+            values.push_back(CreateDoubleAttribute(
+                attrs, zhihui_twopoint_sibian::kAttrStartX, inputs.startPoint.X));
+            values.push_back(CreateDoubleAttribute(
+                attrs, zhihui_twopoint_sibian::kAttrStartY, inputs.startPoint.Y));
+            values.push_back(CreateDoubleAttribute(
+                attrs, zhihui_twopoint_sibian::kAttrStartZ, inputs.startPoint.Z));
+            values.push_back(CreateDoubleAttribute(
+                attrs, zhihui_twopoint_sibian::kAttrEndX, inputs.endPoint.X));
+            values.push_back(CreateDoubleAttribute(
+                attrs, zhihui_twopoint_sibian::kAttrEndY, inputs.endPoint.Y));
+            values.push_back(CreateDoubleAttribute(
+                attrs, zhihui_twopoint_sibian::kAttrEndZ, inputs.endPoint.Z));
+            values.push_back(CreateDoubleAttribute(
+                attrs, zhihui_twopoint_sibian::kAttrThickness, inputs.thickness));
+            values.push_back(CreateDoubleAttribute(
+                attrs, zhihui_twopoint_sibian::kAttrSpanLength, inputs.spanLength));
+            values.push_back(CreateStringAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrClearance,
+                inputs.clearanceValue));
+            values.push_back(CreateStringAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrBendRadius,
+                inputs.bendRadiusValue));
+            values.push_back(CreateIntegerAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrFeatureMode,
+                static_cast<int>(inputs.featureMode)));
+            values.push_back(CreateLogicalAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrSmartMode,
+                inputs.smartMode));
+            values.push_back(CreateLogicalAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrChamferEdgeMode,
+                inputs.chamferEdgeMode));
+            values.push_back(CreateLogicalAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrReverseCut,
+                inputs.reverseChamfer270Cut));
+            values.push_back(CreateLogicalAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrInferredFromSingleClick,
+                inputs.inferredFromSingleClick));
+            values.push_back(CreateDoubleAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrClickX,
+                inputs.selectionClickPoint.X));
+            values.push_back(CreateDoubleAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrClickY,
+                inputs.selectionClickPoint.Y));
+            values.push_back(CreateDoubleAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrClickZ,
+                inputs.selectionClickPoint.Z));
+            values.push_back(CreateIntegerAttribute(
+                attrs,
+                zhihui_twopoint_sibian::kAttrSchemaVersion,
+                2));
+            data = workPart->Features()
+                       ->CustomFeatureDataCollection()
+                       ->CreateData(featureClass_, values);
+        }
+        else
+        {
+            data = editedFeature_->FeatureData();
+        }
+
+        if (editingExistingFeature)
+        {
+            // Preserve the original target/face/edge references and P1/P2.
+            // Those objects may have been replaced by the completed rip and
+            // offset topology, but the registered construction members retain
+            // their own associative inputs.
+            data->CustomStringAttributeByName(
+                    zhihui_twopoint_sibian::kAttrClearance)
+                ->SetValue(NXString(inputs.clearanceValue.c_str(), NXString::UTF8));
+            data->CustomStringAttributeByName(
+                    zhihui_twopoint_sibian::kAttrBendRadius)
+                ->SetValue(NXString(inputs.bendRadiusValue.c_str(), NXString::UTF8));
+        }
+        else
+        {
+            AssignCustomFeatureData(data, inputs);
+        }
+
+        lastPreviewInputs_ = inputs;
+        hasLastPreviewInputs_ = true;
+        // Only a brand-new CustomFeature may create construction members in
+        // PreUpdate.  Editing must preserve the existing list and let the
+        // Core InternalFeaturePreUpdate callback edit each member in place.
+        buildingCustomFeature_ = !editingExistingFeature;
+        customFeatureConstructionRebuilt_ = false;
+        builder->SetFeatureData(data);
+        Features::Feature* committed = builder->CommitFeature();
+        builder->Destroy();
+        builder = nullptr;
+        buildingCustomFeature_ = false;
+
+        if (editingExistingFeature)
+        {
+            // CommitFeature schedules the internal-feature callbacks.  Finish
+            // that one scheduled pass before Block Styler reports a successful
+            // preview.  This is the same edit contract used by feature 18 and
+            // prevents Apply/OK from observing a half-updated construction
+            // chain that only succeeds after a second double-click.
+            const int updateResult = UF_MODL_update();
+            if (updateResult != 0)
+            {
+                throw NXException::Create(
+                    updateResult,
+                    ("Failed to finish the edited 2P_SiBian model update: " +
+                     UfMessage(updateResult))
+                        .c_str());
+            }
+            AppendDebugLog(
+                "CommitCustomFeature edit: scheduled internal-feature update completed synchronously.");
+        }
+
+        Features::CustomFeature* customFeature =
+            dynamic_cast<Features::CustomFeature*>(committed);
+        if (customFeature == nullptr)
+        {
+            errorMessage = "NX did not return the committed 2P_SiBian CustomFeature.";
+            return false;
+        }
+        customFeature->SetName(zhihui_twopoint_sibian::kFeatureDisplayName);
+        if (editingExistingFeature)
+        {
+            editedFeature_ = customFeature;
+        }
+        AppendDebugLog("CommitCustomFeature OK: node=" +
+                       std::to_string(customFeature->Tag()) +
+                       ", one opaque node with construction features.");
+        return true;
+    }
+    catch (const NXException& ex)
+    {
+        buildingCustomFeature_ = false;
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        errorMessage = "Failed to create/update the 2P_SiBian CustomFeature: " +
+                       NxExceptionText(ex);
+    }
+    catch (const std::exception& ex)
+    {
+        buildingCustomFeature_ = false;
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        errorMessage =
+            std::string("Failed to create/update the 2P_SiBian CustomFeature: ") +
+            ex.what();
+    }
+    catch (...)
+    {
+        buildingCustomFeature_ = false;
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        errorMessage = "Failed to create/update the 2P_SiBian CustomFeature.";
+    }
+    AppendDebugLog(errorMessage);
+    return false;
+}
+
+bool TwoPointSiBianUI::RestoreEditedFeatureBaseline(
+    std::string& errorMessage)
+{
+    errorMessage.clear();
+    if (editedFeature_ == nullptr || !editedLivePreviewDirty_)
+    {
+        return true;
+    }
+    if (!hasEditedBaselineInputs_)
+    {
+        errorMessage =
+            "The original 2P_SiBian edit values were not retained for Cancel.";
+        return false;
+    }
+
+    isUpdatingPreview_ = true;
+    const bool restored =
+        CommitCustomFeature(editedBaselineInputs_, errorMessage);
+    isUpdatingPreview_ = false;
+    if (restored)
+    {
+        lastPreviewInputs_ = editedBaselineInputs_;
+        hasLastPreviewInputs_ = true;
+        editedLivePreviewDirty_ = false;
+    }
+    return restored;
+}
+
+int TwoPointSiBianUI::BuildCustomFeatureConstruction(
+    Features::CustomFeaturePreUpdateEvent* event)
+{
+    if (event == nullptr)
+    {
+        return 1;
+    }
+    const std::vector<Features::ConstructionFeatureData*> existingConstruction =
+        event->GetConstructionFeatures();
+    if (!existingConstruction.empty())
+    {
+        // Siemens' CustomFeature contract requires existing construction
+        // features to be retained here.  Their parameters are edited later by
+        // InternalFeaturePreUpdateCallback; never recreate a second rip chain.
+        event->SetConstructionFeatures(existingConstruction);
+        AppendDebugLog(
+            "CustomFeature pre-update retained existing construction chain: count=" +
+            std::to_string(existingConstruction.size()));
+        return 0;
+    }
+
+    if (!buildingCustomFeature_ || !hasLastPreviewInputs_)
+    {
+        AppendDebugLog(
+            "CustomFeature pre-update has no existing construction chain and no authorized initial build context.");
+        return 1;
+    }
+
+    AppendDebugLog("CustomFeature pre-update: creating the initial internal branch chain.");
+    customFeatureConstructionRebuilt_ = true;
+    InferredInputs buildInputs = lastPreviewInputs_;
+    if (!CompleteInputsForEndpoints(buildInputs))
+    {
+        AppendDebugLog(
+            "CustomFeature pre-update could not resolve the persisted P1/P2 on the input body.");
+        return 1;
+    }
+    lastPreviewInputs_ = buildInputs;
+    if (!CreatePreview(&buildInputs))
+    {
+        AppendDebugLog("CustomFeature pre-update failed while creating the internal chain.");
+        return 1;
+    }
+
+    // CreatePreview may replace the original right-angle P2 with the endpoint
+    // shared by the selected plane and the newly offset rip face.  Persist
+    // that actual primary-UDF point on the opaque node.  Only numeric data is
+    // updated here; storing the child offset edge itself would create a
+    // circular dependency from the CustomFeature to its construction member.
+    if (event->GetCustomFeature() != nullptr &&
+        hasResolvedPrimaryP2ForPersistence_ && hasLastPreviewInputs_ &&
+        (lastPreviewInputs_.featureMode == FeatureMode::NinetyLeft ||
+         lastPreviewInputs_.featureMode == FeatureMode::NinetyRight))
+    {
+        Features::CustomFeatureData* featureData =
+            event->GetCustomFeature()->FeatureData();
+        if (featureData != nullptr)
+        {
+            featureData->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrEndX)
+                ->SetValue(resolvedPrimaryP2ForPersistence_.X);
+            featureData->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrEndY)
+                ->SetValue(resolvedPrimaryP2ForPersistence_.Y);
+            featureData->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrEndZ)
+                ->SetValue(resolvedPrimaryP2ForPersistence_.Z);
+            featureData->CustomDoubleAttributeByName(
+                    zhihui_twopoint_sibian::kAttrSpanLength)
+                ->SetValue(Distance(lastPreviewInputs_.startPoint,
+                                    resolvedPrimaryP2ForPersistence_));
+            AppendDebugLog(
+                "CustomFeature persisted the actual primary right-angle P2: " +
+                FormatPoint(resolvedPrimaryP2ForPersistence_));
+        }
+    }
+
+    std::vector<Features::ConstructionFeatureData*> constructionData;
+    std::set<tag_t> seen;
+    const tag_t customFeatureTag =
+        event->GetCustomFeature() != nullptr
+            ? event->GetCustomFeature()->Tag()
+            : NULL_TAG;
+    for (tag_t featureTag : previewCreatedFeatureTags_)
+    {
+        if (featureTag == NULL_TAG || featureTag == customFeatureTag ||
+            !seen.insert(featureTag).second ||
+            UF_OBJ_ask_status(featureTag) != UF_OBJ_ALIVE)
+        {
+            continue;
+        }
+        try
+        {
+            Features::Feature* feature = dynamic_cast<Features::Feature*>(
+                NXObjectManager::Get(featureTag));
+            if (feature == nullptr)
+            {
+                continue;
+            }
+            // An extrusion already owns its sketch through
+            // SetParentFeatureInternal/MakeSketchInternal. Registering that
+            // sketch again as a CustomFeature construction member flattens
+            // the navigator relationship. Keep internal UDF/sketch children
+            // with their immediate owning feature and register only the
+            // top-level construction features here.
+            if (feature->IsInternal())
+            {
+                AppendDebugLog(
+                    "CustomFeature retained internal child under its owning feature: tag=" +
+                    std::to_string(featureTag));
+                continue;
+            }
+            Features::ConstructionFeatureData* item =
+                event->CreateConstructionFeatureData(feature);
+            // This flag controls graphics, not Part Navigator disclosure.
+            // Keep it true so body-modifying rips/offsets/booleans display
+            // their final target body while NX hides the internal history.
+            item->SetShowInGraphicView(true);
+            constructionData.push_back(item);
+        }
+        catch (...)
+        {
+            AppendDebugLog("CustomFeature skipped an unavailable construction feature tag=" +
+                           std::to_string(featureTag));
+        }
+    }
+    if (constructionData.empty())
+    {
+        UndoPreview();
+        AppendDebugLog("CustomFeature pre-update produced no construction features.");
+        return 1;
+    }
+
+    event->SetConstructionFeatures(constructionData);
+    const size_t constructionCount = constructionData.size();
+    CommitPreview();
+    FinalizeCommittedPreview();
+    AppendDebugLog("CustomFeature pre-update registered constructionFeatureCount=" +
+                   std::to_string(constructionCount));
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int ZhihuiTwoPointSiBianBuildCustomFeature(
+    void* eventPointer)
+{
+    if (gActiveTwoPointSiBianDialog == nullptr || eventPointer == nullptr)
+    {
+        return 1;
+    }
+    return gActiveTwoPointSiBianDialog->BuildCustomFeatureConstruction(
+        static_cast<Features::CustomFeaturePreUpdateEvent*>(eventPointer));
+}
+
+bool TwoPointSiBianUI::ConsolidatePreviewFeatureTemplate(
+    std::string& errorMessage)
+{
+    errorMessage.clear();
+    if (!hasPreview_ || previewCreatedFeatureTags_.empty())
+    {
+        errorMessage =
+            "The completed preview has no feature chain to package as 2P_SiBian.";
+        return false;
+    }
+
+    std::vector<tag_t> liveFeatureTags;
+    std::set<tag_t> uniqueTags;
+    for (tag_t featureTag : previewCreatedFeatureTags_)
+    {
+        if (featureTag == NULL_TAG ||
+            UF_OBJ_ask_status(featureTag) != UF_OBJ_ALIVE ||
+            !uniqueTags.insert(featureTag).second)
+        {
+            continue;
+        }
+        int objectType = 0;
+        int objectSubtype = 0;
+        if (UF_OBJ_ask_type_and_subtype(featureTag,
+                                       &objectType,
+                                       &objectSubtype) == 0 &&
+            objectType == UF_feature_type)
+        {
+            liveFeatureTags.push_back(featureTag);
+        }
+    }
+    if (liveFeatureTags.empty())
+    {
+        errorMessage =
+            "None of the preview features remained available for feature-template packaging.";
+        return false;
+    }
+
+    Part* workPart = session_ != nullptr ? session_->Parts()->Work() : nullptr;
+    if (workPart == nullptr || workPart->UserDefinedTemplates() == nullptr)
+    {
+        errorMessage =
+            "No work part is available for creation of the complete branch feature template.";
+        return false;
+    }
+
+    // Build a genuine UDF definition from the exact feature chain selected by
+    // the current branch, including any continuation iterations. Converting
+    // that definition gives NX a real UDT Feature Group instead of the plain
+    // feature set previously created by UF_MODL_create_set_of_feature.
+    tag_t targetBodyReference = previewTargetBodyTag_;
+    char targetPrompt[] = "Target sheet body";
+    char* referencePrompts[] = {targetPrompt};
+    UF_MODL_udfs_def_data_t definitionData{};
+    definitionData.frecs = liveFeatureTags.data();
+    definitionData.num_frecs = static_cast<int>(liveFeatureTags.size());
+    definitionData.exp_defs = nullptr;
+    definitionData.num_exp = 0;
+    definitionData.refs = &targetBodyReference;
+    definitionData.ref_prompts = referencePrompts;
+    definitionData.num_ref = 1;
+    std::strncpy(definitionData.name_str_data,
+                 "2P_SiBian",
+                 sizeof(definitionData.name_str_data) - 1);
+    definitionData.name_str_data[sizeof(definitionData.name_str_data) - 1] = '\0';
+    definitionData.explosion_flag = false;
+
+    const std::vector<tag_t> featureTagsBeforeConversion =
+        CurrentWorkPartFeatureTags();
+    const std::set<tag_t> featuresBeforeConversion(
+        featureTagsBeforeConversion.begin(),
+        featureTagsBeforeConversion.end());
+    tag_t udfDefinitionTag = NULL_TAG;
+    const int createDefinitionResult =
+        UF_MODL_udfs_create_def(&udfDefinitionTag, &definitionData);
+    if (createDefinitionResult != 0 || udfDefinitionTag == NULL_TAG)
+    {
+        errorMessage =
+            "NX could not create a complete UDF definition for the selected branch: " +
+            UfMessage(createDefinitionResult);
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+
+    try
+    {
+        Features::Feature* definitionFeature =
+            dynamic_cast<Features::Feature*>(NXObjectManager::Get(udfDefinitionTag));
+        if (definitionFeature == nullptr)
+        {
+            throw std::runtime_error(
+                "The complete UDF definition feature could not be resolved.");
+        }
+        workPart->UserDefinedTemplates()->ConvertUdfToFeaturetemplate(
+            definitionFeature);
+    }
+    catch (const NXException& ex)
+    {
+        errorMessage =
+            "NX could not convert the complete branch definition into a Feature Template: " +
+            NxExceptionText(ex);
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+    catch (const std::exception& ex)
+    {
+        errorMessage =
+            std::string("NX could not convert the complete branch definition into a Feature Template: ") +
+            ex.what();
+        AppendDebugLog(errorMessage);
+        return false;
+    }
+
+    tag_t templateGroupTag = NULL_TAG;
+    for (auto iterator = workPart->Features()->begin();
+         iterator != workPart->Features()->end();
+         ++iterator)
+    {
+        Features::Feature* feature = *iterator;
+        if (feature == nullptr ||
+            featuresBeforeConversion.find(feature->Tag()) !=
+                featuresBeforeConversion.end())
+        {
+            continue;
+        }
+        const char* featureTypeText = feature->FeatureType().GetText();
+        const std::string featureType =
+            ToLowerAscii(featureTypeText != nullptr ? featureTypeText : "");
+        if (featureType.find("udt feature group") != std::string::npos)
+        {
+            templateGroupTag = feature->Tag();
+        }
+    }
+    if (templateGroupTag == NULL_TAG)
+    {
+        errorMessage =
+            "NX converted the complete branch, but its UDT Feature Group could not be resolved.";
+        AppendDebugLog(errorMessage +
+                       " definition=" + std::to_string(udfDefinitionTag));
+        return false;
+    }
+
+    UF_OBJ_set_name(templateGroupTag, "2P_SiBian");
+    previewUdfTag_ = templateGroupTag;
+    previewCreatedFeatureTags_.push_back(templateGroupTag);
+    AppendDebugLog("ConsolidatePreviewFeatureTemplate OK: genuineFeatureTemplate=true"
+                   ", definition=" + std::to_string(udfDefinitionTag) +
+                   ", group=" + std::to_string(templateGroupTag) +
+                   ", branchMemberCount=" +
+                   std::to_string(liveFeatureTags.size()) +
+                   ", targetBodyReference=" +
+                   std::to_string(previewTargetBodyTag_) +
+                   ", variableContinuationSupported=true");
+    return true;
+}
+
 void TwoPointSiBianUI::CommitPreview()
 {
     if (!hasPreview_)
@@ -4314,6 +5806,45 @@ bool TwoPointSiBianUI::ReadInputs(InferredInputs& inputs,
     Point3d selectedEndPoint;
     bool hasStart = ReadSelectedPoint(startPointBlock_, selectedStartObject, selectedStartPoint);
     bool hasEnd = ReadSelectedPoint(endPointBlock_, selectedEndObject, selectedEndPoint);
+
+    if (!inputs.smartMode && !hasStart && !hasEnd && hasEditedEndpointCache_)
+    {
+        selectedStartPoint = editedCachedP1_;
+        selectedEndPoint = editedCachedP2_;
+        hasStart = true;
+        hasEnd = true;
+        try
+        {
+            selectedStartObject = editedStartEdgeTag_ != NULL_TAG
+                                      ? dynamic_cast<TaggedObject*>(
+                                            NXObjectManager::Get(editedStartEdgeTag_))
+                                      : nullptr;
+            selectedEndObject = editedEndEdgeTag_ != NULL_TAG
+                                    ? dynamic_cast<TaggedObject*>(
+                                          NXObjectManager::Get(editedEndEdgeTag_))
+                                    : nullptr;
+            inputs.targetBody = editedTargetBodyTag_ != NULL_TAG
+                                    ? dynamic_cast<Body*>(
+                                          NXObjectManager::Get(editedTargetBodyTag_))
+                                    : nullptr;
+            inputs.baseFace = editedBaseFaceTag_ != NULL_TAG
+                                  ? dynamic_cast<Face*>(
+                                        NXObjectManager::Get(editedBaseFaceTag_))
+                                  : nullptr;
+        }
+        catch (...)
+        {
+            selectedStartObject = nullptr;
+            selectedEndObject = nullptr;
+            inputs.targetBody = nullptr;
+            inputs.baseFace = nullptr;
+        }
+        AppendDebugLog("ReadInputs restored CustomFeature endpoints: P1=" +
+                       FormatPoint(selectedStartPoint) +
+                       ", P2=" + FormatPoint(selectedEndPoint) +
+                       ", targetBody=" +
+                       std::to_string(editedTargetBodyTag_));
+    }
 
     if (singleClickObjectOverride != nullptr && singleClickPointOverride != nullptr)
     {
@@ -5040,7 +6571,12 @@ bool TwoPointSiBianUI::ConstrainRightAnglePrimaryP2ToOffsetSharedEdges(
         // their result-face set.  That zero-distance endpoint is not the end
         // of the moved rip-offset edge.  Prefer the nearest endpoint that was
         // actually displaced whenever one exists.
-        if (hasMovedOffsetEndpoint &&
+        // Ninety-left needs the displaced end of the rip-offset edge.  For
+        // ninety-right the recorded P2 is the stable end of that same shared
+        // edge; discarding it makes the UDF reference follow the moving end
+        // when clearance is edited.
+        if (currentInputs.featureMode == FeatureMode::NinetyLeft &&
+            hasMovedOffsetEndpoint &&
             endpoint.distanceToRecordedP2 <= kPointTolerance)
         {
             AppendDebugLog("Right-angle final P2 skipped unchanged recorded endpoint: edge=" +
@@ -5065,6 +6601,12 @@ bool TwoPointSiBianUI::ConstrainRightAnglePrimaryP2ToOffsetSharedEdges(
         {
             continue;
         }
+        // Keep the actual plane/offset common edge as the right-angle UDF's
+        // P2 parent.  CompleteInputsForEndpoints classifies signed edges and
+        // may otherwise replace this edge with an unrelated outer Y+ edge
+        // that happens to meet the same point.
+        candidate.endEdge = dynamic_cast<Edge*>(
+            NXObjectManager::Get(endpoint.edgeTag));
         constrainedInputs = candidate;
         AppendDebugLog("Right-angle final P2 constrained to plane/offset shared-edge endpoint: mode=" +
                        std::string(currentInputs.featureMode == FeatureMode::NinetyLeft
@@ -6737,7 +8279,8 @@ bool TwoPointSiBianUI::ExtrudeReferenceCornerProfile(
     fixedPlaneMatrix.Zy = profileNormal.Y;
     fixedPlaneMatrix.Zz = profileNormal.Z;
 
-    SimpleSketchInPlaceBuilder* sketchBuilder = nullptr;
+    SketchInPlaceBuilder* sketchBuilder = nullptr;
+    SimpleSketchInPlaceBuilder* simpleSketchBuilder = nullptr;
     Sketch* profileSketch = nullptr;
     Features::Feature* sketchFeature = nullptr;
     Features::ExtrudeBuilder* extrudeBuilder = nullptr;
@@ -6745,7 +8288,9 @@ bool TwoPointSiBianUI::ExtrudeReferenceCornerProfile(
     tag_t sketchFeatureTag = NULL_TAG;
     tag_t extrudeFeatureTag = NULL_TAG;
     tag_t placementPointTag = NULL_TAG;
+    tag_t placementPlaneTag = NULL_TAG;
     tag_t placementCsysTag = NULL_TAG;
+    tag_t sketchAxisDirectionTag = NULL_TAG;
     tag_t extrusionDirectionTag = NULL_TAG;
     std::vector<tag_t> sketchCurveTags;
     Session::UndoMarkId localUndoMark = static_cast<Session::UndoMarkId>(0);
@@ -6809,6 +8354,17 @@ bool TwoPointSiBianUI::ExtrudeReferenceCornerProfile(
             }
             sketchBuilder = nullptr;
         }
+        if (simpleSketchBuilder != nullptr)
+        {
+            try
+            {
+                simpleSketchBuilder->Destroy();
+            }
+            catch (...)
+            {
+            }
+            simpleSketchBuilder = nullptr;
+        }
         if (localUndoMark != static_cast<Session::UndoMarkId>(0))
         {
             try
@@ -6863,6 +8419,20 @@ bool TwoPointSiBianUI::ExtrudeReferenceCornerProfile(
             cleanupComplete = cleanupComplete &&
                               UF_OBJ_ask_status(placementPointTag) != UF_OBJ_ALIVE;
         }
+        if (sketchAxisDirectionTag != NULL_TAG &&
+            UF_OBJ_ask_status(sketchAxisDirectionTag) == UF_OBJ_ALIVE)
+        {
+            UF_OBJ_delete_object(sketchAxisDirectionTag);
+            cleanupComplete = cleanupComplete &&
+                              UF_OBJ_ask_status(sketchAxisDirectionTag) != UF_OBJ_ALIVE;
+        }
+        if (placementPlaneTag != NULL_TAG &&
+            UF_OBJ_ask_status(placementPlaneTag) == UF_OBJ_ALIVE)
+        {
+            UF_OBJ_delete_object(placementPlaneTag);
+            cleanupComplete = cleanupComplete &&
+                              UF_OBJ_ask_status(placementPlaneTag) != UF_OBJ_ALIVE;
+        }
         if (placementCsysTag != NULL_TAG &&
             UF_OBJ_ask_status(placementCsysTag) == UF_OBJ_ALIVE)
         {
@@ -6875,28 +8445,90 @@ bool TwoPointSiBianUI::ExtrudeReferenceCornerProfile(
 
     try
     {
-        failureStage = "fixed sketch coordinate-system creation";
-        CartesianCoordinateSystem* placementCsys =
-            workPart->CoordinateSystems()->CreateCoordinateSystem(
+        failureStage = "fixed sketch plane creation";
+        const bool isFarTopCut =
+            operationName != nullptr &&
+            std::strcmp(operationName,
+                        "reference far-end top-corner cut") == 0;
+        Plane* placementPlane = nullptr;
+        CartesianCoordinateSystem* placementCsys = nullptr;
+        if (isFarTopCut)
+        {
+            // The far-cut sketch must survive opaque CustomFeature updates.
+            // A temporary CSYS is not saved, and a Plane smart object derived
+            // from a datum feature can still be condemned when the sketch is
+            // made internal.  Use a non-temporary saved CSYS directly as the
+            // SimpleSketch placement object, avoiding an intermediate Plane.
+            placementCsys = workPart->CoordinateSystems()->CreateCoordinateSystem(
                 origin,
                 fixedPlaneMatrix,
-                true);
+                false);
+            if (placementCsys == nullptr)
+            {
+                throw std::runtime_error(
+                    "NX did not create the persistent far-cut sketch coordinate system.");
+            }
+            placementCsysTag = placementCsys->Tag();
+            placementCsys->SetVisibility(
+                SmartObject::VisibilityOptionInvisible);
+            AppendDebugLog(
+                "far-end top-cut sketch uses saved non-temporary coordinate system: csys=" +
+                std::to_string(placementCsysTag));
+        }
+        else
+        {
+            placementPlane = workPart->Planes()->CreatePlane(
+                origin,
+                profileNormal,
+                SmartObject::UpdateOptionWithinModeling);
+        }
+        Direction* sketchAxisDirection = workPart->Directions()->CreateDirection(
+            origin,
+            fixedPlaneXAxis,
+            SmartObject::UpdateOptionWithinModeling);
         Point* placementPoint = workPart->Points()->CreatePoint(origin);
-        if (placementCsys == nullptr || placementPoint == nullptr)
+        if ((!isFarTopCut && placementPlane == nullptr) ||
+            sketchAxisDirection == nullptr ||
+            placementPoint == nullptr)
         {
             throw std::runtime_error("NX did not create the corner-profile sketch placement.");
         }
-        placementCsysTag = placementCsys->Tag();
+        placementPlaneTag = placementPlane != nullptr
+                                ? placementPlane->Tag()
+                                : NULL_TAG;
+        sketchAxisDirectionTag = sketchAxisDirection->Tag();
         placementPointTag = placementPoint->Tag();
+        if (placementPlane != nullptr)
+        {
+            placementPlane->SetVisibility(SmartObject::VisibilityOptionInvisible);
+        }
+        sketchAxisDirection->SetVisibility(SmartObject::VisibilityOptionInvisible);
         placementPoint->SetVisibility(SmartObject::VisibilityOptionInvisible);
 
         failureStage = "fixed sketch commit";
-        sketchBuilder = workPart->Sketches()->CreateSimpleSketchInPlaceBuilder();
-        sketchBuilder->SetUseWorkPartOrigin(false);
-        sketchBuilder->SetCoordinateSystem(placementCsys);
-        sketchBuilder->SetSketchOrigin(placementPoint);
-
-        NXObject* committedSketchObject = sketchBuilder->Commit();
+        NXObject* committedSketchObject = nullptr;
+        std::vector<NXObject*> committedSketchObjects;
+        if (isFarTopCut)
+        {
+            simpleSketchBuilder =
+                workPart->Sketches()->CreateSimpleSketchInPlaceBuilder();
+            simpleSketchBuilder->SetUseWorkPartOrigin(false);
+            simpleSketchBuilder->SetCoordinateSystem(placementCsys);
+            simpleSketchBuilder->SetSketchOrigin(placementPoint);
+            committedSketchObject = simpleSketchBuilder->Commit();
+            committedSketchObjects = simpleSketchBuilder->GetCommittedObjects();
+        }
+        else
+        {
+            sketchBuilder = workPart->Sketches()->CreateSketchInPlaceBuilder2(nullptr);
+            sketchBuilder->SetPlaneOption(Sketch::PlaneOptionExistingPlane);
+            sketchBuilder->SetPlaneReference(placementPlane);
+            sketchBuilder->SetAxisReference(sketchAxisDirection);
+            sketchBuilder->SetOriginOption(OriginMethodSpecifyPoint);
+            sketchBuilder->SetSketchOrigin(placementPoint);
+            committedSketchObject = sketchBuilder->Commit();
+            committedSketchObjects = sketchBuilder->GetCommittedObjects();
+        }
         profileSketch = dynamic_cast<Sketch*>(committedSketchObject);
         Features::SketchFeature* committedSketchFeature =
             dynamic_cast<Features::SketchFeature*>(committedSketchObject);
@@ -6913,7 +8545,6 @@ bool TwoPointSiBianUI::ExtrudeReferenceCornerProfile(
         {
             sketchFeatureTag = sketchFeature->Tag();
         }
-        std::vector<NXObject*> committedSketchObjects = sketchBuilder->GetCommittedObjects();
         for (NXObject* committedObject : committedSketchObjects)
         {
             if (profileSketch == nullptr)
@@ -6932,8 +8563,16 @@ bool TwoPointSiBianUI::ExtrudeReferenceCornerProfile(
                 }
             }
         }
-        sketchBuilder->Destroy();
-        sketchBuilder = nullptr;
+        if (simpleSketchBuilder != nullptr)
+        {
+            simpleSketchBuilder->Destroy();
+            simpleSketchBuilder = nullptr;
+        }
+        if (sketchBuilder != nullptr)
+        {
+            sketchBuilder->Destroy();
+            sketchBuilder = nullptr;
+        }
         if (profileSketch == nullptr)
         {
             throw std::runtime_error("NX did not create the corner-profile sketch.");
@@ -7132,6 +8771,51 @@ bool TwoPointSiBianUI::ExtrudeReferenceCornerProfile(
         if (!sketchFeature->IsInternal())
         {
             throw std::runtime_error("NX did not place the profile sketch inside the extrusion.");
+        }
+
+        if (operationName != nullptr &&
+            std::strcmp(operationName,
+                        "reference far-end top-corner cut") == 0)
+        {
+            SetConstructionRole(
+                extrudeFeature,
+                zhihui_twopoint_sibian::kRoleExtrudeFarTopCut);
+            AppendDebugLog(
+                "tagged the far-end top-corner extrusion for bend-R/clearance editing: extrude=" +
+                std::to_string(extrudeFeatureTag));
+        }
+        else if (operationName != nullptr &&
+                 std::strcmp(operationName,
+                             "reference 90-degree closed-profile corner-edge cut") == 0)
+        {
+            SetConstructionRole(
+                extrudeFeature,
+                zhihui_twopoint_sibian::kRoleExtrudeCornerEdgeCut);
+            AppendDebugLog(
+                "tagged the closed-profile reference corner-edge extrusion for clearance editing: extrude=" +
+                std::to_string(extrudeFeatureTag));
+        }
+        else if (operationName != nullptr &&
+                 std::strcmp(operationName,
+                             "90-right oblique clearance rectangle cut") == 0)
+        {
+            SetConstructionRole(
+                extrudeFeature,
+                zhihui_twopoint_sibian::kRoleExtrudeRightClearanceRectangle);
+            AppendDebugLog(
+                "tagged the 90-right clearance rectangle extrusion for clearance editing: extrude=" +
+                std::to_string(extrudeFeatureTag));
+        }
+        else if (operationName != nullptr &&
+                 std::strcmp(operationName,
+                             "90-left oblique clearance rectangle cut") == 0)
+        {
+            SetConstructionRole(
+                extrudeFeature,
+                zhihui_twopoint_sibian::kRoleExtrudeLeftClearanceRectangle);
+            AppendDebugLog(
+                "tagged the 90-left clearance rectangle extrusion for clearance editing: extrude=" +
+                std::to_string(extrudeFeatureTag));
         }
 
         failureStage = "extrusion body resolution";
@@ -7530,6 +9214,15 @@ bool TwoPointSiBianUI::CreateReferenceRightCornerEdgeCut(
         Features::Feature* feature = builder->CommitFeature();
         builder->Destroy();
         builder = nullptr;
+        SetConstructionRole(
+            feature,
+            zhihui_twopoint_sibian::kRoleExtrudeCornerEdgeCut);
+        if (feature != nullptr)
+        {
+            AppendDebugLog(
+                "tagged the reference corner-edge extrusion for clearance editing: extrude=" +
+                std::to_string(feature->Tag()));
+        }
         tag_t toolBodyTag = NULL_TAG;
         if (feature == nullptr ||
             UF_MODL_ask_feat_body(feature->Tag(), &toolBodyTag) != 0 ||
@@ -8153,6 +9846,48 @@ bool TwoPointSiBianUI::CreateObliqueClearanceCut(
                 b1RipEndpoint.Y + sideDirection.Y * clearance,
                 b1RipEndpoint.Z + sideDirection.Z * clearance)};
 
+    // Both directional right-angle routes use an internal four-line sketch so
+    // their clearance rectangle can be edited in place.  Keep only the
+    // established chamfer route on the raw-curve implementation below.
+    if (inputs.featureMode == FeatureMode::NinetyRight ||
+        inputs.featureMode == FeatureMode::NinetyLeft)
+    {
+        const bool rightMode =
+            inputs.featureMode == FeatureMode::NinetyRight;
+        const std::vector<Point3d> sketchProfile = {
+            corners[0], corners[1], corners[2], corners[3], corners[0]};
+        if (!ExtrudeReferenceCornerProfile(
+                inputs,
+                sketchProfile,
+                b1RipEndpoint,
+                planeNormal,
+                -inputs.thickness,
+                inputs.thickness,
+                rightMode ? "90-right oblique clearance rectangle cut"
+                          : "90-left oblique clearance rectangle cut",
+                errorMessage))
+        {
+            return false;
+        }
+        AppendDebugLog(
+            std::string(rightMode ? "90-right" : "90-left") +
+            " oblique clearance rectangle completed with internal sketch: referenceBEdge=" +
+            std::to_string(referenceBEdge->Tag()) +
+            ", B2RipEndpoint=" + FormatPoint(b1RipEndpoint) +
+            ", shortestDirectionEdge=" +
+            std::to_string(shortestDirectionEdge->Tag()) +
+            ", shortestLength=" +
+            FormatExpressionNumber(shortestLength) +
+            ", perimeterIntersection=" +
+            FormatExpressionNumber(furthestIntersection) +
+            ", extensionBeyondPerimeter=1" +
+            ", rectangleLength=" +
+            FormatExpressionNumber(rectangleLength) +
+            ", rectangleWidth=" +
+            FormatExpressionNumber(clearance));
+        return true;
+    }
+
     std::vector<tag_t> curveTags;
     uf_list_p_t curveList = nullptr;
     uf_list_p_t featureList = nullptr;
@@ -8502,6 +10237,9 @@ bool TwoPointSiBianUI::OffsetConcaveClearanceFace(
             std::vector<SelectionIntentRule*>{offsetRule}, false);
         Features::Feature* offsetFeature = offsetBuilder->CommitFeature();
         offsetFeatureTag = offsetFeature != nullptr ? offsetFeature->Tag() : NULL_TAG;
+        SetConstructionRole(
+            offsetFeature,
+            zhihui_twopoint_sibian::kRoleOffsetNegative60);
         offsetBuilder->Destroy();
         offsetBuilder = nullptr;
         if (offsetFeatureTag == NULL_TAG)
@@ -8899,6 +10637,9 @@ bool TwoPointSiBianUI::CreateSheetMetalRip(const InferredInputs& inputs,
         ripBuilder->SetParentFeatureInternal(false);
         Features::Feature* ripFeature = ripBuilder->CommitFeature();
         createdRipTag = ripFeature != nullptr ? ripFeature->Tag() : NULL_TAG;
+        SetConstructionRole(
+            ripFeature,
+            zhihui_twopoint_sibian::kRoleEdgeRip);
         ripBuilder->Destroy();
         ripBuilder = nullptr;
         section->Destroy();
@@ -8921,6 +10662,9 @@ bool TwoPointSiBianUI::CreateSheetMetalRip(const InferredInputs& inputs,
             offsetBuilder->FaceCollector()->ReplaceRules(rules, false);
             Features::Feature* offsetFeature = offsetBuilder->CommitFeature();
             const tag_t offsetTag = offsetFeature != nullptr ? offsetFeature->Tag() : NULL_TAG;
+            SetConstructionRole(
+                offsetFeature,
+                zhihui_twopoint_sibian::kRoleOffsetNegativeClearance);
             offsetBuilder->Destroy();
             if (offsetTag == NULL_TAG)
             {
@@ -9133,6 +10877,9 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
             firstBuilder->FaceCollector()->ReplaceRules(smallOffsetRules, false);
             Features::Feature* firstOffsetFeature = firstBuilder->CommitFeature();
             firstOffsetTag = firstOffsetFeature != nullptr ? firstOffsetFeature->Tag() : NULL_TAG;
+            SetConstructionRole(
+                firstOffsetFeature,
+                zhihui_twopoint_sibian::kRoleOffsetSmallDirectional);
             firstBuilder->Destroy();
             firstBuilder = nullptr;
             if (firstOffsetFeature == nullptr)
@@ -9153,6 +10900,9 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
             secondBuilder->FaceCollector()->ReplaceRules(largeOffsetRules, false);
             Features::Feature* secondOffsetFeature = secondBuilder->CommitFeature();
             secondOffsetTag = secondOffsetFeature != nullptr ? secondOffsetFeature->Tag() : NULL_TAG;
+            SetConstructionRole(
+                secondOffsetFeature,
+                zhihui_twopoint_sibian::kRoleOffsetThicknessPlus002);
             secondBuilder->Destroy();
             secondBuilder = nullptr;
             if (secondOffsetFeature == nullptr)
@@ -9188,6 +10938,9 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
         firstBuilder->FaceCollector()->ReplaceRules(ripRules, false);
         Features::Feature* firstOffsetFeature = firstBuilder->CommitFeature();
         firstOffsetTag = firstOffsetFeature != nullptr ? firstOffsetFeature->Tag() : NULL_TAG;
+        SetConstructionRole(
+            firstOffsetFeature,
+            zhihui_twopoint_sibian::kRoleOffsetNegativeClearance);
         firstBuilder->Destroy();
         firstBuilder = nullptr;
         if (firstOffsetFeature == nullptr)
@@ -9226,6 +10979,9 @@ bool TwoPointSiBianUI::OffsetRightAngleRipFeature(const InferredInputs& inputs,
         secondBuilder->FaceCollector()->ReplaceRules(largestRules, false);
         Features::Feature* secondOffsetFeature = secondBuilder->CommitFeature();
         secondOffsetTag = secondOffsetFeature != nullptr ? secondOffsetFeature->Tag() : NULL_TAG;
+        SetConstructionRole(
+            secondOffsetFeature,
+            zhihui_twopoint_sibian::kRoleOffsetThicknessPlusClearance);
         secondBuilder->Destroy();
         secondBuilder = nullptr;
         if (secondOffsetFeature == nullptr)
@@ -9919,11 +11675,12 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                        ", continue=" + (continuationCreated ? "true" : "false"));
     }
 
-    // Only the chamfer-mode reflex corner whose parallel rip edge is
-    // P2-Q + 2*thickness uses the requested early-primary sequence:
-    // primary UDF -> P2-Q rip -> subtract primary tool -> two offsets -> -60.
-    // The 90-degree chamfer branch and every other path retain their existing
-    // operation order.
+    // A reflex chamfer primary UDF must keep the original P2 topology during
+    // later parameter edits.  This was already required by the P2Q+2T path;
+    // the Q-first-equal path has the same requirement.  If its primary UDF is
+    // created after the rip, RefreshSmartInputsAfterRips moves P2 onto a short
+    // rip edge (for example by 0.02), and that endpoint then moves whenever
+    // the clearance changes.
     const bool reverseConcaveChamferP2Q2T =
         useConcaveStripBranch &&
         inputs.featureMode == FeatureMode::Chamfer &&
@@ -9948,9 +11705,17 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         concaveQ3HasThicknessEdge &&
         inputs.featureMode == FeatureMode::Chamfer &&
         qCornerIs270;
+    const bool useEarlyPrimaryChamfer270Equal =
+        useFallbackSecondUdf &&
+        inputs.featureMode == FeatureMode::Chamfer &&
+        secondFeatureCornerAngle >
+            kConvexCornerMaximumAngleDegrees + 1.0e-6;
+    const bool useEarlyPrimaryChamfer =
+        useEarlyPrimaryChamfer270P2Q2T ||
+        useEarlyPrimaryChamfer270Equal;
     tag_t earlyPrimaryUdfTag = NULL_TAG;
     std::vector<tag_t> earlyPrimaryToolBodyTags;
-    if (useEarlyPrimaryChamfer270P2Q2T)
+    if (useEarlyPrimaryChamfer)
     {
         if (!CreateUserDefinedFeature(inputs,
                                       errorMessage,
@@ -9960,7 +11725,11 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
         {
             return false;
         }
-        AppendDebugLog("TryCreateSecondPointRip created the primary UDF before the chamfer-270 P2-Q rip: udf=" +
+        AppendDebugLog("TryCreateSecondPointRip created the primary UDF from original P1/P2 before the chamfer-270 P2-Q rip: branch=" +
+                       std::string(useEarlyPrimaryChamfer270Equal
+                                       ? "Q-first-equal"
+                                       : "P2Q+2T") +
+                       ", udf=" +
                        std::to_string(earlyPrimaryUdfTag) +
                        ", toolBodies=" +
                        std::to_string(earlyPrimaryToolBodyTags.size()));
@@ -9998,6 +11767,9 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
 
         Features::Feature* createdRip = builder->CommitFeature();
         const tag_t createdRipTag = createdRip != nullptr ? createdRip->Tag() : NULL_TAG;
+        SetConstructionRole(
+            createdRip,
+            zhihui_twopoint_sibian::kRoleEdgeRip);
         builder->Destroy();
         builder = nullptr;
         section->Destroy();
@@ -10007,7 +11779,7 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
             errorMessage = "NX did not return a feature after creating the sheet-metal rip.";
             return false;
         }
-        if (useEarlyPrimaryChamfer270P2Q2T)
+        if (useEarlyPrimaryChamfer)
         {
             if (!SubtractToolBodies(inputs.targetBody,
                                     earlyPrimaryToolBodyTags,
@@ -10017,7 +11789,11 @@ bool TwoPointSiBianUI::TryCreateSecondPointRip(const InferredInputs& inputs,
                 return false;
             }
             primaryUdfCreatedBeforeRip = true;
-            AppendDebugLog("TryCreateSecondPointRip subtracted the early primary UDF immediately after the chamfer-270 P2-Q rip: udf=" +
+            AppendDebugLog("TryCreateSecondPointRip subtracted the original-P2 primary UDF immediately after the chamfer-270 P2-Q rip: branch=" +
+                           std::string(useEarlyPrimaryChamfer270Equal
+                                           ? "Q-first-equal"
+                                           : "P2Q+2T") +
+                           ", udf=" +
                            std::to_string(earlyPrimaryUdfTag) +
                            ", rip=" + std::to_string(createdRipTag) +
                            ", subtract=" +
@@ -10570,7 +12346,390 @@ double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) cons
     return bestDistance == std::numeric_limits<double>::max() ? 0.0 : bestDistance;
 }
 
-bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
+bool TwoPointSiBianUI::CreateFeatureTemplateFeature(
+    const InferredInputs& inputs,
+    std::string& errorMessage,
+    tag_t* createdTemplateGroupTag,
+    std::vector<tag_t>* createdToolBodyTags) const
+{
+    errorMessage.clear();
+    if (createdTemplateGroupTag != nullptr)
+    {
+        *createdTemplateGroupTag = NULL_TAG;
+    }
+    if (createdToolBodyTags != nullptr)
+    {
+        createdToolBodyTags->clear();
+    }
+
+    Part* workPart = session_ != nullptr ? session_->Parts()->Work() : nullptr;
+    if (workPart == nullptr || inputs.targetBody == nullptr ||
+        inputs.baseFace == nullptr || inputs.startPositiveYEdge == nullptr ||
+        inputs.endPositiveYEdge == nullptr || inputs.startNegativeYEdge == nullptr)
+    {
+        errorMessage = "The feature-template inputs are incomplete.";
+        return false;
+    }
+
+    const tag_t workPartTag = workPart->Tag();
+    const std::vector<tag_t> featureTagsBeforeVector =
+        CurrentWorkPartFeatureTags();
+    const std::set<tag_t> featureTagsBefore(featureTagsBeforeVector.begin(),
+                                            featureTagsBeforeVector.end());
+    std::set<tag_t> bodyTagsBefore;
+    for (Body* body : *workPart->Bodies())
+    {
+        if (body != nullptr)
+        {
+            bodyTagsBefore.insert(body->Tag());
+        }
+    }
+
+    ExtractedTemplatePart extractedTemplate;
+    std::string templatePath;
+    std::string extractTrace = "embedded feature-template extraction:\n";
+    if (!extractedTemplate.Extract(inputs.featureMode,
+                                   inputs.useNinetyClearanceGrooveTemplate,
+                                   inputs.useNinetyClearanceGrooveRightTemplate,
+                                   templatePath,
+                                   extractTrace,
+                                   true))
+    {
+        errorMessage = "Failed to extract the embedded NX feature template.";
+        AppendDebugLog(extractTrace + errorMessage);
+        return false;
+    }
+    AppendDebugLog(extractTrace);
+
+    const Session::UndoMarkId attemptMark =
+        session_->SetUndoMark(Session::MarkVisibilityInvisible,
+                              "2P_SiBian Feature Template Attempt");
+    UserDefinedTemplate::InstantiationBuilder* builder = nullptr;
+    Part* authoringPart = nullptr;
+    auto destroyBuilder = [&]()
+    {
+        if (builder != nullptr)
+        {
+            try
+            {
+                builder->Destroy();
+            }
+            catch (...)
+            {
+            }
+            builder = nullptr;
+        }
+        // NX destroys/unloads the authoring part together with the
+        // InstantiationBuilder.  Touching the Part wrapper afterwards is a
+        // use-after-close and can raise an NX memory access violation.
+        authoringPart = nullptr;
+    };
+    auto rollbackAttempt = [&]() -> bool
+    {
+        destroyBuilder();
+        try
+        {
+            if (session_->DoesUndoMarkExist(attemptMark,
+                                            "2P_SiBian Feature Template Attempt"))
+            {
+                session_->UndoToMark(attemptMark,
+                                     "2P_SiBian Feature Template Attempt");
+                if (session_->DoesUndoMarkExist(attemptMark,
+                                                "2P_SiBian Feature Template Attempt"))
+                {
+                    session_->DeleteUndoMark(attemptMark,
+                                             "2P_SiBian Feature Template Attempt");
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        auto collectRemainingFeatures = [&]()
+        {
+            std::vector<Features::Feature*> remaining;
+            for (auto iterator = workPart->Features()->begin();
+                 iterator != workPart->Features()->end();
+                 ++iterator)
+            {
+                Features::Feature* feature = *iterator;
+                if (feature != nullptr &&
+                    featureTagsBefore.find(feature->Tag()) == featureTagsBefore.end())
+                {
+                    remaining.push_back(feature);
+                }
+            }
+            return remaining;
+        };
+
+        std::vector<Features::Feature*> remaining = collectRemainingFeatures();
+        if (!remaining.empty())
+        {
+            try
+            {
+                std::vector<TaggedObject*> objectsToDelete(
+                    remaining.begin(), remaining.end());
+                Update* updateManager = session_->UpdateManager();
+                const Session::UndoMarkId cleanupMark =
+                    session_->SetUndoMark(Session::MarkVisibilityInvisible,
+                                          "2P_SiBian Feature Template Cleanup");
+                updateManager->ClearDeleteList();
+                updateManager->ClearErrorList();
+                const int addErrors =
+                    updateManager->AddObjectsToDeleteList(objectsToDelete);
+                const int updateErrors = updateManager->DoUpdate(cleanupMark);
+                if (session_->DoesUndoMarkExist(
+                        cleanupMark,
+                        "2P_SiBian Feature Template Cleanup"))
+                {
+                    session_->DeleteUndoMark(
+                        cleanupMark,
+                        "2P_SiBian Feature Template Cleanup");
+                }
+                AppendDebugLog("feature-template fallback cleanup: objects=" +
+                               std::to_string(objectsToDelete.size()) +
+                               ", addErrors=" + std::to_string(addErrors) +
+                               ", updateErrors=" + std::to_string(updateErrors));
+            }
+            catch (const NXException& ex)
+            {
+                AppendDebugLog("feature-template fallback cleanup failed: " +
+                               NxExceptionText(ex));
+            }
+            catch (...)
+            {
+                AppendDebugLog("feature-template fallback cleanup failed with an unknown error.");
+            }
+            remaining = collectRemainingFeatures();
+        }
+        return remaining.empty();
+    };
+
+    try
+    {
+        builder = workPart->UserDefinedTemplates()->CreateInstantiationBuilder(nullptr);
+        authoringPart = builder->LoadAuthoringPart(templatePath.c_str());
+        if (authoringPart == nullptr)
+        {
+            throw std::runtime_error("NX did not load the feature-template authoring part.");
+        }
+        builder->SetLayerOption(
+            UserDefinedTemplate::InstantiationBuilder::
+                JaUserdefinedtemplateinstantiationLayerOptionWork);
+
+        std::ostringstream mappingTrace;
+        mappingTrace << "==== 2P_SiBian feature-template insert ====\n"
+                     << "template=" << templatePath;
+        for (Expression* originalExpression : builder->GetExpressions())
+        {
+            if (originalExpression == nullptr)
+            {
+                continue;
+            }
+            bool canBeEdited = false;
+            Expression* matchedExpression =
+                builder->GetMatchedExpression(originalExpression, &canBeEdited);
+            if (matchedExpression == nullptr)
+            {
+                throw std::runtime_error("A feature-template expression could not be matched.");
+            }
+
+            const char* nameText = originalExpression->Name().GetLocaleText();
+            const std::string expressionName =
+                ToLowerAscii(nameText != nullptr ? nameText : "");
+            std::string value;
+            if (expressionName == "p16" || expressionName == "p42" ||
+                expressionName == "p33")
+            {
+                value = FormatExpressionNumber(inputs.thickness);
+            }
+            else if (expressionName == "p24" || expressionName == "p43" ||
+                     expressionName == "p34")
+            {
+                value = inputs.bendRadiusValue;
+            }
+            else if (expressionName == "p17" || expressionName == "p45" ||
+                     expressionName == "p36" || expressionName == "p52" ||
+                     expressionName == "p61")
+            {
+                value = inputs.clearanceValue;
+            }
+            else
+            {
+                continue;
+            }
+            matchedExpression->SetRightHandSide(value.c_str());
+            mappingTrace << "\n  expression " << expressionName
+                         << "=" << value
+                         << ", editable=" << (canBeEdited ? "true" : "false");
+        }
+
+        const std::array<Edge*, 3> edgeMatches = {
+            inputs.startPositiveYEdge,
+            inputs.endPositiveYEdge,
+            inputs.startNegativeYEdge};
+        const std::array<bool, 3> edgeFlips = {
+            EdgeDirectionWithStartPoint(inputs.startPositiveYEdge,
+                                        inputs.startPoint,
+                                        "FT A(P1,Y+) start=P1") == UF_MODL_UDF_REVERSE_DIR,
+            EdgeDirectionWithStartPoint(inputs.endPositiveYEdge,
+                                        inputs.endPoint,
+                                        "FT a(P2,Y+) start=P2") == UF_MODL_UDF_REVERSE_DIR,
+            EdgeDirectionWithEndPoint(inputs.startNegativeYEdge,
+                                      inputs.startPoint,
+                                      "FT B(P1,Y-) end=P1") == UF_MODL_UDF_REVERSE_DIR};
+        int edgeOrdinal = 0;
+        for (NXObject* originalReference : builder->GetReferences())
+        {
+            if (dynamic_cast<Face*>(originalReference) != nullptr)
+            {
+                builder->SetMatchedReference(originalReference,
+                                             inputs.baseFace,
+                                             false);
+                mappingTrace << "\n  face -> " << inputs.baseFace->Tag();
+            }
+            else if (dynamic_cast<Edge*>(originalReference) != nullptr)
+            {
+                if (edgeOrdinal >= static_cast<int>(edgeMatches.size()) ||
+                    edgeMatches[edgeOrdinal] == nullptr)
+                {
+                    throw std::runtime_error(
+                        "The feature template requested an unexpected edge reference.");
+                }
+                builder->SetMatchedReference(originalReference,
+                                             edgeMatches[edgeOrdinal],
+                                             edgeFlips[edgeOrdinal]);
+                mappingTrace << "\n  edge[" << edgeOrdinal << "] -> "
+                             << edgeMatches[edgeOrdinal]->Tag()
+                             << ", flip="
+                             << (edgeFlips[edgeOrdinal] ? "true" : "false");
+                ++edgeOrdinal;
+            }
+            else
+            {
+                bool automaticFlip = false;
+                NXObject* automaticMatch =
+                    builder->GetMatchedReference(originalReference, &automaticFlip);
+                mappingTrace << "\n  internal reference -> "
+                             << (automaticMatch != nullptr
+                                     ? std::to_string(automaticMatch->Tag())
+                                     : std::string("automatic"));
+            }
+        }
+        if (edgeOrdinal != static_cast<int>(edgeMatches.size()))
+        {
+            throw std::runtime_error(
+                "The feature template did not expose exactly three edge references.");
+        }
+        AppendDebugLog(mappingTrace.str());
+
+        NXObject* committed = builder->Commit();
+        AppendDebugLog("feature-template builder committed object=" +
+                       std::to_string(committed != nullptr ? committed->Tag() : NULL_TAG));
+        Features::Feature* templateGroup = nullptr;
+        if (UserDefinedTemplate::Instantiation* instantiation =
+                dynamic_cast<UserDefinedTemplate::Instantiation*>(committed))
+        {
+#pragma warning(push)
+#pragma warning(disable : 4996)
+            templateGroup = instantiation->GetFeature();
+#pragma warning(pop)
+            AppendDebugLog("feature-template group resolved from committed instantiation: group=" +
+                           std::to_string(templateGroup != nullptr
+                                              ? templateGroup->Tag()
+                                              : NULL_TAG));
+        }
+        // Instantiation is owned by the builder. Resolve the persistent
+        // work-part feature before Destroy(), which invalidates that wrapper.
+        destroyBuilder();
+        for (auto iterator = workPart->Features()->begin();
+             iterator != workPart->Features()->end();
+             ++iterator)
+        {
+            Features::Feature* feature = *iterator;
+            if (feature == nullptr ||
+                featureTagsBefore.find(feature->Tag()) != featureTagsBefore.end())
+            {
+                continue;
+            }
+            const char* featureTypeText = feature->FeatureType().GetLocaleText();
+            const std::string featureType =
+                ToLowerAscii(featureTypeText != nullptr ? featureTypeText : "");
+            if (templateGroup == nullptr &&
+                featureType.find("udt feature group") != std::string::npos)
+            {
+                templateGroup = feature;
+            }
+        }
+        if (templateGroup == nullptr)
+        {
+            throw std::runtime_error(
+                "NX created the template objects but no UDT feature group was found.");
+        }
+
+        std::vector<tag_t> createdBodies;
+        for (Body* body : *workPart->Bodies())
+        {
+            if (body != nullptr && body != inputs.targetBody &&
+                bodyTagsBefore.find(body->Tag()) == bodyTagsBefore.end())
+            {
+                createdBodies.push_back(body->Tag());
+            }
+        }
+        if (createdBodies.empty())
+        {
+            throw std::runtime_error(
+                "The feature template was created, but its independent tool body was not found.");
+        }
+
+        templateGroup->SetName("2P_SiBian");
+        if (createdTemplateGroupTag != nullptr)
+        {
+            *createdTemplateGroupTag = templateGroup->Tag();
+        }
+        if (createdToolBodyTags != nullptr)
+        {
+            *createdToolBodyTags = createdBodies;
+        }
+        if (session_->DoesUndoMarkExist(attemptMark,
+                                        "2P_SiBian Feature Template Attempt"))
+        {
+            session_->DeleteUndoMark(attemptMark,
+                                     "2P_SiBian Feature Template Attempt");
+        }
+        AppendDebugLog("feature-template instantiation OK: group=" +
+                       std::to_string(templateGroup->Tag()) +
+                       ", toolBodyCount=" + std::to_string(createdBodies.size()));
+        return true;
+    }
+    catch (const NXException& ex)
+    {
+        errorMessage = "NX feature-template instantiation failed: " +
+                       NxExceptionText(ex);
+    }
+    catch (const std::exception& ex)
+    {
+        errorMessage = std::string("NX feature-template instantiation failed: ") +
+                       ex.what();
+    }
+    catch (...)
+    {
+        errorMessage = "NX feature-template instantiation failed with an unknown error.";
+    }
+
+    AppendDebugLog(errorMessage + "; rolling back and using the legacy UDF fallback.");
+    if (!rollbackAttempt())
+    {
+        errorMessage =
+            "FT_ROLLBACK_FAILED: " + errorMessage +
+            " The partial feature-template objects could not be removed safely.";
+        AppendDebugLog(errorMessage);
+    }
+    return false;
+}
+
+bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& sourceInputs,
                                                 std::string& errorMessage,
                                                 tag_t* createdUdfTag,
                                                 std::vector<tag_t>* createdReferenceTags,
@@ -10588,6 +12747,53 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
     {
         createdToolBodyTags->clear();
     }
+
+    // CustomFeature editing rolls the model back to the state immediately
+    // before the opaque node. Edge objects saved on the node still carry the
+    // old post-feature topology and can become tag 0 as soon as the preview
+    // starts modifying the body. Never feed those cached wrappers to a UDF.
+    // Re-resolve all four signed straight edges from the stable face and P1/P2
+    // immediately before every UDF insertion.
+    InferredInputs inputs = sourceInputs;
+    inputs.startEdge = nullptr;
+    inputs.endEdge = nullptr;
+    inputs.startPositiveYEdge = nullptr;
+    inputs.startNegativeYEdge = nullptr;
+    inputs.endPositiveYEdge = nullptr;
+    inputs.endNegativeYEdge = nullptr;
+    if (!CompleteInputsForEndpoints(inputs))
+    {
+        errorMessage =
+            "The current straight-edge references could not be resolved from the saved P1/P2 and face.";
+        AppendDebugLog(
+            "CreateUserDefinedFeature rejected stale cached edges: body=" +
+            std::to_string(inputs.targetBody != nullptr
+                               ? inputs.targetBody->Tag()
+                               : NULL_TAG) +
+            ", face=" +
+            std::to_string(inputs.baseFace != nullptr
+                               ? inputs.baseFace->Tag()
+                               : NULL_TAG) +
+            ", P1=" + FormatPoint(inputs.startPoint) +
+            ", P2=" + FormatPoint(inputs.endPoint));
+        return false;
+    }
+    AppendDebugLog(
+        "CreateUserDefinedFeature refreshed live straight-edge references: "
+        "P1Y+=" +
+        std::to_string(inputs.startPositiveYEdge->Tag()) +
+        ", P1Y-=" +
+        std::to_string(inputs.startNegativeYEdge->Tag()) +
+        ", P2Y+=" +
+        std::to_string(inputs.endPositiveYEdge->Tag()) +
+        ", P2Y-=" +
+        std::to_string(inputs.endNegativeYEdge->Tag()));
+
+    // The individual tool-generating UDFs remain stable construction members.
+    // The CustomFeature pre-update event owns the complete completed branch,
+    // so nested Feature Template instances are neither required nor used.
+    AppendDebugLog(
+        "CreateUserDefinedFeature using a UDF construction member owned by the opaque CustomFeature node.");
 
     Part* workPart = session_->Parts()->Work();
     if (workPart == nullptr)
@@ -11027,6 +13233,16 @@ bool TwoPointSiBianUI::CreateUserDefinedFeature(const InferredInputs& inputs,
         return false;
     }
 
+    try
+    {
+        SetConstructionRole(
+            dynamic_cast<Features::Feature*>(NXObjectManager::Get(newUdf)),
+            zhihui_twopoint_sibian::kRoleUdf);
+    }
+    catch (...)
+    {
+    }
+
     if (createdUdfTag != nullptr)
     {
         *createdUdfTag = newUdf;
@@ -11071,6 +13287,15 @@ bool TwoPointSiBianUI::SubtractToolBodies(Body* targetBody,
 
     try
     {
+        // A UDF may return several disconnected tool bodies.  Creating one
+        // subtract feature per body makes the feature chain fragile: after an
+        // edit, one small tool can move completely outside the target and its
+        // standalone subtract then fails even though the other tools still
+        // produce the intended cut.  Submit all compatible tools in one
+        // Boolean feature.  Solid and sheet bodies must remain in separate
+        // groups because NX does not allow them in the same Boolean feature.
+        std::vector<Body*> solidTools;
+        std::vector<Body*> sheetTools;
         for (tag_t toolTag : toolBodyTags)
         {
             Body* toolBody = dynamic_cast<Body*>(NXObjectManager::Get(toolTag));
@@ -11079,27 +13304,69 @@ bool TwoPointSiBianUI::SubtractToolBodies(Body* targetBody,
                 errorMessage = "A deferred UDF tool body is no longer available for subtraction.";
                 return false;
             }
+            (toolBody->IsSolidBody() ? solidTools : sheetTools).push_back(toolBody);
+        }
 
-            Features::BooleanBuilder* builder = workPart->Features()->CreateBooleanBuilder(nullptr);
+        const std::array<std::vector<Body*>*, 2> groups = {&solidTools, &sheetTools};
+        for (const std::vector<Body*>* group : groups)
+        {
+            if (group == nullptr || group->empty())
+            {
+                continue;
+            }
+
+            Features::BooleanBuilder* builder =
+                workPart->Features()->CreateBooleanBuilderUsingCollector(nullptr);
             builder->SetOperation(Features::Feature::BooleanTypeSubtract);
-            builder->SetTarget(targetBody);
-#pragma warning(push)
-#pragma warning(disable : 4996)
-            builder->SetTool(toolBody);
-#pragma warning(pop)
             builder->SetRetainTarget(false);
             builder->SetRetainTool(false);
+
+            SelectionIntentRuleOptions* targetOptions =
+                workPart->ScRuleFactory()->CreateRuleOptions();
+            targetOptions->SetSelectedFromInactive(false);
+            BodyDumbRule* targetRule = workPart->ScRuleFactory()->CreateRuleBodyDumb(
+                std::vector<Body*>{targetBody}, true, targetOptions);
+            delete targetOptions;
+            ScCollector* targetCollector = workPart->ScCollectors()->CreateCollector();
+            targetCollector->ReplaceRules(
+                std::vector<SelectionIntentRule*>{targetRule}, false);
+            builder->SetTargetBodyCollector(targetCollector);
+
+            SelectionIntentRuleOptions* toolOptions =
+                workPart->ScRuleFactory()->CreateRuleOptions();
+            toolOptions->SetSelectedFromInactive(false);
+            BodyDumbRule* toolRule = workPart->ScRuleFactory()->CreateRuleBodyDumb(
+                *group, true, toolOptions);
+            delete toolOptions;
+            ScCollector* toolCollector = workPart->ScCollectors()->CreateCollector();
+            toolCollector->ReplaceRules(
+                std::vector<SelectionIntentRule*>{toolRule}, false);
+            builder->SetToolBodyCollector(toolCollector);
+
             NXObject* result = builder->Commit();
             resultFeatureTag = result != nullptr ? result->Tag() : NULL_TAG;
             builder->Destroy();
             if (resultFeatureTag == NULL_TAG)
             {
-                errorMessage = "NX returned no feature from the final Boolean Subtract.";
+                errorMessage = "NX returned no feature from the grouped final Boolean Subtract.";
                 return false;
             }
-            AppendDebugLog("final deferred subtraction: target=" + std::to_string(targetBody->Tag()) +
-                           ", tool=" + std::to_string(toolTag) +
-                           ", resultFeature=" + std::to_string(resultFeatureTag));
+
+            std::string tags;
+            for (Body* toolBody : *group)
+            {
+                if (!tags.empty())
+                {
+                    tags += ",";
+                }
+                tags += std::to_string(toolBody->Tag());
+            }
+            AppendDebugLog("grouped final deferred subtraction: target=" +
+                           std::to_string(targetBody->Tag()) +
+                           ", toolType=" +
+                           std::string(group == &solidTools ? "solid" : "sheet") +
+                           ", tools=[" + tags +
+                           "], resultFeature=" + std::to_string(resultFeatureTag));
         }
     }
     catch (const NXException& ex)
@@ -11148,6 +13415,58 @@ void TwoPointSiBianUI::ConfigureInputMode(bool smartMode, bool clearSelections)
 {
     AppendDebugLog(std::string("ConfigureInputMode begin mode=") +
                    (smartMode ? "smart" : "manual"));
+
+    if (editedFeature_ != nullptr)
+    {
+        // Match the proven editable-CustomFeature pattern used by feature 18:
+        // editing changes parameters only; selection and topology controls are
+        // not available while NX owns the existing construction chain.
+        if (smartModeBlock_ != nullptr)
+        {
+            smartModeBlock_->SetShow(false);
+            smartModeBlock_->SetEnable(false);
+        }
+        if (featureModeBlock_ != nullptr)
+        {
+            featureModeBlock_->SetShow(false);
+            featureModeBlock_->SetEnable(false);
+        }
+        if (startPointBlock_ != nullptr)
+        {
+            startPointBlock_->SetShow(false);
+            startPointBlock_->SetEnable(false);
+        }
+        if (endPointBlock_ != nullptr)
+        {
+            endPointBlock_->SetShow(false);
+            endPointBlock_->SetEnable(false);
+        }
+        if (chamferEdgeToggleBlock_ != nullptr)
+        {
+            chamferEdgeToggleBlock_->SetShow(false);
+            chamferEdgeToggleBlock_->SetEnable(false);
+        }
+        if (reverseCutButton_ != nullptr)
+        {
+            reverseCutButton_->SetShow(false);
+            reverseCutButton_->SetEnable(false);
+        }
+        if (clearanceBlock_ != nullptr)
+        {
+            clearanceBlock_->SetShow(true);
+            clearanceBlock_->SetEnable(true);
+        }
+        if (bendRadiusBlock_ != nullptr)
+        {
+            bendRadiusBlock_->SetShow(true);
+            bendRadiusBlock_->SetEnable(true);
+        }
+        activeSmartSelectionBlock_ = nullptr;
+        AppendDebugLog(
+            "ConfigureInputMode edit mode: only clearance and bend-R controls are visible and editable.");
+        return;
+    }
+
     const std::vector<TaggedObject*> noSelection;
     if (clearSelections)
     {

@@ -23,6 +23,16 @@
 #include <string>
 #include <vector>
 
+namespace NXOpen
+{
+namespace Features
+{
+class CustomFeatureData;
+class EditWithRollbackManager;
+class CustomFeaturePreUpdateEvent;
+}
+}
+
 class TwoPointSiBianUI
 {
 public:
@@ -37,6 +47,8 @@ public:
     ~TwoPointSiBianUI();
 
     NXOpen::BlockStyler::BlockDialog::DialogResponse Launch();
+    int BuildCustomFeatureConstruction(
+        NXOpen::Features::CustomFeaturePreUpdateEvent* event);
 
 private:
     struct InferredInputs
@@ -256,13 +268,28 @@ private:
                                   tag_t* createdUdfTag = nullptr,
                                   std::vector<tag_t>* createdReferenceTags = nullptr,
                                   std::vector<tag_t>* createdToolBodyTags = nullptr) const;
+    bool CreateFeatureTemplateFeature(const InferredInputs& inputs,
+                                      std::string& errorMessage,
+                                      tag_t* createdTemplateGroupTag,
+                                      std::vector<tag_t>* createdToolBodyTags) const;
     bool SubtractToolBodies(NXOpen::Body* targetBody,
                             const std::vector<tag_t>& toolBodyTags,
                             tag_t& resultFeatureTag,
                             std::string& errorMessage) const;
-    bool CreatePreview();
+    bool CreatePreview(const InferredInputs* forcedInputs = nullptr);
+    bool LoadEditedFeatureState();
+    bool ReadCurrentEditedInputs(InferredInputs& inputs) const;
+    void AssignCustomFeatureData(NXOpen::Features::CustomFeatureData* data,
+                                 const InferredInputs& inputs) const;
+    bool BeginEditedFeatureRollback(std::string& errorMessage);
+    bool FinishEditedFeatureRollback(bool errorDuringEdit,
+                                     std::string& errorMessage);
+    bool CommitCustomFeature(const InferredInputs& inputs,
+                             std::string& errorMessage);
+    bool RestoreEditedFeatureBaseline(std::string& errorMessage);
     bool UndoPreview(bool includeCommitted = false);
     bool FlattenPreviewTargetBody(std::string& errorMessage);
+    bool ConsolidatePreviewFeatureTemplate(std::string& errorMessage);
     void CommitPreview();
     void FinalizeCommittedPreview();
     std::vector<tag_t> CurrentWorkPartFeatureTags() const;
@@ -288,6 +315,16 @@ private:
     NXOpen::Features::CustomFeatureClassManager* customFeatureManager_;
     NXOpen::Features::CustomFeature* editedFeature_;
     NXOpen::Features::CustomFeatureClass* featureClass_;
+    NXOpen::Features::EditWithRollbackManager* editRollbackManager_;
+    NXOpen::Session::UndoMarkId editRollbackMark_;
+    bool loadingEditedFeature_;
+    tag_t editedTargetBodyTag_;
+    tag_t editedBaseFaceTag_;
+    tag_t editedStartEdgeTag_;
+    tag_t editedEndEdgeTag_;
+    bool hasEditedEndpointCache_;
+    NXOpen::Point3d editedCachedP1_;
+    NXOpen::Point3d editedCachedP2_;
     NXOpen::Session::UndoMarkId previewUndoMark_;
     tag_t previewUdfTag_;
     tag_t previewTargetBodyTag_;
@@ -304,4 +341,16 @@ private:
     bool previewCommitted_;
     bool isUpdatingPreview_;
     bool reverseChamfer270Cut_;
+    bool hasLastPreviewInputs_;
+    InferredInputs lastPreviewInputs_;
+    bool hasResolvedPrimaryP2ForPersistence_;
+    NXOpen::Point3d resolvedPrimaryP2ForPersistence_;
+    bool hasEditedBaselineInputs_;
+    InferredInputs editedBaselineInputs_;
+    bool editedLivePreviewDirty_;
+    bool buildingCustomFeature_;
+    bool customFeatureConstructionRebuilt_;
 };
+
+extern "C" __declspec(dllexport) int ZhihuiTwoPointSiBianBuildCustomFeature(
+    void* eventPointer);
