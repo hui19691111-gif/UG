@@ -2,6 +2,7 @@
 #include "../../common/ZhihuiDialogMemory.hpp"
 #include "../../common/ZhihuiEmbeddedDialog.hpp"
 #include "embedded_dialog_resources.h"
+#include "ZheWanBiRangCaoCustomFeatureShared.hpp"
 
 #ifdef CreateDialog
 #undef CreateDialog
@@ -11,19 +12,33 @@
 #include <stdexcept>
 #include <NXOpen/BasePart.hxx>
 #include <NXOpen/CurveDumbRule.hxx>
+#include <NXOpen/CartesianCoordinateSystem.hxx>
+#include <NXOpen/CoordinateSystemCollection.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
 #include <NXOpen/BodyDumbRule.hxx>
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/Features_BooleanBuilder.hxx>
+#include <NXOpen/Features_BaseFeatureCollection.hxx>
+#include <NXOpen/Features_CustomAttribute.hxx>
+#include <NXOpen/Features_CustomAttributeCollection.hxx>
+#include <NXOpen/Features_CustomDoubleArrayAttribute.hxx>
+#include <NXOpen/Features_CustomDoubleAttribute.hxx>
+#include <NXOpen/Features_CustomFeatureBuilder.hxx>
+#include <NXOpen/Features_CustomFeatureData.hxx>
+#include <NXOpen/Features_CustomFeatureDataCollection.hxx>
+#include <NXOpen/Features_CustomTagAttribute.hxx>
 #include <NXOpen/Features_BooleanFeature.hxx>
 #include <NXOpen/Features_ExtrudeBuilder.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_MoveObject.hxx>
+#include <NXOpen/Features_MoveObjectBuilder.hxx>
 #include <NXOpen/GeometricUtilities_BooleanOperation.hxx>
 #include <NXOpen/GeometricUtilities_Extend.hxx>
 #include <NXOpen/GeometricUtilities_FeatureOptions.hxx>
 #include <NXOpen/GeometricUtilities_Limits.hxx>
+#include <NXOpen/GeometricUtilities_ModlMotion.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObject.hxx>
@@ -38,6 +53,7 @@
 #include <NXOpen/ScCollectorCollection.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
 #include <NXOpen/SelectObject.hxx>
+#include <NXOpen/SelectNXObjectList.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
 #include <NXOpen/Section.hxx>
@@ -570,6 +586,7 @@ void ForceModelUpdate()
         throw NXOpen::NXException::Create(1, "Failed to update the model.");
     }
 }
+
 }
 
 ZheWanBiRangCaoDialog::ZheWanBiRangCaoDialog()
@@ -580,6 +597,12 @@ ZheWanBiRangCaoDialog::ZheWanBiRangCaoDialog()
       edgeSelectBlock_(nullptr),
       slotWidthBlock_(nullptr),
       slotDepthBlock_(nullptr),
+      customFeatureManager_(nullptr),
+      editedFeature_(nullptr),
+      featureClass_(nullptr),
+      loadingEditedFeature_(false),
+      hasEditedPickPoint_(false),
+      editedPickPoint_(0.0, 0.0, 0.0),
       slotRecords_(),
       hiddenTemporaryTags_(),
       previewFeatureTags_()
@@ -601,10 +624,16 @@ ZheWanBiRangCaoDialog::ZheWanBiRangCaoDialog()
     dialog_->AddApplyHandler(NXOpen::make_callback(this, &ZheWanBiRangCaoDialog::apply_cb));
     dialog_->AddOkHandler(NXOpen::make_callback(this, &ZheWanBiRangCaoDialog::ok_cb));
     dialog_->AddCancelHandler(NXOpen::make_callback(this, &ZheWanBiRangCaoDialog::cancel_cb));
+
+    customFeatureManager_ = session_->CustomFeatureClassManager();
+    editedFeature_ = customFeatureManager_->GetEditedCustomFeature();
+    featureClass_ = customFeatureManager_->GetClassFromName(
+        zhihui_zhewan_birangcao::kFeatureClassName);
 }
 
 ZheWanBiRangCaoDialog::~ZheWanBiRangCaoDialog()
 {
+    CleanupPreviewObjects();
     CleanupHiddenTemporaryObjects();
 
     if (dialog_ != nullptr)
@@ -616,7 +645,11 @@ ZheWanBiRangCaoDialog::~ZheWanBiRangCaoDialog()
 
 NXOpen::BlockStyler::BlockDialog::DialogResponse ZheWanBiRangCaoDialog::Launch()
 {
-    return dialog_->Launch();
+    const NXOpen::BlockStyler::BlockDialog::DialogMode mode =
+        editedFeature_ != nullptr
+            ? NXOpen::BlockStyler::BlockDialog::DialogModeEdit
+            : NXOpen::BlockStyler::BlockDialog::DialogModeCreate;
+    return dialog_->LaunchInDialogMode(mode);
 }
 
 std::string ZheWanBiRangCaoDialog::GetDialogFilePath() const
@@ -642,6 +675,66 @@ void ZheWanBiRangCaoDialog::initialize_cb()
     delete properties;
 
     LoadDialogState();
+    LoadEditedCustomFeatureData();
+    if (editedFeature_ != nullptr && GetSelectedFace() != nullptr)
+    {
+        CleanupPreviewObjects();
+        CleanupHiddenTemporaryObjects();
+        static_cast<void>(Preview());
+    }
+}
+
+void ZheWanBiRangCaoDialog::LoadEditedCustomFeatureData()
+{
+    if (editedFeature_ == nullptr || edgeSelectBlock_ == nullptr)
+    {
+        return;
+    }
+
+    loadingEditedFeature_ = true;
+    try
+    {
+        NXOpen::Features::CustomFeatureData* data = editedFeature_->FeatureData();
+        SetDoubleValue(
+            slotWidthBlock_,
+            data->CustomDoubleAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrSlotWidth)
+                ->Value());
+        SetDoubleValue(
+            slotDepthBlock_,
+            data->CustomDoubleAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrSlotDepth)
+                ->Value());
+
+        NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(
+            data->CustomTagAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrSelectedFace)
+                ->Value());
+        const std::vector<double> pickPoint =
+            data->CustomDoubleArrayAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrPickPoint)
+                ->GetValues();
+
+        NXOpen::BlockStyler::PropertyList* properties = edgeSelectBlock_->GetProperties();
+        if (face != nullptr)
+        {
+            std::vector<NXOpen::TaggedObject*> selectedObjects(1, face);
+            properties->SetTaggedObjectVector("SelectedObjects", selectedObjects);
+        }
+        if (pickPoint.size() >= 3)
+        {
+            editedPickPoint_ = NXOpen::Point3d(
+                pickPoint[0], pickPoint[1], pickPoint[2]);
+            hasEditedPickPoint_ = true;
+        }
+        delete properties;
+    }
+    catch (...)
+    {
+        loadingEditedFeature_ = false;
+        throw;
+    }
+    loadingEditedFeature_ = false;
 }
 
 bool ZheWanBiRangCaoDialog::enable_ok_cb()
@@ -651,11 +744,20 @@ bool ZheWanBiRangCaoDialog::enable_ok_cb()
 
 int ZheWanBiRangCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
+    if (loadingEditedFeature_)
+    {
+        return 0;
+    }
     if (block == edgeSelectBlock_)
     {
-        CleanupPreviewObjects();
-        CleanupHiddenTemporaryObjects();
-        return Execute();
+        hasEditedPickPoint_ = false;
+        if (GetSelectedFace() != nullptr)
+        {
+            CleanupPreviewObjects();
+            CleanupHiddenTemporaryObjects();
+            return Preview();
+        }
+        return 0;
     }
 
     if (block == slotWidthBlock_ || block == slotDepthBlock_)
@@ -665,8 +767,9 @@ int ZheWanBiRangCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
         {
             CleanupPreviewObjects();
             CleanupHiddenTemporaryObjects();
-            return Execute();
+            return Preview();
         }
+        return 0;
     }
 
     return 0;
@@ -678,10 +781,14 @@ int ZheWanBiRangCaoDialog::apply_cb()
 
     if (GetSelectedFace() != nullptr)
     {
-        previewFeatureTags_.clear();
+        CleanupPreviewObjects();
         CleanupHiddenTemporaryObjects();
-        ClearSelectedEdge();
-        return 0;
+        const int result = Execute();
+        if (result == 0 && editedFeature_ == nullptr)
+        {
+            ClearSelectedEdge();
+        }
+        return result;
     }
 
     previewFeatureTags_.clear();
@@ -721,6 +828,11 @@ NXOpen::Face* ZheWanBiRangCaoDialog::GetSelectedFace() const
 
 NXOpen::Point3d ZheWanBiRangCaoDialog::GetSelectionPickPoint() const
 {
+    if (hasEditedPickPoint_)
+    {
+        return editedPickPoint_;
+    }
+
     NXOpen::BlockStyler::PropertyList* properties = edgeSelectBlock_->GetProperties();
     const NXOpen::Point3d point = properties->GetPoint("PickPoint");
     delete properties;
@@ -1237,6 +1349,221 @@ NXOpen::Vector3d ZheWanBiRangCaoDialog::AskSelectedFaceOuterNormal(
     return Scale(candidate, -1.0);
 }
 
+bool ZheWanBiRangCaoDialog::BuildSlotToolTransformAtEnd(
+    NXOpen::Edge* selectedEdge,
+    NXOpen::Face* selectedFace,
+    const NXOpen::Point3d& selectionPickPoint,
+    const NXOpen::Point3d& endpoint,
+    const NXOpen::Point3d& otherEndpoint,
+    double slotWidth,
+    double slotDepth,
+    double thickness,
+    SlotToolTransform& transform) const
+{
+    NXOpen::Body* targetBody = selectedEdge != nullptr ? selectedEdge->GetBody() : nullptr;
+    if (targetBody == nullptr || selectedFace == nullptr || slotWidth <= 0.0 ||
+        slotDepth <= 0.0 || thickness <= 0.0)
+    {
+        return false;
+    }
+
+    NXOpen::Vector3d endpointInwardDirection = Subtract(otherEndpoint, endpoint);
+    if (Magnitude(endpointInwardDirection) < kVectorTolerance)
+    {
+        return false;
+    }
+    endpointInwardDirection = Normalize(endpointInwardDirection);
+
+    NXOpen::Point3d selectedEdgeStart;
+    NXOpen::Point3d selectedEdgeEnd;
+    selectedEdge->GetVertices(&selectedEdgeStart, &selectedEdgeEnd);
+    NXOpen::Vector3d nearestEdgeDirection = Subtract(selectedEdgeEnd, selectedEdgeStart);
+    if (Magnitude(nearestEdgeDirection) < kVectorTolerance)
+    {
+        return false;
+    }
+    nearestEdgeDirection = Normalize(nearestEdgeDirection);
+    const NXOpen::Point3d perpendicularPoint =
+        ClosestPointOnLine(selectionPickPoint, selectedEdgeStart, nearestEdgeDirection);
+
+    transform.zDirection =
+        AskSelectedFaceOuterNormal(selectedFace, targetBody, selectionPickPoint);
+    transform.yDirection = Subtract(perpendicularPoint, selectionPickPoint);
+    transform.yDirection = Subtract(
+        transform.yDirection,
+        Scale(transform.zDirection, Dot(transform.yDirection, transform.zDirection)));
+    if (Magnitude(transform.yDirection) < kVectorTolerance)
+    {
+        return false;
+    }
+    transform.yDirection = Normalize(transform.yDirection);
+    transform.xDirection = Cross(transform.yDirection, transform.zDirection);
+    if (Magnitude(transform.xDirection) < kVectorTolerance)
+    {
+        return false;
+    }
+    transform.xDirection = Normalize(transform.xDirection);
+    transform.origin = Add(endpoint, Scale(endpointInwardDirection, -0.5 * slotWidth));
+    return true;
+}
+
+bool ZheWanBiRangCaoDialog::CommitEditableCustomFeature(
+    NXOpen::Body* targetBody,
+    NXOpen::Face* selectedFace,
+    NXOpen::Edge* selectedEdge,
+    const NXOpen::Point3d& pickPoint,
+    double slotWidth,
+    double slotDepth,
+    double thickness,
+    const std::vector<SlotToolTransform>& transforms)
+{
+    NXOpen::Part* workPart = session_->Parts()->Work();
+    if (featureClass_ == nullptr)
+    {
+        return ReportSlotFailure(
+            "editable custom feature class is not registered; restart NX after deployment");
+    }
+
+    if (workPart == nullptr || targetBody == nullptr || selectedFace == nullptr ||
+        selectedEdge == nullptr || transforms.empty())
+    {
+        return ReportSlotFailure("invalid editable custom feature inputs");
+    }
+
+    NXOpen::Features::CustomFeatureBuilder* builder = nullptr;
+    try
+    {
+        NXOpen::Features::CustomFeatureData* data = nullptr;
+        builder = workPart->Features()->CreateCustomFeatureBuilder(editedFeature_);
+        if (editedFeature_ == nullptr)
+        {
+            NXOpen::Features::CustomAttributeCollection* attributes =
+                workPart->Features()->CustomAttributeCollection();
+            std::vector<NXOpen::Features::CustomAttribute*> values;
+
+            std::vector<NXOpen::Features::CustomAttribute::Property> required{
+                NXOpen::Features::CustomAttribute::PropertyMandatoryInput};
+            std::vector<NXOpen::Features::CustomAttribute::Property> targetProperties = required;
+            targetProperties.push_back(
+                NXOpen::Features::CustomAttribute::PropertyIsReferencingTargetBody);
+            values.push_back(attributes->CreateCustomTagAttribute(
+                zhihui_zhewan_birangcao::kAttrTargetBody, targetProperties));
+            values.push_back(attributes->CreateCustomTagAttribute(
+                zhihui_zhewan_birangcao::kAttrSelectedFace, required));
+            values.push_back(attributes->CreateCustomTagAttribute(
+                zhihui_zhewan_birangcao::kAttrSelectedEdge, required));
+
+            const std::vector<NXOpen::Features::CustomAttribute::Property> optional;
+            values.push_back(attributes->CreateCustomDoubleAttribute(
+                zhihui_zhewan_birangcao::kAttrSlotWidth, optional));
+            values.push_back(attributes->CreateCustomDoubleAttribute(
+                zhihui_zhewan_birangcao::kAttrSlotDepth, optional));
+            values.push_back(attributes->CreateCustomDoubleAttribute(
+                zhihui_zhewan_birangcao::kAttrThickness, optional));
+            values.push_back(attributes->CreateCustomDoubleArrayAttribute(
+                zhihui_zhewan_birangcao::kAttrPickPoint, optional));
+            values.push_back(attributes->CreateCustomDoubleArrayAttribute(
+                zhihui_zhewan_birangcao::kAttrToolTransforms, optional));
+            data = workPart->Features()->CustomFeatureDataCollection()->CreateData(
+                featureClass_, values);
+        }
+        else
+        {
+            data = editedFeature_->FeatureData();
+        }
+
+        std::vector<double> flattenedTransforms;
+        flattenedTransforms.reserve(
+            transforms.size() * zhihui_zhewan_birangcao::kTransformValueCount);
+        for (const SlotToolTransform& transform : transforms)
+        {
+            flattenedTransforms.insert(
+                flattenedTransforms.end(),
+                {transform.origin.X,
+                 transform.origin.Y,
+                 transform.origin.Z,
+                 transform.xDirection.X,
+                 transform.xDirection.Y,
+                 transform.xDirection.Z,
+                 transform.yDirection.X,
+                 transform.yDirection.Y,
+                 transform.yDirection.Z,
+                 transform.zDirection.X,
+                 transform.zDirection.Y,
+                 transform.zDirection.Z});
+        }
+
+        const auto assignCurrentDialogValues =
+            [&](NXOpen::Features::CustomFeatureData* destination)
+        {
+            destination->CustomTagAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrTargetBody)
+                ->SetValue(targetBody);
+            destination->CustomTagAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrSelectedFace)
+                ->SetValue(selectedFace);
+            destination->CustomTagAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrSelectedEdge)
+                ->SetValue(selectedEdge);
+            destination->CustomDoubleAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrSlotWidth)
+                ->SetValue(slotWidth);
+            destination->CustomDoubleAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrSlotDepth)
+                ->SetValue(slotDepth);
+            destination->CustomDoubleAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrThickness)
+                ->SetValue(thickness);
+            destination->CustomDoubleArrayAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrPickPoint)
+                ->SetValues({pickPoint.X, pickPoint.Y, pickPoint.Z});
+            destination->CustomDoubleArrayAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrToolTransforms)
+                ->SetValues(flattenedTransforms);
+        };
+        assignCurrentDialogValues(data);
+
+        const bool editingExistingFeature = editedFeature_ != nullptr;
+        builder->SetFeatureData(data);
+
+        NXOpen::Features::Feature* feature = nullptr;
+        try
+        {
+            feature = builder->CommitFeature();
+            if (editingExistingFeature)
+            {
+                // Editing can defer the CustomFeature's internal-feature
+                // callbacks until the next model update. Those callbacks edit
+                // the existing UDF and Move Object parameters in place.
+                ForceModelUpdate();
+            }
+        }
+        catch (...)
+        {
+            throw;
+        }
+        builder->Destroy();
+        builder = nullptr;
+        if (feature == nullptr)
+        {
+            return ReportSlotFailure("commit editable custom feature");
+        }
+        feature->SetName(zhihui_zhewan_birangcao::kFeatureDisplayName);
+        gLastSlotFailure.clear();
+        return true;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        return ReportSlotFailure("commit editable custom feature: " +
+                                     std::string(ex.Message()),
+                                 ex.ErrorCode());
+    }
+}
+
 bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
     NXOpen::Edge* selectedEdge,
     NXOpen::Face* selectedFace,
@@ -1245,7 +1572,8 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
     const NXOpen::Point3d& otherEndpoint,
     double slotWidth,
     double slotDepth,
-    double thickness)
+    double thickness,
+    bool previewToolOnly)
 {
     NXOpen::Body* targetBody = selectedEdge != nullptr ? selectedEdge->GetBody() : nullptr;
     NXOpen::Part* workPart = session_->Parts()->Work();
@@ -1431,31 +1759,79 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
         return ReportSlotFailure("find the single tool body created by the UDF");
     }
 
-    // Apply the placement transform to the actual tool body.  Passing only the
-    // UDF wrapper tag can return success without relocating all UDF children.
-    // UF_MODL_transform_entities moves the body together with its owning
-    // extrude/sketch/datum parents, including the placement point.
-    const double sourceOrigin[3] = {0.0, 0.0, 0.0};
-    const double sourceX[3] = {1.0, 0.0, 0.0};
-    const double sourceY[3] = {0.0, 1.0, 0.0};
-    const double targetOrigin[3] = {origin.X, origin.Y, origin.Z};
-    const double targetX[3] = {xDirection.X, xDirection.Y, xDirection.Z};
-    const double targetY[3] = {yDirection.X, yDirection.Y, yDirection.Z};
-    double transform[16] = {};
-    const int matrixResult = UF_MTX4_csys_to_csys(sourceOrigin, sourceX, sourceY,
-                                                   targetOrigin, targetX, targetY, transform);
+    // Create an associative Move Object feature for the complete placement
+    // matrix.  A one-shot UF_MODL_transform_entities operation looks correct
+    // in preview but has no history record, so an adopted CustomFeature would
+    // replay the UDF at its original template coordinates.
     tag_t transformedToolBodyTag = toolBodyTags.front();
-    const int transformResult = matrixResult == 0
-                                    ? UF_MODL_transform_entities(1, &transformedToolBodyTag, transform)
-                                    : 0;
-    if (matrixResult != 0 || transformResult != 0)
+    tag_t moveFeatureTag = NULL_TAG;
+    tag_t sourceCsysTag = NULL_TAG;
+    tag_t targetCsysTag = NULL_TAG;
+    NXOpen::Features::MoveObjectBuilder* moveBuilder = nullptr;
+    try
     {
+        NXOpen::Body* sourceToolBody = dynamic_cast<NXOpen::Body*>(
+            NXOpen::NXObjectManager::Get(transformedToolBodyTag));
+        if (sourceToolBody == nullptr)
+        {
+            throw NXOpen::NXException::Create(1, "The source UDF body is unavailable.");
+        }
+
+        const NXOpen::Matrix3x3 sourceOrientation(
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0);
+        const NXOpen::Matrix3x3 targetOrientation(
+            xDirection.X, xDirection.Y, xDirection.Z,
+            yDirection.X, yDirection.Y, yDirection.Z,
+            outwardNormal.X, outwardNormal.Y, outwardNormal.Z);
+        NXOpen::CartesianCoordinateSystem* sourceCsys =
+            workPart->CoordinateSystems()->CreateCoordinateSystem(
+                NXOpen::Point3d(0.0, 0.0, 0.0), sourceOrientation, true);
+        NXOpen::CartesianCoordinateSystem* targetCsys =
+            workPart->CoordinateSystems()->CreateCoordinateSystem(
+                origin, targetOrientation, true);
+        if (sourceCsys == nullptr || targetCsys == nullptr)
+        {
+            throw NXOpen::NXException::Create(1,
+                                               "Failed to create placement coordinate systems.");
+        }
+        sourceCsysTag = sourceCsys->Tag();
+        targetCsysTag = targetCsys->Tag();
+
+        moveBuilder = workPart->BaseFeatures()->CreateMoveObjectBuilder(nullptr);
+        moveBuilder->SetMoveObjectResult(
+            NXOpen::Features::MoveObjectBuilder::MoveObjectResultOptionsMoveOriginal);
+        moveBuilder->SetMoveParents(false);
+        moveBuilder->SetAssociative(true);
+        moveBuilder->ObjectToMoveObject()->Add(sourceToolBody);
+        moveBuilder->TransformMotion()->SetOption(
+            NXOpen::GeometricUtilities::ModlMotion::OptionsCsysToCsys);
+        moveBuilder->TransformMotion()->SetFromCsys(sourceCsys);
+        moveBuilder->TransformMotion()->SetToCsys(targetCsys);
+        NXOpen::NXObject* moveResult = moveBuilder->Commit();
+        moveFeatureTag = moveResult != nullptr ? moveResult->Tag() : NULL_TAG;
+        moveBuilder->Destroy();
+        moveBuilder = nullptr;
+        if (moveFeatureTag == NULL_TAG)
+        {
+            throw NXOpen::NXException::Create(1, "Move Object returned no feature.");
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        if (moveBuilder != nullptr)
+        {
+            moveBuilder->Destroy();
+        }
         DeleteObjectIfAlive(transformedToolBodyTag);
+        DeleteObjectIfAlive(targetCsysTag);
+        DeleteObjectIfAlive(sourceCsysTag);
         DeleteObjectIfAlive(udfTag);
         DeleteObjectIfAlive(placementPointTag);
-        return ReportSlotFailure(matrixResult != 0 ? "build tool-body placement transform"
-                                                    : "transform UDF tool body",
-                                 matrixResult != 0 ? matrixResult : transformResult);
+        return ReportSlotFailure("create associative tool-body placement: " +
+                                     std::string(ex.Message()),
+                                 ex.ErrorCode());
     }
     toolBodyTags[0] = transformedToolBodyTag;
 
@@ -1494,6 +1870,16 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
     }
     transformedToolBodyTag = updatedToolBodyTags.front();
     toolBodyTags[0] = transformedToolBodyTag;
+
+    if (previewToolOnly)
+    {
+        previewFeatureTags_.push_back(placementPointTag);
+        previewFeatureTags_.push_back(udfTag);
+        previewFeatureTags_.push_back(moveFeatureTag);
+        ForceModelUpdate();
+        gLastSlotFailure.clear();
+        return true;
+    }
 
     double targetBox[6] = {};
     double toolBox[6] = {};
@@ -1638,6 +2024,7 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
 
     previewFeatureTags_.push_back(placementPointTag);
     previewFeatureTags_.push_back(udfTag);
+    previewFeatureTags_.push_back(moveFeatureTag);
     previewFeatureTags_.insert(previewFeatureTags_.end(),
                                booleanFeatureTags.begin(),
                                booleanFeatureTags.end());
@@ -1870,6 +2257,67 @@ bool ZheWanBiRangCaoDialog::UpdateAllSlots()
     return false;
 }
 
+int ZheWanBiRangCaoDialog::Preview()
+{
+    gLastSlotFailure.clear();
+    NXOpen::Face* selectedFace = GetSelectedFace();
+    if (selectedFace == nullptr)
+    {
+        return 0;
+    }
+
+    const NXOpen::Point3d pickPoint = GetSelectionPickPoint();
+    NXOpen::Edge* edge = FindClosestLinearEdgeOnFace(selectedFace, pickPoint);
+    if (edge == nullptr || edge->SolidEdgeType() != NXOpen::Edge::EdgeTypeLinear)
+    {
+        return 0;
+    }
+
+    try
+    {
+        const SlotParameters parameters{GetSlotWidthY(), GetSlotDepthZ(), 0.5, 0.5, 6.0};
+        double selectedFaceBox[6] = {};
+        const NXOpen::Vector3d selectedFaceNormal =
+            AskPlanarFaceNormal(selectedFace, selectedFaceBox);
+        const NXOpen::Point3d selectedPlanePoint = FaceBoxCenter(selectedFaceBox);
+        const std::vector<SlotReferenceEdge> referenceEdges =
+            FindInnerReferenceEdges(edge,
+                                    selectedFace,
+                                    selectedPlanePoint,
+                                    selectedFaceNormal);
+        const double thickness = EstimateThickness(edge->GetBody(), selectedFace);
+
+        for (const SlotReferenceEdge& referenceEdge : referenceEdges)
+        {
+            static_cast<void>(CreateSlotCustomFeatureAtEnd(edge,
+                                                            selectedFace,
+                                                            pickPoint,
+                                                            referenceEdge.startPoint,
+                                                            referenceEdge.endPoint,
+                                                            parameters.slotWidth,
+                                                            parameters.slotDepth,
+                                                            thickness,
+                                                            false));
+            static_cast<void>(CreateSlotCustomFeatureAtEnd(edge,
+                                                            selectedFace,
+                                                            pickPoint,
+                                                            referenceEdge.endPoint,
+                                                            referenceEdge.startPoint,
+                                                            parameters.slotWidth,
+                                                            parameters.slotDepth,
+                                                            thickness,
+                                                            false));
+        }
+        return 0;
+    }
+    catch (...)
+    {
+        CleanupPreviewObjects();
+        CleanupHiddenTemporaryObjects();
+        return 0;
+    }
+}
+
 int ZheWanBiRangCaoDialog::Execute()
 {
     SaveDialogState();
@@ -1913,35 +2361,47 @@ int ZheWanBiRangCaoDialog::Execute()
             FindInnerReferenceEdges(edge, largerFace, selectedPlanePoint, selectedFaceNormal);
         const double thickness = EstimateThickness(edge->GetBody(), largerFace);
 
-        int createdCount = 0;
+        std::vector<SlotToolTransform> transforms;
         for (const SlotReferenceEdge& referenceEdge : referenceEdges)
         {
-            if (CreateSlotCustomFeatureAtEnd(edge,
-                                             largerFace,
-                                             pickPoint,
-                                             referenceEdge.startPoint,
-                                             referenceEdge.endPoint,
-                                             parameters.slotWidth,
-                                             parameters.slotDepth,
-                                             thickness))
+            SlotToolTransform startTransform;
+            if (BuildSlotToolTransformAtEnd(edge,
+                                            largerFace,
+                                            pickPoint,
+                                            referenceEdge.startPoint,
+                                            referenceEdge.endPoint,
+                                            parameters.slotWidth,
+                                            parameters.slotDepth,
+                                            thickness,
+                                            startTransform))
             {
-                ++createdCount;
+                transforms.push_back(startTransform);
             }
 
-            if (CreateSlotCustomFeatureAtEnd(edge,
-                                             largerFace,
-                                             pickPoint,
-                                             referenceEdge.endPoint,
-                                             referenceEdge.startPoint,
-                                             parameters.slotWidth,
-                                             parameters.slotDepth,
-                                             thickness))
+            SlotToolTransform endTransform;
+            if (BuildSlotToolTransformAtEnd(edge,
+                                            largerFace,
+                                            pickPoint,
+                                            referenceEdge.endPoint,
+                                            referenceEdge.startPoint,
+                                            parameters.slotWidth,
+                                            parameters.slotDepth,
+                                            thickness,
+                                            endTransform))
             {
-                ++createdCount;
+                transforms.push_back(endTransform);
             }
         }
 
-        if (createdCount == 0)
+        if (transforms.empty() ||
+            !CommitEditableCustomFeature(edge->GetBody(),
+                                         largerFace,
+                                         edge,
+                                         pickPoint,
+                                         parameters.slotWidth,
+                                         parameters.slotDepth,
+                                         thickness,
+                                         transforms))
         {
             std::string message = "No relief slot was created.";
             if (!gLastSlotFailure.empty())

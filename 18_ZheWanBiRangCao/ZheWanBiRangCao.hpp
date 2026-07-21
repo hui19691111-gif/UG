@@ -6,6 +6,9 @@
 #include <NXOpen/DisplayableObject.hxx>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/Face.hxx>
+#include <NXOpen/Features_CustomFeature.hxx>
+#include <NXOpen/Features_CustomFeatureClass.hxx>
+#include <NXOpen/Features_CustomFeatureClassManager.hxx>
 #include <NXOpen/Session.hxx>
 #include <NXOpen/UI.hxx>
 
@@ -46,6 +49,14 @@ private:
         NXOpen::Vector3d widthDirection;
         NXOpen::Vector3d depthDirection;
         tag_t lines[5];
+    };
+
+    struct SlotToolTransform
+    {
+        NXOpen::Point3d origin;
+        NXOpen::Vector3d xDirection;
+        NXOpen::Vector3d yDirection;
+        NXOpen::Vector3d zDirection;
     };
 
     void initialize_cb();
@@ -101,7 +112,26 @@ private:
                                       const NXOpen::Point3d& otherEndpoint,
                                       double slotWidth,
                                       double slotDepth,
-                                      double thickness);
+                                      double thickness,
+                                      bool previewToolOnly = false);
+    bool BuildSlotToolTransformAtEnd(NXOpen::Edge* selectedEdge,
+                                     NXOpen::Face* selectedFace,
+                                     const NXOpen::Point3d& selectionPickPoint,
+                                     const NXOpen::Point3d& endpoint,
+                                     const NXOpen::Point3d& otherEndpoint,
+                                     double slotWidth,
+                                     double slotDepth,
+                                     double thickness,
+                                     SlotToolTransform& transform) const;
+    bool CommitEditableCustomFeature(NXOpen::Body* targetBody,
+                                     NXOpen::Face* selectedFace,
+                                     NXOpen::Edge* selectedEdge,
+                                     const NXOpen::Point3d& pickPoint,
+                                     double slotWidth,
+                                     double slotDepth,
+                                     double thickness,
+                                     const std::vector<SlotToolTransform>& transforms);
+    void LoadEditedCustomFeatureData();
     NXOpen::Vector3d AskSelectedFaceOuterNormal(NXOpen::Face* face,
                                                 NXOpen::Body* body,
                                                 const NXOpen::Point3d& validFacePoint) const;
@@ -119,6 +149,7 @@ private:
     void HideObject(tag_t objectTag) const;
     void CleanupHiddenTemporaryObjects();
     void CleanupPreviewObjects();
+    int Preview();
     bool UpdateAllSlots();
     int Execute();
 
@@ -130,6 +161,12 @@ private:
     NXOpen::BlockStyler::UIBlock* edgeSelectBlock_;
     NXOpen::BlockStyler::UIBlock* slotWidthBlock_;
     NXOpen::BlockStyler::UIBlock* slotDepthBlock_;
+    NXOpen::Features::CustomFeatureClassManager* customFeatureManager_;
+    NXOpen::Features::CustomFeature* editedFeature_;
+    NXOpen::Features::CustomFeatureClass* featureClass_;
+    bool loadingEditedFeature_;
+    bool hasEditedPickPoint_;
+    NXOpen::Point3d editedPickPoint_;
     std::vector<SlotFeatureRecord> slotRecords_;
     std::vector<tag_t> hiddenTemporaryTags_;
     std::vector<tag_t> previewFeatureTags_;

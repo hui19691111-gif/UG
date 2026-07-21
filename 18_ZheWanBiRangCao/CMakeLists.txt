@@ -20,23 +20,32 @@ add_library(ZheWanBiRangCao SHARED
     ZheWanBiRangCaoMain.cpp
 )
 
-target_include_directories(ZheWanBiRangCao
-    PRIVATE
-        ${NX_OPEN_INCLUDE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}
+add_library(ZheWanBiRangCaoCore SHARED
+    embedded_dialog_resources.rc
+    ZheWanBiRangCaoCustomFeatureCore.cpp
 )
 
-target_compile_definitions(ZheWanBiRangCao PRIVATE UNICODE _UNICODE NOMINMAX)
-target_compile_definitions(ZheWanBiRangCao PRIVATE
-    $<$<CONFIG:Release>:ZH_PROTECTED_BUILD=1>
-    $<$<CONFIG:Release>:NDEBUG>
-)
-
-target_compile_options(ZheWanBiRangCao PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/W4 /EHsc>
-)
-
-target_link_directories(ZheWanBiRangCao PRIVATE ${NX_OPEN_LIBRARY_DIR})
+foreach(target ZheWanBiRangCao ZheWanBiRangCaoCore)
+    target_include_directories(${target}
+        PRIVATE
+            ${NX_OPEN_INCLUDE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_compile_definitions(${target} PRIVATE UNICODE _UNICODE NOMINMAX)
+    target_compile_definitions(${target} PRIVATE
+        $<$<CONFIG:Release>:ZH_PROTECTED_BUILD=1>
+        $<$<CONFIG:Release>:NDEBUG>
+    )
+    target_compile_options(${target} PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /EHsc>
+    )
+    target_link_directories(${target} PRIVATE ${NX_OPEN_LIBRARY_DIR})
+    target_link_options(${target} PRIVATE
+        $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/RELEASE>
+        $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/DYNAMICBASE>
+        $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/NXCOMPAT>
+    )
+endforeach()
 
 target_link_libraries(ZheWanBiRangCao PRIVATE
     libugopenint.lib
@@ -50,18 +59,24 @@ target_link_libraries(ZheWanBiRangCao PRIVATE
     libufun.lib
 )
 
-target_link_options(ZheWanBiRangCao PRIVATE
-    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/RELEASE>
-    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/DYNAMICBASE>
-    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/NXCOMPAT>
+target_link_libraries(ZheWanBiRangCaoCore PRIVATE
+    libugopenint.lib
+    libnxopencpp.lib
+    libnxopencpp_features.lib
+    libnxopencpp_gateway.lib
+    libnxopencpp_geometricutilities.lib
+    libnxopencpp_modlutils.lib
+    libufun.lib
 )
 
-set_target_properties(ZheWanBiRangCao PROPERTIES
-    OUTPUT_NAME "ZheWanBiRangCao"
-)
+set_target_properties(ZheWanBiRangCao PROPERTIES OUTPUT_NAME "ZheWanBiRangCao")
+set_target_properties(ZheWanBiRangCaoCore PROPERTIES OUTPUT_NAME "ZheWanBiRangCaoCore")
 
 add_custom_command(TARGET ZheWanBiRangCao POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/ZheWanBiRangCao.dlx"
         "$<TARGET_FILE_DIR:ZheWanBiRangCao>/ZheWanBiRangCao.dlx"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/CustomFeatureConfiguration.xml"
+        "$<TARGET_FILE_DIR:ZheWanBiRangCao>/CustomFeatureConfiguration.xml"
 )
