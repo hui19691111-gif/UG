@@ -262,6 +262,7 @@ private:
                             std::string& errorMessage) const;
     bool CreatePreview();
     bool UndoPreview(bool includeCommitted = false);
+    bool FlattenPreviewTargetBody(std::string& errorMessage);
     void CommitPreview();
     void FinalizeCommittedPreview();
     std::vector<tag_t> CurrentWorkPartFeatureTags() const;
@@ -289,6 +290,7 @@ private:
     NXOpen::Features::CustomFeatureClass* featureClass_;
     NXOpen::Session::UndoMarkId previewUndoMark_;
     tag_t previewUdfTag_;
+    tag_t previewTargetBodyTag_;
     std::vector<tag_t> previewReferenceTags_;
     std::vector<tag_t> previewBaselineFeatureTags_;
     std::vector<tag_t> previewCreatedFeatureTags_;

@@ -3129,6 +3129,7 @@ TwoPointSiBianUI::TwoPointSiBianUI()
       featureClass_(nullptr),
       previewUndoMark_(static_cast<Session::UndoMarkId>(0)),
       previewUdfTag_(NULL_TAG),
+      previewTargetBodyTag_(NULL_TAG),
       previewReferenceTags_(),
       hasSmartEndpointCache_(false),
       smartEndpointBodyTag_(NULL_TAG),
@@ -3403,6 +3404,18 @@ int TwoPointSiBianUI::apply_cb()
             {
                 throw std::runtime_error("Preview creation failed. See " + DebugLogPath());
             }
+        }
+
+        std::string flattenError;
+        if (!FlattenPreviewTargetBody(flattenError))
+        {
+            const bool restored = UndoPreview();
+            if (!restored)
+            {
+                flattenError +=
+                    "\nThe preview rollback also failed; close the part without saving to protect the original model.";
+            }
+            throw std::runtime_error(flattenError);
         }
 
         CommitPreview();
@@ -3869,6 +3882,8 @@ bool TwoPointSiBianUI::CreatePreview()
     }
 
     previewUdfTag_ = finalResultTag;
+    previewTargetBodyTag_ =
+        inputs.targetBody != nullptr ? inputs.targetBody->Tag() : NULL_TAG;
     previewReferenceTags_ = allReferenceTags;
     if (inputs.smartMode && inputs.inferredFromSingleClick && inputs.targetBody != nullptr)
     {
@@ -3958,6 +3973,7 @@ bool TwoPointSiBianUI::UndoPreview(bool includeCommitted)
     if (!hasPreview_ &&
         !previewCommitted_ &&
         previewUdfTag_ == NULL_TAG &&
+        previewTargetBodyTag_ == NULL_TAG &&
         previewReferenceTags_.empty() &&
         previewBaselineFeatureTags_.empty() &&
         previewCreatedFeatureTags_.empty() &&
@@ -4127,10 +4143,111 @@ bool TwoPointSiBianUI::UndoPreview(bool includeCommitted)
     previewCommitted_ = false;
     previewUndoMark_ = static_cast<Session::UndoMarkId>(0);
     previewUdfTag_ = NULL_TAG;
+    previewTargetBodyTag_ = NULL_TAG;
     previewReferenceTags_.clear();
     previewBaselineFeatureTags_.clear();
     previewCreatedFeatureTags_.clear();
     return rollbackSucceeded;
+}
+
+bool TwoPointSiBianUI::FlattenPreviewTargetBody(std::string& errorMessage)
+{
+    errorMessage.clear();
+    if (!hasPreview_ || previewTargetBodyTag_ == NULL_TAG)
+    {
+        errorMessage =
+            "The completed preview has no valid target body to convert into a single feature.";
+        return false;
+    }
+    if (UF_OBJ_ask_status(previewTargetBodyTag_) != UF_OBJ_ALIVE)
+    {
+        errorMessage =
+            "The target body is no longer alive, so it cannot be converted into a single feature.";
+        return false;
+    }
+
+    int objectType = 0;
+    int objectSubtype = 0;
+    const int typeResult =
+        UF_OBJ_ask_type_and_subtype(previewTargetBodyTag_, &objectType, &objectSubtype);
+    if (typeResult != 0 || objectType != UF_solid_type)
+    {
+        errorMessage =
+            "The preview target is not a live solid or sheet body: " +
+            UfMessage(typeResult);
+        return false;
+    }
+
+    uf_list_p_t bodyList = nullptr;
+    int result = UF_MODL_create_list(&bodyList);
+    if (result == 0)
+    {
+        result = UF_MODL_put_list_item(bodyList, previewTargetBodyTag_);
+    }
+    if (result == 0)
+    {
+        AppendDebugLog("FlattenPreviewTargetBody deleting body parameters: body=" +
+                       std::to_string(previewTargetBodyTag_));
+        result = UF_MODL_delete_body_parms(bodyList);
+    }
+    if (bodyList != nullptr)
+    {
+        UF_MODL_delete_list(&bodyList);
+    }
+    if (result != 0)
+    {
+        errorMessage =
+            "Failed to convert the completed result into one non-parametric feature: " +
+            UfMessage(result);
+        return false;
+    }
+
+    uf_list_p_t featureList = nullptr;
+    result = UF_MODL_ask_body_feats(previewTargetBodyTag_, &featureList);
+    int featureCount = 0;
+    if (result == 0 && featureList != nullptr)
+    {
+        result = UF_MODL_ask_list_count(featureList, &featureCount);
+    }
+
+    tag_t resultFeatureTag = NULL_TAG;
+    if (result == 0 && featureCount == 1)
+    {
+        result = UF_MODL_ask_list_item(featureList, 0, &resultFeatureTag);
+    }
+    if (featureList != nullptr)
+    {
+        UF_MODL_delete_list(&featureList);
+    }
+    if (result != 0 || featureCount != 1 || resultFeatureTag == NULL_TAG)
+    {
+        errorMessage =
+            "NX converted the body parameters, but the result did not resolve to exactly one feature.";
+        AppendDebugLog("FlattenPreviewTargetBody verification failed: result=" +
+                       std::to_string(result) +
+                       ", featureCount=" + std::to_string(featureCount) +
+                       ", featureTag=" + std::to_string(resultFeatureTag));
+        return false;
+    }
+
+    result = UF_OBJ_set_name(resultFeatureTag, "2P_SiBian");
+    if (result != 0)
+    {
+        errorMessage =
+            "The single result feature was created, but it could not be named 2P_SiBian: " +
+            UfMessage(result);
+        return false;
+    }
+
+    previewUdfTag_ = resultFeatureTag;
+    previewReferenceTags_.clear();
+    previewCreatedFeatureTags_.clear();
+    previewCreatedFeatureTags_.push_back(resultFeatureTag);
+    AppendDebugLog("FlattenPreviewTargetBody OK: body=" +
+                   std::to_string(previewTargetBodyTag_) +
+                   ", feature=" + std::to_string(resultFeatureTag) +
+                   ", name=2P_SiBian");
+    return true;
 }
 
 void TwoPointSiBianUI::CommitPreview()
@@ -4178,6 +4295,7 @@ void TwoPointSiBianUI::FinalizeCommittedPreview()
     previewCommitted_ = false;
     previewUndoMark_ = static_cast<Session::UndoMarkId>(0);
     previewUdfTag_ = NULL_TAG;
+    previewTargetBodyTag_ = NULL_TAG;
     previewReferenceTags_.clear();
     previewBaselineFeatureTags_.clear();
     previewCreatedFeatureTags_.clear();
