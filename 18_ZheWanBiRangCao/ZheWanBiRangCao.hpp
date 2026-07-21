@@ -59,6 +59,12 @@ private:
         NXOpen::Vector3d zDirection;
     };
 
+    struct SlotEndCandidate
+    {
+        NXOpen::Point3d endpoint;
+        NXOpen::Point3d otherEndpoint;
+    };
+
     void initialize_cb();
     bool enable_ok_cb();
     int update_cb(NXOpen::BlockStyler::UIBlock* block);
@@ -72,6 +78,7 @@ private:
     void ClearSelectedEdge() const;
     double GetSlotWidthY() const;
     double GetSlotDepthZ() const;
+    int GetCutMode() const;
     void SetDoubleValue(NXOpen::BlockStyler::UIBlock* block, double value) const;
     void LoadDialogState() const;
     void SaveDialogState() const;
@@ -85,6 +92,9 @@ private:
                                                            NXOpen::Face* face,
                                                            const NXOpen::Point3d& selectedPlanePoint,
                                                            const NXOpen::Vector3d& selectedPlaneNormal) const;
+    std::vector<SlotEndCandidate> BuildSlotEndCandidates(
+        const std::vector<SlotReferenceEdge>& referenceEdges,
+        const NXOpen::Point3d& pickPoint) const;
     NXOpen::Point3d FindNearestOuterPoint(const NXOpen::Point3d& innerPoint,
                                           const NXOpen::Point3d& outerStart,
                                           const NXOpen::Point3d& outerEnd) const;
@@ -159,6 +169,7 @@ private:
     NXOpen::BlockStyler::BlockDialog* dialog_;
     NXOpen::BlockStyler::UIBlock* mainGroup_;
     NXOpen::BlockStyler::UIBlock* edgeSelectBlock_;
+    NXOpen::BlockStyler::UIBlock* cutModeBlock_;
     NXOpen::BlockStyler::UIBlock* slotWidthBlock_;
     NXOpen::BlockStyler::UIBlock* slotDepthBlock_;
     NXOpen::Features::CustomFeatureClassManager* customFeatureManager_;

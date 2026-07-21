@@ -595,6 +595,7 @@ ZheWanBiRangCaoDialog::ZheWanBiRangCaoDialog()
       dialog_(nullptr),
       mainGroup_(nullptr),
       edgeSelectBlock_(nullptr),
+      cutModeBlock_(nullptr),
       slotWidthBlock_(nullptr),
       slotDepthBlock_(nullptr),
       customFeatureManager_(nullptr),
@@ -662,6 +663,7 @@ void ZheWanBiRangCaoDialog::initialize_cb()
 {
     mainGroup_ = dialog_->TopBlock()->FindBlock("main_group");
     edgeSelectBlock_ = dialog_->TopBlock()->FindBlock("edge_select");
+    cutModeBlock_ = dialog_->TopBlock()->FindBlock("cut_mode");
     slotWidthBlock_ = dialog_->TopBlock()->FindBlock("slot_width_y");
     slotDepthBlock_ = dialog_->TopBlock()->FindBlock("slot_depth_z");
 
@@ -714,6 +716,15 @@ void ZheWanBiRangCaoDialog::LoadEditedCustomFeatureData()
             data->CustomDoubleArrayAttributeByName(
                     zhihui_zhewan_birangcao::kAttrPickPoint)
                 ->GetValues();
+        const std::vector<double> transforms =
+            data->CustomDoubleArrayAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrToolTransforms)
+                ->GetValues();
+
+        const std::size_t transformCount =
+            transforms.size() / zhihui_zhewan_birangcao::kTransformValueCount;
+        zhihui_dialog_memory::TrySetEnum(
+            cutModeBlock_, transformCount <= 1 ? 0 : 1);
 
         NXOpen::BlockStyler::PropertyList* properties = edgeSelectBlock_->GetProperties();
         if (face != nullptr)
@@ -760,7 +771,8 @@ int ZheWanBiRangCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
         return 0;
     }
 
-    if (block == slotWidthBlock_ || block == slotDepthBlock_)
+    if (block == cutModeBlock_ || block == slotWidthBlock_ ||
+        block == slotDepthBlock_)
     {
         SaveDialogState();
         if (GetSelectedFace() != nullptr)
@@ -867,6 +879,18 @@ double ZheWanBiRangCaoDialog::GetSlotDepthZ() const
     return value;
 }
 
+int ZheWanBiRangCaoDialog::GetCutMode() const
+{
+    if (cutModeBlock_ == nullptr)
+    {
+        return 1;
+    }
+    NXOpen::BlockStyler::PropertyList* properties = cutModeBlock_->GetProperties();
+    const int value = properties->GetEnum("Value");
+    delete properties;
+    return value;
+}
+
 void ZheWanBiRangCaoDialog::SetDoubleValue(NXOpen::BlockStyler::UIBlock* block, double value) const
 {
     if (block == nullptr)
@@ -881,12 +905,14 @@ void ZheWanBiRangCaoDialog::SetDoubleValue(NXOpen::BlockStyler::UIBlock* block, 
 
 void ZheWanBiRangCaoDialog::LoadDialogState() const
 {
+    zhihui_dialog_memory::LoadEnum(L"ZheWanBiRangCao_state.ini", L"cutMode", cutModeBlock_);
     zhihui_dialog_memory::LoadDouble(L"ZheWanBiRangCao_state.ini", L"slotWidthY", slotWidthBlock_);
     zhihui_dialog_memory::LoadDouble(L"ZheWanBiRangCao_state.ini", L"slotDepthZ", slotDepthBlock_);
 }
 
 void ZheWanBiRangCaoDialog::SaveDialogState() const
 {
+    zhihui_dialog_memory::SaveEnum(L"ZheWanBiRangCao_state.ini", L"cutMode", cutModeBlock_);
     zhihui_dialog_memory::SaveDouble(L"ZheWanBiRangCao_state.ini", L"slotWidthY", slotWidthBlock_);
     zhihui_dialog_memory::SaveDouble(L"ZheWanBiRangCao_state.ini", L"slotDepthZ", slotDepthBlock_);
 }
@@ -1158,6 +1184,40 @@ std::vector<ZheWanBiRangCaoDialog::SlotReferenceEdge> ZheWanBiRangCaoDialog::Fin
     }
 
     return result;
+}
+
+std::vector<ZheWanBiRangCaoDialog::SlotEndCandidate>
+ZheWanBiRangCaoDialog::BuildSlotEndCandidates(
+    const std::vector<SlotReferenceEdge>& referenceEdges,
+    const NXOpen::Point3d& pickPoint) const
+{
+    std::vector<SlotEndCandidate> candidates;
+    candidates.reserve(referenceEdges.size() * 2);
+    for (const SlotReferenceEdge& referenceEdge : referenceEdges)
+    {
+        candidates.push_back(
+            SlotEndCandidate{referenceEdge.startPoint, referenceEdge.endPoint});
+        candidates.push_back(
+            SlotEndCandidate{referenceEdge.endPoint, referenceEdge.startPoint});
+    }
+
+    // 0 = single cut: keep only the end nearest to the actual face pick point.
+    // 1 = multiple cuts: preserve the existing behavior and keep every end.
+    if (GetCutMode() == 0 && candidates.size() > 1)
+    {
+        const auto nearest = std::min_element(
+            candidates.begin(),
+            candidates.end(),
+            [&pickPoint](const SlotEndCandidate& left,
+                         const SlotEndCandidate& right)
+            {
+                return Distance(pickPoint, left.endpoint) <
+                       Distance(pickPoint, right.endpoint);
+            });
+        const SlotEndCandidate selected = *nearest;
+        candidates.assign(1, selected);
+    }
+    return candidates;
 }
 
 NXOpen::Point3d ZheWanBiRangCaoDialog::FindNearestOuterPoint(const NXOpen::Point3d& innerPoint,
@@ -2285,24 +2345,17 @@ int ZheWanBiRangCaoDialog::Preview()
                                     selectedFace,
                                     selectedPlanePoint,
                                     selectedFaceNormal);
+        const std::vector<SlotEndCandidate> endCandidates =
+            BuildSlotEndCandidates(referenceEdges, pickPoint);
         const double thickness = EstimateThickness(edge->GetBody(), selectedFace);
 
-        for (const SlotReferenceEdge& referenceEdge : referenceEdges)
+        for (const SlotEndCandidate& candidate : endCandidates)
         {
             static_cast<void>(CreateSlotCustomFeatureAtEnd(edge,
                                                             selectedFace,
                                                             pickPoint,
-                                                            referenceEdge.startPoint,
-                                                            referenceEdge.endPoint,
-                                                            parameters.slotWidth,
-                                                            parameters.slotDepth,
-                                                            thickness,
-                                                            false));
-            static_cast<void>(CreateSlotCustomFeatureAtEnd(edge,
-                                                            selectedFace,
-                                                            pickPoint,
-                                                            referenceEdge.endPoint,
-                                                            referenceEdge.startPoint,
+                                                            candidate.endpoint,
+                                                            candidate.otherEndpoint,
                                                             parameters.slotWidth,
                                                             parameters.slotDepth,
                                                             thickness,
@@ -2359,37 +2412,26 @@ int ZheWanBiRangCaoDialog::Execute()
 
         const std::vector<SlotReferenceEdge> referenceEdges =
             FindInnerReferenceEdges(edge, largerFace, selectedPlanePoint, selectedFaceNormal);
+        const std::vector<SlotEndCandidate> endCandidates =
+            BuildSlotEndCandidates(referenceEdges, pickPoint);
         const double thickness = EstimateThickness(edge->GetBody(), largerFace);
 
         std::vector<SlotToolTransform> transforms;
-        for (const SlotReferenceEdge& referenceEdge : referenceEdges)
+        transforms.reserve(endCandidates.size());
+        for (const SlotEndCandidate& candidate : endCandidates)
         {
-            SlotToolTransform startTransform;
+            SlotToolTransform transform;
             if (BuildSlotToolTransformAtEnd(edge,
                                             largerFace,
                                             pickPoint,
-                                            referenceEdge.startPoint,
-                                            referenceEdge.endPoint,
+                                            candidate.endpoint,
+                                            candidate.otherEndpoint,
                                             parameters.slotWidth,
                                             parameters.slotDepth,
                                             thickness,
-                                            startTransform))
+                                            transform))
             {
-                transforms.push_back(startTransform);
-            }
-
-            SlotToolTransform endTransform;
-            if (BuildSlotToolTransformAtEnd(edge,
-                                            largerFace,
-                                            pickPoint,
-                                            referenceEdge.endPoint,
-                                            referenceEdge.startPoint,
-                                            parameters.slotWidth,
-                                            parameters.slotDepth,
-                                            thickness,
-                                            endTransform))
-            {
-                transforms.push_back(endTransform);
+                transforms.push_back(transform);
             }
         }
 

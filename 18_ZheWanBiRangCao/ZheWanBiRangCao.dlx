@@ -37,6 +37,27 @@
               </PropertyList>
             </item>
           </Property>
+          <Property id="cut_mode" mask="256" name="cut_mode" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="cut_mode" icon="styler_optionmenu.bmp" name="cut_mode" type="uicomp" class="UICOMP_enum" notes="" Expanded="1" hierarchy="" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" mask="16656" name="API Name" type="string" group="General::" sname="BlockID" value="cut_mode" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="Title" mask="257" name="Title" type="utfstring" group="General::" sname="Label" value="&#x5207;&#x5272;&#x65B9;&#x5F0F;" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="MinimumValue" mask="69636" name="MinimumValue" type="integer" group="Block Specific::" sname="MinimumValue" value="0" source="1" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="MaximumValue" mask="69636" name="MaximumValue" type="integer" group="Block Specific::" sname="MaximumValue" value="1" source="1" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="Value" mask="69636" name="Value" type="integer" group="Block Specific::" sname="TEMPVALUE" value="1" source="1" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="Titles_1" mask="256" name="Titles_1" type="enum" group="Block Specific::" sname="Value" source="4" ClassID="UGS::UICOMP_enum" dynamic="1" selected="1" hierarchy="UGS::UICOMP_enum">
+                  <Option name="&#x5355;&#x5207;" value="0"/>
+                  <Option name="&#x591A;&#x5207;" value="1"/>
+                </Property>
+                <Property id="Top" loc="1" mask="16384" name="Top" type="attachment" group="Other::Attachments::" sname="Top" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+                <Property id="Left" loc="2" mask="16384" name="Left" type="attachment" group="Other::Attachments::" sname="Left" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+                <Property id="Right" loc="3" mask="16384" name="Right" type="attachment" group="Other::Attachments::" sname="Right" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+                <Property id="Bottom" loc="4" mask="16384" name="Bottom" type="attachment" group="Other::Attachments::" sname="Bottom" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+              </PropertyList>
+            </item>
+          </Property>
           <Property id="slot_width_y" mask="256" name="slot_width_y" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
             <item id="slot_width_y" icon="styler_double" name="slot_width_y" type="uicomp" class="UICOMP_double" notes="" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
               <PropertyList id="id" mode="0">

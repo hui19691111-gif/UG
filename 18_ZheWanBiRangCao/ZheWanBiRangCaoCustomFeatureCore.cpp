@@ -491,6 +491,39 @@ bool UpdateMovePlacement(Features::MoveObject* move,
     }
 }
 
+bool AskMoveOrigin(Features::Feature* feature, Point3d& origin)
+{
+    Features::MoveObject* move = dynamic_cast<Features::MoveObject*>(feature);
+    Part* workPart = Session::GetSession()->Parts()->Work();
+    if (move == nullptr || workPart == nullptr)
+    {
+        return false;
+    }
+
+    Features::MoveObjectBuilder* builder = nullptr;
+    try
+    {
+        builder = workPart->BaseFeatures()->CreateMoveObjectBuilder(move);
+        CoordinateSystem* targetCsys = builder->TransformMotion()->ToCsys();
+        if (targetCsys == nullptr)
+        {
+            builder->Destroy();
+            return false;
+        }
+        origin = targetCsys->Origin();
+        builder->Destroy();
+        return true;
+    }
+    catch (...)
+    {
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        return false;
+    }
+}
+
 int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
 {
     Features::CustomFeature* customFeature = event->GetCustomFeature();
@@ -499,29 +532,6 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
     if (customFeature == nullptr || data == nullptr || workPart == nullptr)
     {
         return 1;
-    }
-
-    const std::vector<Features::ConstructionFeatureData*> existingConstruction =
-        event->GetConstructionFeatures();
-    if (!existingConstruction.empty())
-    {
-        // Siemens CustomFeature contract: construction features are created
-        // once. Existing members are retained here and their parameters are
-        // edited only by InternalFeaturePreUpdateCallback.
-        for (Features::ConstructionFeatureData* constructionData : existingConstruction)
-        {
-            Features::Feature* constructionFeature =
-                constructionData != nullptr ? constructionData->GetFeature() : nullptr;
-            if (constructionFeature == nullptr)
-            {
-                continue;
-            }
-            const bool isUdf = FeatureType(constructionFeature).find("UDF") !=
-                               std::string::npos;
-            constructionData->SetShowInGraphicView(!isUdf);
-        }
-        event->SetConstructionFeatures(existingConstruction);
-        return 0;
     }
 
     Body* targetBody = dynamic_cast<Body*>(
@@ -536,6 +546,113 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
         transforms.size() % zhihui_zhewan_birangcao::kTransformValueCount != 0)
     {
         return 1;
+    }
+
+    const size_t desiredToolCount = transforms.size() /
+                                    zhihui_zhewan_birangcao::kTransformValueCount;
+    const std::vector<Features::ConstructionFeatureData*> existingConstruction =
+        event->GetConstructionFeatures();
+    std::vector<Features::ConstructionFeatureData*> constructionFeatures;
+    std::vector<size_t> transformIndicesToCreate;
+    size_t retainedToolCount = 0;
+
+    if (!existingConstruction.empty())
+    {
+        // Every relief tool is stored as one UDF + one Move Object + one
+        // Boolean construction feature.  Existing groups are edited in place.
+        // When changing Multi Cut to Single Cut, retaining the earliest group
+        // avoids breaking the target-body history; its Move Object is then
+        // repositioned to the sole stored transform by the internal callback.
+        if (existingConstruction.size() % 3 != 0)
+        {
+            event->SetConstructionFeatures(existingConstruction);
+            return 0;
+        }
+
+        const size_t existingToolCount = existingConstruction.size() / 3;
+        if (existingToolCount >= desiredToolCount)
+        {
+            const size_t keepFeatureCount = desiredToolCount * 3;
+            constructionFeatures.assign(existingConstruction.begin(),
+                                        existingConstruction.begin() +
+                                            keepFeatureCount);
+            for (size_t index = 0; index < constructionFeatures.size(); ++index)
+            {
+                constructionFeatures[index]->SetShowInGraphicView(index % 3 == 2);
+            }
+            event->SetConstructionFeatures(constructionFeatures);
+            return 0;
+        }
+
+        constructionFeatures = existingConstruction;
+        retainedToolCount = existingToolCount;
+        for (size_t index = 0; index < constructionFeatures.size(); ++index)
+        {
+            constructionFeatures[index]->SetShowInGraphicView(index % 3 == 2);
+        }
+
+        // Match each retained Move Object to its nearest new transform.  Only
+        // create the transforms that are not already represented.
+        std::vector<bool> covered(desiredToolCount, false);
+        for (size_t group = 0; group < existingToolCount; ++group)
+        {
+            Point3d currentOrigin(0.0, 0.0, 0.0);
+            Features::Feature* moveFeature =
+                existingConstruction[group * 3 + 1]->GetFeature();
+            size_t bestIndex = desiredToolCount;
+            double bestDistanceSquared = std::numeric_limits<double>::max();
+            if (AskMoveOrigin(moveFeature, currentOrigin))
+            {
+                for (size_t index = 0; index < desiredToolCount; ++index)
+                {
+                    if (covered[index])
+                    {
+                        continue;
+                    }
+                    const size_t offset =
+                        index * zhihui_zhewan_birangcao::kTransformValueCount;
+                    const double dx = currentOrigin.X - transforms[offset];
+                    const double dy = currentOrigin.Y - transforms[offset + 1];
+                    const double dz = currentOrigin.Z - transforms[offset + 2];
+                    const double distanceSquared = dx * dx + dy * dy + dz * dz;
+                    if (distanceSquared < bestDistanceSquared)
+                    {
+                        bestDistanceSquared = distanceSquared;
+                        bestIndex = index;
+                    }
+                }
+            }
+            if (bestIndex == desiredToolCount)
+            {
+                for (size_t index = 0; index < desiredToolCount; ++index)
+                {
+                    if (!covered[index])
+                    {
+                        bestIndex = index;
+                        break;
+                    }
+                }
+            }
+            if (bestIndex < desiredToolCount)
+            {
+                covered[bestIndex] = true;
+            }
+        }
+        for (size_t index = 0; index < desiredToolCount; ++index)
+        {
+            if (!covered[index])
+            {
+                transformIndicesToCreate.push_back(index);
+            }
+        }
+    }
+    else
+    {
+        transformIndicesToCreate.reserve(desiredToolCount);
+        for (size_t index = 0; index < desiredToolCount; ++index)
+        {
+            transformIndicesToCreate.push_back(index);
+        }
     }
 
     ExtractedTemplate extracted;
@@ -560,11 +677,8 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
         return 1;
     }
 
-    std::vector<Features::ConstructionFeatureData*> constructionFeatures;
-    int createdCuts = 0;
-    const size_t toolCount = transforms.size() /
-                             zhihui_zhewan_birangcao::kTransformValueCount;
-    for (size_t index = 0; index < toolCount; ++index)
+    int createdCuts = static_cast<int>(retainedToolCount);
+    for (size_t index : transformIndicesToCreate)
     {
         ToolResult tool;
         if (!CreateUdfTool(definition,
