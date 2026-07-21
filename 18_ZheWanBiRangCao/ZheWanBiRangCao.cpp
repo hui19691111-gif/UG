@@ -14,6 +14,7 @@
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
 #include <NXOpen/BodyDumbRule.hxx>
+#include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/Features_BooleanBuilder.hxx>
 #include <NXOpen/Features_BooleanFeature.hxx>
 #include <NXOpen/Features_ExtrudeBuilder.hxx>
@@ -36,6 +37,7 @@
 #include <NXOpen/ScCollector.hxx>
 #include <NXOpen/ScCollectorCollection.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
+#include <NXOpen/SelectObject.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
 #include <NXOpen/Section.hxx>
@@ -48,22 +50,182 @@
 #include <uf_curve.h>
 #include <uf_modl.h>
 #include <uf_modl_sweep.h>
+#include <uf_modl_udf.h>
+#include <uf_mtx.h>
 #include <uf_obj.h>
+#include <uf_part.h>
+#include <uf_trns.h>
 #include <uf_ui_types.h>
 
 #include <windows.h>
 
 #include <cmath>
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <limits>
+#include <sstream>
+#include <set>
 #include <string>
 #include <vector>
 
 namespace
 {
 constexpr double kVectorTolerance = 1.0e-6;
+std::string FormatDouble(double value);
+
+class ExtractedReliefUdfTemplate
+{
+public:
+    ExtractedReliefUdfTemplate() = default;
+    ~ExtractedReliefUdfTemplate()
+    {
+        std::error_code error;
+        if (!file_.empty())
+        {
+            std::filesystem::remove(file_, error);
+        }
+        error.clear();
+        if (!directory_.empty())
+        {
+            std::filesystem::remove(directory_, error);
+        }
+    }
+
+    bool Extract(std::string& path)
+    {
+        HMODULE module = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(&FormatDouble),
+                               &module))
+        {
+            return false;
+        }
+
+        HRSRC resource = FindResourceW(module,
+                                       MAKEINTRESOURCEW(IDR_ZH_UDF_ZHEWANBIRANGCAO_PRT),
+                                       RT_RCDATA);
+        if (resource == nullptr)
+        {
+            return false;
+        }
+
+        const DWORD byteCount = SizeofResource(module, resource);
+        HGLOBAL loaded = LoadResource(module, resource);
+        const void* bytes = loaded != nullptr ? LockResource(loaded) : nullptr;
+        if (byteCount == 0 || bytes == nullptr)
+        {
+            return false;
+        }
+
+        try
+        {
+            const std::wstring uniqueName =
+                L"ZW_BiLanCao_" + std::to_wstring(GetCurrentProcessId()) + L"_" +
+                std::to_wstring(GetTickCount64());
+            directory_ = std::filesystem::temp_directory_path() / uniqueName;
+            std::filesystem::create_directories(directory_);
+            file_ = directory_ / L"ZW_BiLanCao.prt";
+
+            std::ofstream output(file_, std::ios::binary | std::ios::trunc);
+            output.write(static_cast<const char*>(bytes), byteCount);
+            output.close();
+            if (!output)
+            {
+                return false;
+            }
+            path = file_.string();
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+private:
+    std::filesystem::path directory_;
+    std::filesystem::path file_;
+};
+
+tag_t FindUdfDefinitionFeature(tag_t partTag)
+{
+    tag_t object = NULL_TAG;
+    while (UF_OBJ_cycle_objs_in_part(partTag, UF_feature_type, &object) == 0 &&
+           object != NULL_TAG)
+    {
+        char* featureType = nullptr;
+        UF_MODL_ask_feat_type(object, &featureType);
+        const bool isDefinition = featureType != nullptr &&
+                                  std::string(featureType) == "UDF_DEF";
+        if (featureType != nullptr)
+        {
+            UF_free(featureType);
+        }
+        if (isDefinition)
+        {
+            return object;
+        }
+    }
+    return NULL_TAG;
+}
+
+std::string gLastSlotFailure;
+
+bool ReportSlotFailure(const std::string& stage, int errorCode = 0)
+{
+    gLastSlotFailure = stage;
+    if (errorCode != 0)
+    {
+        gLastSlotFailure += " (NX error " + std::to_string(errorCode) + ")";
+    }
+
+    std::string syslogMessage =
+        "ZheWanBiRangCao: relief-slot failure: " + gLastSlotFailure + "\n";
+    UF_print_syslog(syslogMessage.data(), FALSE);
+    return false;
+}
+
+bool AllocateUdfExpressionValues(UF_MODL_udf_exp_data_t& expressionData,
+                                 double slotDepth,
+                                 double slotWidth)
+{
+    if (expressionData.num_exps <= 0)
+    {
+        return true;
+    }
+
+    int allocationError = 0;
+    expressionData.new_exp_values = static_cast<char**>(UF_allocate_memory(
+        static_cast<unsigned int>(sizeof(char*) * expressionData.num_exps),
+        &allocationError));
+    if (allocationError != 0 || expressionData.new_exp_values == nullptr)
+    {
+        return false;
+    }
+    std::memset(expressionData.new_exp_values, 0,
+                sizeof(char*) * expressionData.num_exps);
+
+    for (int index = 0; index < expressionData.num_exps; ++index)
+    {
+        double numericValue = index == 0 ? slotDepth : slotWidth;
+
+        const std::string value = FormatDouble(numericValue);
+        char* stored = static_cast<char*>(UF_allocate_memory(
+            static_cast<unsigned int>(value.size() + 1), &allocationError));
+        if (allocationError != 0 || stored == nullptr)
+        {
+            return false;
+        }
+        std::memcpy(stored, value.c_str(), value.size() + 1);
+        expressionData.new_exp_values[index] = stored;
+    }
+    return true;
+}
 std::string FormatDouble(const double value)
 {
     char buffer[64] = {};
@@ -222,7 +384,7 @@ bool EditLineBetweenPoints(tag_t lineTag, const NXOpen::Point3d& startPoint, con
 
 void DeleteObjectIfAlive(tag_t objectTag)
 {
-    if (objectTag != NULL_TAG)
+    if (objectTag != NULL_TAG && UF_OBJ_ask_status(objectTag) == UF_OBJ_ALIVE)
     {
         static_cast<void>(UF_OBJ_delete_object(objectTag));
     }
@@ -1055,75 +1217,433 @@ bool ZheWanBiRangCaoDialog::ShouldCreateSlotAtEnd(const NXOpen::Point3d& innerPo
     return endExtension > extensionTolerance;
 }
 
-bool ZheWanBiRangCaoDialog::CreateSlotOutlineOnSelectedFace(NXOpen::Edge* selectedEdge,
-                                                            NXOpen::Face* selectedFace,
-                                                            const NXOpen::Point3d& innerPoint,
-                                                            const NXOpen::Point3d& selectedPlanePoint,
-                                                            const NXOpen::Vector3d& selectedPlaneNormal,
-                                                            double slotWidth,
-                                                            double slotDepth)
+NXOpen::Vector3d ZheWanBiRangCaoDialog::AskSelectedFaceOuterNormal(
+    NXOpen::Face* face,
+    NXOpen::Body* body,
+    const NXOpen::Point3d& validFacePoint) const
 {
-    if (selectedEdge == nullptr || selectedFace == nullptr || slotWidth <= 0.0 || slotDepth <= 0.0)
+    if (face == nullptr || body == nullptr)
     {
-        return false;
+        throw NXOpen::NXException::Create(1, "A planar face and its body are required.");
     }
 
-    NXOpen::Point3d edgeStart;
-    NXOpen::Point3d edgeEnd;
-    selectedEdge->GetVertices(&edgeStart, &edgeEnd);
-    const NXOpen::Vector3d edgeDirection = Normalize(Subtract(edgeEnd, edgeStart));
-
-    const NXOpen::Point3d pointB = ProjectPointToPlane(innerPoint, selectedPlanePoint, selectedPlaneNormal);
-    const NXOpen::Point3d pointA = ClosestPointOnLine(pointB, edgeStart, edgeDirection);
-    NXOpen::Vector3d depthDirection = Subtract(pointB, pointA);
-    if (Magnitude(depthDirection) < kVectorTolerance)
+    double faceBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    const NXOpen::Vector3d candidate = AskPlanarFaceNormal(face, faceBox);
+    const NXOpen::Point3d positiveProbe = Add(validFacePoint, Scale(candidate, 0.05));
+    if (AskPointContainmentStatus(body, positiveProbe) == 2)
     {
-        return false;
+        return candidate;
     }
-    depthDirection = Normalize(depthDirection);
+    return Scale(candidate, -1.0);
+}
 
-    NXOpen::Point3d nearEdgeEnd = edgeStart;
-    NXOpen::Point3d farEdgeEnd = edgeEnd;
-    if (Distance(pointA, edgeEnd) < Distance(pointA, edgeStart))
+bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
+    NXOpen::Edge* selectedEdge,
+    NXOpen::Face* selectedFace,
+    const NXOpen::Point3d& selectionPickPoint,
+    const NXOpen::Point3d& endpoint,
+    const NXOpen::Point3d& otherEndpoint,
+    double slotWidth,
+    double slotDepth,
+    double thickness)
+{
+    NXOpen::Body* targetBody = selectedEdge != nullptr ? selectedEdge->GetBody() : nullptr;
+    NXOpen::Part* workPart = session_->Parts()->Work();
+    if (targetBody == nullptr || selectedFace == nullptr || workPart == nullptr ||
+        slotWidth <= 0.0 || slotDepth <= 0.0 || thickness <= 0.0)
     {
-        nearEdgeEnd = edgeEnd;
-        farEdgeEnd = edgeStart;
+        return ReportSlotFailure("invalid face, body, work part, or parameter");
     }
 
-    NXOpen::Vector3d widthDirection = Subtract(nearEdgeEnd, farEdgeEnd);
-    if (Magnitude(widthDirection) < kVectorTolerance)
+    NXOpen::Vector3d endpointInwardDirection = Subtract(otherEndpoint, endpoint);
+    if (Magnitude(endpointInwardDirection) < kVectorTolerance)
     {
-        widthDirection = edgeDirection;
+        return ReportSlotFailure("reference edge has zero length");
     }
-    widthDirection = Normalize(widthDirection);
+    endpointInwardDirection = Normalize(endpointInwardDirection);
 
-    const NXOpen::Point3d pointC = Add(pointB, Scale(depthDirection, slotDepth));
-    const NXOpen::Point3d pointD = Add(pointC, Scale(widthDirection, slotWidth));
-    const NXOpen::Point3d pointE = Add(pointA, Scale(widthDirection, slotWidth));
-
-    std::vector<tag_t> curveTags;
-    curveTags.reserve(5);
-    curveTags.push_back(CreateLineBetweenPoints(pointA, pointB));
-    curveTags.push_back(CreateLineBetweenPoints(pointB, pointC));
-    curveTags.push_back(CreateLineBetweenPoints(pointC, pointD));
-    curveTags.push_back(CreateLineBetweenPoints(pointD, pointE));
-    curveTags.push_back(CreateLineBetweenPoints(pointE, pointA));
-
-    for (tag_t line : curveTags)
+    NXOpen::Point3d selectedEdgeStart;
+    NXOpen::Point3d selectedEdgeEnd;
+    selectedEdge->GetVertices(&selectedEdgeStart, &selectedEdgeEnd);
+    NXOpen::Vector3d nearestEdgeDirection = Subtract(selectedEdgeEnd, selectedEdgeStart);
+    if (Magnitude(nearestEdgeDirection) < kVectorTolerance)
     {
-        if (line == NULL_TAG)
+        return ReportSlotFailure("nearest edge has zero length");
+    }
+    nearestEdgeDirection = Normalize(nearestEdgeDirection);
+    const NXOpen::Point3d perpendicularPoint =
+        ClosestPointOnLine(selectionPickPoint, selectedEdgeStart, nearestEdgeDirection);
+
+    const NXOpen::Vector3d outwardNormal =
+        AskSelectedFaceOuterNormal(selectedFace, targetBody, selectionPickPoint);
+    NXOpen::Vector3d yDirection = Subtract(perpendicularPoint, selectionPickPoint);
+    // Remove any numerical component normal to the picked face so Y remains
+    // in the face plane and points from the click position to the edge foot.
+    yDirection = Subtract(yDirection, Scale(outwardNormal, Dot(yDirection, outwardNormal)));
+    if (Magnitude(yDirection) < kVectorTolerance)
+    {
+        return ReportSlotFailure("pick point is too close to the nearest edge to define Y");
+    }
+    yDirection = Normalize(yDirection);
+    NXOpen::Vector3d xDirection = Cross(yDirection, outwardNormal);
+    if (Magnitude(xDirection) < kVectorTolerance)
+    {
+        return ReportSlotFailure("failed to derive X from Y and the face outward normal");
+    }
+    xDirection = Normalize(xDirection);
+
+    // Each origin is extended outwards from its reference-edge endpoint by
+    // half the dialog slot width.  The extension direction is independent of
+    // local X: A extends opposite A->B and B extends opposite B->A.
+    const NXOpen::Point3d origin =
+        Add(endpoint, Scale(endpointInwardDirection, -0.5 * slotWidth));
+
+    std::set<tag_t> bodyTagsBefore;
+    for (NXOpen::Body* body : *workPart->Bodies())
+    {
+        if (body != nullptr)
         {
-            DeleteObjects(curveTags);
-            return false;
+            bodyTagsBefore.insert(body->Tag());
         }
     }
-    HideObjects(curveTags);
-    hiddenTemporaryTags_.insert(hiddenTemporaryTags_.end(), curveTags.begin(), curveTags.end());
 
-    const double thickness = EstimateThickness(selectedEdge->GetBody(), selectedFace);
-    const bool subtracted =
-        ExtrudeSubtractAndDeleteCurves(selectedEdge->GetBody(), selectedFace, pointA, curveTags, thickness);
-    return subtracted;
+    ExtractedReliefUdfTemplate extractedTemplate;
+    std::string templatePath;
+    if (!extractedTemplate.Extract(templatePath))
+    {
+        return ReportSlotFailure("extract embedded UDF template");
+    }
+
+    UF_PART_load_status_t loadStatus;
+    std::memset(&loadStatus, 0, sizeof(loadStatus));
+    tag_t templatePart = NULL_TAG;
+    const int openResult = UF_PART_open_quiet(templatePath.c_str(), &templatePart, &loadStatus);
+    UF_PART_free_load_status(&loadStatus);
+    if (openResult != 0 || templatePart == NULL_TAG)
+    {
+        return ReportSlotFailure("open embedded UDF template", openResult);
+    }
+
+    auto closeTemplate = [&]()
+    {
+        if (templatePart != NULL_TAG)
+        {
+            UF_PART_close(templatePart, 0, 1);
+            templatePart = NULL_TAG;
+        }
+    };
+
+    const tag_t udfDefinition = FindUdfDefinitionFeature(templatePart);
+    if (udfDefinition == NULL_TAG)
+    {
+        closeTemplate();
+        return ReportSlotFailure("find UDF definition in template");
+    }
+
+    UF_MODL_udf_exp_data_t expressionData;
+    UF_MODL_udf_ref_data_t referenceData;
+    UF_MODL_udf_init_exp_data(&expressionData);
+    UF_MODL_udf_init_ref_data(&referenceData);
+    const int initUdfResult = UF_MODL_udf_init_insert_data_from_def(udfDefinition,
+                                                                    &expressionData,
+                                                                    &referenceData);
+    if (initUdfResult != 0 ||
+        expressionData.num_exps != 2 ||
+        !AllocateUdfExpressionValues(expressionData, slotDepth, slotWidth))
+    {
+        const bool expressionCountMismatch = expressionData.num_exps != 2;
+        UF_MODL_udf_free_exp_data(&expressionData);
+        UF_MODL_udf_free_ref_data(&referenceData);
+        closeTemplate();
+        return ReportSlotFailure(
+            expressionCountMismatch ? "UDF template must contain exactly two expressions"
+                                    : "initialize UDF insertion data",
+            initUdfResult);
+    }
+
+    // The source UDF has one point parent.  It is first created at absolute
+    // zero and then its entire feature (including the point parent) is mapped
+    // from the template XYZ system to the requested end-local system.
+    NXOpen::Point* placementPoint = workPart->Points()->CreatePoint(NXOpen::Point3d(0.0, 0.0, 0.0));
+    placementPoint->Blank();
+    const tag_t placementPointTag = placementPoint->Tag();
+
+    int allocationError = 0;
+    referenceData.new_refs = static_cast<tag_t*>(UF_allocate_memory(
+        static_cast<unsigned int>(sizeof(tag_t) * referenceData.num_refs),
+        &allocationError));
+    if (referenceData.reverse_refs_dir == nullptr)
+    {
+        referenceData.reverse_refs_dir = static_cast<UF_MODL_udf_reverse_dir_t*>(UF_allocate_memory(
+            static_cast<unsigned int>(sizeof(UF_MODL_udf_reverse_dir_t) * referenceData.num_refs),
+            &allocationError));
+    }
+    int parentType = 0;
+    int parentSubtype = 0;
+    const bool pointParent = referenceData.num_refs == 1 &&
+                             referenceData.old_refs != nullptr &&
+                             UF_OBJ_ask_type_and_subtype(referenceData.old_refs[0],
+                                                        &parentType,
+                                                        &parentSubtype) == 0 &&
+                             parentType == UF_point_type;
+    if (!pointParent || allocationError != 0 ||
+        referenceData.new_refs == nullptr || referenceData.reverse_refs_dir == nullptr)
+    {
+        UF_MODL_udf_free_exp_data(&expressionData);
+        UF_MODL_udf_free_ref_data(&referenceData);
+        closeTemplate();
+        DeleteObjectIfAlive(placementPointTag);
+        return ReportSlotFailure("resolve the UDF point parent", allocationError);
+    }
+    referenceData.new_refs[0] = placementPointTag;
+    referenceData.reverse_refs_dir[0] = UF_MODL_UDF_KEEP_DIR;
+
+    tag_t udfTag = NULL_TAG;
+    const int createResult = UF_MODL_create_instantiated_udf1(
+        udfDefinition, &expressionData, &referenceData, &udfTag);
+    UF_MODL_udf_free_exp_data(&expressionData);
+    UF_MODL_udf_free_ref_data(&referenceData);
+    closeTemplate();
+    if (createResult != 0 || udfTag == NULL_TAG)
+    {
+        DeleteObjectIfAlive(udfTag);
+        DeleteObjectIfAlive(placementPointTag);
+        return ReportSlotFailure("instantiate UDF", createResult);
+    }
+
+    std::vector<tag_t> toolBodyTags;
+    for (NXOpen::Body* body : *workPart->Bodies())
+    {
+        if (body != nullptr && body != targetBody &&
+            bodyTagsBefore.find(body->Tag()) == bodyTagsBefore.end())
+        {
+            toolBodyTags.push_back(body->Tag());
+        }
+    }
+    if (toolBodyTags.size() != 1)
+    {
+        for (tag_t toolBodyTag : toolBodyTags)
+        {
+            DeleteObjectIfAlive(toolBodyTag);
+        }
+        DeleteObjectIfAlive(udfTag);
+        DeleteObjectIfAlive(placementPointTag);
+        return ReportSlotFailure("find the single tool body created by the UDF");
+    }
+
+    // Apply the placement transform to the actual tool body.  Passing only the
+    // UDF wrapper tag can return success without relocating all UDF children.
+    // UF_MODL_transform_entities moves the body together with its owning
+    // extrude/sketch/datum parents, including the placement point.
+    const double sourceOrigin[3] = {0.0, 0.0, 0.0};
+    const double sourceX[3] = {1.0, 0.0, 0.0};
+    const double sourceY[3] = {0.0, 1.0, 0.0};
+    const double targetOrigin[3] = {origin.X, origin.Y, origin.Z};
+    const double targetX[3] = {xDirection.X, xDirection.Y, xDirection.Z};
+    const double targetY[3] = {yDirection.X, yDirection.Y, yDirection.Z};
+    double transform[16] = {};
+    const int matrixResult = UF_MTX4_csys_to_csys(sourceOrigin, sourceX, sourceY,
+                                                   targetOrigin, targetX, targetY, transform);
+    tag_t transformedToolBodyTag = toolBodyTags.front();
+    const int transformResult = matrixResult == 0
+                                    ? UF_MODL_transform_entities(1, &transformedToolBodyTag, transform)
+                                    : 0;
+    if (matrixResult != 0 || transformResult != 0)
+    {
+        DeleteObjectIfAlive(transformedToolBodyTag);
+        DeleteObjectIfAlive(udfTag);
+        DeleteObjectIfAlive(placementPointTag);
+        return ReportSlotFailure(matrixResult != 0 ? "build tool-body placement transform"
+                                                    : "transform UDF tool body",
+                                 matrixResult != 0 ? matrixResult : transformResult);
+    }
+    toolBodyTags[0] = transformedToolBodyTag;
+
+    // The transformed UDF can already be displayed at the requested position,
+    // while modeling queries still see its pre-transform cached geometry.  Make
+    // the transform current before asking for its box or running interference.
+    try
+    {
+        ForceModelUpdate();
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        DeleteObjectIfAlive(udfTag);
+        DeleteObjectIfAlive(placementPointTag);
+        return ReportSlotFailure("update transformed UDF before interference: " +
+                                     std::string(ex.Message()),
+                                 ex.ErrorCode());
+    }
+
+    // Updating a parametric UDF may replace the generated body object.  Resolve
+    // the live body again instead of retaining the tag captured before update.
+    std::vector<tag_t> updatedToolBodyTags;
+    for (NXOpen::Body* body : *workPart->Bodies())
+    {
+        if (body != nullptr && body != targetBody &&
+            bodyTagsBefore.find(body->Tag()) == bodyTagsBefore.end())
+        {
+            updatedToolBodyTags.push_back(body->Tag());
+        }
+    }
+    if (updatedToolBodyTags.size() != 1)
+    {
+        DeleteObjectIfAlive(udfTag);
+        DeleteObjectIfAlive(placementPointTag);
+        return ReportSlotFailure("find the updated tool body created by the UDF");
+    }
+    transformedToolBodyTag = updatedToolBodyTags.front();
+    toolBodyTags[0] = transformedToolBodyTag;
+
+    double targetBox[6] = {};
+    double toolBox[6] = {};
+    const int targetBoxResult = UF_MODL_ask_bounding_box(targetBody->Tag(), targetBox);
+    const int toolBoxResult = UF_MODL_ask_bounding_box(transformedToolBodyTag, toolBox);
+    std::ostringstream placementTrace;
+    placementTrace << "ZheWanBiRangCao: placed relief UDF"
+                   << ", origin=(" << origin.X << ',' << origin.Y << ',' << origin.Z << ')'
+                   << ", X=(" << xDirection.X << ',' << xDirection.Y << ',' << xDirection.Z << ')'
+                   << ", Y=(" << yDirection.X << ',' << yDirection.Y << ',' << yDirection.Z << ')'
+                   << ", Z=(" << outwardNormal.X << ',' << outwardNormal.Y << ',' << outwardNormal.Z << ')'
+                   << ", thickness=" << thickness;
+    if (targetBoxResult == 0 && toolBoxResult == 0)
+    {
+        placementTrace << ", targetBox=[" << targetBox[0] << ',' << targetBox[1] << ',' << targetBox[2]
+                       << "]-[" << targetBox[3] << ',' << targetBox[4] << ',' << targetBox[5] << ']'
+                       << ", toolBox=[" << toolBox[0] << ',' << toolBox[1] << ',' << toolBox[2]
+                       << "]-[" << toolBox[3] << ',' << toolBox[4] << ',' << toolBox[5] << ']';
+    }
+    placementTrace << '\n';
+    std::string placementMessage = placementTrace.str();
+    UF_print_syslog(placementMessage.data(), FALSE);
+
+    // UF_MODL_check_interference distinguishes actual solid interference from
+    // coincident-face touching.  The former SimpleInterference face method can
+    // report intersecting/touching faces even when there is no volume to cut.
+    int interferenceStatus = 0;
+    tag_t interferenceToolTag = transformedToolBodyTag;
+    const int interferenceCheckResult = UF_MODL_check_interference(
+        targetBody->Tag(), 1, &interferenceToolTag, &interferenceStatus);
+    // The UF documentation requires an update after this check to remove its
+    // temporary modeling objects.
+    const int interferenceCleanupResult = UF_MODL_update();
+
+    std::ostringstream interferenceTrace;
+    interferenceTrace << "ZheWanBiRangCao: solid interference check"
+                      << ", apiResult=" << interferenceCheckResult
+                      << ", status=" << interferenceStatus
+                      << ", cleanupResult=" << interferenceCleanupResult << '\n';
+    std::string interferenceMessage = interferenceTrace.str();
+    UF_print_syslog(interferenceMessage.data(), FALSE);
+
+    if (interferenceCheckResult != 0 || interferenceCleanupResult != 0)
+    {
+        DeleteObjectIfAlive(udfTag);
+        return ReportSlotFailure(interferenceCheckResult != 0
+                                     ? "solid-body interference check"
+                                     : "clean up solid-body interference check",
+                                 interferenceCheckResult != 0
+                                     ? interferenceCheckResult
+                                     : interferenceCleanupResult);
+    }
+
+    if (interferenceStatus != 1)
+    {
+        DeleteObjectIfAlive(udfTag);
+        const char* reason =
+            interferenceStatus == 3
+                ? "tool body only touches the target; custom feature deleted"
+                : (interferenceStatus == 2
+                       ? "tool body does not intersect the target; custom feature deleted"
+                       : "body-interference check could not be performed; custom feature deleted");
+        return ReportSlotFailure(reason);
+    }
+
+    NXOpen::Body* toolBody = dynamic_cast<NXOpen::Body*>(
+        NXOpen::NXObjectManager::Get(transformedToolBodyTag));
+    if (toolBody == nullptr)
+    {
+        DeleteObjectIfAlive(udfTag);
+        return ReportSlotFailure("the transformed UDF tool body is unavailable");
+    }
+
+    std::vector<tag_t> booleanFeatureTags;
+    NXOpen::Features::BooleanBuilder* booleanBuilder = nullptr;
+    try
+    {
+        booleanBuilder = workPart->Features()->CreateBooleanBuilder(nullptr);
+        booleanBuilder->SetOperation(NXOpen::Features::Feature::BooleanTypeSubtract);
+        booleanBuilder->SetTarget(targetBody);
+#pragma warning(push)
+#pragma warning(disable : 4996)
+        booleanBuilder->SetTool(toolBody);
+#pragma warning(pop)
+        booleanBuilder->SetRetainTarget(false);
+        booleanBuilder->SetRetainTool(false);
+        NXOpen::NXObject* result = booleanBuilder->Commit();
+        const tag_t booleanTag = result != nullptr ? result->Tag() : NULL_TAG;
+        booleanBuilder->Destroy();
+        booleanBuilder = nullptr;
+        if (booleanTag == NULL_TAG)
+        {
+            throw NXOpen::NXException::Create(1, "Boolean subtract returned no feature.");
+        }
+        booleanFeatureTags.push_back(booleanTag);
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        if (booleanBuilder != nullptr)
+        {
+            try
+            {
+                booleanBuilder->Destroy();
+            }
+            catch (...)
+            {
+            }
+        }
+        DeleteObjectIfAlive(udfTag);
+        return ReportSlotFailure("Boolean subtract: " + std::string(ex.Message()), ex.ErrorCode());
+    }
+    catch (const std::exception& ex)
+    {
+        if (booleanBuilder != nullptr)
+        {
+            try
+            {
+                booleanBuilder->Destroy();
+            }
+            catch (...)
+            {
+            }
+        }
+        DeleteObjectIfAlive(udfTag);
+        return ReportSlotFailure("Boolean subtract: " + std::string(ex.what()));
+    }
+    catch (...)
+    {
+        if (booleanBuilder != nullptr)
+        {
+            try
+            {
+                booleanBuilder->Destroy();
+            }
+            catch (...)
+            {
+            }
+        }
+        DeleteObjectIfAlive(udfTag);
+        return ReportSlotFailure("Boolean subtract: unknown failure");
+    }
+
+    previewFeatureTags_.push_back(placementPointTag);
+    previewFeatureTags_.push_back(udfTag);
+    previewFeatureTags_.insert(previewFeatureTags_.end(),
+                               booleanFeatureTags.begin(),
+                               booleanFeatureTags.end());
+    ForceModelUpdate();
+    gLastSlotFailure.clear();
+    return true;
 }
 
 bool ZheWanBiRangCaoDialog::EditSlotOutline(SlotFeatureRecord& record, double slotWidth, double slotDepth) const
@@ -1169,7 +1689,12 @@ void ZheWanBiRangCaoDialog::CleanupHiddenTemporaryObjects()
 
 void ZheWanBiRangCaoDialog::CleanupPreviewObjects()
 {
-    DeleteObjects(previewFeatureTags_);
+    for (auto iterator = previewFeatureTags_.rbegin();
+         iterator != previewFeatureTags_.rend();
+         ++iterator)
+    {
+        DeleteObjectIfAlive(*iterator);
+    }
     previewFeatureTags_.clear();
 }
 
@@ -1348,6 +1873,7 @@ bool ZheWanBiRangCaoDialog::UpdateAllSlots()
 int ZheWanBiRangCaoDialog::Execute()
 {
     SaveDialogState();
+    gLastSlotFailure.clear();
 
     NXOpen::Face* selectedFace = GetSelectedFace();
     if (selectedFace == nullptr)
@@ -1385,28 +1911,31 @@ int ZheWanBiRangCaoDialog::Execute()
 
         const std::vector<SlotReferenceEdge> referenceEdges =
             FindInnerReferenceEdges(edge, largerFace, selectedPlanePoint, selectedFaceNormal);
+        const double thickness = EstimateThickness(edge->GetBody(), largerFace);
 
         int createdCount = 0;
         for (const SlotReferenceEdge& referenceEdge : referenceEdges)
         {
-            if (CreateSlotOutlineOnSelectedFace(edge,
-                                                largerFace,
-                                                referenceEdge.startPoint,
-                                                selectedPlanePoint,
-                                                selectedFaceNormal,
-                                                parameters.slotWidth,
-                                                parameters.slotDepth))
+            if (CreateSlotCustomFeatureAtEnd(edge,
+                                             largerFace,
+                                             pickPoint,
+                                             referenceEdge.startPoint,
+                                             referenceEdge.endPoint,
+                                             parameters.slotWidth,
+                                             parameters.slotDepth,
+                                             thickness))
             {
                 ++createdCount;
             }
 
-            if (CreateSlotOutlineOnSelectedFace(edge,
-                                                largerFace,
-                                                referenceEdge.endPoint,
-                                                selectedPlanePoint,
-                                                selectedFaceNormal,
-                                                parameters.slotWidth,
-                                                parameters.slotDepth))
+            if (CreateSlotCustomFeatureAtEnd(edge,
+                                             largerFace,
+                                             pickPoint,
+                                             referenceEdge.endPoint,
+                                             referenceEdge.startPoint,
+                                             parameters.slotWidth,
+                                             parameters.slotDepth,
+                                             thickness))
             {
                 ++createdCount;
             }
@@ -1414,7 +1943,12 @@ int ZheWanBiRangCaoDialog::Execute()
 
         if (createdCount == 0)
         {
-            ShowError("No relief slot was created.");
+            std::string message = "No relief slot was created.";
+            if (!gLastSlotFailure.empty())
+            {
+                message += "\nFailure stage: " + gLastSlotFailure;
+            }
+            ShowError(message);
             return 1;
         }
 

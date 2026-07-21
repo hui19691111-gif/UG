@@ -94,13 +94,17 @@ private:
                                const NXOpen::Vector3d& outerEdgeDirection,
                                NXOpen::Body* body,
                                double thickness) const;
-    bool CreateSlotOutlineOnSelectedFace(NXOpen::Edge* selectedEdge,
-                                         NXOpen::Face* selectedFace,
-                                         const NXOpen::Point3d& innerPoint,
-                                         const NXOpen::Point3d& selectedPlanePoint,
-                                         const NXOpen::Vector3d& selectedPlaneNormal,
-                                         double slotWidth,
-                                         double slotDepth);
+    bool CreateSlotCustomFeatureAtEnd(NXOpen::Edge* selectedEdge,
+                                      NXOpen::Face* selectedFace,
+                                      const NXOpen::Point3d& selectionPickPoint,
+                                      const NXOpen::Point3d& endpoint,
+                                      const NXOpen::Point3d& otherEndpoint,
+                                      double slotWidth,
+                                      double slotDepth,
+                                      double thickness);
+    NXOpen::Vector3d AskSelectedFaceOuterNormal(NXOpen::Face* face,
+                                                NXOpen::Body* body,
+                                                const NXOpen::Point3d& validFacePoint) const;
     bool EditSlotOutline(SlotFeatureRecord& record, double slotWidth, double slotDepth) const;
     NXOpen::Vector3d AskSelectedFaceInnerNormal(NXOpen::Face* face,
                                                 NXOpen::Body* body,

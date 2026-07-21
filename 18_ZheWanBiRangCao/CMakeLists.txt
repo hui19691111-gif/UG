@@ -27,6 +27,10 @@ target_include_directories(ZheWanBiRangCao
 )
 
 target_compile_definitions(ZheWanBiRangCao PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_definitions(ZheWanBiRangCao PRIVATE
+    $<$<CONFIG:Release>:ZH_PROTECTED_BUILD=1>
+    $<$<CONFIG:Release>:NDEBUG>
+)
 
 target_compile_options(ZheWanBiRangCao PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /EHsc>
@@ -44,6 +48,12 @@ target_link_libraries(ZheWanBiRangCao PRIVATE
     libnxopencpp_tooling.lib
     libnxopenuicpp.lib
     libufun.lib
+)
+
+target_link_options(ZheWanBiRangCao PRIVATE
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/RELEASE>
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/DYNAMICBASE>
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/NXCOMPAT>
 )
 
 set_target_properties(ZheWanBiRangCao PROPERTIES
