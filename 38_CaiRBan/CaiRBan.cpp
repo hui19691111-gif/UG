@@ -668,11 +668,18 @@ int CaiRBanDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
         cutDistances_[0] = (std::max)(0.0, cutDimension0_->Value());
         cutDistances_[1] = (std::max)(0.0, cutDimension1_->Value());
         const double negativeThickness = -std::fabs(currentThickness_);
-        const auto snapOffset = [negativeThickness](double value)
+        const double positiveThickness = std::fabs(currentThickness_);
+        const bool innerWrap = WrapMode() == 1;
+        const auto snapOffset =
+            [negativeThickness, positiveThickness, innerWrap](double value)
         {
-            return value < negativeThickness * 0.5
-                       ? negativeThickness
-                       : 0.0;
+            if (innerWrap)
+            {
+                return value > positiveThickness * 0.5
+                           ? positiveThickness
+                           : 0.0;
+            }
+            return value < negativeThickness * 0.5 ? negativeThickness : 0.0;
         };
         offsetDistances_[0] = snapOffset(offsetDimension0_->Value());
         offsetDistances_[1] = snapOffset(offsetDimension1_->Value());
@@ -811,7 +818,7 @@ void CaiRBanDialog::ConfigureDimensionHandles(
             }
             dimension->SetFormula(Number(values[index]).c_str());
             dimension->SetValue(values[index]);
-            dimension->SetShowHandle(index < 2 || WrapMode() == 1);
+            dimension->SetShowHandle(true);
             dimension->SetShowFocusHandle(false);
             dimension->SetAutoReverseDuringDrag(true);
             dimension->SetHandleOrigin(origins[index]);
@@ -1281,17 +1288,19 @@ int CaiRBanDialog::CreatePreview()
     {
         cutDistances_[0] = ExtensionLength();
         cutDistances_[1] = ExtensionLength();
-        offsetDistances_[0] = -thickness;
-        offsetDistances_[1] = -thickness;
+        const double defaultOffset = WrapMode() == 1 ? thickness : -thickness;
+        offsetDistances_[0] = defaultOffset;
+        offsetDistances_[1] = defaultOffset;
         dimensionValuesInitialized_ = true;
         dimensionFaceTag_ = face->Tag();
     }
     else
     {
+        const double modeOffset = WrapMode() == 1 ? thickness : -thickness;
         offsetDistances_[0] =
-            offsetDistances_[0] < -kTolerance ? -thickness : 0.0;
+            std::fabs(offsetDistances_[0]) > kTolerance ? modeOffset : 0.0;
         offsetDistances_[1] =
-            offsetDistances_[1] < -kTolerance ? -thickness : 0.0;
+            std::fabs(offsetDistances_[1]) > kTolerance ? modeOffset : 0.0;
     }
     currentThickness_ = thickness;
     std::array<NXOpen::Point3d, 4> handleOrigins{};
@@ -2378,13 +2387,10 @@ bool CaiRBanDialog::CreateArcPanel(
             }
         }
 
-        // 外包：加厚体完成修剪后直接结束。
-        // 内包：将与同轴圆弧边相连的端部平面，沿实体内法向
-        // 偏置一个板厚。对两端平面同时使用负偏置，即各自沿
-        // 其外法向的反方向移动。
-        if (wrapMode == 1)
+        // 两种包角均由两端偏置手柄控制：外包非零档为负板厚，
+        // 内包非零档为正板厚。
         {
-            stage = "内包端面沿内法向偏置一个板厚";
+            stage = "端面沿内法向偏置一个板厚";
             std::vector<NXOpen::Face*> inwardOffsetFaces;
             const NXOpen::Point3d cylinderOrigin(
                 cylinderOriginData[0], cylinderOriginData[1],
@@ -2510,7 +2516,7 @@ bool CaiRBanDialog::CreateArcPanel(
                         FaceBoxCenter(inwardOffsetFaces[index]);
                     (*handleDirections)[index + 2] = outwardNormal;
                 }
-                if (offsetDistances[index] < -kTolerance)
+                if (std::fabs(offsetDistances[index]) > kTolerance)
                 {
                     facesToOffset.push_back(inwardOffsetFaces[index]);
                 }
@@ -2520,7 +2526,8 @@ bool CaiRBanDialog::CreateArcPanel(
             {
                 innerOffset =
                     workPart->Features()->CreateOffsetFaceBuilder(nullptr);
-                innerOffset->Distance()->SetFormula(Number(-thickness).c_str());
+                innerOffset->Distance()->SetFormula(
+                    Number(wrapMode == 1 ? thickness : -thickness).c_str());
                 innerOffset->SetDirection(false);
                 NXOpen::SelectionIntentRuleOptions* offsetOptions =
                     workPart->ScRuleFactory()->CreateRuleOptions();
