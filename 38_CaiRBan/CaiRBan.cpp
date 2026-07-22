@@ -172,6 +172,26 @@ bool FacePlaneData(NXOpen::Face* face,
     return Normalize(outwardNormal);
 }
 
+NXOpen::Point3d FaceBoxCenter(NXOpen::Face* face)
+{
+    int type = 0;
+    double origin[3] = {};
+    double direction[3] = {};
+    double box[6] = {};
+    double radius = 0.0;
+    double radiusData = 0.0;
+    int normalDirection = 1;
+    if (face != nullptr &&
+        UF_MODL_ask_face_data(face->Tag(), &type, origin, direction, box,
+                              &radius, &radiusData, &normalDirection) == 0)
+    {
+        return NXOpen::Point3d((box[0] + box[3]) * 0.5,
+                               (box[1] + box[4]) * 0.5,
+                               (box[2] + box[5]) * 0.5);
+    }
+    return NXOpen::Point3d(0.0, 0.0, 0.0);
+}
+
 bool PointOnFace(NXOpen::Face* face, const NXOpen::Point3d& point)
 {
     double coordinates[3] = {point.X, point.Y, point.Z};
@@ -487,6 +507,10 @@ CaiRBanDialog::CaiRBanDialog()
       extensionLength_(nullptr),
       wrapMode_(nullptr),
       faceSelect_(nullptr),
+      cutDimension0_(nullptr),
+      cutDimension1_(nullptr),
+      offsetDimension0_(nullptr),
+      offsetDimension1_(nullptr),
       customFeatureManager_(nullptr),
       editedFeature_(nullptr),
       featureClass_(nullptr),
@@ -494,11 +518,17 @@ CaiRBanDialog::CaiRBanDialog()
       hasPreview_(false),
       loadingEditedFeature_(false),
       rebuildingPreview_(false),
+      configuringDimensionHandles_(false),
+      dimensionValuesInitialized_(false),
       buildingCustomFeature_(false),
       previewSubtractCreated_(false),
       previewColor_(0),
       previewTargetBodyTag_(NULL_TAG),
       previewSelectedFaceTag_(NULL_TAG),
+      dimensionFaceTag_(NULL_TAG),
+      cutDistances_{0.0, 0.0},
+      offsetDistances_{0.0, 0.0},
+      currentThickness_(0.0),
       previewCreatedFeatureTags_(),
       previewBodyTranslucencies_()
 {
@@ -549,9 +579,19 @@ void CaiRBanDialog::initialize_cb()
     extensionLength_ = dialog_->TopBlock()->FindBlock("extension_length");
     wrapMode_ = dialog_->TopBlock()->FindBlock("wrap_mode");
     faceSelect_ = dialog_->TopBlock()->FindBlock("face_select");
+    cutDimension0_ = dynamic_cast<NXOpen::BlockStyler::LinearDimension*>(
+        dialog_->TopBlock()->FindBlock("cut_dimension_0"));
+    cutDimension1_ = dynamic_cast<NXOpen::BlockStyler::LinearDimension*>(
+        dialog_->TopBlock()->FindBlock("cut_dimension_1"));
+    offsetDimension0_ = dynamic_cast<NXOpen::BlockStyler::LinearDimension*>(
+        dialog_->TopBlock()->FindBlock("offset_dimension_0"));
+    offsetDimension1_ = dynamic_cast<NXOpen::BlockStyler::LinearDimension*>(
+        dialog_->TopBlock()->FindBlock("offset_dimension_1"));
     if (recolorToggle_ == nullptr || colorMode_ == nullptr ||
         fixedColor_ == nullptr || extensionLength_ == nullptr ||
-        wrapMode_ == nullptr || faceSelect_ == nullptr)
+        wrapMode_ == nullptr || faceSelect_ == nullptr ||
+        cutDimension0_ == nullptr || cutDimension1_ == nullptr ||
+        offsetDimension0_ == nullptr || offsetDimension1_ == nullptr)
     {
         throw std::runtime_error("CaiRBan.dlx is missing a required block.");
     }
@@ -597,15 +637,19 @@ void CaiRBanDialog::dialogShown_cb()
 
 int CaiRBanDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
-    if (loadingEditedFeature_ || rebuildingPreview_)
+    if (loadingEditedFeature_ || rebuildingPreview_ ||
+        configuringDimensionHandles_)
     {
         return 0;
     }
 
+    const bool dimensionChanged =
+        block == cutDimension0_ || block == cutDimension1_ ||
+        block == offsetDimension0_ || block == offsetDimension1_;
     const bool parameterChanged =
         block == recolorToggle_ || block == colorMode_ ||
         block == fixedColor_ || block == extensionLength_ ||
-        block == wrapMode_;
+        block == wrapMode_ || dimensionChanged;
     const bool selectionChanged = block == faceSelect_;
     if (!parameterChanged && !selectionChanged)
     {
@@ -613,6 +657,32 @@ int CaiRBanDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
     }
 
     rebuildingPreview_ = true;
+    if (block == extensionLength_)
+    {
+        cutDistances_[0] = ExtensionLength();
+        cutDistances_[1] = ExtensionLength();
+        dimensionValuesInitialized_ = true;
+    }
+    else if (dimensionChanged)
+    {
+        cutDistances_[0] = (std::max)(0.0, cutDimension0_->Value());
+        cutDistances_[1] = (std::max)(0.0, cutDimension1_->Value());
+        const double negativeThickness = -std::fabs(currentThickness_);
+        const auto snapOffset = [negativeThickness](double value)
+        {
+            return value < negativeThickness * 0.5
+                       ? negativeThickness
+                       : 0.0;
+        };
+        offsetDistances_[0] = snapOffset(offsetDimension0_->Value());
+        offsetDistances_[1] = snapOffset(offsetDimension1_->Value());
+        dimensionValuesInitialized_ = true;
+    }
+    if (selectionChanged)
+    {
+        dimensionValuesInitialized_ = false;
+        dimensionFaceTag_ = NULL_TAG;
+    }
     if (parameterChanged)
     {
         UpdateColorControlVisibility();
@@ -720,6 +790,42 @@ double CaiRBanDialog::ExtensionLength() const
     return (std::max)(0.0, value);
 }
 
+void CaiRBanDialog::ConfigureDimensionHandles(
+    const std::array<NXOpen::Point3d, 4>& origins,
+    const std::array<NXOpen::Vector3d, 4>& directions)
+{
+    std::array<NXOpen::BlockStyler::LinearDimension*, 4> dimensions{
+        cutDimension0_, cutDimension1_, offsetDimension0_, offsetDimension1_};
+    const std::array<double, 4> values{
+        cutDistances_[0], cutDistances_[1],
+        offsetDistances_[0], offsetDistances_[1]};
+    configuringDimensionHandles_ = true;
+    try
+    {
+        for (std::size_t index = 0; index < dimensions.size(); ++index)
+        {
+            NXOpen::BlockStyler::LinearDimension* dimension = dimensions[index];
+            if (dimension == nullptr)
+            {
+                continue;
+            }
+            dimension->SetFormula(Number(values[index]).c_str());
+            dimension->SetValue(values[index]);
+            dimension->SetShowHandle(index < 2 || WrapMode() == 1);
+            dimension->SetShowFocusHandle(false);
+            dimension->SetAutoReverseDuringDrag(true);
+            dimension->SetHandleOrigin(origins[index]);
+            dimension->SetHandleOrientation(directions[index]);
+        }
+    }
+    catch (...)
+    {
+        configuringDimensionHandles_ = false;
+        throw;
+    }
+    configuringDimensionHandles_ = false;
+}
+
 int CaiRBanDialog::WrapMode() const
 {
     int value = 0;
@@ -775,6 +881,7 @@ void CaiRBanDialog::LoadEditedCustomFeatureData()
                     ->Value());
             if (storedFace != nullptr)
             {
+                dimensionFaceTag_ = storedFace->Tag();
                 NXOpen::BlockStyler::PropertyList* faceProperties =
                     faceSelect_->GetProperties();
                 faceProperties->SetTaggedObjectVector(
@@ -815,6 +922,29 @@ void CaiRBanDialog::LoadEditedCustomFeatureData()
             data->CustomDoubleAttributeByName(
                     zhihui_cairban::kAttrExtensionLength)
                 ->Value());
+        cutDistances_[0] = ExtensionLength();
+        cutDistances_[1] = ExtensionLength();
+        offsetDistances_[0] = 0.0;
+        offsetDistances_[1] = 0.0;
+        bool loadedDimensionValues = false;
+        try
+        {
+            cutDistances_[0] = data->CustomDoubleAttributeByName(
+                zhihui_cairban::kAttrCutDistance0)->Value();
+            cutDistances_[1] = data->CustomDoubleAttributeByName(
+                zhihui_cairban::kAttrCutDistance1)->Value();
+            offsetDistances_[0] = data->CustomDoubleAttributeByName(
+                zhihui_cairban::kAttrOffsetDistance0)->Value();
+            offsetDistances_[1] = data->CustomDoubleAttributeByName(
+                zhihui_cairban::kAttrOffsetDistance1)->Value();
+            loadedDimensionValues = true;
+        }
+        catch (...)
+        {
+            // Features created before dimension handles used the single
+            // extension value; offset defaults are resolved from thickness.
+        }
+        dimensionValuesInitialized_ = loadedDimensionValues;
         zhihui_dialog_memory::TrySetEnum(
             wrapMode_,
             static_cast<int>(data->CustomDoubleAttributeByName(
@@ -883,6 +1013,14 @@ bool CaiRBanDialog::CommitEditableCustomFeature(std::string& error)
             values.push_back(attributes->CreateCustomDoubleAttribute(
                 zhihui_cairban::kAttrExtensionLength, optional));
             values.push_back(attributes->CreateCustomDoubleAttribute(
+                zhihui_cairban::kAttrCutDistance0, optional));
+            values.push_back(attributes->CreateCustomDoubleAttribute(
+                zhihui_cairban::kAttrCutDistance1, optional));
+            values.push_back(attributes->CreateCustomDoubleAttribute(
+                zhihui_cairban::kAttrOffsetDistance0, optional));
+            values.push_back(attributes->CreateCustomDoubleAttribute(
+                zhihui_cairban::kAttrOffsetDistance1, optional));
+            values.push_back(attributes->CreateCustomDoubleAttribute(
                 zhihui_cairban::kAttrWrapMode, optional));
             data = workPart->Features()->CustomFeatureDataCollection()->CreateData(
                 featureClass_, values);
@@ -924,6 +1062,14 @@ bool CaiRBanDialog::CommitEditableCustomFeature(std::string& error)
         data->CustomDoubleAttributeByName(
                 zhihui_cairban::kAttrExtensionLength)
             ->SetValue(ExtensionLength());
+        data->CustomDoubleAttributeByName(zhihui_cairban::kAttrCutDistance0)
+            ->SetValue(cutDistances_[0]);
+        data->CustomDoubleAttributeByName(zhihui_cairban::kAttrCutDistance1)
+            ->SetValue(cutDistances_[1]);
+        data->CustomDoubleAttributeByName(zhihui_cairban::kAttrOffsetDistance0)
+            ->SetValue(offsetDistances_[0]);
+        data->CustomDoubleAttributeByName(zhihui_cairban::kAttrOffsetDistance1)
+            ->SetValue(offsetDistances_[1]);
         data->CustomDoubleAttributeByName(zhihui_cairban::kAttrWrapMode)
             ->SetValue(static_cast<double>(WrapMode()));
 
@@ -1090,6 +1236,8 @@ int CaiRBanDialog::apply_cb()
         previewSelectedFaceTag_ = NULL_TAG;
         previewColor_ = 0;
         previewSubtractCreated_ = false;
+        dimensionValuesInitialized_ = false;
+        dimensionFaceTag_ = NULL_TAG;
     }
     return 0;
 }
@@ -1122,14 +1270,40 @@ int CaiRBanDialog::CreatePreview()
     double diameter = 0.0;
     double thickness = 0.0;
     bool reverseThicken = false;
+    if (!EstimateCylinderThickness(face->GetBody(), face, diameter, thickness,
+                                   reverseThicken, WrapMode(), error))
+    {
+        UndoPreview();
+        ShowError(error);
+        return 1;
+    }
+    if (!dimensionValuesInitialized_ || dimensionFaceTag_ != face->Tag())
+    {
+        cutDistances_[0] = ExtensionLength();
+        cutDistances_[1] = ExtensionLength();
+        offsetDistances_[0] = -thickness;
+        offsetDistances_[1] = -thickness;
+        dimensionValuesInitialized_ = true;
+        dimensionFaceTag_ = face->Tag();
+    }
+    else
+    {
+        offsetDistances_[0] =
+            offsetDistances_[0] < -kTolerance ? -thickness : 0.0;
+        offsetDistances_[1] =
+            offsetDistances_[1] < -kTolerance ? -thickness : 0.0;
+    }
+    currentThickness_ = thickness;
+    std::array<NXOpen::Point3d, 4> handleOrigins{};
+    std::array<NXOpen::Vector3d, 4> handleDirections{};
     previewCreatedFeatureTags_.clear();
     previewSubtractCreated_ = false;
     previewColor_ = RecolorEnabled() ? RequestedColor() : 0;
-    if (!EstimateCylinderThickness(face->GetBody(), face, diameter, thickness,
-                                   reverseThicken, WrapMode(), error) ||
-        !CreateArcPanel(face, thickness, reverseThicken, ExtensionLength(),
+    if (!CreateArcPanel(face, thickness, reverseThicken, cutDistances_,
+                        offsetDistances_,
                         WrapMode(), error, RecolorEnabled(), previewColor_,
-                        &previewCreatedFeatureTags_))
+                        &previewCreatedFeatureTags_, &handleOrigins,
+                        &handleDirections))
     {
         UndoPreview();
         ShowError(error);
@@ -1153,6 +1327,7 @@ int CaiRBanDialog::CreatePreview()
         }
     }
     ApplyPreviewTranslucency(previewBody);
+    ConfigureDimensionHandles(handleOrigins, handleDirections);
     hasPreview_ = true;
     return 0;
 }
@@ -1935,12 +2110,15 @@ bool CaiRBanDialog::CreateArcPanel(
     NXOpen::Face* face,
     double thickness,
     bool reverseThicken,
-    double extensionLength,
+    const std::array<double, 2>& cutDistances,
+    const std::array<double, 2>& offsetDistances,
     int wrapMode,
     std::string& error,
     bool recolor,
     int color,
-    std::vector<tag_t>* createdFeatureTags) const
+    std::vector<tag_t>* createdFeatureTags,
+    std::array<NXOpen::Point3d, 4>* handleOrigins,
+    std::array<NXOpen::Vector3d, 4>* handleDirections) const
 {
     NXOpen::Part* workPart = session_->Parts()->Work();
     NXOpen::Body* sourceBody = face != nullptr ? face->GetBody() : nullptr;
@@ -1984,7 +2162,8 @@ bool CaiRBanDialog::CreateArcPanel(
     };
     std::vector<NXOpen::Face*> facesToThicken{face};
     std::vector<TangentEnd> tangentEnds;
-    if (extensionLength > kTolerance)
+    const bool extendTangentFaces =
+        cutDistances[0] > kTolerance || cutDistances[1] > kTolerance;
     {
         for (NXOpen::Edge* edge : face->GetEdges())
         {
@@ -2070,18 +2249,48 @@ bool CaiRBanDialog::CreateArcPanel(
             {
                 continue;
             }
-            if (std::find(facesToThicken.begin(), facesToThicken.end(),
-                          tangentFace) == facesToThicken.end())
+            const bool alreadyFound = std::find_if(
+                tangentEnds.begin(), tangentEnds.end(),
+                [tangentFace](const TangentEnd& item)
+                {
+                    return item.tangentFace == tangentFace;
+                }) != tangentEnds.end();
+            if (!alreadyFound)
             {
-                facesToThicken.push_back(tangentFace);
+                if (extendTangentFaces)
+                {
+                    facesToThicken.push_back(tangentFace);
+                }
                 tangentEnds.push_back(
                     {tangentFace, edge, midpoint, away});
             }
         }
         if (tangentEnds.size() != 2)
         {
-            error = "延伸模式要求圆弧两端各连接一个相切平面，当前未能准确找到两个相切面。";
+            error = "尺寸手柄要求圆弧两端各连接一个相切平面，当前未能准确找到两个相切面。";
             return false;
+        }
+        std::sort(tangentEnds.begin(), tangentEnds.end(),
+                  [](const TangentEnd& left, const TangentEnd& right)
+                  {
+                      if (std::fabs(left.edgeMidpoint.X - right.edgeMidpoint.X) >
+                          kTolerance)
+                          return left.edgeMidpoint.X < right.edgeMidpoint.X;
+                      if (std::fabs(left.edgeMidpoint.Y - right.edgeMidpoint.Y) >
+                          kTolerance)
+                          return left.edgeMidpoint.Y < right.edgeMidpoint.Y;
+                      return left.edgeMidpoint.Z < right.edgeMidpoint.Z;
+                  });
+        if (handleOrigins != nullptr && handleDirections != nullptr)
+        {
+            for (std::size_t index = 0; index < 2; ++index)
+            {
+                // LinearDimension displays its draggable end at
+                // origin + orientation * value, which puts the grip on the
+                // trimmed end-face centre.
+                (*handleOrigins)[index] = tangentEnds[index].edgeMidpoint;
+                (*handleDirections)[index] = tangentEnds[index].awayDirection;
+            }
         }
     }
 
@@ -2120,13 +2329,15 @@ bool CaiRBanDialog::CreateArcPanel(
             createdFeatureTags->push_back(thickenFeature->Tag());
         }
 
-        for (std::size_t index = 0; index < tangentEnds.size(); ++index)
+        for (std::size_t index = 0;
+             extendTangentFaces && index < tangentEnds.size(); ++index)
         {
             stage = "创建并执行第 " + std::to_string(index + 1) +
                     " 个修剪平面";
             const TangentEnd& end = tangentEnds[index];
             const NXOpen::Point3d planeOrigin =
-                Move(end.edgeMidpoint, end.awayDirection, extensionLength);
+                Move(end.edgeMidpoint, end.awayDirection,
+                     cutDistances[index]);
             NXOpen::Plane* plane = workPart->Planes()->CreatePlane(
                 planeOrigin, end.awayDirection,
                 NXOpen::SmartObject::UpdateOptionWithinModeling);
@@ -2262,33 +2473,80 @@ bool CaiRBanDialog::CreateArcPanel(
                     "未找到与加厚体圆弧边连接的端部平面。");
             }
 
-            innerOffset =
-                workPart->Features()->CreateOffsetFaceBuilder(nullptr);
-            innerOffset->Distance()->SetFormula(
-                ("-(" + Number(thickness) + ")").c_str());
-            innerOffset->SetDirection(false);
-            NXOpen::SelectionIntentRuleOptions* offsetOptions =
-                workPart->ScRuleFactory()->CreateRuleOptions();
-            offsetOptions->SetSelectedFromInactive(false);
-            NXOpen::FaceDumbRule* offsetRule =
-                workPart->ScRuleFactory()->CreateRuleFaceDumb(
-                    inwardOffsetFaces, offsetOptions);
-            delete offsetOptions;
-            innerOffset->FaceCollector()->ReplaceRules(
-                std::vector<NXOpen::SelectionIntentRule*>{offsetRule}, false);
-            NXOpen::Features::Feature* offsetFeature =
-                innerOffset->CommitFeature();
-            innerOffset->Destroy();
-            innerOffset = nullptr;
-            if (offsetFeature == nullptr || offsetFeature->GetBodies().empty())
+            std::sort(
+                inwardOffsetFaces.begin(), inwardOffsetFaces.end(),
+                [&cylinderOrigin, &cylinderAxis](NXOpen::Face* left,
+                                                 NXOpen::Face* right)
+                {
+                    return Dot(Subtract(FaceBoxCenter(left), cylinderOrigin),
+                               cylinderAxis) <
+                           Dot(Subtract(FaceBoxCenter(right), cylinderOrigin),
+                               cylinderAxis);
+                });
+            if (inwardOffsetFaces.size() > 2)
+            {
+                inwardOffsetFaces = std::vector<NXOpen::Face*>{
+                    inwardOffsetFaces.front(), inwardOffsetFaces.back()};
+            }
+            if (inwardOffsetFaces.size() != 2)
             {
                 throw std::runtime_error(
-                    "NX 未返回内包端面偏置后的实体。");
+                    "未能准确找到加厚体两端的偏置平面。");
             }
-            panelBody = offsetFeature->GetBodies().front();
-            if (createdFeatureTags != nullptr)
+
+            std::vector<NXOpen::Face*> facesToOffset;
+            for (std::size_t index = 0; index < 2; ++index)
             {
-                createdFeatureTags->push_back(offsetFeature->Tag());
+                NXOpen::Point3d planePoint;
+                NXOpen::Vector3d outwardNormal;
+                if (!FacePlaneData(inwardOffsetFaces[index], planePoint,
+                                   outwardNormal))
+                {
+                    throw std::runtime_error("无法读取偏置端面的法向。");
+                }
+                if (handleOrigins != nullptr && handleDirections != nullptr)
+                {
+                    (*handleOrigins)[index + 2] =
+                        FaceBoxCenter(inwardOffsetFaces[index]);
+                    (*handleDirections)[index + 2] = outwardNormal;
+                }
+                if (offsetDistances[index] < -kTolerance)
+                {
+                    facesToOffset.push_back(inwardOffsetFaces[index]);
+                }
+            }
+
+            if (!facesToOffset.empty())
+            {
+                innerOffset =
+                    workPart->Features()->CreateOffsetFaceBuilder(nullptr);
+                innerOffset->Distance()->SetFormula(Number(-thickness).c_str());
+                innerOffset->SetDirection(false);
+                NXOpen::SelectionIntentRuleOptions* offsetOptions =
+                    workPart->ScRuleFactory()->CreateRuleOptions();
+                offsetOptions->SetSelectedFromInactive(false);
+                NXOpen::FaceDumbRule* offsetRule =
+                    workPart->ScRuleFactory()->CreateRuleFaceDumb(
+                        facesToOffset, offsetOptions);
+                delete offsetOptions;
+                innerOffset->FaceCollector()->ReplaceRules(
+                    std::vector<NXOpen::SelectionIntentRule*>{offsetRule},
+                    false);
+                NXOpen::Features::Feature* offsetFeature =
+                    innerOffset->CommitFeature();
+                innerOffset->Destroy();
+                innerOffset = nullptr;
+                if (offsetFeature == nullptr ||
+                    offsetFeature->GetBodies().empty())
+                {
+                    throw std::runtime_error(
+                        "NX 未返回内包端面偏置后的实体。");
+                }
+                panelBody = offsetFeature->GetBodies().front();
+                if (createdFeatureTags != nullptr)
+                {
+                    createdFeatureTags->push_back(offsetFeature->Tag());
+                }
             }
         }
 
@@ -2333,9 +2591,10 @@ int CaiRBanDialog::Execute()
     bool reverseThicken = false;
     if (!EstimateCylinderThickness(face->GetBody(), face, diameter, thickness,
                                    reverseThicken, WrapMode(), error) ||
-        !CreateArcPanel(face, thickness, reverseThicken, ExtensionLength(),
+        !CreateArcPanel(face, thickness, reverseThicken, cutDistances_,
+                        offsetDistances_,
                         WrapMode(), error, RecolorEnabled(), RequestedColor(),
-                        nullptr))
+                        nullptr, nullptr, nullptr))
     {
         session_->UndoToMark(mark, "拆圆弧板失败");
         session_->DeleteUndoMark(mark, "拆圆弧板失败");

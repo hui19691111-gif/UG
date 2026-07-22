@@ -1,12 +1,14 @@
 #pragma once
 
 #include <NXOpen/BlockStyler_BlockDialog.hxx>
+#include <NXOpen/BlockStyler_LinearDimension.hxx>
 #include <NXOpen/BlockStyler_ObjectColorPicker.hxx>
 #include <NXOpen/BlockStyler_UIBlock.hxx>
 #include <NXOpen/Face.hxx>
 #include <NXOpen/Session.hxx>
 #include <uf_defs.h>
 
+#include <array>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,6 +58,9 @@ private:
     int ColorMode() const;
     int FixedColor() const;
     double ExtensionLength() const;
+    void ConfigureDimensionHandles(
+        const std::array<NXOpen::Point3d, 4>& origins,
+        const std::array<NXOpen::Vector3d, 4>& directions);
     int WrapMode() const;
     void LoadDialogState() const;
     void SaveDialogState() const;
@@ -71,12 +76,15 @@ private:
     bool CreateArcPanel(NXOpen::Face* face,
                         double thickness,
                         bool reverseThicken,
-                        double extensionLength,
+                        const std::array<double, 2>& cutDistances,
+                        const std::array<double, 2>& offsetDistances,
                         int wrapMode,
                         std::string& error,
                         bool recolor,
                         int color,
-                        std::vector<tag_t>* createdFeatureTags) const;
+                        std::vector<tag_t>* createdFeatureTags,
+                        std::array<NXOpen::Point3d, 4>* handleOrigins,
+                        std::array<NXOpen::Vector3d, 4>* handleDirections) const;
     bool CommitPreviewSubtract(std::string& error);
     void ApplyPreviewTranslucency(NXOpen::Body* previewBody);
     void RestorePreviewTranslucency();
@@ -109,6 +117,10 @@ private:
     NXOpen::BlockStyler::UIBlock* extensionLength_;
     NXOpen::BlockStyler::UIBlock* wrapMode_;
     NXOpen::BlockStyler::UIBlock* faceSelect_;
+    NXOpen::BlockStyler::LinearDimension* cutDimension0_;
+    NXOpen::BlockStyler::LinearDimension* cutDimension1_;
+    NXOpen::BlockStyler::LinearDimension* offsetDimension0_;
+    NXOpen::BlockStyler::LinearDimension* offsetDimension1_;
     NXOpen::Features::CustomFeatureClassManager* customFeatureManager_;
     NXOpen::Features::CustomFeature* editedFeature_;
     NXOpen::Features::CustomFeatureClass* featureClass_;
@@ -116,11 +128,17 @@ private:
     bool hasPreview_;
     bool loadingEditedFeature_;
     bool rebuildingPreview_;
+    bool configuringDimensionHandles_;
+    bool dimensionValuesInitialized_;
     bool buildingCustomFeature_;
     bool previewSubtractCreated_;
     int previewColor_;
     tag_t previewTargetBodyTag_;
     tag_t previewSelectedFaceTag_;
+    tag_t dimensionFaceTag_;
+    std::array<double, 2> cutDistances_;
+    std::array<double, 2> offsetDistances_;
+    double currentThickness_;
     std::vector<tag_t> previewCreatedFeatureTags_;
     std::vector<std::pair<tag_t, int>> previewBodyTranslucencies_;
 };

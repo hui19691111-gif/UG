@@ -14,5 +14,9 @@ constexpr const char* kAttrColorMode = "colorMode";
 constexpr const char* kAttrFixedColor = "fixedColor";
 constexpr const char* kAttrAppliedColor = "appliedColor";
 constexpr const char* kAttrExtensionLength = "extensionLength";
+constexpr const char* kAttrCutDistance0 = "cutDistance0";
+constexpr const char* kAttrCutDistance1 = "cutDistance1";
+constexpr const char* kAttrOffsetDistance0 = "offsetDistance0";
+constexpr const char* kAttrOffsetDistance1 = "offsetDistance1";
 constexpr const char* kAttrWrapMode = "wrapMode";
 }
