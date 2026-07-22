@@ -663,26 +663,20 @@ int CaiRBanDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
         cutDistances_[1] = ExtensionLength();
         dimensionValuesInitialized_ = true;
     }
+    else if (block == wrapMode_)
+    {
+        const double defaultOffset =
+            WrapMode() == 1 ? -std::fabs(currentThickness_) : 0.0;
+        offsetDistances_[0] = defaultOffset;
+        offsetDistances_[1] = defaultOffset;
+        dimensionValuesInitialized_ = true;
+    }
     else if (dimensionChanged)
     {
         cutDistances_[0] = (std::max)(0.0, cutDimension0_->Value());
         cutDistances_[1] = (std::max)(0.0, cutDimension1_->Value());
-        const double negativeThickness = -std::fabs(currentThickness_);
-        const double positiveThickness = std::fabs(currentThickness_);
-        const bool innerWrap = WrapMode() == 1;
-        const auto snapOffset =
-            [negativeThickness, positiveThickness, innerWrap](double value)
-        {
-            if (innerWrap)
-            {
-                return value > positiveThickness * 0.5
-                           ? positiveThickness
-                           : 0.0;
-            }
-            return value < negativeThickness * 0.5 ? negativeThickness : 0.0;
-        };
-        offsetDistances_[0] = snapOffset(offsetDimension0_->Value());
-        offsetDistances_[1] = snapOffset(offsetDimension1_->Value());
+        offsetDistances_[0] = offsetDimension0_->Value();
+        offsetDistances_[1] = offsetDimension1_->Value();
         dimensionValuesInitialized_ = true;
     }
     if (selectionChanged)
@@ -1288,19 +1282,11 @@ int CaiRBanDialog::CreatePreview()
     {
         cutDistances_[0] = ExtensionLength();
         cutDistances_[1] = ExtensionLength();
-        const double defaultOffset = WrapMode() == 1 ? thickness : -thickness;
+        const double defaultOffset = WrapMode() == 1 ? -thickness : 0.0;
         offsetDistances_[0] = defaultOffset;
         offsetDistances_[1] = defaultOffset;
         dimensionValuesInitialized_ = true;
         dimensionFaceTag_ = face->Tag();
-    }
-    else
-    {
-        const double modeOffset = WrapMode() == 1 ? thickness : -thickness;
-        offsetDistances_[0] =
-            std::fabs(offsetDistances_[0]) > kTolerance ? modeOffset : 0.0;
-        offsetDistances_[1] =
-            std::fabs(offsetDistances_[1]) > kTolerance ? modeOffset : 0.0;
     }
     currentThickness_ = thickness;
     std::array<NXOpen::Point3d, 4> handleOrigins{};
@@ -2387,10 +2373,10 @@ bool CaiRBanDialog::CreateArcPanel(
             }
         }
 
-        // 两种包角均由两端偏置手柄控制：外包非零档为负板厚，
-        // 内包非零档为正板厚。
+        // 两端偏置手柄均为自由有符号距离。外包默认 0，内包默认
+        // 负板厚；拖动后按两端各自的实际数值创建偏置特征。
         {
-            stage = "端面沿内法向偏置一个板厚";
+            stage = "定位端面偏置手柄";
             std::vector<NXOpen::Face*> inwardOffsetFaces;
             const NXOpen::Point3d cylinderOrigin(
                 cylinderOriginData[0], cylinderOriginData[1],
@@ -2500,7 +2486,6 @@ bool CaiRBanDialog::CreateArcPanel(
                     "未能准确找到加厚体两端的偏置平面。");
             }
 
-            std::vector<NXOpen::Face*> facesToOffset;
             for (std::size_t index = 0; index < 2; ++index)
             {
                 NXOpen::Point3d planePoint;
@@ -2516,25 +2501,28 @@ bool CaiRBanDialog::CreateArcPanel(
                         FaceBoxCenter(inwardOffsetFaces[index]);
                     (*handleDirections)[index + 2] = outwardNormal;
                 }
-                if (std::fabs(offsetDistances[index]) > kTolerance)
-                {
-                    facesToOffset.push_back(inwardOffsetFaces[index]);
-                }
             }
 
-            if (!facesToOffset.empty())
+            for (std::size_t index = 0; index < 2; ++index)
             {
+                if (std::fabs(offsetDistances[index]) <= kTolerance)
+                {
+                    continue;
+                }
+                stage = "创建第 " + std::to_string(index + 1) +
+                        " 个端面偏置";
                 innerOffset =
                     workPart->Features()->CreateOffsetFaceBuilder(nullptr);
                 innerOffset->Distance()->SetFormula(
-                    Number(wrapMode == 1 ? thickness : -thickness).c_str());
+                    Number(offsetDistances[index]).c_str());
                 innerOffset->SetDirection(false);
                 NXOpen::SelectionIntentRuleOptions* offsetOptions =
                     workPart->ScRuleFactory()->CreateRuleOptions();
                 offsetOptions->SetSelectedFromInactive(false);
                 NXOpen::FaceDumbRule* offsetRule =
                     workPart->ScRuleFactory()->CreateRuleFaceDumb(
-                        facesToOffset, offsetOptions);
+                        std::vector<NXOpen::Face*>{inwardOffsetFaces[index]},
+                        offsetOptions);
                 delete offsetOptions;
                 innerOffset->FaceCollector()->ReplaceRules(
                     std::vector<NXOpen::SelectionIntentRule*>{offsetRule},
@@ -2547,7 +2535,7 @@ bool CaiRBanDialog::CreateArcPanel(
                     offsetFeature->GetBodies().empty())
                 {
                     throw std::runtime_error(
-                        "NX 未返回内包端面偏置后的实体。");
+                        "NX 未返回端面偏置后的实体。");
                 }
                 panelBody = offsetFeature->GetBodies().front();
                 if (createdFeatureTags != nullptr)
