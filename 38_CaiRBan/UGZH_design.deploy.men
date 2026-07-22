@@ -1,0 +1,200 @@
+! TITLE UG�ǻ��ӽ���V2.47 Menu
+! Ling Peng 2026
+!
+VERSION 120
+EDIT UG_GATEWAY_MAIN_MENUBAR
+
+BEFORE UG_HELP
+
+ CASCADE_BUTTON LP_OPEN_APPLICATION
+ LABEL &UG�ǻ��ӽ���V2.47
+
+END_OF_BEFORE
+
+MENU LP_OPEN_APPLICATION
+
+ TOGGLE_BUTTON  LP_DRAWING_MANAGER
+ LABEL   Drawing Manager
+ BITMAP  lp_drawing_manager.bmp
+ ACTIONS LP_OPEN_FUNCTIONS
+
+ BUTTON  Write_Prat_Attr
+ LABEL   д�벿������
+ BITMAP  Write_Prat_Attr.bmp
+ ACTIONS Write_Prat_Attr
+
+
+ BUTTON  PiLian_Write_Prat_Attr
+ LABEL   ����д�벿������
+ BITMAP  PiLian_Write_Prat_Attr.bmp
+ ACTIONS PiLian_Write_Prat_Attr
+ BUTTON  ZiDonFenCen
+ LABEL   ͳ�ƺ�������
+ BITMAP  ZiDonFenCen.bmp
+ ACTIONS ZiDonFenCen
+
+ BUTTON  BiaoJIXIan
+ LABEL   �����?
+ BITMAP  BiaoJIXIan.bmp
+ ACTIONS BiaoJIXIan
+
+ BUTTON  SouDonZuanBanJin
+ LABEL   �ֶ�ת�ӽ�
+ BITMAP  SouDonZuanBanJin.bmp
+ ACTIONS SouDonZuanBanJin
+
+ BUTTON  PiLianZuanBanJin
+ LABEL   ����ת�ӽ�
+ BITMAP  PiLianZuanBanJin.bmp
+ ACTIONS PiLianZuanBanJin
+
+ BUTTON  HoleAttribute
+ LABEL   ����������
+ BITMAP  HoleAttribute.bmp
+ ACTIONS HoleAttribute
+
+ BUTTON  ZiDonCuTu
+ LABEL   �Զ���ͼ
+ BITMAP  ZiDonCuTu.bmp
+ ACTIONS ZiDonCuTu
+
+ BUTTON  KonBiaoZu
+ LABEL   �ױ�ע
+ BITMAP  KonBiaoZu.bmp
+ ACTIONS KonBiaoZu
+
+ BUTTON  MaxDim
+ LABEL   ���ߴ�
+ BITMAP  MaxDim.bmp
+ ACTIONS MaxDim
+
+ BUTTON  ZiDonBiaoZhu
+ LABEL   ����ͼ�Զ���ע
+ BITMAP  ZiDonBiaoZhu.bmp
+ ACTIONS ZiDonBiaoZhu
+
+ BUTTON  BianHao
+ LABEL   ���?
+ BITMAP  BianHao.bmp
+ ACTIONS BianHao
+
+ BUTTON  BODYNOT
+ LABEL   �Ų���
+ BITMAP  BODYNOT.bmp
+ ACTIONS BODYNOT
+
+ BUTTON  ATTRmodify
+ LABEL   �޸ĺŲ���
+ BITMAP  ATTRmodify.bmp
+ ACTIONS ATTRmodify
+
+ BUTTON  MenBanSiBian
+ LABEL   90�Ƚ�˺��
+ BITMAP  MenBanSiBian.bmp
+ ACTIONS MenBanSiBian
+
+ BUTTON  BaoLonTiFenGe
+ LABEL   ������ָ�?
+ BITMAP  BaoLonTiFenGe.bmp
+ ACTIONS BaoLonTiFenGe
+
+ BUTTON  BaoRongQieChu
+ LABEL   �������г�
+ BITMAP  BaoRongQieChu.bmp
+ ACTIONS BaoRongQieChu
+
+ BUTTON  ZheWanBiRangCao
+ LABEL   ������ò�?
+ BITMAP  ZheWanBiRangCao.bmp
+ ACTIONS ZheWanBiRangCao
+
+ BUTTON  BanJjinCaiBian
+ LABEL   �ӽ�ñ�?
+ BITMAP  BanJjinCaiBian.bmp
+ ACTIONS BanJjinCaiBian
+
+ BUTTON  BanJinCaiTu
+ LABEL   �ӽ���? BITMAP  BanJinCaiTu.bmp
+ ACTIONS BanJinCaiTuDialog
+
+ BUTTON  FangTongKaKou
+ LABEL   ��ͨ����
+ BITMAP  FangTongKaKou.bmp
+ ACTIONS FangTongKaKou
+
+ BUTTON  XuanZeGuanJian
+ LABEL   �ܲ�ͳ��
+ BITMAP  XuanZeGuanJian.bmp
+ ACTIONS XuanZeGuanJian
+
+ BUTTON  DuoSiTiZuanZuanPei
+ LABEL   ����תװ��
+ BITMAP  DuoSiTiZuanZuanPei.bmp
+ ACTIONS DuoSiTiZuanZuanPei
+ BUTTON  ChaiJiJia
+ LABEL   �����?
+ BITMAP  ChaiJiJia.bmp
+ ACTIONS ChaiJiJia
+
+
+ BUTTON  TwoPointBiLanCao
+ LABEL   2����ò�?
+ BITMAP  2P_BiLanCao.bmp
+ ACTIONS TwoPointBiLanCao
+
+ BUTTON  TwoPointSiBian
+ LABEL   ��ν�˺��? BITMAP  2P_BiLanCao.bmp
+ ACTIONS TwoPointSiBianUI
+
+ BUTTON  CaiRBan
+ LABEL   ��Բ����
+ BITMAP  CaiRBan.bmp
+ ACTIONS CaiRBan
+
+ BUTTON  AutoCreateThreeViews
+ LABEL   �Զ�����ͼ
+ BITMAP  AutoCreateThreeViews.bmp
+ ACTIONS AutoCreateThreeViews
+
+ BUTTON  DaoCuDWG
+ LABEL   ����DWG
+ BITMAP  DaoCuDWG.bmp
+ ACTIONS DaoCuDWG
+
+ BUTTON  PILianDaoCuZKT
+ LABEL   ��������չ��ͼ
+ BITMAP  PILianDaoCuZKT.bmp
+ ACTIONS PILianDaoCuZKT
+
+ BUTTON  KaKou
+ LABEL   ����
+ BITMAP  kakou.bmp
+ ACTIONS KaKou
+
+ BUTTON  KeZi
+ LABEL   ����
+ BITMAP  KeZi.bmp
+ ACTIONS KeZi
+ BUTTON  FanTonGMK
+ LABEL   ��ͨ��ĸ��
+ BITMAP  FanTonGMK_Menu.bmp
+ ACTIONS FanTonGMK
+
+ BUTTON  MinXiBiao
+ LABEL   ��ϸ��
+ BITMAP  MinXiBiao.bmp
+ ACTIONS MinXiBiao
+ BUTTON  TianFenXI
+ LABEL   ���϶
+ BITMAP  TianFenXI.bmp
+ ACTIONS TianFenXI
+ BUTTON  QinLiGuanJian
+ LABEL   �ܼ�б�Ӵ���
+ BITMAP  QinLiGuanJian.bmp
+ ACTIONS QinLiGuanJian
+
+ BUTTON  CheckUpdate
+ LABEL   ������
+ BITMAP  CheckUpdate.bmp
+ ACTIONS CheckUpdate
+END_OF_MENU

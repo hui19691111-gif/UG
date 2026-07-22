@@ -1,0 +1,7 @@
+obj/
+_deploy_stage/
+
+bin/*
+!bin/Release/
+bin/Release/*
+!bin/Release/CaiRBan.dlx

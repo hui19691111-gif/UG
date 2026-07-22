@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CustomFeatureLib
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="CustomFeatureConfiguration_schema.xsd">
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::TwoPointSiBian"
+        FeatureName="2P_SiBian"
+        FeatureIcon="2P_BiLanCao"
+        FeatureLibrary="TwoPointSiBianCore"
+        FeatureUILibrary="TwoPointSiBianUI"
+        IsWithoutBody="true"/>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::CaiRBan"
+        FeatureName="&#x62C6;&#x5706;&#x5F27;&#x677F;"
+        FeatureIcon="CaiRBan"
+        FeatureLibrary="CaiRBanCore"
+        FeatureUILibrary="CaiRBan"
+        IsWithoutBody="true"/>
+</CustomFeatureLib>
