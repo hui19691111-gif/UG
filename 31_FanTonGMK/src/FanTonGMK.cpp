@@ -5255,17 +5255,17 @@ double AskFaceChainDistancePerpendicularToPlane(
 
 }
 
-double AskOtherTubeFaceChainPlaneDepth(
+double AskSelectedTubePerpendicularFacePairDistance(
 
-    const SelectedFaceInfo& otherSelection,
-
-    const double currentFaceNormal[3])
+    const SelectedFaceInfo& selection)
 
 {
 
-    FacePlacement otherPlacement = {};
+    FacePlacement placement = {};
 
-    if (!AskPlanarFacePlacement(otherSelection.face, otherSelection.pickPoint, otherPlacement, false))
+    if (selection.face == NULL ||
+
+        !AskPlanarFacePlacement(selection.face, selection.pickPoint, placement, false))
 
     {
 
@@ -5273,17 +5273,17 @@ double AskOtherTubeFaceChainPlaneDepth(
 
     }
 
-    const std::vector<tag_t> otherFaceChain =
+    const std::vector<tag_t> faceChain =
 
         CollectFaceChainAlongLongEdges(
 
-            otherPlacement.faceTag,
+            placement.faceTag,
 
-            otherPlacement.bodyTag,
+            placement.bodyTag,
 
-            otherPlacement.lengthAxis);
+            placement.lengthAxis);
 
-    if (otherFaceChain.empty())
+    if (faceChain.empty())
 
     {
 
@@ -5291,7 +5291,157 @@ double AskOtherTubeFaceChainPlaneDepth(
 
     }
 
-    return AskFaceChainDistancePerpendicularToPlane(otherFaceChain, currentFaceNormal);
+    struct CandidatePlane
+
+    {
+
+        double point[3];
+
+        double normal[3];
+
+    };
+
+    std::vector<CandidatePlane> candidates;
+
+    for (std::size_t faceIndex = 0; faceIndex < faceChain.size(); ++faceIndex)
+
+    {
+
+        CandidatePlane candidate = {};
+
+        if (!AskPlanarFacePlane(faceChain[faceIndex], candidate.point, candidate.normal) ||
+
+            !Normalize3(candidate.normal) ||
+
+            std::fabs(Dot3(candidate.normal, placement.normal)) > 0.12)
+
+        {
+
+            continue;
+
+        }
+
+        uf_list_p_t edgeList = NULL;
+
+        if (UF_MODL_ask_face_edges(faceChain[faceIndex], &edgeList) != 0 || edgeList == NULL)
+
+        {
+
+            continue;
+
+        }
+
+        const std::vector<tag_t> edgeTags = UfListToTags(edgeList);
+
+        UF_MODL_delete_list(&edgeList);
+
+        bool hasParallelLongEdge = false;
+
+        for (std::size_t edgeIndex = 0; edgeIndex < edgeTags.size(); ++edgeIndex)
+
+        {
+
+            if (!IsLinearEdge(edgeTags[edgeIndex]))
+
+            {
+
+                continue;
+
+            }
+
+            double point1[3] = {0.0, 0.0, 0.0};
+
+            double point2[3] = {0.0, 0.0, 0.0};
+
+            int vertexCount = 0;
+
+            if (UF_MODL_ask_edge_verts(edgeTags[edgeIndex], point1, point2, &vertexCount) != 0 ||
+
+                vertexCount != 2)
+
+            {
+
+                continue;
+
+            }
+
+            double edgeDirection[3] =
+
+            {
+
+                point2[0] - point1[0],
+
+                point2[1] - point1[1],
+
+                point2[2] - point1[2]
+
+            };
+
+            if (Normalize3(edgeDirection) &&
+
+                std::fabs(Dot3(edgeDirection, placement.lengthAxis)) >= 0.98)
+
+            {
+
+                hasParallelLongEdge = true;
+
+                break;
+
+            }
+
+        }
+
+        if (hasParallelLongEdge)
+
+        {
+
+            candidates.push_back(candidate);
+
+        }
+
+    }
+
+    double farthestDistance = 0.0;
+
+    for (std::size_t firstIndex = 0; firstIndex < candidates.size(); ++firstIndex)
+
+    {
+
+        for (std::size_t secondIndex = firstIndex + 1; secondIndex < candidates.size(); ++secondIndex)
+
+        {
+
+            if (std::fabs(Dot3(candidates[firstIndex].normal, candidates[secondIndex].normal)) < 0.98)
+
+            {
+
+                continue;
+
+            }
+
+            const double delta[3] =
+
+            {
+
+                candidates[secondIndex].point[0] - candidates[firstIndex].point[0],
+
+                candidates[secondIndex].point[1] - candidates[firstIndex].point[1],
+
+                candidates[secondIndex].point[2] - candidates[firstIndex].point[2]
+
+            };
+
+            farthestDistance = std::max(
+
+                farthestDistance,
+
+                std::fabs(Dot3(delta, candidates[firstIndex].normal)));
+
+        }
+
+    }
+
+    return farthestDistance;
 
 }
 
@@ -7267,13 +7417,13 @@ private:
 
             const double malePositiveXOffset = hasMalePlacement ?
 
-                AskOtherTubeFaceChainPlaneDepth(femaleFace, malePlacement.normal) :
+                AskSelectedTubePerpendicularFacePairDistance(femaleFace) :
 
                 0.0;
 
             const double femalePositiveXOffset = hasFemalePlacement ?
 
-                AskOtherTubeFaceChainPlaneDepth(maleFace, femalePlacement.normal) :
+                AskSelectedTubePerpendicularFacePairDistance(maleFace) :
 
                 0.0;
 
