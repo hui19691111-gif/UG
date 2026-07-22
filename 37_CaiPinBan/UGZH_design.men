@@ -1,0 +1,202 @@
+! TITLE UG智辉钣金插件V2.47 Menu
+! Ling Peng 2026
+!
+VERSION 120
+EDIT UG_GATEWAY_MAIN_MENUBAR
+
+BEFORE UG_HELP
+
+ CASCADE_BUTTON LP_OPEN_APPLICATION
+ LABEL &UG智辉钣金插件V2.47
+
+END_OF_BEFORE
+
+MENU LP_OPEN_APPLICATION
+
+ TOGGLE_BUTTON  LP_DRAWING_MANAGER
+ LABEL   Drawing Manager
+ BITMAP  lp_drawing_manager.bmp
+ ACTIONS LP_OPEN_FUNCTIONS
+
+ BUTTON  Write_Prat_Attr
+ LABEL   写入部件属性
+ BITMAP  Write_Prat_Attr.bmp
+ ACTIONS Write_Prat_Attr
+
+
+ BUTTON  PiLian_Write_Prat_Attr
+ LABEL   批量写入部件属性
+ BITMAP  PiLian_Write_Prat_Attr.bmp
+ ACTIONS PiLian_Write_Prat_Attr
+ BUTTON  ZiDonFenCen
+ LABEL   统计焊件数量
+ BITMAP  ZiDonFenCen.bmp
+ ACTIONS ZiDonFenCen
+
+ BUTTON  BiaoJIXIan
+ LABEL   标记线
+ BITMAP  BiaoJIXIan.bmp
+ ACTIONS BiaoJIXIan
+
+ BUTTON  SouDonZuanBanJin
+ LABEL   手动转钣金
+ BITMAP  SouDonZuanBanJin.bmp
+ ACTIONS SouDonZuanBanJin
+
+ BUTTON  PiLianZuanBanJin
+ LABEL   批量转钣金
+ BITMAP  PiLianZuanBanJin.bmp
+ ACTIONS PiLianZuanBanJin
+
+ BUTTON  HoleAttribute
+ LABEL   创建孔属性
+ BITMAP  HoleAttribute.bmp
+ ACTIONS HoleAttribute
+
+ BUTTON  ZiDonCuTu
+ LABEL   自动出图
+ BITMAP  ZiDonCuTu.bmp
+ ACTIONS ZiDonCuTu
+
+ BUTTON  KonBiaoZu
+ LABEL   孔标注
+ BITMAP  KonBiaoZu.bmp
+ ACTIONS KonBiaoZu
+
+ BUTTON  MaxDim
+ LABEL   最大尺寸
+ BITMAP  MaxDim.bmp
+ ACTIONS MaxDim
+
+ BUTTON  ZiDonBiaoZhu
+ LABEL   工程图自动标注
+ BITMAP  ZiDonBiaoZhu.bmp
+ ACTIONS ZiDonBiaoZhu
+
+ BUTTON  BianHao
+ LABEL   编号
+ BITMAP  BianHao.bmp
+ ACTIONS BianHao
+
+ BUTTON  BODYNOT
+ LABEL   号材量
+ BITMAP  BODYNOT.bmp
+ ACTIONS BODYNOT
+
+ BUTTON  ATTRmodify
+ LABEL   修改号材量
+ BITMAP  ATTRmodify.bmp
+ ACTIONS ATTRmodify
+
+ BUTTON  MenBanSiBian
+ LABEL   90度角撕边
+ BITMAP  MenBanSiBian.bmp
+ ACTIONS MenBanSiBian
+
+ BUTTON  BaoLonTiFenGe
+ LABEL   包容体分割
+ BITMAP  BaoLonTiFenGe.bmp
+ ACTIONS BaoLonTiFenGe
+
+ BUTTON  BaoRongQieChu
+ LABEL   包容体切除
+ BITMAP  BaoRongQieChu.bmp
+ ACTIONS BaoRongQieChu
+
+ BUTTON  ZheWanBiRangCao
+ LABEL   折弯避让槽
+ BITMAP  ZheWanBiRangCao.bmp
+ ACTIONS ZheWanBiRangCao
+
+ BUTTON  BanJjinCaiBian
+ LABEL   钣金裁边
+ BITMAP  BanJjinCaiBian.bmp
+ ACTIONS BanJjinCaiBian
+
+ BUTTON  BanJinCaiTu
+ LABEL   钣金拆图
+ BITMAP  BanJinCaiTu.bmp
+ ACTIONS BanJinCaiTuDialog
+
+ BUTTON  FangTongKaKou
+ LABEL   方通卡口
+ BITMAP  FangTongKaKou.bmp
+ ACTIONS FangTongKaKou
+
+ BUTTON  XuanZeGuanJian
+ LABEL   管材统计
+ BITMAP  XuanZeGuanJian.bmp
+ ACTIONS XuanZeGuanJian
+
+ BUTTON  DuoSiTiZuanZuanPei
+ LABEL   多体转装配
+ BITMAP  DuoSiTiZuanZuanPei.bmp
+ ACTIONS DuoSiTiZuanZuanPei
+ BUTTON  ChaiJiJia
+ LABEL   拆机架
+ BITMAP  ChaiJiJia.bmp
+ ACTIONS ChaiJiJia
+
+
+ BUTTON  TwoPointBiLanCao
+ LABEL   2点避让槽
+ BITMAP  2P_BiLanCao.bmp
+ ACTIONS TwoPointBiLanCao
+
+ BUTTON  TwoPointSiBian
+ LABEL   多段角撕边
+ BITMAP  2P_BiLanCao.bmp
+ ACTIONS TwoPointSiBianUI
+
+ BUTTON  CaiPinBan
+ LABEL   拆平板
+ BITMAP  CaiPinBan.bmp
+ ACTIONS CaiPinBan
+
+ BUTTON  AutoCreateThreeViews
+ LABEL   自动三视图
+ BITMAP  AutoCreateThreeViews.bmp
+ ACTIONS AutoCreateThreeViews
+
+ BUTTON  DaoCuDWG
+ LABEL   导出DWG
+ BITMAP  DaoCuDWG.bmp
+ ACTIONS DaoCuDWG
+
+ BUTTON  PILianDaoCuZKT
+ LABEL   批量导出展开图
+ BITMAP  PILianDaoCuZKT.bmp
+ ACTIONS PILianDaoCuZKT
+
+ BUTTON  KaKou
+ LABEL   卡口
+ BITMAP  kakou.bmp
+ ACTIONS KaKou
+
+ BUTTON  KeZi
+ LABEL   刻字
+ BITMAP  KeZi.bmp
+ ACTIONS KeZi
+ BUTTON  FanTonGMK
+ LABEL   方通公母口
+ BITMAP  FanTonGMK_Menu.bmp
+ ACTIONS FanTonGMK
+
+ BUTTON  MinXiBiao
+ LABEL   明细表
+ BITMAP  MinXiBiao.bmp
+ ACTIONS MinXiBiao
+ BUTTON  TianFenXI
+ LABEL   填补缝隙
+ BITMAP  TianFenXI.bmp
+ ACTIONS TianFenXI
+ BUTTON  QinLiGuanJian
+ LABEL   管件斜接处理
+ BITMAP  QinLiGuanJian.bmp
+ ACTIONS QinLiGuanJian
+
+ BUTTON  CheckUpdate
+ LABEL   检查更新
+ BITMAP  CheckUpdate.bmp
+ ACTIONS CheckUpdate
+END_OF_MENU
