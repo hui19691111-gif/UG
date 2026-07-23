@@ -1,0 +1,205 @@
+! TITLE UG锟角伙拷锟接斤拷锟斤拷V2.47 Menu
+! Ling Peng 2026
+!
+VERSION 120
+EDIT UG_GATEWAY_MAIN_MENUBAR
+
+BEFORE UG_HELP
+
+ CASCADE_BUTTON LP_OPEN_APPLICATION
+ LABEL &UG锟角伙拷锟接斤拷锟斤拷V2.47
+
+END_OF_BEFORE
+
+MENU LP_OPEN_APPLICATION
+
+ TOGGLE_BUTTON  LP_DRAWING_MANAGER
+ LABEL   Drawing Manager
+ BITMAP  lp_drawing_manager.bmp
+ ACTIONS LP_OPEN_FUNCTIONS
+
+ BUTTON  Write_Prat_Attr
+ LABEL   写锟诫部锟斤拷锟斤拷锟斤拷
+ BITMAP  Write_Prat_Attr.bmp
+ ACTIONS Write_Prat_Attr
+
+
+ BUTTON  PiLian_Write_Prat_Attr
+ LABEL   锟斤拷锟斤拷写锟诫部锟斤拷锟斤拷锟斤拷
+ BITMAP  PiLian_Write_Prat_Attr.bmp
+ ACTIONS PiLian_Write_Prat_Attr
+ BUTTON  ZiDonFenCen
+ LABEL   统锟狡猴拷锟斤拷锟斤拷锟斤拷
+ BITMAP  ZiDonFenCen.bmp
+ ACTIONS ZiDonFenCen
+
+ BUTTON  BiaoJIXIan
+ LABEL   锟斤拷锟斤拷锟?
+ BITMAP  BiaoJIXIan.bmp
+ ACTIONS BiaoJIXIan
+
+ BUTTON  SouDonZuanBanJin
+ LABEL   锟街讹拷转锟接斤拷
+ BITMAP  SouDonZuanBanJin.bmp
+ ACTIONS SouDonZuanBanJin
+
+ BUTTON  PiLianZuanBanJin
+ LABEL   锟斤拷锟斤拷转锟接斤拷
+ BITMAP  PiLianZuanBanJin.bmp
+ ACTIONS PiLianZuanBanJin
+
+ BUTTON  HoleAttribute
+ LABEL   锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷
+ BITMAP  HoleAttribute.bmp
+ ACTIONS HoleAttribute
+
+ BUTTON  ZiDonCuTu
+ LABEL   锟皆讹拷锟斤拷图
+ BITMAP  ZiDonCuTu.bmp
+ ACTIONS ZiDonCuTu
+
+ BUTTON  KonBiaoZu
+ LABEL   锟阶憋拷注
+ BITMAP  KonBiaoZu.bmp
+ ACTIONS KonBiaoZu
+
+ BUTTON  MaxDim
+ LABEL   锟斤拷锟竭达拷
+ BITMAP  MaxDim.bmp
+ ACTIONS MaxDim
+
+ BUTTON  ZiDonBiaoZhu
+ LABEL   锟斤拷锟斤拷图锟皆讹拷锟斤拷注
+ BITMAP  ZiDonBiaoZhu.bmp
+ ACTIONS ZiDonBiaoZhu
+
+ BUTTON  BianHao
+ LABEL   锟斤拷锟?
+ BITMAP  BianHao.bmp
+ ACTIONS BianHao
+
+ BUTTON  BODYNOT
+ LABEL   锟脚诧拷锟斤拷
+ BITMAP  BODYNOT.bmp
+ ACTIONS BODYNOT
+
+ BUTTON  ATTRmodify
+ LABEL   锟睫改号诧拷锟斤拷
+ BITMAP  ATTRmodify.bmp
+ ACTIONS ATTRmodify
+
+ BUTTON  MenBanSiBian
+ LABEL   90锟饺斤拷撕锟斤拷
+ BITMAP  MenBanSiBian.bmp
+ ACTIONS MenBanSiBian
+
+ BUTTON  BaoLonTiFenGe
+ LABEL   锟斤拷锟斤拷锟斤拷指锟?
+ BITMAP  BaoLonTiFenGe.bmp
+ ACTIONS BaoLonTiFenGe
+
+ BUTTON  BaoRongQieChu
+ LABEL   锟斤拷锟斤拷锟斤拷锟叫筹拷
+ BITMAP  BaoRongQieChu.bmp
+ ACTIONS BaoRongQieChu
+
+ BUTTON  ZheWanBiRangCao
+ LABEL   锟斤拷锟斤拷锟斤拷貌锟?
+ BITMAP  ZheWanBiRangCao.bmp
+ ACTIONS ZheWanBiRangCao
+
+ BUTTON  BanJjinCaiBian
+ LABEL   锟接斤拷帽锟?
+ BITMAP  BanJjinCaiBian.bmp
+ ACTIONS BanJjinCaiBian
+
+ BUTTON  BanJinCaiTu
+ LABEL   锟接斤拷锟酵? BITMAP  BanJinCaiTu.bmp
+ ACTIONS BanJinCaiTuDialog
+
+ BUTTON  FangTongKaKou
+ LABEL   锟斤拷通锟斤拷锟斤拷
+ BITMAP  FangTongKaKou.bmp
+ ACTIONS FangTongKaKou
+
+ BUTTON  XuanZeGuanJian
+ LABEL   锟杰诧拷统锟斤拷
+ BITMAP  XuanZeGuanJian.bmp
+ ACTIONS XuanZeGuanJian
+
+ BUTTON  DuoSiTiZuanZuanPei
+ LABEL   锟斤拷锟斤拷转装锟斤拷
+ BITMAP  DuoSiTiZuanZuanPei.bmp
+ ACTIONS DuoSiTiZuanZuanPei
+ BUTTON  ChaiJiJia
+ LABEL   锟斤拷锟斤拷锟?
+ BITMAP  ChaiJiJia.bmp
+ ACTIONS ChaiJiJia
+
+
+ BUTTON  TwoPointBiLanCao
+ LABEL   2锟斤拷锟斤拷貌锟?
+ BITMAP  2P_BiLanCao.bmp
+ ACTIONS TwoPointBiLanCao
+
+ BUTTON  TwoPointSiBian
+ LABEL   锟斤拷谓锟剿猴拷锟? BITMAP  2P_BiLanCao.bmp
+ ACTIONS TwoPointSiBianUI
+
+ BUTTON  CaiRBan
+ LABEL   拆圆弧板
+ BITMAP  CaiRBan.bmp
+ ACTIONS CaiRBan
+
+ BUTTON  CaiR1
+ LABEL   分割圆角1
+ BITMAP  CaiR1.bmp
+ ACTIONS CaiR1
+
+ BUTTON  AutoCreateThreeViews
+ LABEL   锟皆讹拷锟斤拷锟斤拷图
+ BITMAP  AutoCreateThreeViews.bmp
+ ACTIONS AutoCreateThreeViews
+
+ BUTTON  DaoCuDWG
+ LABEL   锟斤拷锟斤拷DWG
+ BITMAP  DaoCuDWG.bmp
+ ACTIONS DaoCuDWG
+
+ BUTTON  PILianDaoCuZKT
+ LABEL   锟斤拷锟斤拷锟斤拷锟斤拷展锟斤拷图
+ BITMAP  PILianDaoCuZKT.bmp
+ ACTIONS PILianDaoCuZKT
+
+ BUTTON  KaKou
+ LABEL   锟斤拷锟斤拷
+ BITMAP  kakou.bmp
+ ACTIONS KaKou
+
+ BUTTON  KeZi
+ LABEL   锟斤拷锟斤拷
+ BITMAP  KeZi.bmp
+ ACTIONS KeZi
+ BUTTON  FanTonGMK
+ LABEL   锟斤拷通锟斤拷母锟斤拷
+ BITMAP  FanTonGMK_Menu.bmp
+ ACTIONS FanTonGMK
+
+ BUTTON  MinXiBiao
+ LABEL   锟斤拷细锟斤拷
+ BITMAP  MinXiBiao.bmp
+ ACTIONS MinXiBiao
+ BUTTON  TianFenXI
+ LABEL   锟筋补锟斤拷隙
+ BITMAP  TianFenXI.bmp
+ ACTIONS TianFenXI
+ BUTTON  QinLiGuanJian
+ LABEL   锟杰硷拷斜锟接达拷锟斤拷
+ BITMAP  QinLiGuanJian.bmp
+ ACTIONS QinLiGuanJian
+
+ BUTTON  CheckUpdate
+ LABEL   锟斤拷锟斤拷锟斤拷
+ BITMAP  CheckUpdate.bmp
+ ACTIONS CheckUpdate
+END_OF_MENU

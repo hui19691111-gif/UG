@@ -1,0 +1,203 @@
+! TITLE UG鏅鸿緣閽ｉ噾鎻掍欢V2.47 Menu
+! Ling Peng 2026
+!
+VERSION 120
+EDIT UG_GATEWAY_MAIN_MENUBAR
+
+BEFORE UG_HELP
+
+ CASCADE_BUTTON LP_OPEN_APPLICATION
+ LABEL &UG鏅鸿緣閽ｉ噾鎻掍欢V2.47
+
+END_OF_BEFORE
+
+MENU LP_OPEN_APPLICATION
+
+ TOGGLE_BUTTON  LP_DRAWING_MANAGER
+ LABEL   Drawing Manager
+ BITMAP  lp_drawing_manager.bmp
+ ACTIONS LP_OPEN_FUNCTIONS
+
+ BUTTON  Write_Prat_Attr
+ LABEL   鍐欏叆閮ㄤ欢灞炴€?
+ BITMAP  Write_Prat_Attr.bmp
+ ACTIONS Write_Prat_Attr
+
+
+ BUTTON  PiLian_Write_Prat_Attr
+ LABEL   鎵归噺鍐欏叆閮ㄤ欢灞炴€?
+ BITMAP  PiLian_Write_Prat_Attr.bmp
+ ACTIONS PiLian_Write_Prat_Attr
+ BUTTON  ZiDonFenCen
+ LABEL   缁熻鐒婁欢鏁伴噺
+ BITMAP  ZiDonFenCen.bmp
+ ACTIONS ZiDonFenCen
+
+ BUTTON  BiaoJIXIan
+ LABEL   鏍囪绾?
+ BITMAP  BiaoJIXIan.bmp
+ ACTIONS BiaoJIXIan
+
+ BUTTON  SouDonZuanBanJin
+ LABEL   鎵嬪姩杞挘閲?
+ BITMAP  SouDonZuanBanJin.bmp
+ ACTIONS SouDonZuanBanJin
+
+ BUTTON  PiLianZuanBanJin
+ LABEL   鎵归噺杞挘閲?
+ BITMAP  PiLianZuanBanJin.bmp
+ ACTIONS PiLianZuanBanJin
+
+ BUTTON  HoleAttribute
+ LABEL   鍒涘缓瀛斿睘鎬?
+ BITMAP  HoleAttribute.bmp
+ ACTIONS HoleAttribute
+
+ BUTTON  ZiDonCuTu
+ LABEL   鑷姩鍑哄浘
+ BITMAP  ZiDonCuTu.bmp
+ ACTIONS ZiDonCuTu
+
+ BUTTON  KonBiaoZu
+ LABEL   瀛旀爣娉?
+ BITMAP  KonBiaoZu.bmp
+ ACTIONS KonBiaoZu
+
+ BUTTON  MaxDim
+ LABEL   鏈€澶у昂瀵?
+ BITMAP  MaxDim.bmp
+ ACTIONS MaxDim
+
+ BUTTON  ZiDonBiaoZhu
+ LABEL   宸ョ▼鍥捐嚜鍔ㄦ爣娉?
+ BITMAP  ZiDonBiaoZhu.bmp
+ ACTIONS ZiDonBiaoZhu
+
+ BUTTON  BianHao
+ LABEL   缂栧彿
+ BITMAP  BianHao.bmp
+ ACTIONS BianHao
+
+ BUTTON  BODYNOT
+ LABEL   鍙锋潗閲?
+ BITMAP  BODYNOT.bmp
+ ACTIONS BODYNOT
+
+ BUTTON  ATTRmodify
+ LABEL   淇敼鍙锋潗閲?
+ BITMAP  ATTRmodify.bmp
+ ACTIONS ATTRmodify
+
+ BUTTON  MenBanSiBian
+ LABEL   90搴﹁鎾曡竟
+ BITMAP  MenBanSiBian.bmp
+ ACTIONS MenBanSiBian
+
+ BUTTON  BaoLonTiFenGe
+ LABEL   鍖呭浣撳垎鍓?
+ BITMAP  BaoLonTiFenGe.bmp
+ ACTIONS BaoLonTiFenGe
+
+ BUTTON  BaoRongQieChu
+ LABEL   鍖呭浣撳垏闄?
+ BITMAP  BaoRongQieChu.bmp
+ ACTIONS BaoRongQieChu
+
+ BUTTON  ZheWanBiRangCao
+ LABEL   鎶樺集閬胯妲?
+ BITMAP  ZheWanBiRangCao.bmp
+ ACTIONS ZheWanBiRangCao
+
+ BUTTON  BanJjinCaiBian
+ LABEL   閽ｉ噾瑁佽竟
+ BITMAP  BanJjinCaiBian.bmp
+ ACTIONS BanJjinCaiBian
+
+ BUTTON  BanJinCaiTu
+ LABEL   閽ｉ噾鎷嗗浘
+ BITMAP  BanJinCaiTu.bmp
+ ACTIONS BanJinCaiTuDialog
+
+ BUTTON  FangTongKaKou
+ LABEL   鏂归€氬崱鍙? BITMAP  FangTongKaKou.bmp
+ ACTIONS FangTongKaKou
+
+ BUTTON  XuanZeGuanJian
+ LABEL   绠℃潗缁熻
+ BITMAP  XuanZeGuanJian.bmp
+ ACTIONS XuanZeGuanJian
+
+ BUTTON  DuoSiTiZuanZuanPei
+ LABEL   澶氫綋杞閰? BITMAP  DuoSiTiZuanZuanPei.bmp
+ ACTIONS DuoSiTiZuanZuanPei
+ BUTTON  ChaiJiJia
+ LABEL   鎷嗘満鏋?
+ BITMAP  ChaiJiJia.bmp
+ ACTIONS ChaiJiJia
+
+
+ BUTTON  TwoPointBiLanCao
+ LABEL   2鐐归伩璁╂Ы
+ BITMAP  2P_BiLanCao.bmp
+ ACTIONS TwoPointBiLanCao
+
+ BUTTON  TwoPointSiBian
+ LABEL   澶氭瑙掓挄杈? BITMAP  2P_BiLanCao.bmp
+ ACTIONS TwoPointSiBianUI
+
+ BUTTON  CaiRBan
+ LABEL   鎷嗗渾寮ф澘
+ BITMAP  CaiRBan.bmp
+ ACTIONS CaiRBan
+
+ BUTTON  CaiR1
+ LABEL   分割圆角1
+ BITMAP  CaiR1.bmp
+ ACTIONS CaiR1
+
+ BUTTON  AutoCreateThreeViews
+ LABEL   鑷姩涓夎鍥?
+ BITMAP  AutoCreateThreeViews.bmp
+ ACTIONS AutoCreateThreeViews
+
+ BUTTON  DaoCuDWG
+ LABEL   瀵煎嚭DWG
+ BITMAP  DaoCuDWG.bmp
+ ACTIONS DaoCuDWG
+
+ BUTTON  PILianDaoCuZKT
+ LABEL   鎵归噺瀵煎嚭灞曞紑鍥? BITMAP  PILianDaoCuZKT.bmp
+ ACTIONS PILianDaoCuZKT
+
+ BUTTON  KaKou
+ LABEL   鍗″彛
+ BITMAP  kakou.bmp
+ ACTIONS KaKou
+
+ BUTTON  KeZi
+ LABEL   鍒诲瓧
+ BITMAP  KeZi.bmp
+ ACTIONS KeZi
+ BUTTON  FanTonGMK
+ LABEL   鏂归€氬叕姣嶅彛
+ BITMAP  FanTonGMK_Menu.bmp
+ ACTIONS FanTonGMK
+
+ BUTTON  MinXiBiao
+ LABEL   鏄庣粏琛?
+ BITMAP  MinXiBiao.bmp
+ ACTIONS MinXiBiao
+ BUTTON  TianFenXI
+ LABEL   濉ˉ缂濋殭
+ BITMAP  TianFenXI.bmp
+ ACTIONS TianFenXI
+ BUTTON  QinLiGuanJian
+ LABEL   绠′欢鏂滄帴澶勭悊
+ BITMAP  QinLiGuanJian.bmp
+ ACTIONS QinLiGuanJian
+
+ BUTTON  CheckUpdate
+ LABEL   妫€鏌ユ洿鏂?
+ BITMAP  CheckUpdate.bmp
+ ACTIONS CheckUpdate
+END_OF_MENU

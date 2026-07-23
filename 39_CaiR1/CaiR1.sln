@@ -1,0 +1,19 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{BC8A1FFA-BEE3-4634-8014-F334798102B3}") = "CaiR1", "CaiR1.vcxproj", "{BCB14826-5B24-43F2-9505-DC39D5B13A13}"
+EndProject
+Project("{BC8A1FFA-BEE3-4634-8014-F334798102B3}") = "CaiR1Core", "CaiR1Core.vcxproj", "{E36D6100-0464-4FF3-B149-BF8A4A2D0639}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{BCB14826-5B24-43F2-9505-DC39D5B13A13}.Release|x64.ActiveCfg = Release|x64
+		{BCB14826-5B24-43F2-9505-DC39D5B13A13}.Release|x64.Build.0 = Release|x64
+		{E36D6100-0464-4FF3-B149-BF8A4A2D0639}.Release|x64.ActiveCfg = Release|x64
+		{E36D6100-0464-4FF3-B149-BF8A4A2D0639}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+EndGlobal

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CustomFeatureLib
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="CustomFeatureConfiguration_schema.xsd">
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::CaiR1"
+        FeatureName="&#x5206;&#x5272;&#x5706;&#x89D2;1"
+        FeatureIcon="CaiR1"
+        FeatureLibrary="CaiR1CoreEdit"
+        FeatureUILibrary="CaiR1"
+        IsWithoutBody="true"/>
+</CustomFeatureLib>

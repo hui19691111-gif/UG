@@ -1,0 +1,10 @@
+obj/
+_deploy_stage/
+
+bin/*
+!bin/Release/
+bin/Release/*
+!bin/Release/CaiR1.dlx
+
+UGZH_design.rtb
+UGZH_design.tbr
