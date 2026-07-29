@@ -474,6 +474,62 @@ NXOpen::Drawings::DraftingCurve* FindRepresentativeCurveForFace(
 	return bestCurve;
 }
 
+NXOpen::Drawings::DraftingCurve* FindAssociativeLineCurveForFace(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Face* face,
+	bool reverseFaceDirection,
+	NXOpen::Point3d* selectedPoint,
+	const NXOpen::Point3d* preferredDrawingPoint,
+	const std::vector<NXOpen::Drawings::DraftingCurve*>* candidateCurves = NULL)
+{
+	if (selectedPoint != NULL)
+	{
+		*selectedPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
+	}
+	if (baseView == NULL || face == NULL)
+	{
+		return NULL;
+	}
+
+	const std::unordered_set<tag_t> edgeTags = CollectFaceEdgeTags(face);
+	if (edgeTags.empty())
+	{
+		return NULL;
+	}
+
+	const std::vector<NXOpen::Drawings::DraftingCurve*> allViewCurves =
+		candidateCurves != NULL ? std::vector<NXOpen::Drawings::DraftingCurve*>() : CollectDraftingCurves(baseView);
+	const std::vector<NXOpen::Drawings::DraftingCurve*>& sourceCurves =
+		candidateCurves != NULL ? *candidateCurves : allViewCurves;
+	std::vector<NXOpen::Drawings::DraftingCurve*> edgeReferencedCurves;
+	for (size_t i = 0; i < sourceCurves.size(); ++i)
+	{
+		NXOpen::Drawings::DraftingCurve* candidate = sourceCurves[i];
+		if (candidate != NULL &&
+			CurveReferencesFaceOrEdge(candidate, NULL_TAG, edgeTags))
+		{
+			edgeReferencedCurves.push_back(candidate);
+		}
+	}
+
+	NXOpen::Drawings::DraftingCurve* curve = FindRepresentativeCurveForFace(
+		baseView,
+		face,
+		false,
+		true,
+		reverseFaceDirection,
+		selectedPoint,
+		preferredDrawingPoint,
+		&edgeReferencedCurves,
+		true);
+	DimensionDebugLog(
+		std::string("[dimension.assoc.edgeLineForFace] faceTag=") +
+		std::to_string(face->Tag()) +
+		" edgeCandidateCount=" + std::to_string(edgeReferencedCurves.size()) +
+		" selectedCurveTag=" + std::to_string(curve != NULL ? curve->Tag() : NULL_TAG));
+	return curve;
+}
+
 NXOpen::Drawings::DraftingCurve* FindRepresentativeCurveForObject(
 	NXOpen::Drawings::BaseView* baseView,
 	NXOpen::DisplayableObject* object)
@@ -2118,18 +2174,34 @@ bool CreateCurveEndToSymbolDimensionFromDrawingPoint(
 	NXOpen::Point3d point(0.0, 0.0, 0.0);
 	NXOpen::View* nullView(NULL);
 
-	UF_EVAL_p_t evaluator;
-	UF_EVAL_initialize(curve->Tag(), &evaluator);
-
 	logical isLine = false;
-	UF_EVAL_is_line(evaluator, &isLine);
+	UF_EVAL_p_t evaluator = NULL;
+	if (UF_EVAL_initialize(curve->Tag(), &evaluator) == 0)
+	{
+		UF_EVAL_is_line(evaluator, &isLine);
+		UF_EVAL_free(evaluator);
+	}
 	DimensionDebugLog(std::string("[dimension.method.curveEndToSymbol] method=") + (isLine ? "Perpendicular" : "PointToPoint"));
 	builder->Measurement()->SetMethod(
 		isLine
 		? NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodPerpendicular
 		: NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodPointToPoint);
+	NXOpen::Point3d firstAssociativityPoint(0.0, 0.0, 0.0);
+	NXOpen::InferSnapType::SnapType firstSnapType = NXOpen::InferSnapType::SnapTypeEnd;
+	const NXOpen::Point3d referenceDrawingPoint(drawingPoint[0], drawingPoint[1], 0.0);
+	if (!TryGetDraftingCurveEndpointNearestDrawingPoint(
+			baseView,
+			curve,
+			referenceDrawingPoint,
+			firstAssociativityPoint,
+			firstSnapType))
+	{
+		builder->Destroy();
+		DimensionDebugLog("[dimension.curveEndToSymbol.noValidEndpoint]");
+		return false;
+	}
 	builder->FirstAssociativity()->SetValue(
-		NXOpen::InferSnapType::SnapTypeEnd, curve, baseView, point, NULL, nullView, point);
+		firstSnapType, curve, baseView, firstAssociativityPoint, NULL, nullView, point);
 	builder->SecondAssociativity()->SetValue(
 		NXOpen::InferSnapType::SnapTypeExist, symbol, baseView, point, NULL, nullView, point);
 	ApplyDefaultRapidDimensionStyle(builder);
@@ -2175,21 +2247,23 @@ bool CreateCurveEndToFaceTangentDimensionFromModelPoint(
 		double firstLineEnd[2] = { 0.0, 0.0 };
 		const bool hasFirstLine =
 			TryGetLineCurveData(baseView, curve, firstLineData, firstLineStart, firstLineEnd);
-		if (hasFirstLine)
-		{
-			const NXOpen::Point3d firstAssociativityPoint(
-				(firstLineData.start_point[0] + firstLineData.end_point[0]) * 0.5,
-				(firstLineData.start_point[1] + firstLineData.end_point[1]) * 0.5,
-				(firstLineData.start_point[2] + firstLineData.end_point[2]) * 0.5);
-			builder->FirstAssociativity()->SetValue(curve, baseView, firstAssociativityPoint);
-		}
-		else
-		{
-			builder->FirstAssociativity()->SetValue(
-				NXOpen::InferSnapType::SnapTypeEnd, curve, baseView, point, NULL, nullView, point);
-		}
 		const NXOpen::Point3d modelAssociativityPoint =
 			BuildAssociativityPointFromModelPoint(baseView, modelPoint);
+		NXOpen::Point3d firstAssociativityPoint(0.0, 0.0, 0.0);
+		NXOpen::InferSnapType::SnapType firstSnapType = NXOpen::InferSnapType::SnapTypeEnd;
+		if (!TryGetDraftingCurveEndpointNearestDrawingPoint(
+				baseView,
+				curve,
+				modelAssociativityPoint,
+				firstAssociativityPoint,
+				firstSnapType))
+		{
+			builder->Destroy();
+			DimensionDebugLog("[dimension.curveEndToFace.noValidEndpoint]");
+			return false;
+		}
+		builder->FirstAssociativity()->SetValue(
+			firstSnapType, curve, baseView, firstAssociativityPoint, NULL, nullView, point);
 		const NXOpen::Point3d originPoint =
 			BuildOffsetOriginFromModelPointAndGuideFace(baseView, modelPoint, guideFace != NULL ? guideFace : face, centerX, centerY, 5.0, reverseGuideDirection);
 
@@ -2210,7 +2284,12 @@ bool CreateCurveEndToFaceTangentDimensionFromModelPoint(
 		{
 			NXOpen::Point3d faceAssociativityPoint(0.0, 0.0, 0.0);
 			NXOpen::Drawings::DraftingCurve* faceCurve =
-				FindRepresentativeCurveForFace(baseView, face, false, true, reverseGuideDirection, &faceAssociativityPoint, &originPoint);
+				FindAssociativeLineCurveForFace(
+					baseView,
+					face,
+					reverseGuideDirection,
+					&faceAssociativityPoint,
+					&originPoint);
 			if (faceCurve == NULL)
 			{
 				builder->Destroy();
@@ -2332,7 +2411,12 @@ bool CreateFaceToSymbolDimensionFromModelPoint(
 		{
 			NXOpen::Point3d faceAssociativityPoint(0.0, 0.0, 0.0);
 			NXOpen::Drawings::DraftingCurve* faceCurve =
-				FindRepresentativeCurveForFace(baseView, face, false, true, reverseGuideDirection, &faceAssociativityPoint, &originPoint);
+				FindAssociativeLineCurveForFace(
+					baseView,
+					face,
+					reverseGuideDirection,
+					&faceAssociativityPoint,
+					&originPoint);
 			if (faceCurve == NULL)
 			{
 				builder->Destroy();
@@ -2426,7 +2510,13 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 		{
 			NXOpen::Point3d firstAssociativityPoint(0.0, 0.0, 0.0);
 			NXOpen::Drawings::DraftingCurve* firstCurve =
-				FindRepresentativeCurveForFace(baseView, firstFace, false, true, reverseGuideDirection, &firstAssociativityPoint, &originPoint, candidateCurves, true);
+				FindAssociativeLineCurveForFace(
+					baseView,
+					firstFace,
+					reverseGuideDirection,
+					&firstAssociativityPoint,
+					&originPoint,
+					candidateCurves);
 			if (firstCurve == NULL)
 			{
 				builder->Destroy();
@@ -2446,41 +2536,13 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 		else
 		{
 			NXOpen::Point3d firstAssociativityPoint(0.0, 0.0, 0.0);
-			const std::unordered_set<tag_t> firstFaceEdgeTags = CollectFaceEdgeTags(firstFace);
-			const std::vector<NXOpen::Drawings::DraftingCurve*> allViewCurves =
-				CollectDraftingCurves(baseView);
-			std::vector<NXOpen::Drawings::DraftingCurve*> edgeReferencedCurves;
-			for (size_t curveIndex = 0; curveIndex < allViewCurves.size(); ++curveIndex)
-			{
-				NXOpen::Drawings::DraftingCurve* candidateCurve = allViewCurves[curveIndex];
-				if (candidateCurve != NULL &&
-					CurveReferencesFaceOrEdge(candidateCurve, NULL_TAG, firstFaceEdgeTags))
-				{
-					edgeReferencedCurves.push_back(candidateCurve);
-				}
-			}
 			NXOpen::Drawings::DraftingCurve* firstCurve =
-				FindRepresentativeCurveForFace(
+				FindAssociativeLineCurveForFace(
 					baseView,
 					firstFace,
-					false,
-					true,
-					reverseGuideDirection,
-					&firstAssociativityPoint,
-					&originPoint,
-					edgeReferencedCurves.empty() ? NULL : &edgeReferencedCurves,
-					!edgeReferencedCurves.empty());
-			if (firstCurve == NULL && !edgeReferencedCurves.empty())
-			{
-				firstCurve = FindRepresentativeCurveForFace(
-					baseView,
-					firstFace,
-					false,
-					true,
 					reverseGuideDirection,
 					&firstAssociativityPoint,
 					&originPoint);
-			}
 			if (firstCurve == NULL)
 			{
 				builder->Destroy();
@@ -2488,8 +2550,7 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 			}
 			DimensionDebugLog(
 				std::string("[dimension.assoc.faceToObject.firstCurve] curveTag=") +
-				std::to_string(firstCurve->Tag()) +
-				" edgeCandidateCount=" + std::to_string(edgeReferencedCurves.size()));
+				std::to_string(firstCurve->Tag()));
 			builder->FirstAssociativity()->SetValue(
 				NXOpen::InferSnapType::SnapTypeExist, firstCurve, baseView, firstAssociativityPoint, NULL, nullView, point);
 			UF_CURVE_line_t firstLineData;
@@ -2501,7 +2562,13 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 		{
 			NXOpen::Point3d secondAssociativityPoint = modelAssociativityPoint;
 			NXOpen::Drawings::DraftingCurve* secondCurve =
-				FindRepresentativeCurveForFace(baseView, secondFace, false, true, reverseGuideDirection, &secondAssociativityPoint, &originPoint, candidateCurves, true);
+				FindAssociativeLineCurveForFace(
+					baseView,
+					secondFace,
+					reverseGuideDirection,
+					&secondAssociativityPoint,
+					&originPoint,
+					candidateCurves);
 			if (secondCurve == NULL)
 			{
 				builder->Destroy();
@@ -2531,7 +2598,12 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 			NXOpen::Drawings::DraftingCurve* suppliedSecondCurve =
 				dynamic_cast<NXOpen::Drawings::DraftingCurve*>(secondObject);
 			NXOpen::Drawings::DraftingCurve* secondCurve = fallbackSecondFace != NULL
-				? FindRepresentativeCurveForFace(baseView, fallbackSecondFace, false, true, reverseGuideDirection, &secondAssociativityPoint, &originPoint)
+				? FindAssociativeLineCurveForFace(
+					baseView,
+					fallbackSecondFace,
+					reverseGuideDirection,
+					&secondAssociativityPoint,
+					&originPoint)
 				: FindRepresentativeCurveForObject(baseView, secondObject);
 			if (secondCurve == NULL)
 			{
@@ -2540,12 +2612,17 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 			}
 			if (suppliedSecondCurve != NULL)
 			{
-				TryGetDraftingCurveEndpointNearestDrawingPoint(
-					baseView,
-					suppliedSecondCurve,
-					modelAssociativityPoint,
-					secondAssociativityPoint,
-					secondSnapType);
+				if (!TryGetDraftingCurveEndpointNearestDrawingPoint(
+						baseView,
+						suppliedSecondCurve,
+						modelAssociativityPoint,
+						secondAssociativityPoint,
+						secondSnapType))
+				{
+					builder->Destroy();
+					DimensionDebugLog("[dimension.faceToObject.secondCurve.noValidEndpoint]");
+					return false;
+				}
 			}
 			builder->SecondAssociativity()->SetValue(
 				secondSnapType, secondCurve, baseView, secondAssociativityPoint, NULL, nullView, point);
