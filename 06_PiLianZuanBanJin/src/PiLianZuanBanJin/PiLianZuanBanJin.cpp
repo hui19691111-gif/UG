@@ -4250,6 +4250,38 @@ namespace
         return edges;
     }
 
+    bool FacesShareCommonEdge(Face* first, Face* second)
+    {
+        if (first == NULL || second == NULL || first->Tag() == second->Tag())
+        {
+            return false;
+        }
+
+        const std::vector<Edge*> firstEdges = FaceEdgesByUf(first);
+        std::set<tag_t> firstEdgeTags;
+        for (size_t i = 0; i < firstEdges.size(); ++i)
+        {
+            if (firstEdges[i] != NULL)
+            {
+                firstEdgeTags.insert(firstEdges[i]->Tag());
+            }
+        }
+        if (firstEdgeTags.empty())
+        {
+            return false;
+        }
+
+        const std::vector<Edge*> secondEdges = FaceEdgesByUf(second);
+        for (size_t i = 0; i < secondEdges.size(); ++i)
+        {
+            if (secondEdges[i] != NULL && firstEdgeTags.count(secondEdges[i]->Tag()) > 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::vector<FaceCandidate> GetPlanarCandidates(Body* body)
     {
         std::vector<FaceCandidate> candidates;
@@ -4771,13 +4803,18 @@ namespace
     bool TrySectionLengthPositionScores(
         const std::vector<FaceCandidate>& candidates,
         std::map<tag_t, double>* scores,
-        const std::map<tag_t, bool>* knownBendFaceTags)
+        const std::map<tag_t, bool>* knownBendFaceTags,
+        std::map<tag_t, double>* centerDistances)
     {
         if (scores == NULL)
         {
             return false;
         }
         scores->clear();
+        if (centerDistances != NULL)
+        {
+            centerDistances->clear();
+        }
         if (candidates.size() < 2)
         {
             return false;
@@ -4807,7 +4844,24 @@ namespace
                 };
                 const double planeSeparation = std::fabs(Dot3(
                     centerDelta, nodes[group].candidate.normal));
+                bool sharesCommonEdge = false;
                 if (normalAlignment >= 0.9999 && planeSeparation <= 0.05)
+                {
+                    for (size_t member = 0; member < nodes[group].memberIndices.size(); ++member)
+                    {
+                        const int memberIndex = nodes[group].memberIndices[member];
+                        if (memberIndex >= 0 &&
+                            static_cast<size_t>(memberIndex) < candidates.size() &&
+                            FacesShareCommonEdge(candidates[i].face, candidates[memberIndex].face))
+                        {
+                            sharesCommonEdge = true;
+                            break;
+                        }
+                    }
+                }
+                if (normalAlignment >= 0.9999 &&
+                    planeSeparation <= 0.05 &&
+                    sharesCommonEdge)
                 {
                     groupIndex = static_cast<int>(group);
                     break;
@@ -4857,11 +4911,36 @@ namespace
                     if (knownBendFaceTags != NULL &&
                         (cylinderFace == NULL || !knownBendFaceTags->count(cylinderFace->Tag())))
                     {
+                        std::ostringstream log;
+                        log << "section link reject"
+                            << " planarFace=" << planarFace->Tag()
+                            << " planarEdge=" << planarEdges[edgeIndex]->Tag()
+                            << " adjacentFace=" << (cylinderFace == NULL ? NULL_TAG : cylinderFace->Tag())
+                            << " reason=not-selected-bend-face";
+                        AppendMarkerLineDebugLog(log.str());
                         continue;
                     }
                     if (!AskCylinderFaceData(cylinderFace, axisPoint, axisDirection, &radius, &normDir))
                     {
+                        std::ostringstream log;
+                        log << "section link reject"
+                            << " planarFace=" << planarFace->Tag()
+                            << " planarEdge=" << planarEdges[edgeIndex]->Tag()
+                            << " adjacentFace=" << (cylinderFace == NULL ? NULL_TAG : cylinderFace->Tag())
+                            << " reason=adjacent-face-not-cylinder";
+                        AppendMarkerLineDebugLog(log.str());
                         continue;
+                    }
+                    {
+                        std::ostringstream log;
+                        log << "section link cylinder"
+                            << " planarFace=" << planarFace->Tag()
+                            << " planarEdge=" << planarEdges[edgeIndex]->Tag()
+                            << " cylinderFace=" << cylinderFace->Tag()
+                            << " selectedBendFace="
+                            << (knownBendFaceTags == NULL || knownBendFaceTags->count(cylinderFace->Tag()) ? 1 : 0)
+                            << " radius=" << radius;
+                        AppendMarkerLineDebugLog(log.str());
                     }
                     Normalize3(axisDirection);
                     if (!hasCommonAxis)
@@ -4892,14 +4971,44 @@ namespace
                             Face* otherPlanar = cylinderAdjacent[otherIndex];
                             if (otherPlanar == NULL || otherPlanar->Tag() == planarFace->Tag()) continue;
                             std::map<tag_t, int>::const_iterator found = indexByTag.find(otherPlanar->Tag());
-                            if (found == indexByTag.end()) continue;
+                            if (found == indexByTag.end())
+                            {
+                                std::ostringstream log;
+                                log << "section link other face reject"
+                                    << " planarFace=" << planarFace->Tag()
+                                    << " cylinderFace=" << cylinderFace->Tag()
+                                    << " cylinderEdge=" << cylinderEdges[cylinderEdgeIndex]->Tag()
+                                    << " otherFace=" << otherPlanar->Tag()
+                                    << " reason=other-face-not-in-selected-candidates";
+                                AppendMarkerLineDebugLog(log.str());
+                                continue;
+                            }
                             const int first = indexByTag[planarFace->Tag()];
                             const int second = found->second;
-                            if (first == second) continue;
+                            if (first == second)
+                            {
+                                std::ostringstream log;
+                                log << "section link other face ignored"
+                                    << " planarFace=" << planarFace->Tag()
+                                    << " cylinderFace=" << cylinderFace->Tag()
+                                    << " otherFace=" << otherPlanar->Tag()
+                                    << " reason=same-coplanar-group";
+                                AppendMarkerLineDebugLog(log.str());
+                                continue;
+                            }
                             const std::pair<int, int> key = first < second
                                 ? std::make_pair(first, second)
                                 : std::make_pair(second, first);
-                            if (!connectedPairs.insert(key).second) continue;
+                            if (!connectedPairs.insert(key).second)
+                            {
+                                std::ostringstream log;
+                                log << "section link duplicate"
+                                    << " planarFace=" << planarFace->Tag()
+                                    << " cylinderFace=" << cylinderFace->Tag()
+                                    << " otherFace=" << otherPlanar->Tag();
+                                AppendMarkerLineDebugLog(log.str());
+                                continue;
+                            }
 
                             double dotNormals = Dot3(nodes[first].candidate.normal, nodes[second].candidate.normal);
                             dotNormals = std::max(-1.0, std::min(1.0, dotNormals));
@@ -4907,10 +5016,52 @@ namespace
                             const double bendLength = std::max(0.0, radius) * bendAngle;
                             nodes[first].neighbors.push_back(std::make_pair(second, bendLength));
                             nodes[second].neighbors.push_back(std::make_pair(first, bendLength));
+                            {
+                                std::ostringstream log;
+                                log << "section link add"
+                                    << " planarFace=" << planarFace->Tag()
+                                    << " cylinderFace=" << cylinderFace->Tag()
+                                    << " otherFace=" << otherPlanar->Tag()
+                                    << " firstGroupFace=" << nodes[first].candidate.face->Tag()
+                                    << " secondGroupFace=" << nodes[second].candidate.face->Tag()
+                                    << " bendLength=" << bendLength;
+                                AppendMarkerLineDebugLog(log.str());
+                            }
                         }
                     }
                 }
             }
+        }
+
+        for (size_t i = 0; i < nodes.size(); ++i)
+        {
+            std::ostringstream log;
+            log << "section graph node"
+                << " face=" << (nodes[i].candidate.face == NULL ? NULL_TAG : nodes[i].candidate.face->Tag())
+                << " memberFaces=";
+            for (size_t memberIndex = 0; memberIndex < nodes[i].memberIndices.size(); ++memberIndex)
+            {
+                if (memberIndex > 0) log << ",";
+                const int candidateIndex = nodes[i].memberIndices[memberIndex];
+                log << (candidateIndex >= 0 &&
+                    static_cast<size_t>(candidateIndex) < candidates.size() &&
+                    candidates[candidateIndex].face != NULL
+                    ? candidates[candidateIndex].face->Tag()
+                    : NULL_TAG);
+            }
+            log << " neighborCount=" << nodes[i].neighbors.size()
+                << " neighborFaces=";
+            for (size_t neighborIndex = 0; neighborIndex < nodes[i].neighbors.size(); ++neighborIndex)
+            {
+                if (neighborIndex > 0) log << ",";
+                const int neighborNode = nodes[i].neighbors[neighborIndex].first;
+                log << (neighborNode >= 0 &&
+                    static_cast<size_t>(neighborNode) < nodes.size() &&
+                    nodes[neighborNode].candidate.face != NULL
+                    ? nodes[neighborNode].candidate.face->Tag()
+                    : NULL_TAG);
+            }
+            AppendMarkerLineDebugLog(log.str());
         }
 
         if (!hasCommonAxis || incompatibleAxes || connectedPairs.empty())
@@ -4932,7 +5083,35 @@ namespace
                 std::ostringstream log;
                 log << "section position fallback reason=branch"
                     << " face=" << nodes[i].candidate.face->Tag()
-                    << " neighborCount=" << nodes[i].neighbors.size();
+                    << " neighborCount=" << nodes[i].neighbors.size()
+                    << " neighborFaces=";
+                for (size_t neighborIndex = 0; neighborIndex < nodes[i].neighbors.size(); ++neighborIndex)
+                {
+                    if (neighborIndex > 0)
+                    {
+                        log << ",";
+                    }
+                    const int nodeIndex = nodes[i].neighbors[neighborIndex].first;
+                    log << (nodeIndex >= 0 &&
+                        static_cast<size_t>(nodeIndex) < nodes.size() &&
+                        nodes[nodeIndex].candidate.face != NULL
+                        ? nodes[nodeIndex].candidate.face->Tag()
+                        : NULL_TAG);
+                }
+                log << " memberFaces=";
+                for (size_t memberIndex = 0; memberIndex < nodes[i].memberIndices.size(); ++memberIndex)
+                {
+                    if (memberIndex > 0)
+                    {
+                        log << ",";
+                    }
+                    const int candidateIndex = nodes[i].memberIndices[memberIndex];
+                    log << (candidateIndex >= 0 &&
+                        static_cast<size_t>(candidateIndex) < candidates.size() &&
+                        candidates[candidateIndex].face != NULL
+                        ? candidates[candidateIndex].face->Tag()
+                        : NULL_TAG);
+                }
                 AppendMarkerLineDebugLog(log.str());
                 return false;
             }
@@ -5016,6 +5195,14 @@ namespace
                 << " groups=" << nodes.size();
             AppendMarkerLineDebugLog(log.str());
         }
+        else
+        {
+            std::ostringstream log;
+            log << "section position chain start"
+                << " face=" << nodes[startIndex].candidate.face->Tag()
+                << " neighborCount=" << nodes[startIndex].neighbors.size();
+            AppendMarkerLineDebugLog(log.str());
+        }
 
         std::vector<int> order;
         std::vector<double> bendAfter;
@@ -5036,6 +5223,16 @@ namespace
                     nextBendLength = nodes[current].neighbors[n].second;
                     break;
                 }
+            }
+            {
+                std::ostringstream log;
+                log << "section position chain step"
+                    << " face=" << nodes[current].candidate.face->Tag()
+                    << " previousFace="
+                    << (previous >= 0 ? nodes[previous].candidate.face->Tag() : NULL_TAG)
+                    << " nextFace="
+                    << (next >= 0 ? nodes[next].candidate.face->Tag() : NULL_TAG);
+                AppendMarkerLineDebugLog(log.str());
             }
             if (next >= 0) bendAfter.push_back(nextBendLength);
             previous = current;
@@ -5065,18 +5262,84 @@ namespace
         }
 
         const double sectionCenter = totalLength * 0.5;
+        std::vector<double> faceCenterPositions(order.size(), 0.0);
+        std::set<size_t> centerFacePositions;
         double cursor = 0.0;
         for (size_t i = 0; i < order.size(); ++i)
         {
+            const SectionPositionNode& node = nodes[order[i]];
+            const double segmentStart = cursor;
+            const double segmentEnd = segmentStart + node.segmentLength;
+            const double faceCenterPosition = segmentStart + node.segmentLength * 0.5;
+            faceCenterPositions[i] = faceCenterPosition;
+            if (sectionCenter >= segmentStart - 1e-9 &&
+                sectionCenter <= segmentEnd + 1e-9)
+            {
+                centerFacePositions.insert(i);
+            }
+            cursor = segmentEnd;
+            if (i < bendAfter.size())
+            {
+                const double bendEnd = cursor + bendAfter[i];
+                if (sectionCenter > cursor + 1e-9 &&
+                    sectionCenter < bendEnd - 1e-9)
+                {
+                    centerFacePositions.insert(i);
+                    if (i + 1 < order.size())
+                    {
+                        centerFacePositions.insert(i + 1);
+                    }
+                }
+                cursor = bendEnd;
+            }
+        }
+        if (centerFacePositions.empty())
+        {
+            size_t nearestPosition = 0;
+            double nearestDistance = std::numeric_limits<double>::max();
+            for (size_t i = 0; i < faceCenterPositions.size(); ++i)
+            {
+                const double distance = std::fabs(faceCenterPositions[i] - sectionCenter);
+                if (distance < nearestDistance)
+                {
+                    nearestDistance = distance;
+                    nearestPosition = i;
+                }
+            }
+            centerFacePositions.insert(nearestPosition);
+        }
+
+        for (size_t i = 0; i < order.size(); ++i)
+        {
             SectionPositionNode& node = nodes[order[i]];
-            const double faceCenterPosition = cursor + node.segmentLength * 0.5;
+            const double faceCenterPosition = faceCenterPositions[i];
             const double distance = std::fabs(faceCenterPosition - sectionCenter);
-            const double normalizedDistance = std::min(1.0, distance / std::max(sectionCenter, 1e-9));
-            const double score = 3.0 * (1.0 - normalizedDistance);
+            double score = centerFacePositions.count(i) ? 3.0 : 1.0;
+            if (score < 3.0)
+            {
+                for (std::set<size_t>::const_iterator centerIt = centerFacePositions.begin();
+                    centerIt != centerFacePositions.end();
+                    ++centerIt)
+                {
+                    const size_t centerPosition = *centerIt;
+                    if ((i + 1 == centerPosition) || (centerPosition + 1 == i))
+                    {
+                        score = 2.0;
+                        break;
+                    }
+                }
+            }
             for (size_t member = 0; member < node.memberIndices.size(); ++member)
             {
                 Face* memberFace = candidates[node.memberIndices[member]].face;
-                if (memberFace != NULL) (*scores)[memberFace->Tag()] = score;
+                if (memberFace != NULL)
+                {
+                    (*scores)[memberFace->Tag()] = score;
+                    if (centerDistances != NULL)
+                    {
+                        (*centerDistances)[memberFace->Tag()] = distance;
+                    }
+                }
             }
             std::ostringstream log;
             log << "section position face=" << node.candidate.face->Tag()
@@ -5086,25 +5349,29 @@ namespace
                 << " totalLength=" << totalLength
                 << " sectionCenter=" << sectionCenter
                 << " distance=" << distance
-                << " positionScore=" << score;
+                << " centerFace=" << (centerFacePositions.count(i) ? 1 : 0)
+                << " positionTier=" << score;
             AppendMarkerLineDebugLog(log.str());
-            cursor += node.segmentLength;
-            if (i < bendAfter.size()) cursor += bendAfter[i];
         }
         return true;
     }
 
     std::map<tag_t, double> ChainPositionScores(
         const std::vector<FaceCandidate>& candidates,
-        const std::map<tag_t, bool>* knownBendFaceTags = NULL)
+        const std::map<tag_t, bool>* knownBendFaceTags = NULL,
+        std::map<tag_t, double>* centerDistances = NULL)
     {
         std::map<tag_t, double> scores;
+        if (centerDistances != NULL)
+        {
+            centerDistances->clear();
+        }
         if (candidates.empty())
         {
             return scores;
         }
 
-        if (TrySectionLengthPositionScores(candidates, &scores, knownBendFaceTags))
+        if (TrySectionLengthPositionScores(candidates, &scores, knownBendFaceTags, centerDistances))
         {
             AppendMarkerLineDebugLog(knownBendFaceTags == NULL
                 ? "position score mode=section-length-center"
@@ -5140,8 +5407,15 @@ namespace
         double half = std::max(span * 0.5, 1e-9);
         for (size_t i = 0; i < candidates.size(); ++i)
         {
-            double normalizedDistance = std::min(1.0, std::fabs(candidates[i].center[axis] - mid) / half);
-            scores[candidates[i].face->Tag()] = 3.0 * (1.0 - normalizedDistance);
+            const double distance = std::fabs(candidates[i].center[axis] - mid);
+            const double normalizedDistance = std::min(1.0, distance / half);
+            scores[candidates[i].face->Tag()] = normalizedDistance <= (1.0 / 3.0)
+                ? 3.0
+                : (normalizedDistance <= (2.0 / 3.0) ? 2.0 : 1.0);
+            if (centerDistances != NULL)
+            {
+                (*centerDistances)[candidates[i].face->Tag()] = distance;
+            }
         }
 
         return scores;
@@ -5159,55 +5433,117 @@ namespace
             return result;
         }
 
-        double minArea = std::numeric_limits<double>::max();
+        double maxArea = 0.0;
         for (size_t i = 0; i < candidates.size(); ++i)
         {
             if (candidates[i].area > 1e-9)
             {
-                minArea = std::min(minArea, candidates[i].area);
+                maxArea = std::max(maxArea, candidates[i].area);
             }
         }
-        if (minArea == std::numeric_limits<double>::max())
+        if (maxArea <= 1e-9)
         {
-            minArea = 1.0;
+            maxArea = 1.0;
         }
 
-        std::map<tag_t, double> position = ChainPositionScores(candidates, knownBendFaceTags);
+        std::map<tag_t, double> centerDistances;
+        std::map<tag_t, double> position =
+            ChainPositionScores(candidates, knownBendFaceTags, &centerDistances);
         {
             std::ostringstream log;
             log << "score base face begin candidates=" << candidates.size()
                 << " scoringChainFaces=" << scoringChainTags.size()
-                << " minArea=" << minArea;
+                << " maxArea=" << maxArea
+                << " scoringMode=three-tier";
             AppendMarkerLineDebugLog(log.str());
         }
+        double bestPositionTier = -1.0;
+        double bestCenterDistance = std::numeric_limits<double>::max();
+        double bestAreaTier = -1.0;
+        int bestCylinderCount = -1;
+        tag_t bestFaceTag = NULL_TAG;
         for (size_t i = 0; i < candidates.size(); ++i)
         {
             tag_t faceTag = candidates[i].face == NULL ? 0 : candidates[i].face->Tag();
-            double areaScore = std::max(1.0, candidates[i].area / std::max(minArea, 1e-9));
+            const double areaRatio = std::max(0.0, candidates[i].area / maxArea);
+            const double areaScore = areaRatio >= 0.70 ? 3.0 : (areaRatio >= 0.30 ? 2.0 : 1.0);
             double positionScore = position.count(faceTag) ? position[faceTag] : 0.0;
+            const double centerDistance = centerDistances.count(faceTag)
+                ? centerDistances[faceTag]
+                : std::numeric_limits<double>::max();
             double innerLoopScore = HasInnerLoopScore(candidates[i].face) ? 1.0 : 0.0;
             int cylinderCount = 0;
-            double cylinderScore = AdjacentCylinderScore(candidates[i].face, &cylinderCount);
+            AdjacentCylinderScore(candidates[i].face, &cylinderCount);
+            const double cylinderScore = cylinderCount >= 3
+                ? 3.0
+                : (cylinderCount == 2 ? 2.0 : (cylinderCount == 1 ? 1.0 : 0.0));
             candidates[i].score = areaScore + positionScore + innerLoopScore + cylinderScore;
             {
                 std::ostringstream log;
                 log << "score base face candidate face=" << faceTag
                     << " area=" << candidates[i].area
+                    << " areaRatio=" << areaRatio
                     << " areaScore=" << areaScore
                     << " positionScore=" << positionScore
+                    << " centerDistance=" << centerDistance
                     << " innerLoopScore=" << innerLoopScore
                     << " cylinderCount=" << cylinderCount
                     << " cylinderScore=" << cylinderScore
                     << " totalScore=" << candidates[i].score;
                 AppendMarkerLineDebugLog(log.str());
             }
-            if (candidates[i].score > result.totalScore ||
-                (std::fabs(candidates[i].score - result.totalScore) <= 1e-9 && candidates[i].area > result.areaScore))
+            bool isBetter = candidates[i].score > result.totalScore + 1e-9;
+            if (!isBetter && std::fabs(candidates[i].score - result.totalScore) <= 1e-9)
+            {
+                if (positionScore > bestPositionTier + 1e-9)
+                {
+                    isBetter = true;
+                }
+                else if (std::fabs(positionScore - bestPositionTier) <= 1e-9)
+                {
+                    if (centerDistance + 1e-9 < bestCenterDistance)
+                    {
+                        isBetter = true;
+                    }
+                    else if (std::fabs(centerDistance - bestCenterDistance) <= 1e-9)
+                    {
+                        if (areaScore > bestAreaTier + 1e-9)
+                        {
+                            isBetter = true;
+                        }
+                        else if (std::fabs(areaScore - bestAreaTier) <= 1e-9)
+                        {
+                            if (candidates[i].area > result.areaScore + 1e-9)
+                            {
+                                isBetter = true;
+                            }
+                            else if (std::fabs(candidates[i].area - result.areaScore) <= 1e-9)
+                            {
+                                if (cylinderCount > bestCylinderCount)
+                                {
+                                    isBetter = true;
+                                }
+                                else if (cylinderCount == bestCylinderCount &&
+                                    (bestFaceTag == NULL_TAG || faceTag < bestFaceTag))
+                                {
+                                    isBetter = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (isBetter || result.face == NULL)
             {
                 result.face = candidates[i].face;
                 result.type = candidates[i].type;
                 result.areaScore = candidates[i].area;
                 result.totalScore = candidates[i].score;
+                bestPositionTier = positionScore;
+                bestCenterDistance = centerDistance;
+                bestAreaTier = areaScore;
+                bestCylinderCount = cylinderCount;
+                bestFaceTag = faceTag;
             }
         }
 
@@ -5215,7 +5551,11 @@ namespace
             std::ostringstream log;
             log << "score base face selected face=" << (result.face == NULL ? 0 : result.face->Tag())
                 << " selectedArea=" << result.areaScore
-                << " selectedScore=" << result.totalScore;
+                << " selectedScore=" << result.totalScore
+                << " selectedPositionTier=" << bestPositionTier
+                << " selectedCenterDistance=" << bestCenterDistance
+                << " selectedAreaTier=" << bestAreaTier
+                << " selectedCylinderCount=" << bestCylinderCount;
             AppendMarkerLineDebugLog(log.str());
         }
         return result;
@@ -5631,47 +5971,8 @@ namespace
         const std::map<tag_t, bool>& scoringChainTags,
         const char* reason)
     {
-        FaceInfo result;
-        if (candidates.empty())
-        {
-            return result;
-        }
-
-        double minArea = std::numeric_limits<double>::max();
-        for (size_t i = 0; i < candidates.size(); ++i)
-        {
-            if (candidates[i].area > 1e-9)
-            {
-                minArea = std::min(minArea, candidates[i].area);
-            }
-        }
-        if (minArea == std::numeric_limits<double>::max())
-        {
-            minArea = 1.0;
-        }
-
-        std::map<tag_t, double> position = ChainPositionScores(candidates);
-        for (size_t i = 0; i < candidates.size(); ++i)
-        {
-            const tag_t faceTag = candidates[i].face == NULL ? 0 : candidates[i].face->Tag();
-            double areaScore = std::max(1.0, candidates[i].area / std::max(minArea, 1e-9));
-            double positionScore = position.count(faceTag) ? position[faceTag] : 0.0;
-            double innerLoopScore = HasInnerLoopScore(candidates[i].face) ? 1.0 : 0.0;
-            int cylinderCount = 0;
-            double cylinderScore = AdjacentCylinderScore(candidates[i].face, &cylinderCount);
-            candidates[i].score = areaScore + positionScore + innerLoopScore + cylinderScore;
-
-            if (candidates[i].score > result.totalScore ||
-                (std::fabs(candidates[i].score - result.totalScore) <= 1e-9 && candidates[i].area > result.areaScore))
-            {
-                result.face = candidates[i].face;
-                result.type = candidates[i].type;
-                result.areaScore = candidates[i].area;
-                result.totalScore = candidates[i].score;
-            }
-        }
-
-        return result;
+        (void)reason;
+        return ScoreAndSelectBaseFace(candidates, scoringChainTags);
     }
 
     std::vector<Face*> CollectContinuousPlanarTangentFaces(Face* startFace)
@@ -6102,8 +6403,219 @@ namespace
             return false;
         }
 
-        AddPlanarChainsAdjacentToBends(innerBendTags, innerSideTags);
-        AddPlanarChainsAdjacentToBends(outerBendTags, outerSideTags);
+        std::map<tag_t, bool> allBendTags = innerBendTags;
+        for (std::map<tag_t, bool>::const_iterator it = outerBendTags.begin();
+            it != outerBendTags.end();
+            ++it)
+        {
+            if (it->second)
+            {
+                allBendTags[it->first] = true;
+            }
+        }
+
+        // "Inner bend adjacent planes" are not one material side when positive
+        // and negative bends alternate.  Build the actual sheet skins instead:
+        // traverse smooth planar/bend-cylinder topology, while allowing only
+        // NX-confirmed bend cylinders to bridge planar faces.
+        struct BendSideComponent
+        {
+            std::map<tag_t, bool> planarTags;
+            int innerBendCount = 0;
+            int outerBendCount = 0;
+            double planarArea = 0.0;
+        };
+
+        std::vector<BendSideComponent> components;
+        std::set<tag_t> visited;
+        std::vector<Face*> bodyFaces;
+        try
+        {
+            bodyFaces = body->GetFaces();
+        }
+        catch (...)
+        {
+            return false;
+        }
+
+        for (size_t faceIndex = 0; faceIndex < bodyFaces.size(); ++faceIndex)
+        {
+            Face* startFace = bodyFaces[faceIndex];
+            int startType = 0;
+            if (startFace == NULL ||
+                visited.count(startFace->Tag()) ||
+                !AskFaceType(startFace, &startType) ||
+                startType != UF_MODL_PLANAR_FACE)
+            {
+                continue;
+            }
+
+            BendSideComponent component;
+            std::queue<Face*> pending;
+            pending.push(startFace);
+            visited.insert(startFace->Tag());
+            while (!pending.empty())
+            {
+                Face* current = pending.front();
+                pending.pop();
+                if (current == NULL)
+                {
+                    continue;
+                }
+
+                int currentType = 0;
+                if (!AskFaceType(current, &currentType))
+                {
+                    continue;
+                }
+                const tag_t currentTag = current->Tag();
+                if (currentType == UF_MODL_PLANAR_FACE)
+                {
+                    component.planarTags[currentTag] = true;
+                    double area = 0.0;
+                    if (TryMeasureFaceArea(current, &area) && area > 0.0)
+                    {
+                        component.planarArea += area;
+                    }
+                }
+                else if (innerBendTags.count(currentTag))
+                {
+                    ++component.innerBendCount;
+                }
+                else if (outerBendTags.count(currentTag))
+                {
+                    ++component.outerBendCount;
+                }
+
+                std::vector<Edge*> edges = FaceEdgesByUf(current);
+                for (size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex)
+                {
+                    logical isSmooth = false;
+                    if (edges[edgeIndex] == NULL ||
+                        UF_MODL_ask_edge_smoothness(edges[edgeIndex]->Tag(), 18.2, &isSmooth) != 0 ||
+                        !isSmooth)
+                    {
+                        continue;
+                    }
+
+                    std::vector<Face*> adjacent = AdjacentFacesByEdge(edges[edgeIndex], current);
+                    for (size_t adjacentIndex = 0; adjacentIndex < adjacent.size(); ++adjacentIndex)
+                    {
+                        Face* next = adjacent[adjacentIndex];
+                        int nextType = 0;
+                        if (next == NULL ||
+                            visited.count(next->Tag()) ||
+                            !AskFaceType(next, &nextType))
+                        {
+                            continue;
+                        }
+                        const bool allowedPlanar = nextType == UF_MODL_PLANAR_FACE;
+                        const bool allowedBendCylinder = allBendTags.count(next->Tag()) > 0;
+                        if (!allowedPlanar && !allowedBendCylinder)
+                        {
+                            continue;
+                        }
+                        visited.insert(next->Tag());
+                        pending.push(next);
+                    }
+                }
+            }
+
+            if (!component.planarTags.empty() &&
+                component.innerBendCount + component.outerBendCount > 0)
+            {
+                const size_t componentIndex = components.size();
+                components.push_back(component);
+                std::ostringstream log;
+                log << "bend side tangent component"
+                    << " index=" << componentIndex
+                    << " planarFaces=" << component.planarTags.size()
+                    << " innerBends=" << component.innerBendCount
+                    << " outerBends=" << component.outerBendCount
+                    << " planarArea=" << component.planarArea
+                    << " faceTags=";
+                bool firstTag = true;
+                for (std::map<tag_t, bool>::const_iterator it = component.planarTags.begin();
+                    it != component.planarTags.end();
+                    ++it)
+                {
+                    if (!it->second) continue;
+                    if (!firstTag) log << ",";
+                    log << it->first;
+                    firstTag = false;
+                }
+                AppendMarkerLineDebugLog(log.str());
+            }
+        }
+
+        if (components.empty())
+        {
+            AppendMarkerLineDebugLog("bend side tangent components: none");
+            return false;
+        }
+
+        std::vector<int> componentOrder;
+        for (size_t i = 0; i < components.size(); ++i)
+        {
+            componentOrder.push_back(static_cast<int>(i));
+        }
+        std::sort(componentOrder.begin(), componentOrder.end(),
+            [&components](int first, int second)
+            {
+                const int firstBends = components[first].innerBendCount + components[first].outerBendCount;
+                const int secondBends = components[second].innerBendCount + components[second].outerBendCount;
+                if (firstBends != secondBends) return firstBends > secondBends;
+                if (std::fabs(components[first].planarArea - components[second].planarArea) > 1e-9)
+                {
+                    return components[first].planarArea > components[second].planarArea;
+                }
+                return first < second;
+            });
+
+        int innerComponent = componentOrder[0];
+        int outerComponent = componentOrder.size() > 1 ? componentOrder[1] : componentOrder[0];
+        if (innerComponent != outerComponent)
+        {
+            const BendSideComponent& first = components[innerComponent];
+            const BendSideComponent& second = components[outerComponent];
+            const int firstBalance = first.innerBendCount - first.outerBendCount;
+            const int secondBalance = second.innerBendCount - second.outerBendCount;
+            if (secondBalance > firstBalance)
+            {
+                std::swap(innerComponent, outerComponent);
+            }
+        }
+
+        if (innerSideTags != NULL)
+        {
+            *innerSideTags = components[innerComponent].planarTags;
+        }
+        if (outerSideTags != NULL)
+        {
+            *outerSideTags = components[outerComponent].planarTags;
+        }
+
+        {
+            const BendSideComponent& innerComponentInfo = components[innerComponent];
+            const BendSideComponent& outerComponentInfo = components[outerComponent];
+            std::ostringstream log;
+            log << "bend side tangent components selected"
+                << " componentCount=" << components.size()
+                << " innerComponent=" << innerComponent
+                << " innerPlanarFaces=" << innerComponentInfo.planarTags.size()
+                << " innerComponentInnerBends=" << innerComponentInfo.innerBendCount
+                << " innerComponentOuterBends=" << innerComponentInfo.outerBendCount
+                << " outerComponent=" << outerComponent
+                << " outerPlanarFaces=" << outerComponentInfo.planarTags.size()
+                << " outerComponentInnerBends=" << outerComponentInfo.innerBendCount
+                << " outerComponentOuterBends=" << outerComponentInfo.outerBendCount
+                << " classification="
+                << (innerComponentInfo.innerBendCount - innerComponentInfo.outerBendCount ==
+                    outerComponentInfo.innerBendCount - outerComponentInfo.outerBendCount
+                    ? "bend-count-tie-area-order"
+                    : "inner-minus-outer-bend-count");
+            AppendMarkerLineDebugLog(log.str());
+        }
 
         return (innerSideTags != NULL && !innerSideTags->empty()) ||
             (outerSideTags != NULL && !outerSideTags->empty());
@@ -6380,12 +6892,28 @@ namespace
             std::map<tag_t, bool> innerBendTags;
             std::map<tag_t, bool> outerBendTags;
             BuildBendFaceTagSets(manager, body, &innerBendTags, &outerBendTags);
-            const std::map<tag_t, bool>& selectedBendTags = selectedInnerSide ? innerBendTags : outerBendTags;
-            FaceInfo sideFace = ScoreAndSelectBaseFace(sideCandidates, selectedSideTags, &selectedBendTags);
+            // The selected side controls which planar faces may become the base
+            // face.  It must not restrict the bend cylinders used to connect
+            // those planes: along one continuous material side, positive and
+            // negative bends alternate between NX inner and outer bend faces.
+            std::map<tag_t, bool> allBendTags = innerBendTags;
+            for (std::map<tag_t, bool>::const_iterator it = outerBendTags.begin();
+                it != outerBendTags.end();
+                ++it)
+            {
+                if (it->second)
+                {
+                    allBendTags[it->first] = true;
+                }
+            }
+            FaceInfo sideFace = ScoreAndSelectBaseFace(sideCandidates, selectedSideTags, &allBendTags);
             {
                 std::ostringstream log;
                 log << "base select bend side decision innerFaces=" << innerSideTags.size()
                     << " outerFaces=" << outerSideTags.size()
+                    << " innerBendFaces=" << innerBendTags.size()
+                    << " outerBendFaces=" << outerBendTags.size()
+                    << " chainBendFaces=" << allBendTags.size()
                     << " innerHasMarker=" << (innerHasMarker ? 1 : 0)
                     << " outerHasMarker=" << (outerHasMarker ? 1 : 0)
                     << " markedChainFaces=" << markedPlanarChainTags.size()
@@ -7142,7 +7670,7 @@ namespace
         }
 
         std::string text = FormatDouble(thickness, 1);
-        body->SetUserAttribute("Z", -1, text.c_str(), Update::OptionNow);
+        body->SetUserAttribute("Z", -1, text.c_str(), Update::OptionLater);
         return true;
     }
 
@@ -10011,6 +10539,9 @@ namespace
 
     bool IsSheetmetalBody(Part* workPart, SheetmetalManager* manager, Body* body)
     {
+        (void)workPart;
+        (void)manager;
+
         if (body == NULL)
         {
             return false;
@@ -10030,46 +10561,6 @@ namespace
         }
         catch (...)
         {
-        }
-
-        if (workPart != NULL && workPart->Features() != NULL)
-        {
-            try
-            {
-                for (FeatureCollection::iterator it = workPart->Features()->begin(); it != workPart->Features()->end(); ++it)
-                {
-                    Feature* feature = *it;
-                    if (!IsConvertSheetmetalFeature(feature))
-                    {
-                        continue;
-                    }
-
-                    if (FeatureOwnsBody(feature, body))
-                    {
-                        return true;
-                    }
-                }
-            }
-            catch (...)
-            {
-            }
-        }
-
-        if (manager != NULL)
-        {
-            try
-            {
-                std::vector<Face*> innerBendFaces;
-                std::vector<SheetmetalBendState> states;
-                manager->GetInnerBendFaces(body, innerBendFaces, states);
-                if (!innerBendFaces.empty())
-                {
-                    return true;
-                }
-            }
-            catch (...)
-            {
-            }
         }
 
         return false;
@@ -11562,21 +12053,25 @@ namespace
             return initial;
         }
 
-        double minArea = std::numeric_limits<double>::max();
+        double maxArea = 0.0;
         for (size_t i = 0; i < candidates.size(); ++i)
         {
-            if (candidates[i].area > 1e-9) minArea = std::min(minArea, candidates[i].area);
+            if (candidates[i].area > 1e-9) maxArea = std::max(maxArea, candidates[i].area);
         }
-        if (minArea == std::numeric_limits<double>::max()) minArea = 1.0;
+        if (maxArea <= 1e-9) maxArea = 1.0;
         const std::map<tag_t, double> positionScores = ChainPositionScores(candidates);
         std::vector<TrialUnfoldCandidate> trialCandidates;
         for (size_t i = 0; i < candidates.size(); ++i)
         {
             const tag_t tag = candidates[i].face == NULL ? NULL_TAG : candidates[i].face->Tag();
             int cylinderCount = 0;
-            const double areaScore = std::max(1.0, candidates[i].area / std::max(minArea, 1e-9));
+            const double areaRatio = std::max(0.0, candidates[i].area / maxArea);
+            const double areaScore = areaRatio >= 0.70 ? 3.0 : (areaRatio >= 0.30 ? 2.0 : 1.0);
             const double innerLoopScore = HasInnerLoopScore(candidates[i].face) ? 1.0 : 0.0;
-            const double cylinderScore = AdjacentCylinderScore(candidates[i].face, &cylinderCount);
+            AdjacentCylinderScore(candidates[i].face, &cylinderCount);
+            const double cylinderScore = cylinderCount >= 3
+                ? 3.0
+                : (cylinderCount == 2 ? 2.0 : (cylinderCount == 1 ? 1.0 : 0.0));
             const double positionScore = positionScores.count(tag) ? positionScores.find(tag)->second : 0.0;
             TrialUnfoldCandidate trial;
             trial.faceTag = tag;
@@ -11606,7 +12101,9 @@ namespace
                 continue;
             }
             anyMeasured = true;
-            const double unfoldedPositionScore = 3.0 * (1.0 - normalizedDistance);
+            const double unfoldedPositionScore = normalizedDistance <= (1.0 / 3.0)
+                ? 3.0
+                : (normalizedDistance <= (2.0 / 3.0) ? 2.0 : 1.0);
             const double refinedScore = trialCandidates[i].scoreWithoutPosition + unfoldedPositionScore;
             std::ostringstream log;
             log << "trial unfold score face=" << trialCandidates[i].faceTag
@@ -12616,6 +13113,63 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
         const size_t resultStart = results.size();
         std::set<tag_t> manuallyProcessedBodyTags = manualButtonProcessedBodyTags_;
         std::set<tag_t> manualTemporarilyHiddenBodyTags;
+        bool hasDeferredAttributeUpdates = false;
+
+        bool partNeedsConvert = false;
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            Body* candidateBody = candidates[i];
+            if (candidateBody != NULL && !IsSheetmetalBody(processPart, manager, candidateBody))
+            {
+                partNeedsConvert = true;
+                break;
+            }
+        }
+        if (partNeedsConvert)
+        {
+            const ULONGLONG preferencesStart = GetTickCount64();
+            ApplySheetmetalPreferencesBeforeConvert(processPart, options);
+            std::ostringstream log;
+            log << "part sheetmetal preferences committed part=" << processPartName
+                << " elapsedMs=" << (GetTickCount64() - preferencesStart);
+            AppendMarkerLineDebugLog(log.str());
+        }
+
+        auto flushDeferredAttributeUpdates = [&]()
+        {
+            if (!hasDeferredAttributeUpdates || session == NULL || session->UpdateManager() == NULL)
+            {
+                return;
+            }
+
+            const ULONGLONG updateStart = GetTickCount64();
+            Session::UndoMarkId markId = session->SetUndoMark(
+                Session::MarkVisibilityInvisible, "Update batch sheetmetal attributes");
+            int updateErrors = 0;
+            try
+            {
+                updateErrors = session->UpdateManager()->DoUpdate(markId);
+            }
+            catch (...)
+            {
+                updateErrors = -1;
+            }
+            try
+            {
+                session->DeleteUndoMark(markId, "Update batch sheetmetal attributes");
+            }
+            catch (...)
+            {
+            }
+            hasDeferredAttributeUpdates = false;
+
+            std::ostringstream log;
+            log << "part deferred attribute update part=" << processPartName
+                << " elapsedMs=" << (GetTickCount64() - updateStart)
+                << " updateErrors=" << updateErrors;
+            AppendMarkerLineDebugLog(log.str());
+        };
+
         auto processBody = [&](Body* body, const ManualBaseSelection* manualBaseSelection) -> tag_t
         {
             BodyResult result;
@@ -12630,6 +13184,7 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 bool hasManualSelection = false;
                 bool hasManualXAxisSelection = false;
 
+                ULONGLONG stageStart = GetTickCount64();
                 FaceInfo fixedFaceInfo;
                 if (manualBaseSelection != NULL && manualBaseSelection->baseFace != NULL)
                 {
@@ -12643,6 +13198,7 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 {
                     fixedFaceInfo = SelectConvertBaseFace(body, options);
                 }
+                const ULONGLONG selectBaseMs = GetTickCount64() - stageStart;
 
                 if (fixedFaceInfo.face == NULL)
                 {
@@ -12653,10 +13209,12 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 Face* fixedFace = fixedFaceInfo.face;
                 Body* activeBody = body;
                 Feature* convertFeature = NULL;
+                stageStart = GetTickCount64();
                 const bool alreadySheetmetal = IsSheetmetalBody(processPart, manager, body);
+                const ULONGLONG sheetmetalCheckMs = GetTickCount64() - stageStart;
+                stageStart = GetTickCount64();
                 if (!alreadySheetmetal)
                 {
-                    ApplySheetmetalPreferencesBeforeConvert(processPart, options);
                     ConvertToSheetmetalBuilder* convertBuilder = manager->CreateConvertToSheetmetalFeatureBuilder(NULL);
                     convertBuilder->SetApplicationContext(ApplicationContextNxSheetMetal);
                     convertBuilder->SetBendReliefType(ConvertToSheetmetalBuilder::BendReliefTypeOptionsSquare);
@@ -12677,12 +13235,38 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 {
                     result.convertOk = true;
                 }
+                const ULONGLONG convertMs = GetTickCount64() - stageStart;
                 displayResultBody = activeBody != NULL ? activeBody : body;
 
-                UpdateBodyZThicknessAttribute(manager, activeBody);
+                stageStart = GetTickCount64();
+                if (UpdateBodyZThicknessAttribute(manager, activeBody))
+                {
+                    hasDeferredAttributeUpdates = true;
+                }
+                const ULONGLONG thicknessAttributeMs = GetTickCount64() - stageStart;
+                stageStart = GetTickCount64();
                 result.neutralFaceCount = ApplyNeutralFactorByRules(processPart, manager, activeBody, ruleConfig, bodyMaterial);
+                const ULONGLONG neutralFactorMs = GetTickCount64() - stageStart;
 
-                Feature* existingFlatPattern = FindExistingFlatPatternFeature(processPart, manager, activeBody);
+                // A body converted by this run cannot already own a flat pattern, so create one directly.
+                // Only bodies that were sheet-metal before this run need an existing flat-pattern lookup.
+                stageStart = GetTickCount64();
+                Feature* existingFlatPattern = alreadySheetmetal
+                    ? FindExistingFlatPatternFeature(processPart, manager, activeBody)
+                    : NULL;
+                const ULONGLONG existingFlatPatternMs = GetTickCount64() - stageStart;
+                {
+                    std::ostringstream log;
+                    log << "pre-base timing body=" << (body == NULL ? 0 : body->Tag())
+                        << " alreadySheetmetal=" << (alreadySheetmetal ? 1 : 0)
+                        << " selectBaseMs=" << selectBaseMs
+                        << " sheetmetalCheckMs=" << sheetmetalCheckMs
+                        << " convertMs=" << convertMs
+                        << " thicknessAttributeMs=" << thicknessAttributeMs
+                        << " neutralFactorMs=" << neutralFactorMs
+                        << " existingFlatPatternMs=" << existingFlatPatternMs;
+                    AppendMarkerLineDebugLog(log.str());
+                }
                 FaceInfo postConvertFaceInfo;
                 if (!hasManualSelection)
                 {
@@ -12848,6 +13432,7 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
 
         if (options.manualOnly)
         {
+            flushDeferredAttributeUpdates();
             continue;
         }
 
@@ -12858,6 +13443,7 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                 << " rememberedManualBodies=" << manuallyProcessedBodyTags.size();
             AppendMarkerLineDebugLog(log.str());
         }
+
         for (size_t i = 0; i < automaticCandidates.size(); ++i)
         {
             Body* body = automaticCandidates[i];
@@ -12870,6 +13456,8 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
             }
             processBody(body, NULL);
         }
+
+        flushDeferredAttributeUpdates();
 
         if (options.autoSaveAfterRun && results.size() > resultStart)
         {
