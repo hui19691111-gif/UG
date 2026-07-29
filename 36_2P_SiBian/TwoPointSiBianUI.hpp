@@ -145,7 +145,8 @@ private:
                                                 NXOpen::Edge* second) const;
     NXOpen::Face* FindParallelFaceAtThickness(NXOpen::Body* body,
                                               NXOpen::Face* sourceFace,
-                                              double thickness) const;
+                                              double thickness,
+                                              const NXOpen::Point3d& qPoint) const;
     bool BuildFallbackSecondInputs(const InferredInputs& sourceInputs,
                                    NXOpen::Edge* firstEdgeAtQ,
                                    NXOpen::Edge* secondEdgeAtQ,

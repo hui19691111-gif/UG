@@ -136,7 +136,7 @@ constexpr double kPointTolerance = 1.0e-4;
 constexpr double kPlaneTolerance = 1.0e-3;
 constexpr double kSmartInnerLoopMinimumAreaRatio = 0.15;
 constexpr double kCornerExtensionDistance = 0.05;
-constexpr double kThicknessProjectionOverlapRatio = 0.60;
+constexpr double kThicknessMinimumAreaRatio = 0.60;
 constexpr double kThicknessProjectionAreaErrorRatio = 0.05;
 constexpr double kEndpointPairMinimumAngleDegrees = 150.0;
 constexpr double kEndpointPairMaximumAngleDegrees = 180.0;
@@ -1650,12 +1650,77 @@ bool FaceBoundaryPoints(
     Face* face,
     std::vector<Point3d>& points,
     double minimumAcceptedInnerLoopArea =
-        std::numeric_limits<double>::infinity())
+        std::numeric_limits<double>::quiet_NaN())
 {
     points.clear();
     if (face == nullptr)
     {
         return false;
+    }
+
+    // Every caller uses the same smart-selection rule unless it supplies an
+    // already measured threshold: ignore inner loops smaller than 15% of the
+    // face area and retain larger inner loops as valid local boundaries.
+    // Historically the no-argument calls used infinity, which silently
+    // discarded every inner loop and made Q/Q3/Q4 and helper geometry behave
+    // differently from the original P1/P2 selection.
+    if (std::isnan(minimumAcceptedInnerLoopArea))
+    {
+        try
+        {
+            Session* session = Session::GetSession();
+            Part* workPart =
+                session != nullptr ? session->Parts()->Work() : nullptr;
+            if (workPart != nullptr)
+            {
+                Unit* areaUnit =
+                    workPart->UnitCollection()->FindObject(
+                        "SquareMilliMeter");
+                Unit* lengthUnit =
+                    workPart->UnitCollection()->FindObject(
+                        "MilliMeter");
+                if (areaUnit != nullptr && lengthUnit != nullptr)
+                {
+                    std::vector<IParameterizedSurface*> measuredFaces;
+                    measuredFaces.push_back(face);
+                    MeasureFaces* measurement =
+                        workPart->MeasureManager()->NewFaceProperties(
+                            areaUnit,
+                            lengthUnit,
+                            0.99,
+                            measuredFaces);
+                    if (measurement != nullptr)
+                    {
+                        const double faceArea =
+                            SquareMillimetersToPartSquareUnits(
+                                workPart,
+                                measurement->Area());
+                        delete measurement;
+                        minimumAcceptedInnerLoopArea =
+                            faceArea > kPointTolerance
+                                ? faceArea *
+                                      kSmartInnerLoopMinimumAreaRatio
+                                : std::numeric_limits<double>::infinity();
+                    }
+                }
+            }
+        }
+        catch (const NXException& ex)
+        {
+            AppendDebugLog(
+                "FaceBoundaryPoints automatic inner-loop area measurement NXException: " +
+                UfMessage(ex.ErrorCode()));
+        }
+        catch (...)
+        {
+            AppendDebugLog(
+                "FaceBoundaryPoints automatic inner-loop area measurement unknown exception.");
+        }
+        if (std::isnan(minimumAcceptedInnerLoopArea))
+        {
+            minimumAcceptedInnerLoopArea =
+                std::numeric_limits<double>::infinity();
+        }
     }
 
     auto addUniquePoint = [&points](const Point3d& point) {
@@ -7491,7 +7556,8 @@ Face* TwoPointSiBianUI::FindPlanarFaceContainingEdges(Body* body,
 
 Face* TwoPointSiBianUI::FindParallelFaceAtThickness(Body* body,
                                                      Face* sourceFace,
-                                                     double thickness) const
+                                                     double thickness,
+                                                     const Point3d& qPoint) const
 {
     if (body == nullptr || sourceFace == nullptr || thickness <= kPointTolerance)
     {
@@ -7507,7 +7573,8 @@ Face* TwoPointSiBianUI::FindParallelFaceAtThickness(Body* body,
 
     const double tolerance = std::max(0.02, thickness * 0.10);
     Face* best = nullptr;
-    double bestError = std::numeric_limits<double>::max();
+    double bestPointDistance = std::numeric_limits<double>::max();
+    double bestThicknessError = std::numeric_limits<double>::max();
     for (Face* candidate : body->GetFaces())
     {
         if (candidate == nullptr || candidate == sourceFace ||
@@ -7524,12 +7591,76 @@ Face* TwoPointSiBianUI::FindParallelFaceAtThickness(Body* body,
         }
         const double distance = std::fabs(Dot(Subtract(candidatePoint, sourcePoint), sourceNormal));
         const double error = std::fabs(distance - thickness);
-        if (error <= tolerance && error < bestError)
+        if (error > tolerance)
+        {
+            continue;
+        }
+
+        // Several trimmed faces can lie on the same parallel sheet plane.
+        // Choose the face whose accepted outer/large-inner-loop point is
+        // geometrically closest to Q instead of relying on body face order.
+        std::vector<Point3d> boundaryPoints;
+        if (!FaceBoundaryPoints(candidate, boundaryPoints) ||
+            boundaryPoints.empty())
+        {
+            continue;
+        }
+        double nearestPointDistance =
+            std::numeric_limits<double>::max();
+        for (const Point3d& boundaryPoint : boundaryPoints)
+        {
+            nearestPointDistance =
+                std::min(nearestPointDistance,
+                         Distance(boundaryPoint, qPoint));
+        }
+
+        std::ostringstream candidateTrace;
+        candidateTrace
+            << "FindParallelFaceAtThickness candidate=" << candidate->Tag()
+            << ", planeDistance=" << distance
+            << ", thicknessError=" << error
+            << ", nearestBoundaryDistanceToQ=" << nearestPointDistance
+            << ", boundaryPointCount=" << boundaryPoints.size();
+        AppendDebugLog(candidateTrace.str());
+
+        const bool closerToQ =
+            nearestPointDistance + kPointTolerance <
+            bestPointDistance;
+        const bool sameQDistance =
+            std::fabs(nearestPointDistance -
+                      bestPointDistance) <= kPointTolerance;
+        const bool betterThickness =
+            error + kPointTolerance < bestThicknessError;
+        const bool deterministicTie =
+            sameQDistance &&
+            std::fabs(error - bestThicknessError) <=
+                kPointTolerance &&
+            (best == nullptr || candidate->Tag() < best->Tag());
+        if (best == nullptr || closerToQ ||
+            (sameQDistance && betterThickness) ||
+            deterministicTie)
         {
             best = candidate;
-            bestError = error;
+            bestPointDistance = nearestPointDistance;
+            bestThicknessError = error;
         }
     }
+    AppendDebugLog(
+        "FindParallelFaceAtThickness selected face=" +
+        std::to_string(best != nullptr ? best->Tag() : NULL_TAG) +
+        ", Q=" + FormatPoint(qPoint) +
+        ", nearestBoundaryDistanceToQ=" +
+        FormatExpressionNumber(
+            bestPointDistance <
+                    std::numeric_limits<double>::max()
+                ? bestPointDistance
+                : -1.0) +
+        ", thicknessError=" +
+        FormatExpressionNumber(
+            bestThicknessError <
+                    std::numeric_limits<double>::max()
+                ? bestThicknessError
+                : -1.0));
     return best;
 }
 
@@ -7591,14 +7722,47 @@ bool TwoPointSiBianUI::BuildFallbackSecondInputs(const InferredInputs& sourceInp
     }
     Face* parallelFace = FindParallelFaceAtThickness(sourceInputs.targetBody,
                                                       commonFace,
-                                                      sourceInputs.thickness);
+                                                      sourceInputs.thickness,
+                                                      qPoint);
     if (commonFace == nullptr || parallelFace == nullptr)
     {
         return false;
     }
 
+    // Apply the same inner-loop rule used by the original P1/P2 smart
+    // selection.  Small inner loops are ignored, while an inner loop whose
+    // area is at least 15% of the selected parallel face remains eligible as
+    // a local boundary.  Previously this call used the default argument,
+    // which discarded every inner loop regardless of size.
+    const double parallelFaceAreaSquareMillimeters =
+        MeasureFaceArea(parallelFace);
+    Part* workPart = session_->Parts()->Work();
+    const double parallelFaceArea =
+        SquareMillimetersToPartSquareUnits(
+            workPart,
+            parallelFaceAreaSquareMillimeters);
+    const double minimumAcceptedInnerLoopArea =
+        parallelFaceArea > kPointTolerance
+            ? parallelFaceArea *
+                  kSmartInnerLoopMinimumAreaRatio
+            : std::numeric_limits<double>::infinity();
+    AppendDebugLog(
+        "P2 fallback parallel-face inner-loop filter: face=" +
+        std::to_string(parallelFace->Tag()) +
+        ", faceAreaSquareMillimeters=" +
+        FormatExpressionNumber(
+            parallelFaceAreaSquareMillimeters) +
+        ", faceAreaPartUnits=" +
+        FormatExpressionNumber(parallelFaceArea) +
+        ", minimumAcceptedInnerLoopArea=" +
+        FormatExpressionNumber(
+            minimumAcceptedInnerLoopArea));
+
     std::vector<Point3d> boundaryPoints;
-    if (!FaceBoundaryPoints(parallelFace, boundaryPoints) || boundaryPoints.size() < 2)
+    if (!FaceBoundaryPoints(parallelFace,
+                            boundaryPoints,
+                            minimumAcceptedInnerLoopArea) ||
+        boundaryPoints.size() < 2)
     {
         return false;
     }
@@ -12097,14 +12261,6 @@ double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) cons
             return 0.0;
         }
 
-        Vector3d projectionXAxis;
-        Vector3d projectionYAxis;
-        if (!FaceProjectionAxes(baseFace, baseNormal, projectionXAxis, projectionYAxis))
-        {
-            AppendDebugLog("EstimateSheetThickness failed to build projection axes.");
-            return 0.0;
-        }
-
         const double baseArea = MeasureFaceArea(baseFace);
         if (baseArea <= kPointTolerance)
         {
@@ -12112,28 +12268,13 @@ double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) cons
             return 0.0;
         }
 
-        std::vector<Point3d> coarseSamples;
-        if (!BuildFaceInteriorGridSamples(baseFace,
-                                          basePlanePoint,
-                                          projectionXAxis,
-                                          projectionYAxis,
-                                          5,
-                                          coarseSamples))
-        {
-            AppendDebugLog("EstimateSheetThickness failed to sample the selected face.");
-            return 0.0;
-        }
-
         std::ostringstream trace;
         trace << "EstimateSheetThickness baseFace=" << baseFace->Tag()
-               << ", baseArea=" << baseArea
-              << ", overlapMethod=grouped NX face-containment sampling"
-              << ", coarseGrid=5x5"
-              << ", coarseInteriorSamples=" << coarseSamples.size()
-              << ", minimumCoverage=" << kThicknessProjectionOverlapRatio
-              << ", basePlanePoint=" << FormatPoint(basePlanePoint)
-              << ", projectionX=" << FormatVector(projectionXAxis)
-              << ", projectionY=" << FormatVector(projectionYAxis);
+              << ", baseArea=" << baseArea
+              << ", selectionMethod=nearest parallel plane group by unsigned normal distance"
+              << ", minimumAreaRatio=" << kThicknessMinimumAreaRatio
+              << ", overlapValidation=disabled"
+              << ", basePlanePoint=" << FormatPoint(basePlanePoint);
 
         std::vector<ThicknessCandidate> candidates;
         std::vector<Face*> faces = body->GetFaces();
@@ -12164,21 +12305,12 @@ double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) cons
                 continue;
             }
 
-            // The material lies behind the selected face's oriented normal.
-            // Do not require the candidate's reported face normal to be
-            // opposite: imported/boolean-modified NX bodies can report the
-            // same UF normal direction for both sides. Actual overlap is
-            // established below by trimmed-face containment sampling.
-            if (signedPlaneDistance >= -kPlaneTolerance)
-            {
-                trace << "\n  skip parallel face=" << face->Tag()
-                      << " planeDistance=" << planeDistance
-                      << " signedPlaneDistance=" << signedPlaneDistance
-                      << " normalDot=" << normalDot
-                      << " reason=not behind the selected face";
-                continue;
-            }
-
+            // Do not use the selected face's normal sign to decide which side
+            // can contain the thickness face. NX/UF face normals may be
+            // reversed by imports and boolean operations. Parallel faces on
+            // both sides remain candidates. The smallest unsigned normal
+            // distance whose parallel face group has enough total area is
+            // the sheet thickness; no projected-overlap test is performed.
             candidates.push_back(
                 {face, planeDistance, signedPlaneDistance, normalDot});
         }
@@ -12237,14 +12369,12 @@ double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) cons
         trace << "\n  oppositeParallelFaces=" << candidates.size()
               << ", planeGroups=" << groups.size();
 
-        std::vector<Point3d> fineSamples;
-        bool fineSamplesBuilt = false;
         for (const ThicknessPlaneGroup& group : groups)
         {
             const double groupToBaseAreaRatio =
                 group.totalArea / baseArea;
             if (groupToBaseAreaRatio + 1.0e-9 <
-                kThicknessProjectionOverlapRatio)
+                kThicknessMinimumAreaRatio)
             {
                 trace << "\n  skip group distance="
                       << group.planeDistance
@@ -12255,80 +12385,17 @@ double TwoPointSiBianUI::EstimateSheetThickness(Body* body, Face* baseFace) cons
                       << " totalArea=" << group.totalArea
                       << " groupToBaseAreaRatio="
                       << groupToBaseAreaRatio
-                      << " reason=combined face area cannot reach coverage threshold";
+                      << " reason=combined parallel-face area is below 60 percent of selected-face area";
                 continue;
             }
-
-            std::size_t coarseCovered = 0;
-            const double coarseCoverage =
-                ProjectedFaceGroupCoverage(coarseSamples,
-                                           baseNormal,
-                                           group.candidates,
-                                           &coarseCovered);
             trace << "\n  group distance=" << group.planeDistance
                   << " signedDistance=" << group.signedPlaneDistance
                   << " faceCount=" << group.candidates.size()
                   << " totalArea=" << group.totalArea
                   << " groupToBaseAreaRatio=" << groupToBaseAreaRatio
-                  << " coarseCovered=" << coarseCovered
-                  << "/" << coarseSamples.size()
-                  << " coarseCoverage=" << coarseCoverage;
-
-            // A strong coarse result is enough. A zero result is an early
-            // rejection. Only uncertain groups pay for the 11x11 pass.
-            if (coarseSamples.size() >= 5 &&
-                coarseCoverage >=
-                    kThicknessProjectionOverlapRatio + 0.15)
-            {
-                bestDistance = group.planeDistance;
-                trace << " selectionRule=coarse grouped containment";
-                break;
-            }
-            if (coarseCoverage <= 1.0e-9 &&
-                coarseSamples.size() >= 5)
-            {
-                trace << " refined=false reason=no coarse overlap";
-                continue;
-            }
-
-            if (!fineSamplesBuilt)
-            {
-                fineSamplesBuilt =
-                    BuildFaceInteriorGridSamples(baseFace,
-                                                 basePlanePoint,
-                                                 projectionXAxis,
-                                                 projectionYAxis,
-                                                 11,
-                                                 fineSamples);
-                trace << "\n  fineGrid=11x11"
-                      << ", fineInteriorSamples="
-                      << fineSamples.size()
-                      << ", built="
-                      << (fineSamplesBuilt ? "true" : "false");
-            }
-            if (!fineSamplesBuilt || fineSamples.empty())
-            {
-                continue;
-            }
-
-            std::size_t fineCovered = 0;
-            const double fineCoverage =
-                ProjectedFaceGroupCoverage(fineSamples,
-                                           baseNormal,
-                                           group.candidates,
-                                           &fineCovered);
-            trace << "\n    refined group distance="
-                  << group.planeDistance
-                  << " covered=" << fineCovered
-                  << "/" << fineSamples.size()
-                  << " coverage=" << fineCoverage;
-            if (fineCoverage + 1.0e-9 >=
-                kThicknessProjectionOverlapRatio)
-            {
-                bestDistance = group.planeDistance;
-                trace << " selectionRule=refined grouped containment";
-                break;
-            }
+                  << " selectionRule=nearest qualifying parallel-face group";
+            bestDistance = group.planeDistance;
+            break;
         }
         trace << "\n  selected thickness="
               << (bestDistance == std::numeric_limits<double>::max() ? 0.0 : bestDistance);
