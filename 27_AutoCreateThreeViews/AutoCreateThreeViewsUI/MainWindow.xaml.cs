@@ -20,6 +20,7 @@ public partial class MainWindow : Window
     private AssemblyNode? selectedAssemblyNode;
     private AssemblyNode? shiftAnchorAssemblyNode;
     private readonly Dictionary<string, Dictionary<string, string>> partOptionsByOccurrence = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<MenuItem, BatchTargetFilterRule> assemblyFilterRulesByMenuItem = new();
     private bool isUpdatingAssemblyChecks;
     private bool isLoadingPartOptions;
     private bool assemblySelectionAvailable = true;
@@ -49,6 +50,7 @@ public partial class MainWindow : Window
 
         LoadTechnicalRequirements();
         LoadAssemblyTree();
+        InitializeAssemblyFilterMenu();
         LoadSavedOptions();
 
         progressTimer.Tick += ProgressTimer_Tick;
@@ -263,7 +265,7 @@ public partial class MainWindow : Window
         }
 
         AssemblyNode node = checkedNodes[0];
-        return IsRootAssemblyNode(node) && node.TreeItem != null && node.TreeItem.Items.Count > 0;
+        return node.HasChildren;
     }
 
     private void StartProgressMonitor(bool delayProgressWindow = false)
@@ -1541,6 +1543,271 @@ public partial class MainWindow : Window
         UpdateSelectedAssemblyText();
     }
 
+    private void InitializeAssemblyFilterMenu()
+    {
+        if (AssemblyTree == null)
+        {
+            return;
+        }
+
+        ContextMenu contextMenu = new();
+        MenuItem filterMenu = new() { Header = "过滤" };
+        AddAssemblyFilterRule(filterMenu, "移除普通零件", BatchTargetFilterKind.RemovePart);
+        AddAssemblyFilterRule(filterMenu, "移除装配体", BatchTargetFilterKind.RemoveAssembly);
+        AddAssemblyFilterRule(filterMenu, "移除已出图模型", BatchTargetFilterKind.RemoveWithDrawingSheets);
+        AddAssemblyFilterRule(filterMenu, "移除未出图模型", BatchTargetFilterKind.RemoveWithoutDrawingSheets);
+        AddAssemblyFilterRule(filterMenu, "移除钣金", BatchTargetFilterKind.RemoveSheetMetal);
+        AddAssemblyFilterRule(filterMenu, "移除非钣金", BatchTargetFilterKind.RemoveNonSheetMetal);
+        AddAssemblyFilterRule(filterMenu, "移除隐藏组件", BatchTargetFilterKind.RemoveHiddenComponent);
+        filterMenu.Items.Add(new Separator());
+        AddAssemblyKeywordFilterRule(
+            filterMenu,
+            "移除包含关键词...",
+            BatchTargetFilterKind.RemoveKeywordMatches);
+        AddAssemblyKeywordFilterRule(
+            filterMenu,
+            "移除不含关键词...",
+            BatchTargetFilterKind.RemoveKeywordNonMatches);
+        AddAssemblyAttributeNameFilterRule(
+            filterMenu,
+            "移除有指定属性...",
+            BatchTargetFilterKind.RemoveHasAttribute);
+        AddAssemblyAttributeNameFilterRule(
+            filterMenu,
+            "移除不含指定属性...",
+            BatchTargetFilterKind.RemoveMissingAttribute);
+        AddAssemblyAttributeEqualsFilterRule(filterMenu);
+        AddAssemblyAttributeValueFilterRule(filterMenu);
+        filterMenu.Items.Add(new Separator());
+        MenuItem applyFilters = new() { Header = "应用所选过滤" };
+        applyFilters.Click += (_, _) => ApplySelectedAssemblyFilters();
+        filterMenu.Items.Add(applyFilters);
+        MenuItem clearFilters = new() { Header = "清除过滤选择" };
+        clearFilters.Click += (_, _) => ClearAssemblyFilterSelections();
+        filterMenu.Items.Add(clearFilters);
+        contextMenu.Items.Add(filterMenu);
+
+        contextMenu.Items.Add(new Separator());
+        MenuItem restoreAll = new() { Header = "恢复全部勾选" };
+        restoreAll.Click += (_, _) =>
+        {
+            SetAllAssemblyNodeChecks(true);
+            UpdateSelectAllCheckBoxState();
+            UpdateSelectedAssemblyText();
+        };
+        contextMenu.Items.Add(restoreAll);
+        AssemblyTree.ContextMenu = contextMenu;
+    }
+
+    private void AddAssemblyFilterRule(
+        MenuItem filterMenu,
+        string header,
+        BatchTargetFilterKind kind)
+    {
+        MenuItem item = new() { Header = header, IsCheckable = true, StaysOpenOnClick = true };
+        assemblyFilterRulesByMenuItem[item] = new BatchTargetFilterRule { Kind = kind };
+        filterMenu.Items.Add(item);
+    }
+
+    private void AddAssemblyKeywordFilterRule(
+        MenuItem filterMenu,
+        string header,
+        BatchTargetFilterKind kind)
+    {
+        MenuItem item = new() { Header = header, IsCheckable = true, StaysOpenOnClick = true };
+        item.Click += (_, _) =>
+        {
+            if (!item.IsChecked)
+            {
+                assemblyFilterRulesByMenuItem.Remove(item);
+                return;
+            }
+
+            if (!BatchTargetFilterPrompt.TryAskText(this, "过滤关键词", "关键词", out string keyword))
+            {
+                item.IsChecked = false;
+                assemblyFilterRulesByMenuItem.Remove(item);
+                return;
+            }
+
+            assemblyFilterRulesByMenuItem[item] =
+                new BatchTargetFilterRule { Kind = kind, Keyword = keyword };
+        };
+        filterMenu.Items.Add(item);
+    }
+
+    private void AddAssemblyAttributeNameFilterRule(
+        MenuItem filterMenu,
+        string header,
+        BatchTargetFilterKind kind)
+    {
+        MenuItem item = new() { Header = header, IsCheckable = true, StaysOpenOnClick = true };
+        item.Click += (_, _) =>
+        {
+            if (!item.IsChecked)
+            {
+                assemblyFilterRulesByMenuItem.Remove(item);
+                return;
+            }
+
+            if (!BatchTargetFilterPrompt.TryAskText(this, "按属性过滤", "属性名", out string attributeName))
+            {
+                item.IsChecked = false;
+                assemblyFilterRulesByMenuItem.Remove(item);
+                return;
+            }
+
+            assemblyFilterRulesByMenuItem[item] =
+                new BatchTargetFilterRule
+                {
+                    Kind = kind,
+                    AttributeName = attributeName
+                };
+        };
+        filterMenu.Items.Add(item);
+    }
+
+    private void AddAssemblyAttributeEqualsFilterRule(MenuItem filterMenu)
+    {
+        MenuItem item = new()
+        {
+            Header = "移除属性等于...",
+            IsCheckable = true,
+            StaysOpenOnClick = true
+        };
+        item.Click += (_, _) =>
+        {
+            if (!item.IsChecked)
+            {
+                assemblyFilterRulesByMenuItem.Remove(item);
+                return;
+            }
+
+            if (!BatchTargetFilterPrompt.TryAskAttributeEquals(
+                    this,
+                    out string attributeName,
+                    out string attributeValue))
+            {
+                item.IsChecked = false;
+                assemblyFilterRulesByMenuItem.Remove(item);
+                return;
+            }
+
+            assemblyFilterRulesByMenuItem[item] =
+                new BatchTargetFilterRule
+                {
+                    Kind = BatchTargetFilterKind.RemoveAttributeEquals,
+                    AttributeName = attributeName,
+                    AttributeValue = attributeValue
+                };
+        };
+        filterMenu.Items.Add(item);
+    }
+
+    private void AddAssemblyAttributeValueFilterRule(MenuItem filterMenu)
+    {
+        MenuItem item = new()
+        {
+            Header = "移除无指定属性值...",
+            IsCheckable = true,
+            StaysOpenOnClick = true
+        };
+        item.Click += (_, _) =>
+        {
+            if (!item.IsChecked)
+            {
+                assemblyFilterRulesByMenuItem.Remove(item);
+                return;
+            }
+
+            if (!BatchTargetFilterPrompt.TryAskText(this, "按属性值过滤", "属性值", out string value))
+            {
+                item.IsChecked = false;
+                assemblyFilterRulesByMenuItem.Remove(item);
+                return;
+            }
+
+            assemblyFilterRulesByMenuItem[item] =
+                new BatchTargetFilterRule
+                {
+                    Kind = BatchTargetFilterKind.RemoveWithoutAttributeValue,
+                    AttributeValue = value
+                };
+        };
+        filterMenu.Items.Add(item);
+    }
+
+    private void ClearAssemblyFilterSelections()
+    {
+        foreach (MenuItem item in assemblyFilterRulesByMenuItem.Keys.ToList())
+        {
+            item.IsChecked = false;
+        }
+    }
+
+    private void ApplySelectedAssemblyFilters()
+    {
+        List<BatchTargetFilterRule> rules = assemblyFilterRulesByMenuItem
+            .Where(pair => pair.Key.IsChecked)
+            .Select(pair => pair.Value)
+            .ToList();
+        if (rules.Count == 0)
+        {
+            SelectedAssemblyTextBlock.Text = "请先勾选至少一个过滤条件";
+            return;
+        }
+
+        List<AssemblyNode> allTargets = GetSelectableAssemblyNodes();
+        if (allTargets.Count == 0)
+        {
+            return;
+        }
+
+        List<AssemblyNode> removed = allTargets
+            .Where(
+                node => rules.Any(
+                    rule => BatchTargetFilterEngine.ShouldRemove(node.FilterTarget, rule)))
+            .ToList();
+
+        isUpdatingAssemblyChecks = true;
+        try
+        {
+            foreach (AssemblyNode node in allTargets)
+            {
+                SetAssemblyNodeChecked(node, !removed.Contains(node));
+            }
+        }
+        finally
+        {
+            isUpdatingAssemblyChecks = false;
+        }
+
+        UpdateSelectAllCheckBoxState();
+        isUpdatingAssemblyChecks = true;
+        try
+        {
+            foreach (AssemblyNode node in EnumerateTreeItems(AssemblyTree.Items)
+                         .Select(item => item.Tag)
+                         .OfType<AssemblyNode>())
+            {
+                if (rules.Any(rule => BatchTargetFilterEngine.ShouldRemove(node.FilterTarget, rule)))
+                {
+                    SetAssemblyNodeChecked(node, false);
+                }
+            }
+
+            SelectAllPartsCheckBox.IsChecked =
+                allTargets.Count > 0 && allTargets.All(node => node.IsChecked);
+        }
+        finally
+        {
+            isUpdatingAssemblyChecks = false;
+        }
+
+        UpdateSelectedAssemblyText();
+        SelectedAssemblyTextBlock.Text += $"，按 {rules.Count} 项条件过滤取消 {removed.Count} 个";
+    }
+
     private void UpdatePartSelectionAvailability()
     {
         if (PartSelectionTab == null || MainTabControl == null)
@@ -1727,7 +1994,6 @@ public partial class MainWindow : Window
         isUpdatingAssemblyChecks = true;
         try
         {
-            UpdateAssemblyParentCheckStates();
             List<AssemblyNode> selectableNodes = GetSelectableAssemblyNodes();
             SelectAllPartsCheckBox.IsChecked = selectableNodes.Count > 0 && selectableNodes.All(node => node.IsChecked);
         }
@@ -1739,24 +2005,9 @@ public partial class MainWindow : Window
 
     private List<AssemblyNode> GetSelectableAssemblyNodes()
     {
-        List<AssemblyNode> nodes = EnumerateTreeItems(AssemblyTree.Items)
+        return EnumerateTreeItems(AssemblyTree.Items)
             .Select(item => item.Tag)
             .OfType<AssemblyNode>()
-            .ToList();
-        List<AssemblyNode> rootNodes = nodes
-            .Where(IsRootAssemblyNode)
-            .ToList();
-        List<AssemblyNode> leafNodes = nodes
-            .Where(node => !node.HasChildren)
-            .ToList();
-        if (leafNodes.Count == 0)
-        {
-            return nodes;
-        }
-
-        return rootNodes
-            .Concat(leafNodes)
-            .Distinct()
             .ToList();
     }
 
@@ -1785,11 +2036,17 @@ public partial class MainWindow : Window
             values.TryGetValue("parent", out string? parentId);
             values.TryGetValue("name", out string? name);
             values.TryGetValue("part", out string? part);
+            values.TryGetValue("attributes", out string? attributes);
             records.Add(new AssemblyManifestRecord(
                 id,
                 parentId ?? "",
                 string.IsNullOrWhiteSpace(name) ? $"零件 {id}" : name,
-                part ?? ""));
+                part ?? "",
+                ReadManifestBool(values, "assembly"),
+                ReadManifestBool(values, "drawing"),
+                ReadManifestBool(values, "sheetMetal"),
+                ReadManifestBool(values, "hidden"),
+                ParseManifestAttributes(attributes ?? "")));
         }
 
         return records;
@@ -1812,6 +2069,7 @@ public partial class MainWindow : Window
         foreach (IGrouping<string, AssemblyManifestRecord> group in groups)
         {
             AssemblyManifestRecord representative = group.First();
+            List<AssemblyManifestRecord> groupedRecords = group.ToList();
             int quantity = Math.Max(1, parentQuantity) * group.Count();
             bool hasChildren = parentIds.Contains(representative.OccurrenceTag);
             AssemblyNode node = new(
@@ -1820,7 +2078,12 @@ public partial class MainWindow : Window
                 representative.Name,
                 representative.PartPath,
                 quantity,
-                hasChildren);
+                hasChildren,
+                representative.IsAssembly || hasChildren,
+                groupedRecords.Any(record => record.HasDrawingSheets),
+                groupedRecords.Any(record => record.IsSheetMetal),
+                groupedRecords.All(record => record.IsHiddenComponent),
+                MergeManifestAttributes(groupedRecords));
             TreeViewItem item = CreateAssemblyTreeItem(node);
             targetItems.Add(item);
             item.IsExpanded = true;
@@ -1835,6 +2098,52 @@ public partial class MainWindow : Window
                     quantity);
             }
         }
+    }
+
+    private static bool ReadManifestBool(
+        IReadOnlyDictionary<string, string> values,
+        string key)
+    {
+        return values.TryGetValue(key, out string? value) &&
+               (string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) || value == "1");
+    }
+
+    private static Dictionary<string, string> ParseManifestAttributes(string payload)
+    {
+        Dictionary<string, string> attributes = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string entry in payload.Split('\x1e', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int separator = entry.IndexOf('\x1f');
+            if (separator <= 0)
+            {
+                continue;
+            }
+
+            string name = entry[..separator].Trim();
+            if (name.Length == 0 || attributes.ContainsKey(name))
+            {
+                continue;
+            }
+
+            attributes[name] = entry[(separator + 1)..].Trim();
+        }
+
+        return attributes;
+    }
+
+    private static Dictionary<string, string> MergeManifestAttributes(
+        IEnumerable<AssemblyManifestRecord> records)
+    {
+        Dictionary<string, string> attributes = new(StringComparer.OrdinalIgnoreCase);
+        foreach (AssemblyManifestRecord record in records)
+        {
+            foreach (KeyValuePair<string, string> pair in record.AttributeValues)
+            {
+                attributes.TryAdd(pair.Key, pair.Value);
+            }
+        }
+
+        return attributes;
     }
 
     private static HashSet<string> ReadAssemblyParentIds(string manifestPath)
@@ -2649,12 +2958,26 @@ public partial class MainWindow : Window
 
     private sealed class AssemblyManifestRecord
     {
-        public AssemblyManifestRecord(string occurrenceTag, string parentOccurrenceTag, string name, string partPath)
+        public AssemblyManifestRecord(
+            string occurrenceTag,
+            string parentOccurrenceTag,
+            string name,
+            string partPath,
+            bool isAssembly,
+            bool hasDrawingSheets,
+            bool isSheetMetal,
+            bool isHiddenComponent,
+            IReadOnlyDictionary<string, string> attributeValues)
         {
             OccurrenceTag = occurrenceTag;
             ParentOccurrenceTag = parentOccurrenceTag;
             Name = name;
             PartPath = partPath;
+            IsAssembly = isAssembly;
+            HasDrawingSheets = hasDrawingSheets;
+            IsSheetMetal = isSheetMetal;
+            IsHiddenComponent = isHiddenComponent;
+            AttributeValues = attributeValues;
         }
 
         public string OccurrenceTag { get; }
@@ -2664,6 +2987,16 @@ public partial class MainWindow : Window
         public string Name { get; }
 
         public string PartPath { get; }
+
+        public bool IsAssembly { get; }
+
+        public bool HasDrawingSheets { get; }
+
+        public bool IsSheetMetal { get; }
+
+        public bool IsHiddenComponent { get; }
+
+        public IReadOnlyDictionary<string, string> AttributeValues { get; }
     }
 
     private sealed class AssemblyNode
@@ -2674,7 +3007,12 @@ public partial class MainWindow : Window
             string name,
             string partPath,
             int quantity = 1,
-            bool hasChildren = false)
+            bool hasChildren = false,
+            bool isAssembly = false,
+            bool hasDrawingSheets = false,
+            bool isSheetMetal = false,
+            bool isHiddenComponent = false,
+            IReadOnlyDictionary<string, string>? attributeValues = null)
         {
             OccurrenceTag = occurrenceTag;
             ParentOccurrenceTag = parentOccurrenceTag;
@@ -2682,6 +3020,17 @@ public partial class MainWindow : Window
             PartPath = partPath;
             Quantity = Math.Max(1, quantity);
             HasChildren = hasChildren;
+            FilterTarget = new BatchTargetFilterTarget
+            {
+                DisplayName = name,
+                FilePath = partPath,
+                IsAssembly = isAssembly || hasChildren,
+                HasDrawingSheets = hasDrawingSheets,
+                IsSheetMetal = isSheetMetal,
+                IsHiddenComponent = isHiddenComponent,
+                AttributeValues = attributeValues ??
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            };
         }
 
         public string OccurrenceTag { get; }
@@ -2695,6 +3044,8 @@ public partial class MainWindow : Window
         public int Quantity { get; }
 
         public bool HasChildren { get; }
+
+        public BatchTargetFilterTarget FilterTarget { get; }
 
         public bool IsChecked { get; set; }
 

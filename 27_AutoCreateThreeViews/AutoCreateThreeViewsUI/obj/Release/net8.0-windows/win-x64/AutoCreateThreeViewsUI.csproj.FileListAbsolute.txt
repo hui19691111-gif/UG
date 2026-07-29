@@ -27,6 +27,3 @@ G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreat
 G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\obj\Release\net8.0-windows\win-x64\refint\AutoCreateThreeViewsUI.dll
 G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\obj\Release\net8.0-windows\win-x64\AutoCreateThreeViewsUI.genruntimeconfig.cache
 G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\obj\Release\net8.0-windows\win-x64\ref\AutoCreateThreeViewsUI.dll
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\bin\Release\net8.0-windows\win-x64\AutoCreateThreeViewsUI.pdb
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\obj\Release\net8.0-windows\win-x64\AutoCreateThreeViewsUI.sourcelink.json
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\27_AutoCreateThreeViews\AutoCreateThreeViewsUI\obj\Release\net8.0-windows\win-x64\AutoCreateThreeViewsUI.pdb

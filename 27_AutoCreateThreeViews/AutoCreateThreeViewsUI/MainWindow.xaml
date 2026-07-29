@@ -134,6 +134,10 @@
                     <Grid>
                     <StackPanel x:Name="PartSelectionPanel">
                         <TextBlock Text="出图零件" Style="{StaticResource GroupTitle}"/>
+                        <TextBlock Text="按鼠标右键可以筛选出图部件"
+                                   Foreground="#7A8794"
+                                   FontSize="12"
+                                   Margin="0,-4,0,8"/>
                         <Grid Margin="0,0,0,8">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto"/>
@@ -186,10 +190,10 @@
                             </Grid.ColumnDefinitions>
                             <ComboBox x:Name="TemplateComboBox" SelectedIndex="0">
                                 <ComboBoxItem Content="自动匹配模板"/>
+                                <ComboBoxItem Content="A4-noviews-template-dwg1.prt" Tag="D:\UG智辉钣金插件\DATA\A4-noviews-template-dwg1.prt"/>
+                                <ComboBoxItem Content="A4-noviews-template-dwg3.prt" Tag="D:\UG智辉钣金插件\DATA\A4-noviews-template-dwg3.prt"/>
                                 <ComboBoxItem Content="A4-noviews-template1.prt" Tag="D:\UG智辉钣金插件\DATA\A4-noviews-template1.prt"/>
-                                <ComboBoxItem Content="A4-noviews-template2.prt" Tag="D:\UG智辉钣金插件\DATA\A4-noviews-template2.prt"/>
                                 <ComboBoxItem Content="A4-noviews-template.prt" Tag="D:\UG智辉钣金插件\DATA\A4-noviews-template.prt"/>
-                                <ComboBoxItem Content="A4-noviews-template-.prt" Tag="D:\UG智辉钣金插件\DATA\A4-noviews-template-.prt"/>
                             </ComboBox>
                             <Button Grid.Column="1" Content="管理模板..." Height="28" Margin="6,2,0,8" Padding="0" Click="ManageTemplateButton_Click"/>
                         </Grid>
@@ -212,6 +216,7 @@
                             <ComboBoxItem Content="最大平面最长直边" Tag="largestFaceLongestEdge"/>
                             <ComboBoxItem Content="展开基面展开X向" Tag="flatPatternX"/>
                             <ComboBoxItem Content="手选面跟X向" Tag="manualFaceX"/>
+                            <ComboBoxItem Content="绝对坐标" Tag="absoluteCoordinate"/>
                         </ComboBox>
                         <Grid>
                             <Grid.ColumnDefinitions>

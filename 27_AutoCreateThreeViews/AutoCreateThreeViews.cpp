@@ -92,16 +92,20 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <ctime>
 #include <fstream>
 #include <filesystem>
 #include <functional>
+#include <iomanip>
 #include <limits>
 #include <map>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <uf_draw.h>
@@ -111,6 +115,7 @@
 #include <uf_curve.h>
 #include <uf_eval.h>
 #include <uf_assem.h>
+#include <uf_layer.h>
 #include <uf_modl.h>
 #include <uf_modl_utilities.h>
 #include <uf_obj.h>
@@ -1519,6 +1524,85 @@ void WriteLine(NXOpen::Session* session, const std::string& message)
     }
 }
 
+using TimingClock = std::chrono::steady_clock;
+
+double ElapsedMilliseconds(const TimingClock::time_point& started)
+{
+    return std::chrono::duration<double, std::milli>(TimingClock::now() - started).count();
+}
+
+void WriteTimingLine(
+    NXOpen::Session* session,
+    const std::string& partLabel,
+    const std::string& stage,
+    const TimingClock::time_point& started)
+{
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(1)
+         << "AutoCreateThreeViews: [timing] part=" << partLabel
+         << ", stage=" << stage
+         << ", elapsedMs=" << ElapsedMilliseconds(started)
+         << ".";
+    WriteLine(session, line.str());
+}
+
+class ScopedPartTiming
+{
+public:
+    ScopedPartTiming(NXOpen::Session* session, std::string partLabel)
+        : session_(session), partLabel_(std::move(partLabel)), started_(TimingClock::now())
+    {
+    }
+
+    ~ScopedPartTiming()
+    {
+        WriteTimingLine(session_, partLabel_, "part_total", started_);
+    }
+
+private:
+    NXOpen::Session* session_ = nullptr;
+    std::string partLabel_;
+    TimingClock::time_point started_;
+};
+
+void EnsureLayer230Visible(NXOpen::Session* session, NXOpen::Part* workPart)
+{
+    if (workPart == nullptr)
+    {
+        return;
+    }
+
+    int currentStatus = UF_LAYER_INACTIVE_LAYER;
+    const int askResult = UF_LAYER_ask_status(230, &currentStatus);
+    if (askResult != 0)
+    {
+        WriteLine(
+            session,
+            "AutoCreateThreeViews: ask layer 230 status failed, UF error " +
+                std::to_string(askResult) + ".");
+        return;
+    }
+
+    if (currentStatus == UF_LAYER_WORK_LAYER || currentStatus == UF_LAYER_ACTIVE_LAYER)
+    {
+        WriteLine(session, "AutoCreateThreeViews: layer 230 is already visible.");
+        return;
+    }
+
+    const int setResult = UF_LAYER_set_status(230, UF_LAYER_ACTIVE_LAYER);
+    if (setResult != 0)
+    {
+        WriteLine(
+            session,
+            "AutoCreateThreeViews: open layer 230 failed, UF error " +
+                std::to_string(setResult) + ".");
+        return;
+    }
+
+    UF_DISP_make_display_up_to_date();
+    WriteLine(session, "AutoCreateThreeViews: layer 230 opened before measuring and creating views.");
+}
+
 std::filesystem::path ProgressPathFromRequest(const std::filesystem::path& requestPath)
 {
     std::filesystem::path directory = requestPath.parent_path();
@@ -1983,6 +2067,20 @@ std::string DominantAxisName(const NXOpen::Vector3d& vector)
 
     const double sign = values[dominant] < 0.0 ? -1.0 : 1.0;
     return std::string(sign < 0.0 ? "-" : "") + AxisName(dominant);
+}
+
+int DominantAxisIndex(const NXOpen::Vector3d& vector)
+{
+    const double values[3] = {vector.X, vector.Y, vector.Z};
+    int dominant = 0;
+    for (int axis = 1; axis < 3; ++axis)
+    {
+        if (std::abs(values[axis]) > std::abs(values[dominant]))
+        {
+            dominant = axis;
+        }
+    }
+    return dominant;
 }
 
 std::vector<std::string> ModelViewNamesForNormal(const AutoViewDirection& orientation)
@@ -4176,6 +4274,10 @@ std::string NormalizeFrontDirectionMode(const std::string& value)
     {
         return "manualFaceX";
     }
+    if (mode == "absolutecoordinate" || mode == "absolute" || mode == "absoluteview")
+    {
+        return "absoluteCoordinate";
+    }
     return "overallBoxMaxArea";
 }
 
@@ -4453,6 +4555,7 @@ double EstimateOneToOneLayoutHeight(const ModelBounds& bounds, const RequestValu
 
 double ScaleUsableWidth(const RequestValues& request, double sheetLength);
 double ScaleUsableHeight(const RequestValues& request, double sheetHeight);
+double EffectiveLayoutMargin(const RequestValues& request);
 
 double ChooseSheetScaleDenominator(
     const ModelBounds& bounds,
@@ -4462,8 +4565,9 @@ double ChooseSheetScaleDenominator(
 {
     const double usableWidth = ScaleUsableWidth(request, sheetLength);
     const double usableHeight = ScaleUsableHeight(request, sheetHeight);
-    const double requiredWidth = EstimateOneToOneLayoutWidth(bounds, request) + request.sheetMargin * 2.0;
-    const double requiredHeight = EstimateOneToOneLayoutHeight(bounds, request) + request.sheetMargin * 2.0;
+    const double layoutMargin = EffectiveLayoutMargin(request);
+    const double requiredWidth = EstimateOneToOneLayoutWidth(bounds, request) + layoutMargin * 2.0;
+    const double requiredHeight = EstimateOneToOneLayoutHeight(bounds, request) + layoutMargin * 2.0;
     const double needed = std::max(requiredWidth / usableWidth, requiredHeight / usableHeight);
     const double standards[] = {1.0, 2.0, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0};
     for (double value : standards)
@@ -4541,19 +4645,164 @@ void ApplyDrawingSheetScale(
 
 std::filesystem::path AutoTemplatePath(NXOpen::Part* part, const RequestValues& request)
 {
+    (void)part;
     if (!request.templatePath.empty())
     {
         return PathFromUtf8(request.templatePath);
     }
 
     const std::filesystem::path dataDir = CurrentModuleDirectory().parent_path() / "DATA";
-    const bool named = HasPartName(part);
-    if (request.firstAngle)
+    const std::filesystem::path partTemplate =
+        dataDir /
+        (request.firstAngle ? "A4-noviews-template1.prt" : "A4-noviews-template.prt");
+    if (!request.assemblyDrawing)
     {
-        return dataDir / (named ? "A4-noviews-template1.prt" : "A4-noviews-template2.prt");
+        return partTemplate;
     }
 
-    return dataDir / (named ? "A4-noviews-template.prt" : "A4-noviews-template-.prt");
+    const std::filesystem::path assemblyTemplate =
+        dataDir /
+        (request.firstAngle ? "A4-noviews-template1-ASM.prt" : "A4-noviews-template-ASM.prt");
+    return std::filesystem::exists(assemblyTemplate) ? assemblyTemplate : partTemplate;
+}
+
+std::wstring TextToWide(const std::string& text)
+{
+    if (text.empty())
+    {
+        return std::wstring();
+    }
+
+    UINT codePage = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    int length = MultiByteToWideChar(
+        codePage,
+        flags,
+        text.data(),
+        static_cast<int>(text.size()),
+        nullptr,
+        0);
+    if (length <= 0)
+    {
+        codePage = CP_ACP;
+        flags = 0;
+        length = MultiByteToWideChar(
+            codePage,
+            flags,
+            text.data(),
+            static_cast<int>(text.size()),
+            nullptr,
+            0);
+    }
+    if (length <= 0)
+    {
+        return std::wstring(text.begin(), text.end());
+    }
+
+    std::wstring result(static_cast<size_t>(length), L'\0');
+    MultiByteToWideChar(
+        codePage,
+        flags,
+        text.data(),
+        static_cast<int>(text.size()),
+        result.data(),
+        length);
+    return result;
+}
+
+std::wstring AttributeTypeToChinese(const std::string& type)
+{
+    const std::string lower = ToLowerAscii(Trim(type));
+    if (lower == "string")
+    {
+        return L"\u5b57\u7b26\u4e32";
+    }
+    if (lower == "integer")
+    {
+        return L"\u6574\u6570";
+    }
+    if (lower == "real" || lower == "double")
+    {
+        return L"\u5b9e\u6570";
+    }
+    if (lower == "boolean")
+    {
+        return L"\u5e03\u5c14";
+    }
+    if (lower == "date" || lower == "time")
+    {
+        return L"\u65e5\u671f/\u65f6\u95f4";
+    }
+    return TextToWide(Trim(type));
+}
+
+struct AttributeConflictDetails
+{
+    bool parsed = false;
+    std::string title;
+    std::string templateValue;
+    std::string templateType;
+    std::string existingValue;
+    std::string existingType;
+};
+
+AttributeConflictDetails ParseAttributeConflict(const std::string& nxMessage)
+{
+    AttributeConflictDetails details;
+    const std::regex pattern(
+        R"(duplicate attribute of title '([^']*)' with value '([^']*)' and type ([^.]+)\.\s*Keeping existing value '([^']*)'\s+([^.]+))",
+        std::regex::icase);
+    std::smatch match;
+    if (!std::regex_search(nxMessage, match, pattern) || match.size() != 6)
+    {
+        return details;
+    }
+
+    details.parsed = true;
+    details.title = match[1].str();
+    details.templateValue = match[2].str();
+    details.templateType = Trim(match[3].str());
+    details.existingValue = match[4].str();
+    details.existingType = Trim(match[5].str());
+    return details;
+}
+
+NXOpen::Drawings::DraftingDrawingSheet* CommitDrawingSheetTemplate(
+    NXOpen::Part* part,
+    const std::filesystem::path& templatePath,
+    NXOpen::Drawings::DrawingSheetBuilder::SheetProjectionAngle projection,
+    double sheetScaleDenominator)
+{
+    NXOpen::Drawings::DraftingDrawingSheetBuilder* builder = nullptr;
+    try
+    {
+        builder = part->DraftingDrawingSheets()->CreateDraftingDrawingSheetBuilder(nullptr);
+        builder->SetProjectionAngle(projection);
+        const std::string templatePathText = LocalPathString(templatePath);
+        builder->SetMetricSheetTemplateLocation(templatePathText.c_str());
+        builder->SetStandardMetricScale(NXOpen::Drawings::DrawingSheetBuilder::SheetStandardMetricScaleCustom);
+        builder->SetScaleNumerator(1.0);
+        builder->SetScaleDenominator(sheetScaleDenominator);
+        NXOpen::NXObject* sheetObject = builder->Commit();
+        try
+        {
+            builder->Destroy();
+        }
+        catch (...)
+        {
+            // A successful commit already owns the sheet. Builder cleanup must not
+            // replace that result with NX error 65 if NX invalidated the JAM handle.
+        }
+        builder = nullptr;
+        return dynamic_cast<NXOpen::Drawings::DraftingDrawingSheet*>(sheetObject);
+    }
+    catch (...)
+    {
+        // NX invalidates this JAM builder when template instantiation fails.
+        // Destroying that invalid handle raises error 65 ("NULL tag for this")
+        // and can corrupt the recovery path, so leave cleanup to NX.
+        throw;
+    }
 }
 
 NXOpen::Drawings::DraftingDrawingSheet* CreateDrawingSheet(NXOpen::Session* session, NXOpen::Part* part, const RequestValues& request, double sheetScaleDenominator)
@@ -4564,49 +4813,100 @@ NXOpen::Drawings::DraftingDrawingSheet* CreateDrawingSheet(NXOpen::Session* sess
     }
 
     const std::filesystem::path templatePath = AutoTemplatePath(part, request);
+    std::filesystem::path activeTemplatePath = templatePath;
+    WriteLine(
+        session,
+        "AutoCreateThreeViews: resolved template path: " + LocalPathString(templatePath) +
+            (request.templatePath.empty() ? " (automatic)" : " (selected)"));
     NXOpen::Drawings::DrawingSheetBuilder::SheetProjectionAngle builderProjection =
         request.firstAngle
             ? NXOpen::Drawings::DrawingSheetBuilder::SheetProjectionAngleFirst
             : NXOpen::Drawings::DrawingSheetBuilder::SheetProjectionAngleThird;
 
     NXOpen::Drawings::DraftingDrawingSheet* sheet = nullptr;
-    if (std::filesystem::exists(templatePath))
+    if (std::filesystem::exists(activeTemplatePath))
     {
-        NXOpen::Drawings::DraftingDrawingSheetBuilder* builder =
-            part->DraftingDrawingSheets()->CreateDraftingDrawingSheetBuilder(nullptr);
-        builder->SetProjectionAngle(builderProjection);
-        const std::string templatePathText = LocalPathString(templatePath);
-        builder->SetMetricSheetTemplateLocation(templatePathText.c_str());
-        builder->SetStandardMetricScale(NXOpen::Drawings::DrawingSheetBuilder::SheetStandardMetricScaleCustom);
-        builder->SetScaleNumerator(1.0);
-        builder->SetScaleDenominator(sheetScaleDenominator);
-        NXOpen::NXObject* sheetObject = builder->Commit();
-        builder->Destroy();
-        sheet = dynamic_cast<NXOpen::Drawings::DraftingDrawingSheet*>(sheetObject);
+        try
+        {
+            sheet = CommitDrawingSheetTemplate(
+                part,
+                activeTemplatePath,
+                builderProjection,
+                sheetScaleDenominator);
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            if (ex.ErrorCode() != 512035)
+            {
+                throw;
+            }
+
+            const std::string nxMessage = ex.Message();
+            const AttributeConflictDetails conflict = ParseAttributeConflict(nxMessage);
+            WriteLine(
+                session,
+                "AutoCreateThreeViews: stopped on actual template attribute conflict (NX 512035): " +
+                    nxMessage);
+            std::wostringstream message;
+            message << L"\u65e0\u6cd5\u521b\u5efa\u56fe\u7eb8\u9875\uff0cNX "
+                    << L"\u68c0\u6d4b\u5230\u5c5e\u6027\u51b2\u7a81\u3002\n\n";
+            if (conflict.parsed)
+            {
+                message
+                    << L"\u51b2\u7a81\u5c5e\u6027\uff1a"
+                    << TextToWide(conflict.title) << L"\n"
+                    << L"\u5f53\u524d\u90e8\u4ef6\uff1a"
+                    << AttributeTypeToChinese(conflict.existingType)
+                    << L"\u7c7b\u578b\uff0c\u503c\u4e3a\u201c"
+                    << TextToWide(conflict.existingValue) << L"\u201d\n"
+                    << L"\u6a21\u677f\u5c1d\u8bd5\u5199\u5165\uff1a"
+                    << AttributeTypeToChinese(conflict.templateType)
+                    << L"\u7c7b\u578b\uff0c\u503c\u4e3a\u201c"
+                    << TextToWide(conflict.templateValue) << L"\u201d\n\n"
+                    << L"\u539f\u56e0\uff1a\u90e8\u4ef6\u548c\u6a21\u677f\u4e2d"
+                    << L"\u5b58\u5728\u540c\u540d\u4f46\u7c7b\u578b\u4e0d\u540c\u7684\u5c5e\u6027\u3002\n"
+                    << L"\u8bf7\u5c06\u4e24\u8005\u7684\u5c5e\u6027\u7c7b\u578b\u7edf\u4e00\u540e"
+                    << L"\u91cd\u65b0\u51fa\u56fe\u3002";
+            }
+            else
+            {
+                message
+                    << L"\u672a\u80fd\u4ece NX \u4fe1\u606f\u4e2d\u81ea\u52a8\u63d0\u53d6"
+                    << L"\u5c5e\u6027\u540d\u79f0\u548c\u7c7b\u578b\u3002\n\n"
+                    << L"NX \u539f\u59cb\u9519\u8bef\uff1a"
+                    << TextToWide(nxMessage);
+            }
+            message
+                << L"\n\nNX \u9519\u8bef\u7801\uff1a512035"
+                << L"\n\u6a21\u677f\u8def\u5f84\uff1a" << activeTemplatePath.wstring();
+            MessageBoxW(
+                nullptr,
+                message.str().c_str(),
+                L"\u81ea\u52a8\u521b\u5efa\u4e09\u89c6\u56fe - \u5c5e\u6027\u51b2\u7a81",
+                MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+            return nullptr;
+        }
         if (part->Drafting() != nullptr)
         {
             part->Drafting()->SetTemplateInstantiationIsComplete(true);
         }
-        WriteLine(session, "AutoCreateThreeViews: created sheet from template " + LocalPathString(templatePath));
+        WriteLine(session, "AutoCreateThreeViews: created sheet from template " + LocalPathString(activeTemplatePath));
     }
     else
     {
-        WriteLine(session, "AutoCreateThreeViews: template not found, fallback blank A3: " + request.templatePath);
-        std::ostringstream name;
-        name << "AutoThreeViews_" << std::time(nullptr);
-        NXOpen::Drawings::DrawingSheet::ProjectionAngleType projection =
-            request.firstAngle
-                ? NXOpen::Drawings::DrawingSheet::ProjectionAngleTypeFirstAngle
-                : NXOpen::Drawings::DrawingSheet::ProjectionAngleTypeThirdAngle;
-
-        sheet = part->DraftingDrawingSheets()->InsertSheet(
-            NXOpen::NXString(name.str(), NXOpen::NXString::UTF8),
-            NXOpen::Drawings::DrawingSheet::UnitMillimeters,
-            420.0,
-            297.0,
-            1.0,
-            sheetScaleDenominator,
-            projection);
+        WriteLine(session, "AutoCreateThreeViews: template not found; drawing stopped: " + LocalPathString(templatePath));
+        std::wostringstream message;
+        message << L"找不到出图模板文件。\n\n"
+                << L"投影方式：" << (request.firstAngle ? L"第一角法" : L"第三角法") << L"\n"
+                << L"缺少模板：" << templatePath.filename().wstring() << L"\n"
+                << L"完整路径：" << templatePath.wstring() << L"\n\n"
+                << L"请将模板文件放到以上路径后重新出图。";
+        MessageBoxW(
+            nullptr,
+            message.str().c_str(),
+            L"自动创建三视图 - 缺少模板",
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        return nullptr;
     }
 
     if (sheet != nullptr)
@@ -4839,7 +5139,6 @@ void PreferOverallBoxDirectionWithMostCurves(
         int curveCount = -1;
     };
 
-    const double sizes[3] = {bounds.sizeX, bounds.sizeY, bounds.sizeZ};
     std::vector<BoxDirectionProbe> probes;
     auto pushProbe = [&](const AutoViewDirection& direction, double area, double horizontalLength) {
         BoxDirectionProbe probe;
@@ -4848,66 +5147,104 @@ void PreferOverallBoxDirectionWithMostCurves(
         probe.horizontalLength = horizontalLength;
         probes.push_back(probe);
     };
-    for (int normalAxis = 0; normalAxis < 3; ++normalAxis)
+
+    AutoViewDirection base = frontDirection;
+    double area = base.faceArea;
+    double horizontalLength = base.edgeLength;
+    if (!base.valid)
     {
-        int projectedAxes[2] = {0, 1};
-        int out = 0;
-        for (int axis = 0; axis < 3; ++axis)
+        const double sizes[3] = {bounds.sizeX, bounds.sizeY, bounds.sizeZ};
+        int bestNormalAxis = -1;
+        int bestHorizontalAxis = -1;
+        double bestArea = -1.0;
+        double bestHorizontalLength = -1.0;
+        for (int normalAxis = 0; normalAxis < 3; ++normalAxis)
         {
-            if (axis != normalAxis)
+            int projectedAxes[2] = {0, 1};
+            int out = 0;
+            for (int axis = 0; axis < 3; ++axis)
             {
-                projectedAxes[out++] = axis;
+                if (axis != normalAxis)
+                {
+                    projectedAxes[out++] = axis;
+                }
+            }
+            const int horizontalAxis =
+                sizes[projectedAxes[0]] >= sizes[projectedAxes[1]]
+                    ? projectedAxes[0]
+                    : projectedAxes[1];
+            const double candidateArea = sizes[projectedAxes[0]] * sizes[projectedAxes[1]];
+            const double candidateHorizontalLength = sizes[horizontalAxis];
+            if (candidateArea > bestArea + 1.0e-6 ||
+                (std::abs(candidateArea - bestArea) <= 1.0e-6 &&
+                 candidateHorizontalLength > bestHorizontalLength + 1.0e-6))
+            {
+                bestNormalAxis = normalAxis;
+                bestHorizontalAxis = horizontalAxis;
+                bestArea = candidateArea;
+                bestHorizontalLength = candidateHorizontalLength;
             }
         }
 
-        const int horizontalAxis =
-            sizes[projectedAxes[0]] >= sizes[projectedAxes[1]] ? projectedAxes[0] : projectedAxes[1];
-        const double area = sizes[projectedAxes[0]] * sizes[projectedAxes[1]];
-        const double horizontalLength = sizes[horizontalAxis];
-        if (area <= 1.0e-6 || horizontalLength <= 1.0e-6)
+        if (bestNormalAxis < 0 || bestHorizontalAxis < 0 ||
+            bestArea <= 1.0e-6 || bestHorizontalLength <= 1.0e-6)
         {
-            continue;
+            return;
         }
 
-        AutoViewDirection base;
-        base.normal = AxisVector(normalAxis, 1.0);
-        base.xDirection = AxisVector(horizontalAxis, 1.0);
+        base.normal = AxisVector(bestNormalAxis, 1.0);
+        base.xDirection = AxisVector(bestHorizontalAxis, 1.0);
         StabilizeDirectionSign(base.normal);
         StabilizeDirectionSign(base.xDirection);
         base.normalName = DominantAxisName(base.normal);
         base.xName = DominantAxisName(base.xDirection);
-        base.faceArea = area;
-        base.edgeLength = horizontalLength;
-        base.source = "drafting view curve bounds max area + longest x direction + visible curve count";
+        base.faceArea = bestArea;
+        base.edgeLength = bestHorizontalLength;
         base.valid = true;
-
-        AutoViewDirection rotatedBase = base;
-        rotatedBase.xDirection = NormalizeVector(CrossVector(base.normal, base.xDirection));
-        if (VectorLength(rotatedBase.xDirection) > 1.0e-6)
+        area = bestArea;
+        horizontalLength = bestHorizontalLength;
+    }
+    else
+    {
+        if (area <= 1.0e-6)
         {
-            rotatedBase.xName = DominantAxisName(rotatedBase.xDirection);
-            rotatedBase.source = base.source + " + rotated x";
+            const int normalAxis = DominantAxisIndex(base.normal);
+            int projectedAxes[2] = {0, 1};
+            int out = 0;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                if (axis != normalAxis)
+                {
+                    projectedAxes[out++] = axis;
+                }
+            }
+            const double sizes[3] = {bounds.sizeX, bounds.sizeY, bounds.sizeZ};
+            area = sizes[projectedAxes[0]] * sizes[projectedAxes[1]];
         }
-
-        pushProbe(base, area, horizontalLength);
-        if (rotatedBase.valid && VectorLength(rotatedBase.xDirection) > 1.0e-6)
+        if (horizontalLength <= 1.0e-6)
         {
-            pushProbe(rotatedBase, area, horizontalLength);
-        }
-
-        AutoViewDirection back = ReversedViewDirection(base);
-        back.source = base.source;
-        pushProbe(back, area, horizontalLength);
-
-        AutoViewDirection rotatedBack = ReversedViewDirection(rotatedBase);
-        rotatedBack.source = rotatedBase.source;
-        if (rotatedBack.valid && VectorLength(rotatedBack.xDirection) > 1.0e-6)
-        {
-            pushProbe(rotatedBack, area, horizontalLength);
+            const int horizontalAxis = DominantAxisIndex(base.xDirection);
+            const double sizes[3] = {bounds.sizeX, bounds.sizeY, bounds.sizeZ};
+            horizontalLength = sizes[horizontalAxis];
         }
     }
 
-    if (probes.empty())
+    base.faceArea = area;
+    base.edgeLength = horizontalLength;
+    base.source = "overall box max-area plane + longest x direction + front/back visible curve comparison";
+    pushProbe(base, area, horizontalLength);
+
+    AutoViewDirection back = ReversedViewDirection(base);
+    back.source = base.source;
+    pushProbe(back, area, horizontalLength);
+
+    /*
+      The overall bounding box already selects the projection plane and the
+      longest in-plane X direction. Only the two opposite viewing sides can
+      differ in hidden/visible curve content, so probing all three axes and
+      both in-plane rotations would create ten redundant drafting views.
+    */
+    if (probes.size() != 2)
     {
         return;
     }
@@ -5492,14 +5829,30 @@ double BottomTitleBlockReserve(double sheetHeight)
     return sheetHeight <= 220.0 ? 35.0 : 45.0;
 }
 
+double EffectiveLayoutMargin(const RequestValues& request)
+{
+    const bool createsDimensions =
+        request.autoDimensions &&
+        (request.dimensionOverall ||
+         request.dimensionLinear ||
+         request.dimensionAngle ||
+         request.dimensionHole ||
+         request.dimensionHoleLocation ||
+         request.dimensionInnerClosedCurve);
+    const double annotationSafety = createsDimensions
+        ? std::max(18.0, request.viewSpacing)
+        : 0.0;
+    return std::max(5.0, request.sheetMargin) + annotationSafety;
+}
+
 double ScaleUsableWidth(const RequestValues& request, double sheetLength)
 {
-    return std::max(20.0, sheetLength - request.sheetMargin * 2.0);
+    return std::max(20.0, sheetLength - EffectiveLayoutMargin(request) * 2.0);
 }
 
 double ScaleUsableHeight(const RequestValues& request, double sheetHeight)
 {
-    return std::max(20.0, sheetHeight - request.sheetMargin * 2.0);
+    return std::max(20.0, sheetHeight - EffectiveLayoutMargin(request) * 2.0);
 }
 
 bool AskDisplayedBodyBounds(NXOpen::Drawings::DraftingView* view, double borders[4], bool filterLargeBodies)
@@ -6103,9 +6456,11 @@ bool ProjectedLayoutSizeAtDenominator(
         ViewLayoutSize size = ViewSizeAtDenominator(AskCreatedViewSize(created.view), currentDenominator, targetDenominator);
         if (!size.valid)
         {
-            width = 0.0;
-            height = 0.0;
-            return false;
+            // A very small part measured at the temporary 1:1000 scale can make
+            // an edge-on projected view collapse to a point. That view consumes
+            // no measurable sheet area and must not cancel scale calculation for
+            // the other valid views.
+            continue;
         }
 
         const double plannedDx = created.plannedPoint.X - frontPoint.X;
@@ -6308,7 +6663,7 @@ void LogScaleFormulaDetails(
     std::ostringstream detail;
     detail << "AutoCreateThreeViews: 【比例计算明细-" << stage << "】目标比例 1:" << targetDenominator
            << "，图纸=" << sheetLength << "x" << sheetHeight
-           << "，边距=" << request.sheetMargin
+           << "，有效边距=" << EffectiveLayoutMargin(request)
            << "，间距=" << request.viewSpacing
            << "，比例可用宽=" << usableWidth
            << "，比例可用高=" << usableHeight << "。";
@@ -6436,8 +6791,9 @@ void LogScaleFormulaDetails(
         totalWidth += request.viewSpacing + rightWidth;
     }
     const double totalHeight = std::max(baseHeight, std::max(leftHeight, rightHeight));
-    const double fullWidth = totalWidth + request.sheetMargin * 2.0;
-    const double fullHeight = totalHeight + request.sheetMargin * 2.0;
+    const double layoutMargin = EffectiveLayoutMargin(request);
+    const double fullWidth = totalWidth + layoutMargin * 2.0;
+    const double fullHeight = totalHeight + layoutMargin * 2.0;
     const double widthRatio = totalWidth / std::max(1.0, usableWidth);
     const double heightRatio = totalHeight / std::max(1.0, usableHeight);
 
@@ -6766,6 +7122,59 @@ void SetAllCreatedViewScales(
     }
 }
 
+std::vector<NXOpen::Drawings::DraftingView*> CollectCreatedDraftingViews(
+    const std::vector<CreatedView>& projectedViews,
+    const std::vector<CreatedAuxiliaryView>& auxiliaryViews)
+{
+    std::vector<NXOpen::Drawings::DraftingView*> views;
+    std::set<tag_t> seen;
+    auto addView = [&](NXOpen::Drawings::DraftingView* view) {
+        if (view != nullptr && view->Tag() != NULL_TAG && seen.insert(view->Tag()).second)
+        {
+            views.push_back(view);
+        }
+    };
+    for (const CreatedView& created : projectedViews)
+    {
+        addView(created.view);
+    }
+    for (const CreatedAuxiliaryView& created : auxiliaryViews)
+    {
+        addView(created.view);
+    }
+    return views;
+}
+
+void UpdateCreatedDraftingViews(
+    NXOpen::Session* session,
+    NXOpen::Part* part,
+    const std::vector<CreatedView>& projectedViews,
+    const std::vector<CreatedAuxiliaryView>& auxiliaryViews,
+    const std::string& stage)
+{
+    if (part == nullptr || part->DraftingViews() == nullptr)
+    {
+        return;
+    }
+    const std::vector<NXOpen::Drawings::DraftingView*> views =
+        CollectCreatedDraftingViews(projectedViews, auxiliaryViews);
+    if (views.empty())
+    {
+        return;
+    }
+    try
+    {
+        part->DraftingViews()->UpdateViews(views);
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        std::ostringstream line;
+        line << "AutoCreateThreeViews: update created views failed, stage=" << stage
+             << ", NX " << ex.ErrorCode() << ", " << ex.Message();
+        WriteLine(session, line.str());
+    }
+}
+
 void MoveAuxiliaryViewsByDelta(const std::vector<CreatedAuxiliaryView>& views, double dx, double dy)
 {
     for (const CreatedAuxiliaryView& created : views)
@@ -6796,10 +7205,11 @@ void CenterAllViewsInUsableArea(
         allBounds = MergeBounds(projectedBounds, auxiliaryBounds);
     }
 
-    const double usableMinX = request.sheetMargin;
-    const double usableMaxX = std::max(usableMinX + 20.0, sheetLength - request.sheetMargin);
-    const double usableMinY = request.sheetMargin;
-    const double usableMaxY = std::max(usableMinY + 20.0, sheetHeight - request.sheetMargin);
+    const double layoutMargin = EffectiveLayoutMargin(request);
+    const double usableMinX = layoutMargin;
+    const double usableMaxX = std::max(usableMinX + 20.0, sheetLength - layoutMargin);
+    const double usableMinY = layoutMargin;
+    const double usableMaxY = std::max(usableMinY + 20.0, sheetHeight - layoutMargin);
     const double targetCenterX = (usableMinX + usableMaxX) * 0.5;
     const double targetCenterY = (usableMinY + usableMaxY) * 0.5 + 10.0;
     const double currentCenterX = (allBounds.minX + allBounds.maxX) * 0.5;
@@ -6848,10 +7258,11 @@ void ArrangeAuxiliaryViews(
         return;
     }
 
-    const double usableMinX = request.sheetMargin;
-    const double usableMinY = request.sheetMargin;
-    const double usableMaxX = std::max(usableMinX + 20.0, sheetLength - request.sheetMargin);
-    const double usableMaxY = std::max(usableMinY + 20.0, sheetHeight - request.sheetMargin);
+    const double layoutMargin = EffectiveLayoutMargin(request);
+    const double usableMinX = layoutMargin;
+    const double usableMinY = layoutMargin;
+    const double usableMaxX = std::max(usableMinX + 20.0, sheetLength - layoutMargin);
+    const double usableMaxY = std::max(usableMinY + 20.0, sheetHeight - layoutMargin);
     LayoutBounds baseBounds = BoundsForCreatedViews(projectedViews);
     const bool hasProjected = baseBounds.maxX > baseBounds.minX && baseBounds.maxY > baseBounds.minY;
     if (!hasProjected)
@@ -16702,8 +17113,8 @@ void ArrangeAllViewsInMemory(
             return first.width * first.height > second.width * second.height;
         });
 
-        const double usableWidth = std::max(20.0, sheetLength - request.sheetMargin * 2.0);
-        const double usableHeight = std::max(20.0, sheetHeight - request.sheetMargin * 2.0);
+        const double usableWidth = ScaleUsableWidth(request, sheetLength);
+        const double usableHeight = ScaleUsableHeight(request, sheetHeight);
         const double preferredFlatSpread = std::max(request.viewSpacing * 3.0, 60.0);
         const double maxFlatSpread = std::min(std::max(request.viewSpacing * 6.0, 120.0), std::max(usableWidth, usableHeight) * 0.45);
         const double flatSpreadWeight = std::max(1.0, std::max(usableWidth, usableHeight) * 0.05);
@@ -16970,10 +17381,11 @@ void ArrangeAllViewsInMemory(
         allTargets = MergeBounds(allTargets, placement.target);
     }
 
-    const double usableMinX = request.sheetMargin;
-    const double usableMaxX = std::max(usableMinX + 20.0, sheetLength - request.sheetMargin);
-    const double usableMinY = request.sheetMargin;
-    const double usableMaxY = std::max(usableMinY + 20.0, sheetHeight - request.sheetMargin);
+    const double layoutMargin = EffectiveLayoutMargin(request);
+    const double usableMinX = layoutMargin;
+    const double usableMaxX = std::max(usableMinX + 20.0, sheetLength - layoutMargin);
+    const double usableMinY = layoutMargin;
+    const double usableMaxY = std::max(usableMinY + 20.0, sheetHeight - layoutMargin);
     const double targetCenterX = (usableMinX + usableMaxX) * 0.5;
     const double targetCenterY = (usableMinY + usableMaxY) * 0.5 + 10.0;
     double dx = targetCenterX - (allTargets.minX + allTargets.maxX) * 0.5;
@@ -17080,10 +17492,11 @@ std::vector<PlannedView> BuildProjectedLayout(
         AddBounds(layoutBounds, view.point, side ? sideViewWidth : viewWidth, side ? sideViewHeight : viewHeight, &initialized);
     }
 
-    const double usableMinX = request.sheetMargin;
-    const double usableMaxX = std::max(usableMinX + 20.0, sheetLength - request.sheetMargin);
-    const double usableMinY = request.sheetMargin;
-    const double usableMaxY = std::max(usableMinY + 20.0, sheetHeight - request.sheetMargin);
+    const double layoutMargin = EffectiveLayoutMargin(request);
+    const double usableMinX = layoutMargin;
+    const double usableMaxX = std::max(usableMinX + 20.0, sheetLength - layoutMargin);
+    const double usableMinY = layoutMargin;
+    const double usableMaxY = std::max(usableMinY + 20.0, sheetHeight - layoutMargin);
     const double targetCenterX = (usableMinX + usableMaxX) * 0.5;
     const double targetCenterY = (usableMinY + usableMaxY) * 0.5;
     const double currentCenterX = (layoutBounds.minX + layoutBounds.maxX) * 0.5;
@@ -17402,11 +17815,15 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         }
 
         const std::string partLabel = PartResultName(workPart);
+        ScopedPartTiming totalTiming(session, partLabel);
+        TimingClock::time_point stageStarted = TimingClock::now();
         const RequestValues request = ReadRequestFile(requestPath);
         WriteLine(session, "AutoCreateThreeViews: execute request work part=" + partLabel + ".");
+        EnsureLayer230Visible(session, workPart);
         const ModelBounds bounds = AskModelBounds(workPart);
         const std::string frontDirectionMode = NormalizeFrontDirectionMode(request.frontDirectionMode);
         const bool manualFrontDirection = frontDirectionMode == "manualFaceX";
+        const bool absoluteFrontDirection = frontDirectionMode == "absoluteCoordinate";
         WriteLine(
             session,
             std::string("AutoCreateThreeViews: request front direction raw=") +
@@ -17417,7 +17834,13 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                 (request.assemblyDrawing ? "true" : "false") +
                 ".");
         AutoViewDirection frontDirection;
-        if (manualFrontDirection)
+        if (absoluteFrontDirection)
+        {
+            WriteLine(
+                session,
+                "AutoCreateThreeViews: absolute coordinate front direction active; use NX Front modeling view.");
+        }
+        else if (manualFrontDirection)
         {
             WriteLine(session, "AutoCreateThreeViews: manual front direction mode active; switch to modeling before selection.");
             try
@@ -17450,7 +17873,10 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                 WriteLine(session, "AutoCreateThreeViews: assembly leaf front direction not found; fallback to Top model view as front view.");
             }
         }
-        if (!frontDirection.valid && (!request.assemblyDrawing || manualFrontDirection))
+        WriteTimingLine(session, partLabel, "model_bounds_and_front_direction", stageStarted);
+        if (!frontDirection.valid &&
+            !absoluteFrontDirection &&
+            (!request.assemblyDrawing || manualFrontDirection))
         {
             const std::string failureMessage = FrontDirectionFailureMessage(frontDirectionMode);
             WriteLine(session, "AutoCreateThreeViews: front view not created; " + failureMessage);
@@ -17463,6 +17889,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             WriteProgressFile(requestPath, 1, 1, "Drawing " + partLabel, false);
         }
 
+        stageStarted = TimingClock::now();
         NXOpen::Drawings::DraftingDrawingSheet* sheet = CreateDrawingSheet(session, workPart, request, 1.0);
         if (sheet == nullptr)
         {
@@ -17499,11 +17926,14 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         catch (...)
         {
         }
+        WriteTimingLine(session, partLabel, "create_and_open_drawing_sheet", stageStarted);
 
-        const double temporarySheetScaleDenominator = 100.0;
+        const double temporarySheetScaleDenominator = 1000.0;
+        stageStarted = TimingClock::now();
         ApplyDrawingSheetScale(session, workPart, sheet, temporarySheetScaleDenominator);
         const double viewScaleDenominator = temporarySheetScaleDenominator;
-        if ((request.assemblyDrawing && !manualFrontDirection) || frontDirectionMode == "overallBoxMaxArea")
+        if ((request.assemblyDrawing && !manualFrontDirection && !absoluteFrontDirection) ||
+            frontDirectionMode == "overallBoxMaxArea")
         {
             PreferOverallBoxDirectionWithMostCurves(session, workPart, frontDirection, viewScaleDenominator);
         }
@@ -17511,7 +17941,9 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         {
             PreferBackSideIfMoreCurves(session, workPart, frontDirection, viewScaleDenominator);
         }
+        WriteTimingLine(session, partLabel, "temporary_scale_and_direction_probes", stageStarted);
 
+        stageStarted = TimingClock::now();
         int createdCount = 0;
         const std::vector<PlannedView> plannedViews =
             BuildProjectedLayout(request, bounds, viewScaleDenominator, sheetLength, sheetHeight);
@@ -17658,16 +18090,17 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                 ++createdCount;
             }
         }
+        WriteTimingLine(session, partLabel, "create_projected_and_auxiliary_views", stageStarted);
 
-        if (workPart->DraftingViews() != nullptr)
-        {
-            workPart->DraftingViews()->UpdateViews(NXOpen::Drawings::DraftingViewCollection::ViewUpdateOptionAll);
-        }
+        stageStarted = TimingClock::now();
+        UpdateCreatedDraftingViews(
+            session,
+            workPart,
+            createdProjectedViews,
+            auxiliaryViews,
+            "after_create");
         ArrangeCreatedProjectedViews(request, createdProjectedViews, sheetLength, sheetHeight);
-        if (workPart->DraftingViews() != nullptr)
-        {
-            workPart->DraftingViews()->UpdateViews(NXOpen::Drawings::DraftingViewCollection::ViewUpdateOptionAll);
-        }
+        WriteTimingLine(session, partLabel, "initial_view_updates_and_arrangement", stageStarted);
         const double measuredScaleDenominator = temporarySheetScaleDenominator;
 
         std::ostringstream roughLog;
@@ -17675,6 +18108,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                  << " drafting curves, calculate final scale before final layout.";
         WriteLine(session, roughLog.str());
 
+        stageStarted = TimingClock::now();
         double sheetScaleDenominator = ChooseScaleDenominatorFromOneToOneActualSizes(
             session,
             request,
@@ -17705,26 +18139,39 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                 WriteLine(session, "AutoCreateThreeViews: final layout usage is tight; enlarge scale before visible layout to 1:" + std::to_string(static_cast<int>(sheetScaleDenominator)) + ".");
             }
         }
+        WriteTimingLine(session, partLabel, "measure_curves_and_choose_final_scale", stageStarted);
+
+        stageStarted = TimingClock::now();
         ApplyDrawingSheetScale(session, workPart, sheet, sheetScaleDenominator);
         SetAllCreatedViewScales(session, workPart, createdProjectedViews, auxiliaryViews, sheetScaleDenominator);
-        if (workPart->DraftingViews() != nullptr)
-        {
-            workPart->DraftingViews()->UpdateViews(NXOpen::Drawings::DraftingViewCollection::ViewUpdateOptionAll);
-        }
+        UpdateCreatedDraftingViews(
+            session,
+            workPart,
+            createdProjectedViews,
+            auxiliaryViews,
+            "after_final_scale");
         ArrangeAllViewsInMemory(request, createdProjectedViews, auxiliaryViews, sheetLength, sheetHeight);
-        if (workPart->DraftingViews() != nullptr)
-        {
-            workPart->DraftingViews()->UpdateViews(NXOpen::Drawings::DraftingViewCollection::ViewUpdateOptionAll);
-        }
+        WriteTimingLine(session, partLabel, "apply_final_scale_update_and_arrange", stageStarted);
+
+        stageStarted = TimingClock::now();
         CreateProjectedOverallDimensions(session, workPart, request, createdProjectedViews, frontDirection);
         CreateFlatPatternOverallDimensions(session, workPart, request, auxiliaryViews);
         CreateFlatPatternNoteBelowView(session, workPart, request, auxiliaryViews);
         CreateTechnicalRequirementNote(session, workPart, request, sheetLength, sheetHeight);
-        if (workPart->DraftingViews() != nullptr)
-        {
-            workPart->DraftingViews()->UpdateViews(NXOpen::Drawings::DraftingViewCollection::ViewUpdateOptionAll);
-        }
+        WriteTimingLine(session, partLabel, "dimensions_and_notes", stageStarted);
+
+        stageStarted = TimingClock::now();
+        UpdateCreatedDraftingViews(
+            session,
+            workPart,
+            createdProjectedViews,
+            auxiliaryViews,
+            "after_dimensions");
+        WriteTimingLine(session, partLabel, "final_view_update", stageStarted);
+
+        stageStarted = TimingClock::now();
         ClearCreatedDrawingSelectionAndHighlights(session, workPart, createdProjectedViews, auxiliaryViews);
+        WriteTimingLine(session, partLabel, "clear_selection_and_highlights", stageStarted);
 
         std::ostringstream result;
         result << u8"成功：" << partLabel

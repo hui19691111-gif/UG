@@ -1,8 +1,15 @@
 #include "AutoCreateThreeViews.hpp"
 
 #include <NXOpen/BasePart.hxx>
+#include <NXOpen/Body.hxx>
+#include <NXOpen/BodyCollection.hxx>
+#include <NXOpen/DisplayableObject.hxx>
+#include <NXOpen/Drawings_DrawingSheetCollection.hxx>
+#include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
+#include <NXOpen/NXObject.hxx>
 #include <NXOpen/NXObjectManager.hxx>
 #include <NXOpen/PartCollection.hxx>
 #include <NXOpen/PartLoadStatus.hxx>
@@ -24,8 +31,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <map>
 #include <set>
 #include <sstream>
@@ -63,12 +72,21 @@ std::vector<tag_t> g_assemblyOccurrenceTags;
 std::set<tag_t> g_knownHighlightedOccurrences;
 tag_t g_highlightedOccurrence = NULL_TAG;
 
+struct AssemblyFilterMetadata
+{
+    bool hasDrawingSheets = false;
+    bool isSheetMetal = false;
+    std::string attributes;
+};
+
+std::map<tag_t, AssemblyFilterMetadata> g_assemblyFilterMetadataByPart;
+
 struct SelectedDrawingPart
 {
     int index = 0;
     tag_t occurrence = NULL_TAG;
     tag_t prototypePart = NULL_TAG;
-    bool rootAssembly = false;
+    bool assemblyDrawing = false;
 };
 
 std::filesystem::path CurrentModuleDirectory()
@@ -121,6 +139,27 @@ void WriteLauncherLog(const std::string& message)
     catch (...)
     {
     }
+}
+
+using LauncherTimingClock = std::chrono::steady_clock;
+
+void WriteLauncherTiming(
+    const std::string& stage,
+    const LauncherTimingClock::time_point& started,
+    const std::string& detail = std::string())
+{
+    const double elapsedMs =
+        std::chrono::duration<double, std::milli>(LauncherTimingClock::now() - started).count();
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(1)
+         << "AutoCreateThreeViews: [timing] stage=" << stage
+         << ", elapsedMs=" << elapsedMs;
+    if (!detail.empty())
+    {
+        line << ", " << detail;
+    }
+    line << ".";
+    WriteLauncherLog(line.str());
 }
 
 std::string PartNameForLog(tag_t partTag)
@@ -255,6 +294,185 @@ std::string EscapeManifestValue(const std::string& value)
     return escaped.str();
 }
 
+std::string NxStringToUtf8(const NXOpen::NXString& value)
+{
+    const char* text = value.GetUTF8Text();
+    return text == nullptr ? std::string() : std::string(text);
+}
+
+std::string FormatAttributeValue(const NXOpen::NXObject::AttributeInformation& attribute)
+{
+    std::ostringstream value;
+    switch (attribute.Type)
+    {
+    case NXOpen::NXObject::AttributeTypeBoolean:
+        return attribute.BooleanValue ? "true" : "false";
+    case NXOpen::NXObject::AttributeTypeInteger:
+        value << attribute.IntegerValue;
+        return value.str();
+    case NXOpen::NXObject::AttributeTypeReal:
+        value << std::setprecision(15) << attribute.RealValue;
+        return value.str();
+    case NXOpen::NXObject::AttributeTypeString:
+        return NxStringToUtf8(attribute.StringValue);
+    case NXOpen::NXObject::AttributeTypeTime:
+        return NxStringToUtf8(attribute.TimeValue);
+    default:
+        return "";
+    }
+}
+
+NXOpen::Part* ResolvePartFromTag(tag_t partTag)
+{
+    if (partTag == NULL_TAG)
+    {
+        return nullptr;
+    }
+
+    try
+    {
+        return dynamic_cast<NXOpen::Part*>(NXOpen::NXObjectManager::Get(partTag));
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+
+bool EnsurePartFullyLoaded(NXOpen::Part* part)
+{
+    if (part == nullptr)
+    {
+        return false;
+    }
+
+    try
+    {
+        if (part->IsFullyLoaded())
+        {
+            return true;
+        }
+
+        NXOpen::PartLoadStatus* status = part->LoadFully();
+        delete status;
+        return part->IsFullyLoaded();
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+AssemblyFilterMetadata ClassifyPartForAssemblyFilter(tag_t partTag)
+{
+    const auto cached = g_assemblyFilterMetadataByPart.find(partTag);
+    if (cached != g_assemblyFilterMetadataByPart.end())
+    {
+        return cached->second;
+    }
+
+    AssemblyFilterMetadata metadata;
+    NXOpen::Part* part = ResolvePartFromTag(partTag);
+    if (part == nullptr)
+    {
+        g_assemblyFilterMetadataByPart[partTag] = metadata;
+        return metadata;
+    }
+
+    EnsurePartFullyLoaded(part);
+
+    try
+    {
+        NXOpen::Drawings::DrawingSheetCollection* sheets = part->DrawingSheets();
+        metadata.hasDrawingSheets = sheets != nullptr && sheets->begin() != sheets->end();
+    }
+    catch (...)
+    {
+    }
+
+    try
+    {
+        if (part->Bodies() != nullptr &&
+            part->Features() != nullptr &&
+            part->Features()->SheetmetalManager() != nullptr)
+        {
+            NXOpen::Features::SheetMetal::SheetmetalManager* manager =
+                part->Features()->SheetmetalManager();
+            for (NXOpen::BodyCollection::iterator it = part->Bodies()->begin();
+                 it != part->Bodies()->end();
+                 ++it)
+            {
+                NXOpen::Body* body = *it;
+                if (body == nullptr || !body->IsSolidBody() || body->IsSheetBody())
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (manager->GetBodyThickness(body) > 1.0e-6)
+                    {
+                        metadata.isSheetMetal = true;
+                        break;
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+
+    try
+    {
+        std::ostringstream attributes;
+        for (const NXOpen::NXObject::AttributeInformation& attribute : part->GetUserAttributes())
+        {
+            if (attribute.Unset)
+            {
+                continue;
+            }
+
+            const std::string title = TrimText(NxStringToUtf8(attribute.Title));
+            if (title.empty())
+            {
+                continue;
+            }
+
+            attributes << title << '\x1f' << FormatAttributeValue(attribute) << '\x1e';
+        }
+        metadata.attributes = attributes.str();
+    }
+    catch (...)
+    {
+    }
+
+    g_assemblyFilterMetadataByPart[partTag] = metadata;
+    return metadata;
+}
+
+bool IsOccurrenceHidden(tag_t occurrence)
+{
+    if (occurrence == NULL_TAG)
+    {
+        return false;
+    }
+
+    try
+    {
+        NXOpen::DisplayableObject* displayable =
+            dynamic_cast<NXOpen::DisplayableObject*>(NXOpen::NXObjectManager::Get(occurrence));
+        return displayable != nullptr && displayable->IsBlanked();
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 std::string BaseNameFromPathText(const std::string& pathText)
 {
     try
@@ -365,13 +583,22 @@ void WriteAssemblyManifestLine(
     tag_t parentOccurrence,
     int depth,
     const std::string& displayName,
-    const std::string& partName)
+    const std::string& partName,
+    bool isAssembly)
 {
+    const tag_t prototypePart =
+        occurrence == NULL_TAG ? UF_PART_ask_display_part() : UF_ASSEM_ask_prototype_of_occ(occurrence);
+    const AssemblyFilterMetadata metadata = ClassifyPartForAssemblyFilter(prototypePart);
     output << "id=" << static_cast<unsigned long long>(occurrence)
            << "\tparent=" << static_cast<unsigned long long>(parentOccurrence)
            << "\tdepth=" << depth
            << "\tname=" << EscapeManifestValue(displayName)
            << "\tpart=" << EscapeManifestValue(partName)
+           << "\tassembly=" << (isAssembly ? "true" : "false")
+           << "\tdrawing=" << (metadata.hasDrawingSheets ? "true" : "false")
+           << "\tsheetMetal=" << (metadata.isSheetMetal ? "true" : "false")
+           << "\thidden=" << (IsOccurrenceHidden(occurrence) ? "true" : "false")
+           << "\tattributes=" << EscapeManifestValue(metadata.attributes)
            << '\n';
 
     if (occurrence != NULL_TAG)
@@ -394,7 +621,20 @@ void WriteAssemblyChildren(std::ofstream& output, tag_t parentOccurrence, int de
         const tag_t child = children[index];
         const std::string partName = PartNameFromOccurrence(child);
         const std::string displayName = DisplayNameFromOccurrence(child, partName);
-        WriteAssemblyManifestLine(output, child, parentOccurrence, depth, displayName, partName);
+        tag_t* grandchildren = nullptr;
+        const int grandchildCount = UF_ASSEM_ask_part_occ_children(child, &grandchildren);
+        if (grandchildren != nullptr)
+        {
+            UF_free(grandchildren);
+        }
+        WriteAssemblyManifestLine(
+            output,
+            child,
+            parentOccurrence,
+            depth,
+            displayName,
+            partName,
+            grandchildCount > 0);
         WriteAssemblyChildren(output, child, depth + 1);
     }
 
@@ -472,6 +712,7 @@ void UnhighlightDisplayedAssemblyTree(int& clearedCount)
 
 bool WriteAssemblyManifest(const std::filesystem::path& manifestPath)
 {
+    const LauncherTimingClock::time_point started = LauncherTimingClock::now();
     std::error_code ignored;
     std::filesystem::create_directories(manifestPath.parent_path(), ignored);
     int clearedCount = 0;
@@ -482,6 +723,7 @@ bool WriteAssemblyManifest(const std::filesystem::path& manifestPath)
         UF_DISP_make_display_up_to_date();
     }
     g_assemblyOccurrenceTags.clear();
+    g_assemblyFilterMetadataByPart.clear();
     g_knownHighlightedOccurrences.clear();
     g_highlightedOccurrence = NULL_TAG;
 
@@ -489,24 +731,45 @@ bool WriteAssemblyManifest(const std::filesystem::path& manifestPath)
     if (!output)
     {
         WriteLauncherLog("AutoCreateThreeViews: cannot create assembly manifest=" + manifestPath.string() + ".");
+        WriteLauncherTiming("build_assembly_manifest_failed", started);
         return false;
     }
 
     const tag_t displayPart = UF_PART_ask_display_part();
     if (displayPart == NULL_TAG)
     {
+        WriteLauncherTiming("build_assembly_manifest_failed", started, "reason=no_display_part");
         return false;
     }
 
     const std::string rootPartName = PartNameFromPartTag(displayPart);
     const std::string rootDisplayName = DisplayNameFromOccurrence(NULL_TAG, rootPartName);
     const tag_t rootOccurrence = UF_ASSEM_ask_root_part_occ(displayPart);
-    WriteAssemblyManifestLine(output, rootOccurrence, NULL_TAG, 0, rootDisplayName, rootPartName);
+    tag_t* rootChildren = nullptr;
+    const int rootChildCount =
+        rootOccurrence == NULL_TAG ? 0 : UF_ASSEM_ask_part_occ_children(rootOccurrence, &rootChildren);
+    if (rootChildren != nullptr)
+    {
+        UF_free(rootChildren);
+    }
+    WriteAssemblyManifestLine(
+        output,
+        rootOccurrence,
+        NULL_TAG,
+        0,
+        rootDisplayName,
+        rootPartName,
+        rootChildCount > 0);
     if (rootOccurrence != NULL_TAG)
     {
         WriteAssemblyChildren(output, rootOccurrence, 1);
     }
 
+    WriteLauncherTiming(
+        "build_assembly_manifest",
+        started,
+        "occurrences=" + std::to_string(g_assemblyOccurrenceTags.size()) +
+            ", uniqueParts=" + std::to_string(g_assemblyFilterMetadataByPart.size()));
     return true;
 }
 
@@ -678,7 +941,7 @@ void WriteSinglePartRequest(
     const std::filesystem::path& requestPath,
     const std::map<std::string, std::string>& values,
     int index,
-    bool rootAssembly)
+    bool assemblyDrawing)
 {
     static const std::vector<std::string> settingKeys = {
         "templatePath",
@@ -713,7 +976,7 @@ void WriteSinglePartRequest(
     std::ofstream output(requestPath, std::ios::binary);
     output << "action=create\n";
     output << "selectedOccurrenceTag=" << FindPartValue(values, index, "occurrenceTag") << '\n';
-    output << "assemblyDrawing=" << (rootAssembly ? "true" : "false") << '\n';
+    output << "assemblyDrawing=" << (assemblyDrawing ? "true" : "false") << '\n';
     for (const std::string& key : settingKeys)
     {
         output << key << '=' << FindPartValue(values, index, key, FindValue(values, key)) << '\n';
@@ -1200,6 +1463,7 @@ bool ApplySelectedOccurrenceFromRequest(const std::filesystem::path& requestPath
 
 void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
 {
+    const LauncherTimingClock::time_point batchStarted = LauncherTimingClock::now();
     BeginAutoCreateThreeViewsRunResults();
     g_uiMonitor.showRunResults = false;
 
@@ -1221,6 +1485,7 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
             }
         }
         ExecuteAutoCreateThreeViewsFromRequest(requestPath);
+        WriteLauncherTiming("ui_request_total", batchStarted, "parts=1");
         return;
     }
 
@@ -1232,18 +1497,6 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
         {
             const bool isRootOccurrence = IsRootOccurrence(occurrenceTag, previousDisplayPart);
             const bool hasChildren = OccurrenceHasChildren(occurrenceTag);
-            if (!isRootOccurrence && hasChildren)
-            {
-                std::ostringstream log;
-                log << "AutoCreateThreeViews: selected occurrence is subassembly; skip drawing index="
-                    << index
-                    << ", occurrence=" << static_cast<unsigned long long>(occurrenceTag)
-                    << ", isRoot=" << (isRootOccurrence ? "yes" : "no")
-                    << ", hasChildren=" << (hasChildren ? "yes" : "no") << ".";
-                WriteLauncherLog(log.str());
-                AddAutoCreateThreeViewsRunResultLine(u8"跳过：装配体或根节点不生成工程图。");
-                continue;
-            }
 
             const tag_t prototypePart = PrototypePartFromOccurrence(occurrenceTag);
             if (prototypePart == NULL_TAG)
@@ -1257,7 +1510,7 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
                 continue;
             }
 
-            drawingParts.push_back({index, occurrenceTag, prototypePart, isRootOccurrence});
+            drawingParts.push_back({index, occurrenceTag, prototypePart, isRootOccurrence || hasChildren});
         }
     }
 
@@ -1270,7 +1523,7 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
     {
         g_uiMonitor.showRunResults =
             drawingParts.size() > 1 ||
-            (drawingParts.size() == 1 && drawingParts.front().rootAssembly);
+            (drawingParts.size() == 1 && drawingParts.front().assemblyDrawing);
     }
 
     int progressIndex = 0;
@@ -1290,6 +1543,7 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
     }
     for (const SelectedDrawingPart& selected : drawingParts)
     {
+        const LauncherTimingClock::time_point partStarted = LauncherTimingClock::now();
         ++progressIndex;
         const std::string progressPartName = ProgressPartDisplayName(values, selected.index, selected.prototypePart);
         const bool manualFrontDirection = IsManualPartFrontDirection(values, selected.index);
@@ -1338,14 +1592,24 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
         partRequestPath += ".part";
         partRequestPath += std::to_string(selected.index);
         partRequestPath += ".request";
-        WriteSinglePartRequest(partRequestPath, values, selected.index, selected.rootAssembly);
+        WriteSinglePartRequest(partRequestPath, values, selected.index, selected.assemblyDrawing);
         ExecuteAutoCreateThreeViewsFromRequest(partRequestPath);
+        WriteLauncherTiming(
+            "batch_part_total",
+            partStarted,
+            "index=" + std::to_string(progressIndex) +
+                "/" + std::to_string(progressTotal) +
+                ", part=" + progressPartName);
 
         std::error_code ignored;
         std::filesystem::remove(partRequestPath, ignored);
     }
 
     WriteProgressFile(requestPath, progressTotal, progressTotal, "Drawing finished.", true);
+    WriteLauncherTiming(
+        "ui_request_total",
+        batchStarted,
+        "parts=" + std::to_string(progressTotal));
     WriteLauncherLog("AutoCreateThreeViews: keep last drawing part displayed after UI request.");
 }
 
