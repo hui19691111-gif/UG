@@ -44,12 +44,11 @@
 
 namespace
 {
+constexpr double kDimensionPullInScale = 2.0 / 3.0;
 std::unordered_map<std::string, int> g_dimensionLayoutLayers;
 
 void DimensionDebugLog(const std::string& message)
 {
-	(void)message;
-	return;
 	try
 	{
 		std::ofstream out("D:\\ZiDonCuTu_side_dim_debug.log", std::ios::out | std::ios::app);
@@ -380,6 +379,7 @@ NXOpen::Drawings::DraftingCurve* FindRepresentativeCurveForFace(
 		}
 
 		NXOpen::Point3d candidatePoint(0.0, 0.0, 0.0);
+		NXOpen::Point3d candidateAssociativityPoint(0.0, 0.0, 0.0);
 		bool hasCandidatePoint = false;
 		if (candidateIsLine)
 		{
@@ -400,6 +400,10 @@ NXOpen::Drawings::DraftingCurve* FindRepresentativeCurveForFace(
 					(startPoint[0] + endPoint[0]) * 0.5,
 					(startPoint[1] + endPoint[1]) * 0.5,
 					0.0);
+				candidateAssociativityPoint = NXOpen::Point3d(
+					(lineData.start_point[0] + lineData.end_point[0]) * 0.5,
+					(lineData.start_point[1] + lineData.end_point[1]) * 0.5,
+					(lineData.start_point[2] + lineData.end_point[2]) * 0.5);
 				hasCandidatePoint = true;
 			}
 		}
@@ -415,6 +419,10 @@ NXOpen::Drawings::DraftingCurve* FindRepresentativeCurveForFace(
 					if (UF_VIEW_map_model_to_drawing(baseView->Tag(), arcData.center, center) == 0)
 					{
 						candidatePoint = NXOpen::Point3d(center[0], center[1], 0.0);
+						candidateAssociativityPoint = NXOpen::Point3d(
+							arcData.center[0],
+							arcData.center[1],
+							arcData.center[2]);
 						hasCandidatePoint = true;
 					}
 				}
@@ -456,7 +464,7 @@ NXOpen::Drawings::DraftingCurve* FindRepresentativeCurveForFace(
 		{
 			bestScore = score;
 			bestCurve = candidate;
-			bestPoint = candidatePoint;
+			bestPoint = candidateAssociativityPoint;
 		}
 	}
 	if (selectedPoint != NULL)
@@ -600,6 +608,68 @@ bool TryGetLineCurveData(
 	}
 	return UF_VIEW_map_model_to_drawing(baseView->Tag(), lineData.start_point, startDrawingPoint) == 0 &&
 		UF_VIEW_map_model_to_drawing(baseView->Tag(), lineData.end_point, endDrawingPoint) == 0;
+}
+
+bool TryGetDraftingCurveEndpointNearestDrawingPoint(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingCurve* draftingCurve,
+	const NXOpen::Point3d& referenceDrawingPoint,
+	NXOpen::Point3d& nearestEndpoint,
+	NXOpen::InferSnapType::SnapType& nearestSnapType)
+{
+	nearestEndpoint = NXOpen::Point3d(0.0, 0.0, 0.0);
+	nearestSnapType = NXOpen::InferSnapType::SnapTypeExist;
+	if (baseView == NULL || draftingCurve == NULL)
+	{
+		return false;
+	}
+
+	UF_EVAL_p_t evaluator = NULL;
+	if (UF_EVAL_initialize(draftingCurve->Tag(), &evaluator) != 0 || evaluator == NULL)
+	{
+		return false;
+	}
+
+	double limits[2] = { 0.0, 0.0 };
+	if (UF_EVAL_ask_limits(evaluator, limits) != 0)
+	{
+		UF_EVAL_free(evaluator);
+		return false;
+	}
+
+	double modelEndpoints[2][3] = {};
+	double derivatives[3] = { 0.0, 0.0, 0.0 };
+	if (UF_EVAL_evaluate(evaluator, 0, limits[0], modelEndpoints[0], derivatives) != 0 ||
+		UF_EVAL_evaluate(evaluator, 0, limits[1], modelEndpoints[1], derivatives) != 0)
+	{
+		UF_EVAL_free(evaluator);
+		return false;
+	}
+	UF_EVAL_free(evaluator);
+
+	double drawingEndpoints[2][2] = {};
+	if (UF_VIEW_map_model_to_drawing(baseView->Tag(), modelEndpoints[0], drawingEndpoints[0]) != 0 ||
+		UF_VIEW_map_model_to_drawing(baseView->Tag(), modelEndpoints[1], drawingEndpoints[1]) != 0)
+	{
+		return false;
+	}
+
+	const double firstDx = drawingEndpoints[0][0] - referenceDrawingPoint.X;
+	const double firstDy = drawingEndpoints[0][1] - referenceDrawingPoint.Y;
+	const double secondDx = drawingEndpoints[1][0] - referenceDrawingPoint.X;
+	const double secondDy = drawingEndpoints[1][1] - referenceDrawingPoint.Y;
+	const int nearestIndex =
+		(firstDx * firstDx + firstDy * firstDy) <= (secondDx * secondDx + secondDy * secondDy)
+		? 0
+		: 1;
+	nearestEndpoint = NXOpen::Point3d(
+		modelEndpoints[nearestIndex][0],
+		modelEndpoints[nearestIndex][1],
+		modelEndpoints[nearestIndex][2]);
+	nearestSnapType = nearestIndex == 0
+		? NXOpen::InferSnapType::SnapTypeStart
+		: NXOpen::InferSnapType::SnapTypeEnd;
+	return true;
 }
 
 bool TryIntersectDrawingLines(
@@ -798,10 +868,13 @@ NXOpen::Point3d ChooseAngularOriginFromBisector(
 	}
 
 	const double angleOffsets[] = { 0.0, 0.2617993878, -0.2617993878, 0.4363323130, -0.4363323130 };
-	const double distances[] = { 5.0, 7.0, 9.0, 12.0, 16.0, 20.0 };
+	const double distances[] = { 5.0 * kDimensionPullInScale, 7.0 * kDimensionPullInScale,
+		9.0 * kDimensionPullInScale, 12.0 * kDimensionPullInScale,
+		16.0 * kDimensionPullInScale, 20.0 * kDimensionPullInScale };
 	bool hasBest = false;
 	double bestScore = 0.0;
-	NXOpen::Point3d bestOrigin(intersection[0] + bisectorX * 8.0, intersection[1] + bisectorY * 8.0, 0.0);
+	NXOpen::Point3d bestOrigin(intersection[0] + bisectorX * 8.0 * kDimensionPullInScale,
+		intersection[1] + bisectorY * 8.0 * kDimensionPullInScale, 0.0);
 
 	for (size_t angleIndex = 0; angleIndex < sizeof(angleOffsets) / sizeof(angleOffsets[0]); ++angleIndex)
 	{
@@ -1349,7 +1422,7 @@ NXOpen::Point3d ChooseBestOriginAlongDirection(
 	}
 
 	const double initialOffset = baseOffset;
-	const double maxOffset = std::max(baseOffset, 9.0);
+	const double maxOffset = std::max(baseOffset, 9.0 * kDimensionPullInScale);
 
 	NXOpen::Point3d bestOrigin = BuildOriginAlongDirection(drawingPoint, unitX, unitY, initialOffset);
 	double bestPenalty = ComputeObstaclePenalty(baseView, drawingPoint, bestOrigin);
@@ -1407,8 +1480,8 @@ NXOpen::Point3d BuildOffsetOrigin(
 		unitY,
 		centerX,
 		centerY,
-		baseOffset,
-		layerGap);
+		baseOffset * kDimensionPullInScale,
+		layerGap * kDimensionPullInScale);
 }
 
 NXOpen::Point3d BuildOffsetOriginFromModelPoint(
@@ -2373,13 +2446,50 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 		else
 		{
 			NXOpen::Point3d firstAssociativityPoint(0.0, 0.0, 0.0);
+			const std::unordered_set<tag_t> firstFaceEdgeTags = CollectFaceEdgeTags(firstFace);
+			const std::vector<NXOpen::Drawings::DraftingCurve*> allViewCurves =
+				CollectDraftingCurves(baseView);
+			std::vector<NXOpen::Drawings::DraftingCurve*> edgeReferencedCurves;
+			for (size_t curveIndex = 0; curveIndex < allViewCurves.size(); ++curveIndex)
+			{
+				NXOpen::Drawings::DraftingCurve* candidateCurve = allViewCurves[curveIndex];
+				if (candidateCurve != NULL &&
+					CurveReferencesFaceOrEdge(candidateCurve, NULL_TAG, firstFaceEdgeTags))
+				{
+					edgeReferencedCurves.push_back(candidateCurve);
+				}
+			}
 			NXOpen::Drawings::DraftingCurve* firstCurve =
-				FindRepresentativeCurveForFace(baseView, firstFace, false, true, reverseGuideDirection, &firstAssociativityPoint, &originPoint);
+				FindRepresentativeCurveForFace(
+					baseView,
+					firstFace,
+					false,
+					true,
+					reverseGuideDirection,
+					&firstAssociativityPoint,
+					&originPoint,
+					edgeReferencedCurves.empty() ? NULL : &edgeReferencedCurves,
+					!edgeReferencedCurves.empty());
+			if (firstCurve == NULL && !edgeReferencedCurves.empty())
+			{
+				firstCurve = FindRepresentativeCurveForFace(
+					baseView,
+					firstFace,
+					false,
+					true,
+					reverseGuideDirection,
+					&firstAssociativityPoint,
+					&originPoint);
+			}
 			if (firstCurve == NULL)
 			{
 				builder->Destroy();
 				return false;
 			}
+			DimensionDebugLog(
+				std::string("[dimension.assoc.faceToObject.firstCurve] curveTag=") +
+				std::to_string(firstCurve->Tag()) +
+				" edgeCandidateCount=" + std::to_string(edgeReferencedCurves.size()));
 			builder->FirstAssociativity()->SetValue(
 				NXOpen::InferSnapType::SnapTypeExist, firstCurve, baseView, firstAssociativityPoint, NULL, nullView, point);
 			UF_CURVE_line_t firstLineData;
@@ -2416,7 +2526,10 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 		else
 		{
 			NXOpen::Point3d secondAssociativityPoint = modelAssociativityPoint;
+			NXOpen::InferSnapType::SnapType secondSnapType = NXOpen::InferSnapType::SnapTypeExist;
 			NXOpen::Face* fallbackSecondFace = dynamic_cast<NXOpen::Face*>(secondObject);
+			NXOpen::Drawings::DraftingCurve* suppliedSecondCurve =
+				dynamic_cast<NXOpen::Drawings::DraftingCurve*>(secondObject);
 			NXOpen::Drawings::DraftingCurve* secondCurve = fallbackSecondFace != NULL
 				? FindRepresentativeCurveForFace(baseView, fallbackSecondFace, false, true, reverseGuideDirection, &secondAssociativityPoint, &originPoint)
 				: FindRepresentativeCurveForObject(baseView, secondObject);
@@ -2425,8 +2538,17 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 				builder->Destroy();
 				return false;
 			}
+			if (suppliedSecondCurve != NULL)
+			{
+				TryGetDraftingCurveEndpointNearestDrawingPoint(
+					baseView,
+					suppliedSecondCurve,
+					modelAssociativityPoint,
+					secondAssociativityPoint,
+					secondSnapType);
+			}
 			builder->SecondAssociativity()->SetValue(
-				NXOpen::InferSnapType::SnapTypeExist, secondCurve, baseView, secondAssociativityPoint, NULL, nullView, point);
+				secondSnapType, secondCurve, baseView, secondAssociativityPoint, NULL, nullView, point);
 		}
 		builder->Origin()->Origin()->SetValue(
 			NULL,
@@ -2610,9 +2732,9 @@ NXOpen::Point3d ComputeHoleOrdinateMarginLocation(
 {
 	const double width = std::max(1.0, extents.maxX - extents.minX);
 	const double height = std::max(1.0, extents.maxY - extents.minY);
-	const double baseXOffset = std::max(12.0, width * 0.10);
-	const double baseYOffset = std::max(12.0, height * 0.10);
-	const double laneGap = std::max(10.0, std::min(width, height) * 0.04);
+	const double baseXOffset = std::max(12.0, width * 0.10) * kDimensionPullInScale;
+	const double baseYOffset = std::max(12.0, height * 0.10) * kDimensionPullInScale;
+	const double laneGap = std::max(10.0, std::min(width, height) * 0.04) * kDimensionPullInScale;
 	const double minimumLabelSpacing = std::max(14.0, std::min(width, height) * 0.10);
 
 	if (verticalDimension)
@@ -3295,7 +3417,7 @@ std::string HoleNoteRuleTypeForRecord(const HoleNoteRuleRecord& rule)
 bool TryBuildMatchedRuleHoleNoteText(double diameter, std::string& typeText, std::string& noteText)
 {
 	const std::vector<HoleNoteRuleRecord> rules = GetHoleNoteRules();
-	const double tolerance = 0.005;
+	const double tolerance = 0.001;
 	for (size_t i = 0; i < rules.size(); ++i)
 	{
 		const HoleNoteRuleRecord& rule = rules[i];
@@ -5147,9 +5269,25 @@ bool DraftingCurveReferencesObject(
 		const std::vector<NXOpen::NXObject*> parents = curve->GetDraftingCurveInfo()->GetParents();
 		for (size_t i = 0; i < parents.size(); ++i)
 		{
-			if (parents[i] != NULL && parents[i]->Tag() == objectTag)
+			NXOpen::NXObject* parent = parents[i];
+			if (parent == NULL)
+			{
+				continue;
+			}
+			if (parent->Tag() == objectTag)
 			{
 				return true;
+			}
+			try
+			{
+				NXOpen::NXObject* prototype = dynamic_cast<NXOpen::NXObject*>(parent->Prototype());
+				if (prototype != NULL && prototype->Tag() == objectTag)
+				{
+					return true;
+				}
+			}
+			catch (...)
+			{
 			}
 		}
 	}
