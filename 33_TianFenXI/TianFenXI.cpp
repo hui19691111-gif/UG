@@ -56,6 +56,9 @@
 #include <NXOpen/Features_BooleanBuilder.hxx>
 #include <NXOpen/Features_BooleanFeature.hxx>
 #include <NXOpen/Features_EdgeBlendBuilder.hxx>
+#include <NXOpen/Features_ExtractFaceBuilder.hxx>
+#include <NXOpen/Features_Feature.hxx>
+#include <NXOpen/Features_PatchBuilder.hxx>
 #include <NXOpen/Features_RemoveParametersBuilder.hxx>
 #include <NXOpen/Features_ToolingBox.hxx>
 #include <NXOpen/Features_ToolingBoxBuilder.hxx>
@@ -70,6 +73,8 @@
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
 #include <NXOpen/SelectNXObjectList.hxx>
+#include <NXOpen/SelectBody.hxx>
+#include <NXOpen/SelectDisplayableObject.hxx>
 #include <NXOpen/Tooling_ToolingSession.hxx>
 #include <NXOpen/Update.hxx>
 #include <NXOpen/WCS.hxx>
@@ -94,6 +99,7 @@
 #include <uf_ui.h>
 #include <uf_part.h>
 #include <uf_curve.h>
+#include <uf_eval.h>
 #include <uf_modl_primitives.h>
 #include <algorithm>
 #include <cfloat>
@@ -210,6 +216,7 @@ const double kSameFaceLengthTolerance = 0.2;
 const double kLongEdgeParallelCosTolerance = 0.98;
 const double kPi = 3.14159265358979323846;
 const bool kDebugLogEnabled = true;
+const bool kVerboseNarrowBoundaryLog = false;
 const wchar_t* kDebugLogPath = L"D:\\UG智辉钣金插件\\logs\\TianFenXI_debug.log";
 const wchar_t* kSettingsPath = L"D:\\UG智辉钣金插件\\config\\TianFenXI.ini";
 
@@ -220,6 +227,7 @@ struct EdgeEndpointPair
     tag_t edgeTag;
     double first[3];
     double second[3];
+    bool isLine;
 };
 
 struct BoundaryLoop
@@ -253,6 +261,25 @@ struct GapFaceGroup
     bool touchesTangentCylinder;
 };
 
+struct PreviewAnalysisCache
+{
+    bool valid;
+    tag_t bodyTag;
+    tag_t selectedFaceTag;
+    double gapDistance;
+    bool hasThickness;
+    double thickness;
+    double inwardNormal[3];
+    std::vector<tag_t> bodyFaceTags;
+    std::vector<tag_t> faceChain;
+    std::vector<GapEdgePair> gapEdgePairs;
+    std::vector<GapFaceGroup> gapFaceGroups;
+    std::set<tag_t> innerLoopHoleFaces;
+    std::set<tag_t> innerLoopHoleEdges;
+    std::set<tag_t> thicknessEndFaces;
+    bool thicknessEndFacesReady;
+};
+
 struct PlanarSmallCylinderGroup
 {
     tag_t planarFace;
@@ -263,6 +290,9 @@ struct InnerHoleLoopCandidate
 {
     tag_t hostFace;
     std::vector<tag_t> edges;
+    double center[3];
+    double normal[3];
+    double projectedArea;
 };
 
 struct FacePair
@@ -309,6 +339,20 @@ struct RemovedGapBlend
     bool deleted;
 };
 
+struct PendingHolePatch
+{
+    tag_t hostFace;
+    std::vector<tag_t> sourceLoopEdges;
+    std::vector<tag_t> extractedFaces;
+    tag_t extractedFeatureTag;
+    tag_t extractedSheetBodyTag;
+    tag_t subtractFeatureTag;
+    bool sourceFacesDeleted;
+    NXOpen::Point3d origin;
+    NXOpen::Vector3d normal;
+    double projectedArea;
+};
+
 bool AskEdgeEndpointPair(tag_t edgeTag, EdgeEndpointPair& endpoints);
 bool ContainsTag(const std::vector<tag_t>& tags, tag_t tag);
 bool AskArcCenter(tag_t edgeTag, double center[3]);
@@ -317,11 +361,12 @@ bool IsLineEdge(tag_t edgeTag);
 bool IsCurveLikeEdge(tag_t edgeTag);
 double AskEdgeLength(tag_t edgeTag);
 bool DeleteFacesWithHealBuilder(const std::vector<tag_t>& faceTags);
+bool RemoveParametersFromBody(tag_t bodyTag);
+std::vector<tag_t> CollectInnerLoopFaceChain(const InnerHoleLoopCandidate& candidate);
 bool BuildBoundingBoxCoordinateFromGapGroup(
     const GapFaceGroup& group,
     NXOpen::Matrix3x3& matrix,
     NXOpen::Point3d& origin);
-bool TryReplaceGapGroupFaces(const GapFaceGroup& group);
 bool TryBuildReplaceGapPlan(const GapFaceGroup& group, ReplaceGapPlan& plan);
 bool ExecuteReplaceGapPlan(const ReplaceGapPlan& plan, const GapFaceGroup& group);
 bool GapGroupTouchesTangentCylinderFace(const GapFaceGroup& group);
@@ -339,12 +384,45 @@ std::map<tag_t, tag_t> replacedFaceTagMap;
 std::set<tag_t> gInnerLoopHoleFaces;
 std::set<tag_t> gInnerLoopHoleEdges;
 std::vector<InnerHoleLoopCandidate> gInnerHoleLoopCandidates;
+std::vector<tag_t> gActiveFaceChain;
 std::set<tag_t> gPrecomputedThicknessFaces;
 bool gThicknessEndFacesReady = false;
 bool gSilentDisplayUpdateActive = false;
 int gLastGapDeleteFailedGroups = 0;
 int gLastGapDeleteSucceededGroups = 0;
 std::vector<tag_t> gLastGapDeleteFailedGroupIndexes;
+PreviewAnalysisCache gPreviewAnalysisCache = {};
+
+void StorePreviewAnalysisCache(
+    tag_t bodyTag,
+    tag_t selectedFaceTag,
+    double gapDistance,
+    bool hasThickness,
+    double thickness,
+    const double inwardNormal[3],
+    const std::vector<tag_t>& bodyFaceTags,
+    const std::vector<tag_t>& faceChain,
+    const std::vector<GapEdgePair>& gapEdgePairs,
+    const std::vector<GapFaceGroup>& gapFaceGroups)
+{
+    gPreviewAnalysisCache.valid = true;
+    gPreviewAnalysisCache.bodyTag = bodyTag;
+    gPreviewAnalysisCache.selectedFaceTag = selectedFaceTag;
+    gPreviewAnalysisCache.gapDistance = gapDistance;
+    gPreviewAnalysisCache.hasThickness = hasThickness;
+    gPreviewAnalysisCache.thickness = thickness;
+    gPreviewAnalysisCache.inwardNormal[0] = inwardNormal[0];
+    gPreviewAnalysisCache.inwardNormal[1] = inwardNormal[1];
+    gPreviewAnalysisCache.inwardNormal[2] = inwardNormal[2];
+    gPreviewAnalysisCache.bodyFaceTags = bodyFaceTags;
+    gPreviewAnalysisCache.faceChain = faceChain;
+    gPreviewAnalysisCache.gapEdgePairs = gapEdgePairs;
+    gPreviewAnalysisCache.gapFaceGroups = gapFaceGroups;
+    gPreviewAnalysisCache.innerLoopHoleFaces = gInnerLoopHoleFaces;
+    gPreviewAnalysisCache.innerLoopHoleEdges = gInnerLoopHoleEdges;
+    gPreviewAnalysisCache.thicknessEndFaces = gPrecomputedThicknessFaces;
+    gPreviewAnalysisCache.thicknessEndFacesReady = gThicknessEndFacesReady;
+}
 
 std::string FormatDouble(double value)
 {
@@ -461,6 +539,7 @@ void ResetDebugLogForRun()
     CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
     DeleteFileW(kDebugLogPath);
     replacedFaceTagMap.clear();
+    gActiveFaceChain.clear();
 }
 
 double Dot3(const double lhs[3], const double rhs[3])
@@ -886,6 +965,35 @@ bool AreBoundaryCurvesWithinNarrowDistance(
     const EdgeEndpointPair& second,
     double gapDistance)
 {
+    double overlap = 0.0;
+    double shortLength = 0.0;
+    double overlapRatio = 0.0;
+    const bool hasOverlap = ComputeEdgeProjectionOverlap(first, second, overlap, shortLength, overlapRatio);
+    const double firstStartToSecondRay = DistancePointToLine3(first.first, second.first, second.second);
+    const double firstEndToSecondRay = DistancePointToLine3(first.second, second.first, second.second);
+    const double secondStartToFirstRay = DistancePointToLine3(second.first, first.first, first.second);
+    const double secondEndToFirstRay = DistancePointToLine3(second.second, first.first, first.second);
+    const bool rayEndpointMatched =
+        firstStartToSecondRay < gapDistance &&
+        firstEndToSecondRay < gapDistance &&
+        secondStartToFirstRay < gapDistance &&
+        secondEndToFirstRay < gapDistance;
+
+    // For two straight edges, distance to the finite edge cannot be smaller than
+    // distance to its supporting line. Reject distant pairs before four costly
+    // minimum-distance calls into the NX modeling kernel.
+    if (first.isLine && second.isLine && !rayEndpointMatched)
+    {
+        if (kVerboseNarrowBoundaryLog)
+        {
+            DebugLog("  narrow boundary coarse reject: edge1=" +
+                FormatTag(first.edgeTag) +
+                ", edge2=" + FormatTag(second.edgeTag) +
+                ", threshold=" + FormatDouble(gapDistance));
+        }
+        return false;
+    }
+
     double firstStartToSecond = DBL_MAX;
     double firstEndToSecond = DBL_MAX;
     double secondStartToFirst = DBL_MAX;
@@ -901,24 +1009,11 @@ bool AreBoundaryCurvesWithinNarrowDistance(
         return false;
     }
 
-    double overlap = 0.0;
-    double shortLength = 0.0;
-    double overlapRatio = 0.0;
-    const bool hasOverlap = ComputeEdgeProjectionOverlap(first, second, overlap, shortLength, overlapRatio);
     const bool endpointMatched =
         firstStartToSecond < gapDistance &&
         firstEndToSecond < gapDistance &&
         secondStartToFirst < gapDistance &&
         secondEndToFirst < gapDistance;
-    const double firstStartToSecondRay = DistancePointToLine3(first.first, second.first, second.second);
-    const double firstEndToSecondRay = DistancePointToLine3(first.second, second.first, second.second);
-    const double secondStartToFirstRay = DistancePointToLine3(second.first, first.first, first.second);
-    const double secondEndToFirstRay = DistancePointToLine3(second.second, first.first, first.second);
-    const bool rayEndpointMatched =
-        firstStartToSecondRay < gapDistance &&
-        firstEndToSecondRay < gapDistance &&
-        secondStartToFirstRay < gapDistance &&
-        secondEndToFirstRay < gapDistance;
     const bool overlapMatched =
         rayEndpointMatched &&
         hasOverlap &&
@@ -932,27 +1027,30 @@ bool AreBoundaryCurvesWithinNarrowDistance(
     {
         matched = false;
     }
-    DebugLog("  narrow boundary check: edge1=" +
-        FormatTag(first.edgeTag) +
-        ", edge2=" + FormatTag(second.edgeTag) +
-        ", firstStartToSecond=" + FormatDouble(firstStartToSecond) +
-        ", firstEndToSecond=" + FormatDouble(firstEndToSecond) +
-        ", secondStartToFirst=" + FormatDouble(secondStartToFirst) +
-        ", secondEndToFirst=" + FormatDouble(secondEndToFirst) +
-        ", firstStartToSecondRay=" + FormatDouble(firstStartToSecondRay) +
-        ", firstEndToSecondRay=" + FormatDouble(firstEndToSecondRay) +
-        ", secondStartToFirstRay=" + FormatDouble(secondStartToFirstRay) +
-        ", secondEndToFirstRay=" + FormatDouble(secondEndToFirstRay) +
-        ", overlap=" + FormatDouble(overlap) +
-        ", shortLength=" + FormatDouble(shortLength) +
-        ", overlapRatio=" + FormatDouble(overlapRatio) +
-        ", threshold=" + FormatDouble(gapDistance) +
-        ", endpointMatched=" + FormatTag(static_cast<tag_t>(endpointMatched ? 1 : 0)) +
-        ", rayEndpointMatched=" + FormatTag(static_cast<tag_t>(rayEndpointMatched ? 1 : 0)) +
-        ", overlapMatched=" + FormatTag(static_cast<tag_t>(overlapMatched ? 1 : 0)) +
-        ", sameFaceRejected=" + FormatTag(static_cast<tag_t>(sameFaceRejected ? 1 : 0)) +
-        ", sharedFace=" + FormatTag(sharedFace) +
-        ", matched=" + FormatTag(static_cast<tag_t>(matched ? 1 : 0)));
+    if (matched || sameFaceRejected || kVerboseNarrowBoundaryLog)
+    {
+        DebugLog("  narrow boundary check: edge1=" +
+            FormatTag(first.edgeTag) +
+            ", edge2=" + FormatTag(second.edgeTag) +
+            ", firstStartToSecond=" + FormatDouble(firstStartToSecond) +
+            ", firstEndToSecond=" + FormatDouble(firstEndToSecond) +
+            ", secondStartToFirst=" + FormatDouble(secondStartToFirst) +
+            ", secondEndToFirst=" + FormatDouble(secondEndToFirst) +
+            ", firstStartToSecondRay=" + FormatDouble(firstStartToSecondRay) +
+            ", firstEndToSecondRay=" + FormatDouble(firstEndToSecondRay) +
+            ", secondStartToFirstRay=" + FormatDouble(secondStartToFirstRay) +
+            ", secondEndToFirstRay=" + FormatDouble(secondEndToFirstRay) +
+            ", overlap=" + FormatDouble(overlap) +
+            ", shortLength=" + FormatDouble(shortLength) +
+            ", overlapRatio=" + FormatDouble(overlapRatio) +
+            ", threshold=" + FormatDouble(gapDistance) +
+            ", endpointMatched=" + FormatTag(static_cast<tag_t>(endpointMatched ? 1 : 0)) +
+            ", rayEndpointMatched=" + FormatTag(static_cast<tag_t>(rayEndpointMatched ? 1 : 0)) +
+            ", overlapMatched=" + FormatTag(static_cast<tag_t>(overlapMatched ? 1 : 0)) +
+            ", sameFaceRejected=" + FormatTag(static_cast<tag_t>(sameFaceRejected ? 1 : 0)) +
+            ", sharedFace=" + FormatTag(sharedFace) +
+            ", matched=" + FormatTag(static_cast<tag_t>(matched ? 1 : 0)));
+    }
     return matched;
 }
 
@@ -1557,6 +1655,121 @@ std::vector<tag_t> AskAnalysisFaceEdges(tag_t faceTag)
     return edges;
 }
 
+struct ProjectedLoopPoint2d
+{
+    double x;
+    double y;
+};
+
+double ProjectedLoopPolygonArea(const std::vector<ProjectedLoopPoint2d>& polygon)
+{
+    if (polygon.size() < 3)
+    {
+        return 0.0;
+    }
+
+    double signedArea = 0.0;
+    for (std::size_t index = 0; index < polygon.size(); ++index)
+    {
+        const ProjectedLoopPoint2d& current = polygon[index];
+        const ProjectedLoopPoint2d& next = polygon[(index + 1) % polygon.size()];
+        signedArea += current.x * next.y - current.y * next.x;
+    }
+    return std::fabs(signedArea) * 0.5;
+}
+
+bool AskPlanarInnerLoopArea(
+    const std::vector<tag_t>& loopEdges,
+    const double planeNormal[3],
+    double& area)
+{
+    area = 0.0;
+    if (loopEdges.empty())
+    {
+        return false;
+    }
+
+    double normal[3] = {planeNormal[0], planeNormal[1], planeNormal[2]};
+    if (!Normalize3(normal))
+    {
+        return false;
+    }
+    double reference[3] = {0.0, 0.0, 1.0};
+    if (std::fabs(normal[2]) > 0.9)
+    {
+        reference[0] = 0.0;
+        reference[1] = 1.0;
+        reference[2] = 0.0;
+    }
+    double axisU[3] = {0.0, 0.0, 0.0};
+    Cross3(reference, normal, axisU);
+    if (!Normalize3(axisU))
+    {
+        return false;
+    }
+    double axisV[3] = {0.0, 0.0, 0.0};
+    Cross3(normal, axisU, axisV);
+    if (!Normalize3(axisV))
+    {
+        return false;
+    }
+
+    std::vector<ProjectedLoopPoint2d> polygon;
+    const int samplesPerEdge = 32;
+    for (std::size_t edgeIndex = 0; edgeIndex < loopEdges.size(); ++edgeIndex)
+    {
+        UF_EVAL_p_t evaluator = NULL;
+        if (loopEdges[edgeIndex] == NULL_TAG ||
+            UF_EVAL_initialize(loopEdges[edgeIndex], &evaluator) != 0 || evaluator == NULL)
+        {
+            continue;
+        }
+
+        double limits[2] = {0.0, 0.0};
+        std::vector<ProjectedLoopPoint2d> segment;
+        if (UF_EVAL_ask_limits(evaluator, limits) == 0)
+        {
+            segment.reserve(samplesPerEdge + 1);
+            for (int sample = 0; sample <= samplesPerEdge; ++sample)
+            {
+                const double parameter = limits[0] +
+                    (limits[1] - limits[0]) *
+                    static_cast<double>(sample) / static_cast<double>(samplesPerEdge);
+                double point[3] = {0.0, 0.0, 0.0};
+                if (UF_EVAL_evaluate(evaluator, 0, parameter, point, NULL) == 0)
+                {
+                    ProjectedLoopPoint2d projected = {};
+                    projected.x = Dot3(point, axisU);
+                    projected.y = Dot3(point, axisV);
+                    segment.push_back(projected);
+                }
+            }
+        }
+        UF_EVAL_free(evaluator);
+
+        if (segment.size() < 2)
+        {
+            continue;
+        }
+        if (!polygon.empty())
+        {
+            const double frontDx = polygon.back().x - segment.front().x;
+            const double frontDy = polygon.back().y - segment.front().y;
+            const double backDx = polygon.back().x - segment.back().x;
+            const double backDy = polygon.back().y - segment.back().y;
+            if (backDx * backDx + backDy * backDy < frontDx * frontDx + frontDy * frontDy)
+            {
+                std::reverse(segment.begin(), segment.end());
+            }
+            segment.erase(segment.begin());
+        }
+        polygon.insert(polygon.end(), segment.begin(), segment.end());
+    }
+
+    area = ProjectedLoopPolygonArea(polygon);
+    return polygon.size() >= 3 && area > 1.0e-9;
+}
+
 void PrecomputeInnerLoopHoleTopology(tag_t bodyTag, tag_t selectedFaceTag)
 {
     gInnerLoopHoleFaces.clear();
@@ -1570,6 +1783,16 @@ void PrecomputeInnerLoopHoleTopology(tag_t bodyTag, tag_t selectedFaceTag)
         const tag_t hostFace = bodyFaces[faceIndex];
         int faceType = 0;
         if (!AskFaceType(hostFace, faceType) || faceType != UF_MODL_PLANAR_FACE)
+        {
+            continue;
+        }
+
+        double hostPoint[3] = {0.0, 0.0, 0.0};
+        double hostNormal[3] = {0.0, 0.0, 0.0};
+        double hostArea = 0.0;
+        double hostPerimeter = 0.0;
+        if (!AskPlanarFacePlane(hostFace, hostPoint, hostNormal) ||
+            !AskFaceAreaAndPerimeter(hostFace, hostArea, hostPerimeter))
         {
             continue;
         }
@@ -1594,13 +1817,50 @@ void PrecomputeInnerLoopHoleTopology(tag_t bodyTag, tag_t selectedFaceTag)
                     continue;
                 }
 
-                ++holeLoopCount;
                 const std::vector<tag_t> holeEdges = UfListToTags(edgeList);
+                double innerLoopArea = 0.0;
+                const bool hasInnerLoopArea =
+                    AskPlanarInnerLoopArea(holeEdges, hostNormal, innerLoopArea);
+                const double areaRatio =
+                    hostArea > 1.0e-9 && hasInnerLoopArea ? innerLoopArea / hostArea : 0.0;
+                const bool areaQualifies =
+                    hasInnerLoopArea && hostArea > 1.0e-9 && areaRatio < 0.15;
+                DebugLog("  inner loop reference area rule: hostFace=" + FormatTag(hostFace) +
+                    ", faceArea=" + FormatDouble(hostArea) +
+                    ", innerLoopArea=" + FormatDouble(innerLoopArea) +
+                    ", areaRatio=" + FormatDouble(areaRatio) +
+                    ", limit=0.150000" +
+                    ", qualifies=" + FormatTag(static_cast<tag_t>(areaQualifies ? 1 : 0)));
+                if (!areaQualifies || holeEdges.empty())
+                {
+                    continue;
+                }
+
+                ++holeLoopCount;
                 if (!holeEdges.empty())
                 {
                     InnerHoleLoopCandidate candidate = {};
                     candidate.hostFace = hostFace;
                     candidate.edges = holeEdges;
+                    candidate.normal[0] = hostNormal[0];
+                    candidate.normal[1] = hostNormal[1];
+                    candidate.normal[2] = hostNormal[2];
+                    candidate.projectedArea = innerLoopArea;
+                    std::vector<EdgeEndpointPair> loopEndpointPairs;
+                    for (std::size_t edgeIndex = 0; edgeIndex < holeEdges.size(); ++edgeIndex)
+                    {
+                        EdgeEndpointPair endpoints = {};
+                        if (AskEdgeEndpointPair(holeEdges[edgeIndex], endpoints))
+                        {
+                            loopEndpointPairs.push_back(endpoints);
+                        }
+                    }
+                    if (!ComputeFaceCenterFromEndpoints(loopEndpointPairs, candidate.center))
+                    {
+                        candidate.center[0] = hostPoint[0];
+                        candidate.center[1] = hostPoint[1];
+                        candidate.center[2] = hostPoint[2];
+                    }
                     gInnerHoleLoopCandidates.push_back(candidate);
                     holeEdgeCount += static_cast<int>(holeEdges.size());
                 }
@@ -1629,25 +1889,25 @@ void ResolveInnerLoopEndFaceExclusions(tag_t bodyTag, tag_t selectedFaceTag)
         for (std::size_t edgeIndex = 0; edgeIndex < candidate.edges.size(); ++edgeIndex)
         {
             const tag_t edgeTag = candidate.edges[edgeIndex];
-            const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(edgeTag);
-            for (std::size_t adjacentIndex = 0; adjacentIndex < adjacentFaces.size(); ++adjacentIndex)
+            if (edgeTag != NULL_TAG)
             {
-                const tag_t adjacentFace = adjacentFaces[adjacentIndex];
-                if (adjacentFace == NULL_TAG ||
-                    adjacentFace == candidate.hostFace ||
-                    gPrecomputedThicknessFaces.find(adjacentFace) == gPrecomputedThicknessFaces.end())
-                {
-                    continue;
-                }
-
                 gInnerLoopHoleEdges.insert(edgeTag);
-                gInnerLoopHoleFaces.insert(adjacentFace);
-                DebugLog("  inner hole edge connected to end face excluded: hostFace=" +
-                    FormatTag(candidate.hostFace) +
-                    ", edge=" + FormatTag(edgeTag) +
-                    ", endFace=" + FormatTag(adjacentFace));
             }
         }
+
+        const std::vector<tag_t> holeWallFaces = CollectInnerLoopFaceChain(candidate);
+        for (std::size_t faceIndex = 0; faceIndex < holeWallFaces.size(); ++faceIndex)
+        {
+            const tag_t holeWallFace = holeWallFaces[faceIndex];
+            if (holeWallFace != NULL_TAG && holeWallFace != candidate.hostFace)
+            {
+                gInnerLoopHoleFaces.insert(holeWallFace);
+            }
+        }
+        DebugLog("  complete inner-loop face chain excluded from main chain: hostFace=" +
+            FormatTag(candidate.hostFace) +
+            ", loopEdges=[" + FormatTagList(candidate.edges) + "]" +
+            ", holeWallFaces=[" + FormatTagList(holeWallFaces) + "]");
     }
 
     gInnerLoopHoleFaces.erase(selectedFaceTag);
@@ -2788,6 +3048,7 @@ std::vector<GapEdgePair> PickOuterAndMultiFaceInnerBoundaryLoops(
         EdgeEndpointPair endpoints = {};
         if (AskEdgeEndpointPair(boundaryEdgeTags[index], endpoints))
         {
+            endpoints.isLine = IsLineEdge(boundaryEdgeTags[index]);
             boundaryEdges.push_back(endpoints);
             edgeOwnerFaces[boundaryEdgeTags[index]] =
                 AskBoundaryEdgeOwnerFace(boundaryEdgeTags[index], chainFaces);
@@ -2923,155 +3184,28 @@ std::vector<GapEdgePair> PickOuterAndMultiFaceInnerBoundaryLoops(
     }
 
     std::vector<GapEdgePair> gapEdgePairs;
-    std::set<std::size_t> usedCandidateIndexes;
-    std::vector<std::size_t> seedOrder;
     for (std::size_t candidateIndex = 0; candidateIndex < candidatePairs.size(); ++candidateIndex)
     {
-        seedOrder.push_back(candidateIndex);
+        const CandidateGapEdgePair& candidate = candidatePairs[candidateIndex];
+        GapEdgePair pair = {};
+        pair.firstEdge = candidate.firstEdge;
+        pair.secondEdge = candidate.secondEdge;
+        pair.firstOwnerFace = edgeOwnerFaces[candidate.firstEdge];
+        pair.secondOwnerFace = edgeOwnerFaces[candidate.secondEdge];
+        pair.firstGapFace = NULL_TAG;
+        pair.secondGapFace = NULL_TAG;
+        pair.firstEdgeSide = -1;
+        pair.secondEdgeSide = -1;
+        pair.chainId = 0;
+        pair.length = candidate.length;
+        pair.firstEdgeIsLine = IsLineEdge(candidate.firstEdge);
+        pair.secondEdgeIsLine = IsLineEdge(candidate.secondEdge);
+        gapEdgePairs.push_back(pair);
+        DebugLog("  narrow boundary pair selected without side partition: edge1=" +
+            FormatTag(pair.firstEdge) +
+            ", edge2=" + FormatTag(pair.secondEdge) +
+            ", candidate=" + FormatTag(static_cast<tag_t>(candidateIndex + 1)));
     }
-    std::sort(seedOrder.begin(), seedOrder.end(),
-        [&candidatePairs](std::size_t lhs, std::size_t rhs)
-        {
-            return candidatePairs[lhs].length > candidatePairs[rhs].length;
-        });
-    for (std::size_t seedOrderIndex = 0; seedOrderIndex < seedOrder.size(); ++seedOrderIndex)
-    {
-        const std::size_t seedIndex = seedOrder[seedOrderIndex];
-        if (usedCandidateIndexes.find(seedIndex) != usedCandidateIndexes.end())
-        {
-            continue;
-        }
-
-        DebugLog("  narrow boundary chain seed: edge1=" +
-            FormatTag(candidatePairs[seedIndex].firstEdge) +
-            ", edge2=" + FormatTag(candidatePairs[seedIndex].secondEdge) +
-            ", length=" + FormatDouble(candidatePairs[seedIndex].length));
-
-        std::map<tag_t, int> edgeSide;
-        edgeSide[candidatePairs[seedIndex].firstEdge] = 0;
-        edgeSide[candidatePairs[seedIndex].secondEdge] = 1;
-
-        std::vector<std::size_t> chainCandidateIndexes;
-        if (usedCandidateIndexes.insert(seedIndex).second)
-        {
-            chainCandidateIndexes.push_back(seedIndex);
-        }
-
-        bool expanded = true;
-        while (expanded)
-        {
-            expanded = false;
-            for (std::size_t candidateIndex = 0; candidateIndex < candidatePairs.size(); ++candidateIndex)
-            {
-                if (usedCandidateIndexes.find(candidateIndex) != usedCandidateIndexes.end())
-                {
-                    continue;
-                }
-
-                const CandidateGapEdgePair& candidate = candidatePairs[candidateIndex];
-                const bool firstKnown = edgeSide.find(candidate.firstEdge) != edgeSide.end();
-                const bool secondKnown = edgeSide.find(candidate.secondEdge) != edgeSide.end();
-                const bool firstConnectsSide0 =
-                    (firstKnown && edgeSide[candidate.firstEdge] == 0) ||
-                    EdgeConnectsToSide(candidate.firstEdge, 0, edgeSide, endpointByEdge);
-                const bool firstConnectsSide1 =
-                    (firstKnown && edgeSide[candidate.firstEdge] == 1) ||
-                    EdgeConnectsToSide(candidate.firstEdge, 1, edgeSide, endpointByEdge);
-                const bool secondConnectsSide0 =
-                    (secondKnown && edgeSide[candidate.secondEdge] == 0) ||
-                    EdgeConnectsToSide(candidate.secondEdge, 0, edgeSide, endpointByEdge);
-                const bool secondConnectsSide1 =
-                    (secondKnown && edgeSide[candidate.secondEdge] == 1) ||
-                    EdgeConnectsToSide(candidate.secondEdge, 1, edgeSide, endpointByEdge);
-
-                bool firstSide0SecondSide1 = firstConnectsSide0 && secondConnectsSide1;
-                bool firstSide1SecondSide0 = firstConnectsSide1 && secondConnectsSide0;
-                if (firstKnown && edgeSide[candidate.firstEdge] != 0)
-                {
-                    firstSide0SecondSide1 = false;
-                }
-                if (secondKnown && edgeSide[candidate.secondEdge] != 1)
-                {
-                    firstSide0SecondSide1 = false;
-                }
-                if (firstKnown && edgeSide[candidate.firstEdge] != 1)
-                {
-                    firstSide1SecondSide0 = false;
-                }
-                if (secondKnown && edgeSide[candidate.secondEdge] != 0)
-                {
-                    firstSide1SecondSide0 = false;
-                }
-
-                if (firstSide0SecondSide1 || firstSide1SecondSide0)
-                {
-                    const int firstSide = firstSide0SecondSide1 ? 0 : 1;
-                    const int secondSide = 1 - firstSide;
-                    edgeSide[candidate.firstEdge] = firstSide;
-                    edgeSide[candidate.secondEdge] = secondSide;
-                    usedCandidateIndexes.insert(candidateIndex);
-                    chainCandidateIndexes.push_back(candidateIndex);
-                    expanded = true;
-                    DebugLog("  narrow boundary chain pair extended: chain=" +
-                        FormatTag(static_cast<tag_t>(seedIndex + 1)) +
-                        ", edge1=" + FormatTag(candidate.firstEdge) +
-                        ", side1=" + FormatTag(static_cast<tag_t>(firstSide)) +
-                        ", edge2=" + FormatTag(candidate.secondEdge) +
-                        ", side2=" + FormatTag(static_cast<tag_t>(secondSide)) +
-                        ", candidate=" + FormatTag(static_cast<tag_t>(candidateIndex + 1)));
-                    continue;
-                }
-
-                const bool touchesCurrentChain =
-                    firstConnectsSide0 || firstConnectsSide1 ||
-                    secondConnectsSide0 || secondConnectsSide1;
-                const bool onlyOneSideTouches =
-                    touchesCurrentChain &&
-                    !((firstConnectsSide0 || secondConnectsSide0) &&
-                      (firstConnectsSide1 || secondConnectsSide1));
-                if (onlyOneSideTouches)
-                {
-                    usedCandidateIndexes.insert(candidateIndex);
-                    DebugLog("  narrow boundary chain rejected: paired side not connected, chain=" +
-                        FormatTag(static_cast<tag_t>(seedIndex + 1)) +
-                        ", edge1=" + FormatTag(candidate.firstEdge) +
-                        ", edge2=" + FormatTag(candidate.secondEdge) +
-                        ", firstConnectsSide0=" + FormatTag(static_cast<tag_t>(firstConnectsSide0 ? 1 : 0)) +
-                        ", firstConnectsSide1=" + FormatTag(static_cast<tag_t>(firstConnectsSide1 ? 1 : 0)) +
-                        ", secondConnectsSide0=" + FormatTag(static_cast<tag_t>(secondConnectsSide0 ? 1 : 0)) +
-                        ", secondConnectsSide1=" + FormatTag(static_cast<tag_t>(secondConnectsSide1 ? 1 : 0)) +
-                        ", discardedCandidate=" + FormatTag(static_cast<tag_t>(candidateIndex + 1)));
-                }
-            }
-        }
-
-        for (std::size_t chainIndex = 0; chainIndex < chainCandidateIndexes.size(); ++chainIndex)
-        {
-            const CandidateGapEdgePair& candidate = candidatePairs[chainCandidateIndexes[chainIndex]];
-            GapEdgePair pair = {};
-            pair.firstEdge = candidate.firstEdge;
-            pair.secondEdge = candidate.secondEdge;
-            pair.firstOwnerFace = edgeOwnerFaces[candidate.firstEdge];
-            pair.secondOwnerFace = edgeOwnerFaces[candidate.secondEdge];
-            pair.firstGapFace = NULL_TAG;
-            pair.secondGapFace = NULL_TAG;
-            pair.firstEdgeSide = edgeSide[candidate.firstEdge];
-            pair.secondEdgeSide = edgeSide[candidate.secondEdge];
-            pair.chainId = static_cast<int>(seedIndex + 1);
-            pair.length = candidate.length;
-            pair.firstEdgeIsLine = IsLineEdge(candidate.firstEdge);
-            pair.secondEdgeIsLine = IsLineEdge(candidate.secondEdge);
-            gapEdgePairs.push_back(pair);
-            DebugLog("  narrow boundary chain pair selected: chain=" +
-                FormatTag(static_cast<tag_t>(pair.chainId)) +
-                ", edge1=" + FormatTag(pair.firstEdge) +
-                ", side1=" + FormatTag(static_cast<tag_t>(pair.firstEdgeSide)) +
-                ", edge2=" + FormatTag(pair.secondEdge) +
-                ", side2=" + FormatTag(static_cast<tag_t>(pair.secondEdgeSide)));
-        }
-    }
-
-    FilterGapEdgesConnectedToOtherChains(gapEdgePairs, endpointByEdge);
 
     DebugLog("Narrow boundary gap pair selected count=" +
         FormatTag(static_cast<tag_t>(gapEdgePairs.size())) +
@@ -3772,16 +3906,6 @@ std::vector<GapFaceGroup> MergeConnectedGapFaceGroups(std::vector<GapFaceGroup> 
                     continue;
                 }
 
-                if (!GapFaceGroupsCanMergeBySide(groups[firstIndex], groups[secondIndex]))
-                {
-                    DebugLog("  gap face groups merge skipped by side conflict: target=" +
-                        FormatTag(static_cast<tag_t>(firstIndex + 1)) +
-                        ", source=" + FormatTag(static_cast<tag_t>(secondIndex + 1)) +
-                        ", targetFaces=" + FormatTag(static_cast<tag_t>(groups[firstIndex].faces.size())) +
-                        ", sourceFaces=" + FormatTag(static_cast<tag_t>(groups[secondIndex].faces.size())));
-                    continue;
-                }
-
                 DebugLog("  gap face groups merged: target=" +
                     FormatTag(static_cast<tag_t>(firstIndex + 1)) +
                     ", source=" + FormatTag(static_cast<tag_t>(secondIndex + 1)) +
@@ -3848,48 +3972,6 @@ std::vector<GapFaceGroup> RemoveContainedGapFaceGroups(const std::vector<GapFace
     }
 
     return result;
-}
-
-std::vector<tag_t> FindNonCylinderCurvedFacesConnectedToFaceChain(
-    const std::vector<tag_t>& faceChain)
-{
-    std::vector<tag_t> curvedFaces;
-    for (std::size_t chainIndex = 0; chainIndex < faceChain.size(); ++chainIndex)
-    {
-        const tag_t chainFace = faceChain[chainIndex];
-        const std::vector<tag_t> edges = AskAnalysisFaceEdges(chainFace);
-        for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex)
-        {
-            const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(edges[edgeIndex]);
-            for (std::size_t faceIndex = 0; faceIndex < adjacentFaces.size(); ++faceIndex)
-            {
-                const tag_t faceTag = adjacentFaces[faceIndex];
-                if (faceTag == NULL_TAG ||
-                    IsInnerLoopHoleFace(faceTag) ||
-                    ContainsTag(faceChain, faceTag))
-                {
-                    continue;
-                }
-
-                int faceType = 0;
-                if (!AskFaceType(faceTag, faceType) ||
-                    faceType == UF_MODL_PLANAR_FACE ||
-                    faceType == UF_MODL_CYLINDRICAL_FACE)
-                {
-                    continue;
-                }
-
-                AddUniqueTag(curvedFaces, faceTag);
-                DebugLog("  face-chain connected curved gap candidate: chainFace=" +
-                    FormatTag(chainFace) +
-                    ", sharedEdge=" + FormatTag(edges[edgeIndex]) +
-                    ", face=" + FormatTag(faceTag) +
-                    ", faceType=" + FormatTag(static_cast<tag_t>(faceType)) +
-                    ", cylinder=0");
-            }
-        }
-    }
-    return curvedFaces;
 }
 
 std::vector<GapFaceGroup> FindGapFaceGroupsFromGapEdgePairs(
@@ -4011,9 +4093,7 @@ std::vector<GapFaceGroup> FindGapFaceGroupsFromGapEdgePairs(
             ", chain=" + FormatTag(static_cast<tag_t>(pair.chainId)) +
             ", faces=" + FormatTag(static_cast<tag_t>(group.faces.size())) +
             ", firstGapFace=" + FormatTag(pair.firstGapFace) +
-            ", firstEdgeSide=" + FormatTag(static_cast<tag_t>(pair.firstEdgeSide)) +
-            ", secondGapFace=" + FormatTag(pair.secondGapFace) +
-            ", secondEdgeSide=" + FormatTag(static_cast<tag_t>(pair.secondEdgeSide)));
+            ", secondGapFace=" + FormatTag(pair.secondGapFace));
         if (!group.faces.empty())
         {
             groups.push_back(group);
@@ -4022,33 +4102,6 @@ std::vector<GapFaceGroup> FindGapFaceGroupsFromGapEdgePairs(
 
     DebugLog("Gap face initial group search result count=" +
         FormatTag(static_cast<tag_t>(groups.size())));
-
-    const std::vector<tag_t> connectedCurvedFaces =
-        FindNonCylinderCurvedFacesConnectedToFaceChain(faceChain);
-    for (std::size_t faceIndex = 0; faceIndex < connectedCurvedFaces.size(); ++faceIndex)
-    {
-        const tag_t curvedFace = connectedCurvedFaces[faceIndex];
-        bool alreadyIncluded = false;
-        for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
-        {
-            if (ContainsTag(groups[groupIndex].faces, curvedFace))
-            {
-                alreadyIncluded = true;
-                break;
-            }
-        }
-        if (alreadyIncluded)
-        {
-            continue;
-        }
-
-        GapFaceGroup curvedGroup = {};
-        curvedGroup.faces.push_back(curvedFace);
-        groups.push_back(curvedGroup);
-        DebugLog("  face-chain connected curved surface added as gap group: face=" +
-            FormatTag(curvedFace) +
-            ", reason=excluded-from-chain-does-not-exclude-gap-face");
-    }
 
     groups = MergeConnectedGapFaceGroups(groups);
     groups = RemoveContainedGapFaceGroups(groups);
@@ -4440,6 +4493,56 @@ GapFaceGroup FilterGapGroupDeselectedFaces(
     return filtered;
 }
 
+std::vector<GapFaceGroup> SplitFilteredGapGroupByConnectivity(
+    const GapFaceGroup& filtered)
+{
+    std::vector<GapFaceGroup> seeds;
+    for (std::size_t pairIndex = 0; pairIndex < filtered.gapEdgePairs.size(); ++pairIndex)
+    {
+        const GapEdgePair& pair = filtered.gapEdgePairs[pairIndex];
+        GapFaceGroup seed = {};
+        seed.gapEdgePairs.push_back(pair);
+        seed.touchesTangentCylinder = filtered.touchesTangentCylinder;
+        if (ContainsTag(filtered.faces, pair.firstGapFace))
+        {
+            AddUniqueTag(seed.faces, pair.firstGapFace);
+        }
+        if (ContainsTag(filtered.faces, pair.secondGapFace))
+        {
+            AddUniqueTag(seed.faces, pair.secondGapFace);
+        }
+        if (!seed.faces.empty())
+        {
+            seeds.push_back(seed);
+        }
+    }
+
+    // Retain any accepted face that is not referenced by a surviving edge pair.
+    // It becomes a singleton component instead of being silently discarded.
+    for (std::size_t faceIndex = 0; faceIndex < filtered.faces.size(); ++faceIndex)
+    {
+        const tag_t faceTag = filtered.faces[faceIndex];
+        bool represented = false;
+        for (std::size_t seedIndex = 0; seedIndex < seeds.size(); ++seedIndex)
+        {
+            if (ContainsTag(seeds[seedIndex].faces, faceTag))
+            {
+                represented = true;
+                break;
+            }
+        }
+        if (!represented)
+        {
+            GapFaceGroup singleton = {};
+            singleton.touchesTangentCylinder = filtered.touchesTangentCylinder;
+            singleton.faces.push_back(faceTag);
+            seeds.push_back(singleton);
+        }
+    }
+
+    return MergeConnectedGapFaceGroups(seeds);
+}
+
 std::vector<GapFaceGroup> FilterGapGroupsDeselectedFaces(
     const std::vector<GapFaceGroup>& groups,
     const std::vector<tag_t>& userDeselectedFaces)
@@ -4457,13 +4560,112 @@ std::vector<GapFaceGroup> FilterGapGroupsDeselectedFaces(
             ", userDeselectedFaces=" + FormatTag(static_cast<tag_t>(userDeselectedFaces.size())) +
             ", originalFaceTags=[" + FormatTagList(groups[groupIndex].faces) + "]" +
             ", filteredFaceTags=[" + FormatTagList(filtered.faces) + "]");
-        if (!filtered.faces.empty())
+        if (filtered.faces.empty())
+        {
+            continue;
+        }
+
+        const bool removedFace = filtered.faces.size() != groups[groupIndex].faces.size();
+        if (!removedFace)
         {
             result.push_back(filtered);
+            continue;
+        }
+
+        const std::vector<GapFaceGroup> regrouped =
+            SplitFilteredGapGroupByConnectivity(filtered);
+        DebugLog("Regroup gap group after user deselection: originalGroup=" +
+            FormatTag(static_cast<tag_t>(groupIndex + 1)) +
+            ", remainingFaces=" + FormatTag(static_cast<tag_t>(filtered.faces.size())) +
+            ", components=" + FormatTag(static_cast<tag_t>(regrouped.size())));
+        for (std::size_t componentIndex = 0; componentIndex < regrouped.size(); ++componentIndex)
+        {
+            DebugLog("  regrouped gap component: originalGroup=" +
+                FormatTag(static_cast<tag_t>(groupIndex + 1)) +
+                ", component=" + FormatTag(static_cast<tag_t>(componentIndex + 1)) +
+                ", faces=[" + FormatTagList(regrouped[componentIndex].faces) + "]");
+            result.push_back(regrouped[componentIndex]);
         }
     }
 
     return result;
+}
+
+std::vector<GapFaceGroup> AddUserSelectedGapFaces(
+    std::vector<GapFaceGroup> groups,
+    const std::vector<tag_t>& userAddedFaces)
+{
+    for (std::size_t faceIndex = 0; faceIndex < userAddedFaces.size(); ++faceIndex)
+    {
+        const tag_t faceTag = userAddedFaces[faceIndex];
+        if (faceTag == NULL_TAG)
+        {
+            continue;
+        }
+
+        bool alreadyIncluded = false;
+        std::vector<std::size_t> connectedGroups;
+        for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+        {
+            if (ContainsTag(groups[groupIndex].faces, faceTag))
+            {
+                alreadyIncluded = true;
+                break;
+            }
+
+            for (std::size_t groupFaceIndex = 0;
+                groupFaceIndex < groups[groupIndex].faces.size();
+                ++groupFaceIndex)
+            {
+                if (FacesShareEdge(faceTag, groups[groupIndex].faces[groupFaceIndex]))
+                {
+                    connectedGroups.push_back(groupIndex);
+                    break;
+                }
+            }
+        }
+
+        if (alreadyIncluded)
+        {
+            continue;
+        }
+
+        if (connectedGroups.empty())
+        {
+            GapFaceGroup manualGroup = {};
+            manualGroup.faces.push_back(faceTag);
+            groups.push_back(manualGroup);
+            DebugLog("User-added gap face created standalone group: face=" +
+                FormatTag(faceTag));
+            continue;
+        }
+
+        const std::size_t targetIndex = connectedGroups.front();
+        AddUniqueTag(groups[targetIndex].faces, faceTag);
+        for (std::size_t connectedIndex = connectedGroups.size(); connectedIndex > 1; --connectedIndex)
+        {
+            const std::size_t sourceIndex = connectedGroups[connectedIndex - 1];
+            MergeGapFaceGroup(groups[targetIndex], groups[sourceIndex]);
+            groups.erase(groups.begin() + sourceIndex);
+        }
+        DebugLog("User-added gap face merged by shared edge: face=" +
+            FormatTag(faceTag) +
+            ", connectedGroups=" +
+            FormatTag(static_cast<tag_t>(connectedGroups.size())) +
+            ", targetGroup=" + FormatTag(static_cast<tag_t>(targetIndex + 1)));
+    }
+
+    return groups;
+}
+
+std::vector<GapFaceGroup> BuildUserAdjustedGapFaceGroups(
+    const std::vector<GapFaceGroup>& groups,
+    const std::vector<tag_t>& userDeselectedFaces,
+    const std::vector<tag_t>& userAddedFaces)
+{
+    return AddUserSelectedGapFaces(
+        FilterGapGroupsDeselectedFaces(groups, userDeselectedFaces),
+        userAddedFaces);
 }
 
 bool ContainsTag(const std::vector<tag_t>& tags, tag_t tag)
@@ -4495,15 +4697,6 @@ NXOpen::Face* FindBaseSelectedFace(
     tag_t previousBaseFace,
     const std::vector<tag_t>& autoGapFaces)
 {
-    for (std::size_t index = 0; index < selectedObjects.size(); ++index)
-    {
-        NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(selectedObjects[index]);
-        if (face != NULL && !ContainsTag(autoGapFaces, face->Tag()))
-        {
-            return face;
-        }
-    }
-
     if (previousBaseFace != NULL_TAG)
     {
         NXOpen::Face* previousFace =
@@ -4511,6 +4704,15 @@ NXOpen::Face* FindBaseSelectedFace(
         if (previousFace != NULL)
         {
             return previousFace;
+        }
+    }
+
+    for (std::size_t index = 0; index < selectedObjects.size(); ++index)
+    {
+        NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(selectedObjects[index]);
+        if (face != NULL && !ContainsTag(autoGapFaces, face->Tag()))
+        {
+            return face;
         }
     }
 
@@ -4594,20 +4796,74 @@ std::vector<tag_t> FindSelectedFaceTags(const std::vector<NXOpen::TaggedObject*>
     return faceTags;
 }
 
-void RememberDeselectedAutoGapFaces(
-    const std::vector<tag_t>& previousAutoGapFaces,
+void RememberRemovedSelectedGapFaces(
+    const std::vector<tag_t>& previousSelectedGapFaces,
     const std::vector<tag_t>& selectedFaceTags,
-    std::vector<tag_t>& userDeselectedGapFaces)
+    std::vector<tag_t>& userDeselectedGapFaces,
+    std::vector<tag_t>& userAddedGapFaces)
 {
-    for (std::size_t index = 0; index < previousAutoGapFaces.size(); ++index)
+    for (std::size_t index = 0; index < previousSelectedGapFaces.size(); ++index)
     {
-        const tag_t faceTag = previousAutoGapFaces[index];
+        const tag_t faceTag = previousSelectedGapFaces[index];
         if (faceTag == NULL_TAG || ContainsTag(selectedFaceTags, faceTag))
         {
             continue;
         }
 
+        std::vector<tag_t>::iterator addedIt =
+            std::find(userAddedGapFaces.begin(), userAddedGapFaces.end(), faceTag);
+        if (addedIt != userAddedGapFaces.end())
+        {
+            userAddedGapFaces.erase(addedIt);
+            DebugLog("User-added gap face removed: face=" + FormatTag(faceTag));
+            continue;
+        }
+
         AddUniqueTag(userDeselectedGapFaces, faceTag);
+        DebugLog("Auto gap face removed by user: face=" + FormatTag(faceTag));
+    }
+}
+
+void RememberUserAddedGapFaces(
+    const std::vector<tag_t>& selectedFaceTags,
+    const std::vector<tag_t>& previousSelectedGapFaces,
+    tag_t baseFaceTag,
+    tag_t bodyTag,
+    std::vector<tag_t>& userDeselectedGapFaces,
+    std::vector<tag_t>& userAddedGapFaces)
+{
+    for (std::size_t index = 0; index < selectedFaceTags.size(); ++index)
+    {
+        const tag_t faceTag = selectedFaceTags[index];
+        if (faceTag == NULL_TAG || faceTag == baseFaceTag ||
+            ContainsTag(previousSelectedGapFaces, faceTag))
+        {
+            continue;
+        }
+
+        tag_t selectedBodyTag = NULL_TAG;
+        if (UF_MODL_ask_face_body(faceTag, &selectedBodyTag) != 0 ||
+            selectedBodyTag == NULL_TAG || selectedBodyTag != bodyTag)
+        {
+            DebugLog("User-added gap face rejected: face=" + FormatTag(faceTag) +
+                ", reason=different-body");
+            continue;
+        }
+
+        std::vector<tag_t>::iterator deselectedIt =
+            std::find(userDeselectedGapFaces.begin(), userDeselectedGapFaces.end(), faceTag);
+        if (deselectedIt != userDeselectedGapFaces.end())
+        {
+            userDeselectedGapFaces.erase(deselectedIt);
+            DebugLog("User-restored automatic gap face: face=" + FormatTag(faceTag));
+            continue;
+        }
+
+        if (!ContainsTag(userAddedGapFaces, faceTag))
+        {
+            userAddedGapFaces.push_back(faceTag);
+            DebugLog("User-added gap face accepted: face=" + FormatTag(faceTag));
+        }
     }
 }
 
@@ -4754,7 +5010,7 @@ bool FaceEdgeLengthsMatch(const std::vector<double>& first, const std::vector<do
     return true;
 }
 
-bool AreSameFacesWithParallelLongEdges(tag_t firstFace, tag_t secondFace, double& distance)
+bool AreParallelGapFaces(tag_t firstFace, tag_t secondFace, double& distance)
 {
     distance = DBL_MAX;
 
@@ -4771,48 +5027,37 @@ bool AreSameFacesWithParallelLongEdges(tag_t firstFace, tag_t secondFace, double
         return false;
     }
 
-    std::vector<double> firstLengths;
-    std::vector<double> secondLengths;
-    if (!AskSortedFaceEdgeLengths(firstFace, firstLengths) ||
-        !AskSortedFaceEdgeLengths(secondFace, secondLengths) ||
-        !FaceEdgeLengthsMatch(firstLengths, secondLengths))
+    const double faceNormalCos = std::fabs(Dot3(firstNormal, secondNormal));
+    if (faceNormalCos < kParallelCosTolerance)
     {
-        DebugLog("  middle plane pair rejected: edge lengths mismatch, face1=" +
+        DebugLog("  middle plane pair rejected: gap faces not parallel, face1=" +
             FormatTag(firstFace) +
             ", face2=" + FormatTag(secondFace) +
-            ", edges1=" + FormatTag(static_cast<tag_t>(firstLengths.size())) +
-            ", edges2=" + FormatTag(static_cast<tag_t>(secondLengths.size())));
+            ", normalCos=" + FormatDouble(faceNormalCos));
         return false;
     }
 
-    double firstLongDirection[3] = {0.0, 0.0, 0.0};
-    double secondLongDirection[3] = {0.0, 0.0, 0.0};
-    double firstLongLength = 0.0;
-    double secondLongLength = 0.0;
-    if (!AskLongestFaceEdgeDirection(firstFace, firstLongDirection, firstLongLength) ||
-        !AskLongestFaceEdgeDirection(secondFace, secondLongDirection, secondLongLength))
+    double centerDelta[3] =
     {
-        return false;
-    }
-
-    const double longEdgeCos = std::fabs(Dot3(firstLongDirection, secondLongDirection));
-    if (longEdgeCos < kLongEdgeParallelCosTolerance)
+        secondPoint[0] - firstPoint[0],
+        secondPoint[1] - firstPoint[1],
+        secondPoint[2] - firstPoint[2]
+    };
+    distance = std::fabs(Dot3(centerDelta, firstNormal));
+    if (distance < 1.0e-6)
     {
-        DebugLog("  middle plane pair rejected: long edges not parallel, face1=" +
+        DebugLog("  middle plane pair rejected: coincident gap planes, face1=" +
             FormatTag(firstFace) +
             ", face2=" + FormatTag(secondFace) +
-            ", longEdgeCos=" + FormatDouble(longEdgeCos));
+            ", distance=" + FormatDouble(distance));
         return false;
     }
 
-    distance = Distance3(firstPoint, secondPoint);
     DebugLog("  middle plane pair matched: face1=" +
         FormatTag(firstFace) +
         ", face2=" + FormatTag(secondFace) +
         ", distance=" + FormatDouble(distance) +
-        ", longEdgeCos=" + FormatDouble(longEdgeCos) +
-        ", longest1=" + FormatDouble(firstLongLength) +
-        ", longest2=" + FormatDouble(secondLongLength));
+        ", normalCos=" + FormatDouble(faceNormalCos));
     return true;
 }
 
@@ -4824,7 +5069,7 @@ std::vector<FacePair> FindSameFacePairsInGapGroup(const GapFaceGroup& group)
         for (std::size_t secondIndex = firstIndex + 1; secondIndex < group.faces.size(); ++secondIndex)
         {
             double distance = 0.0;
-            if (!AreSameFacesWithParallelLongEdges(group.faces[firstIndex], group.faces[secondIndex], distance))
+            if (!AreParallelGapFaces(group.faces[firstIndex], group.faces[secondIndex], distance))
             {
                 continue;
             }
@@ -4871,13 +5116,6 @@ NXOpen::Plane* CreateMiddlePlaneForFacePair(const FacePair& pair)
         return NULL;
     }
 
-    double longEdgeDirection[3] = {0.0, 0.0, 0.0};
-    double longEdgeLength = 0.0;
-    if (!AskLongestFaceEdgeDirection(pair.firstFace, longEdgeDirection, longEdgeLength))
-    {
-        return NULL;
-    }
-
     double planePoint[3] =
     {
         (firstPoint[0] + secondPoint[0]) * 0.5,
@@ -4885,37 +5123,15 @@ NXOpen::Plane* CreateMiddlePlaneForFacePair(const FacePair& pair)
         (firstPoint[2] + secondPoint[2]) * 0.5
     };
 
-    double centerDelta[3] =
-    {
-        secondPoint[0] - firstPoint[0],
-        secondPoint[1] - firstPoint[1],
-        secondPoint[2] - firstPoint[2]
-    };
-    const double deltaAlongLongEdge = Dot3(centerDelta, longEdgeDirection);
     double planeNormal[3] =
     {
-        centerDelta[0] - longEdgeDirection[0] * deltaAlongLongEdge,
-        centerDelta[1] - longEdgeDirection[1] * deltaAlongLongEdge,
-        centerDelta[2] - longEdgeDirection[2] * deltaAlongLongEdge
+        firstNormal[0],
+        firstNormal[1],
+        firstNormal[2]
     };
     if (!Normalize3(planeNormal))
     {
-        if (Dot3(firstNormal, secondNormal) < 0.0)
-        {
-            secondNormal[0] = -secondNormal[0];
-            secondNormal[1] = -secondNormal[1];
-            secondNormal[2] = -secondNormal[2];
-        }
-
-        planeNormal[0] = firstNormal[0] + secondNormal[0];
-        planeNormal[1] = firstNormal[1] + secondNormal[1];
-        planeNormal[2] = firstNormal[2] + secondNormal[2];
-        if (!Normalize3(planeNormal))
-        {
-            planeNormal[0] = firstNormal[0];
-            planeNormal[1] = firstNormal[1];
-            planeNormal[2] = firstNormal[2];
-        }
+        return NULL;
     }
 
     NXOpen::Session* session = NXOpen::Session::GetSession();
@@ -5015,6 +5231,339 @@ tag_t AskFeatureBodyTag(tag_t featureTag)
     }
 
     return NULL_TAG;
+}
+
+bool IsModelObjectAlive(tag_t objectTag)
+{
+    if (objectTag == NULL_TAG)
+    {
+        return false;
+    }
+    int type = 0;
+    int subtype = 0;
+    return UF_OBJ_ask_type_and_subtype(objectTag, &type, &subtype) == 0;
+}
+
+void DeleteModelObjectIfAlive(tag_t objectTag)
+{
+    if (IsModelObjectAlive(objectTag))
+    {
+        static_cast<void>(UF_OBJ_delete_object(objectTag));
+    }
+}
+
+bool IsHoleFaceChainParallelCap(tag_t faceTag, const InnerHoleLoopCandidate& candidate)
+{
+    if (faceTag == NULL_TAG || faceTag == candidate.hostFace)
+    {
+        return true;
+    }
+
+    int faceType = 0;
+    if (AskFaceType(faceTag, faceType) && faceType == UF_MODL_PLANAR_FACE)
+    {
+        double point[3] = {0.0, 0.0, 0.0};
+        double normal[3] = {0.0, 0.0, 0.0};
+        double candidateNormal[3] =
+        {
+            candidate.normal[0], candidate.normal[1], candidate.normal[2]
+        };
+        if (AskPlanarFacePlane(faceTag, point, normal) &&
+            Normalize3(normal) && Normalize3(candidateNormal) &&
+            std::fabs(Dot3(normal, candidateNormal)) >= 0.99)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsHoleFaceChainExpansionBarrier(tag_t faceTag, const InnerHoleLoopCandidate& candidate)
+{
+    // Main-chain membership cannot stop an inner-hole wall traversal: on
+    // imported bodies part of the wall can also be classified into that chain.
+    // Only a planar cap parallel to the host plane terminates the hole wall.
+    return IsHoleFaceChainParallelCap(faceTag, candidate);
+}
+
+std::vector<tag_t> CollectInnerLoopFaceChain(const InnerHoleLoopCandidate& candidate)
+{
+    std::vector<tag_t> faceChain;
+    std::deque<tag_t> pendingFaces;
+    std::set<tag_t> visitedFaces;
+    std::set<tag_t> seedFaces;
+    for (std::size_t edgeIndex = 0; edgeIndex < candidate.edges.size(); ++edgeIndex)
+    {
+        const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(candidate.edges[edgeIndex]);
+        for (std::size_t adjacentIndex = 0; adjacentIndex < adjacentFaces.size(); ++adjacentIndex)
+        {
+            const tag_t adjacentFace = adjacentFaces[adjacentIndex];
+            // A face directly across an accepted inner-loop edge is part of the
+            // hole wall even when the earlier main-chain classifier included it.
+            // Main-chain membership only stops expansion beyond this first ring.
+            if (!IsHoleFaceChainParallelCap(adjacentFace, candidate))
+            {
+                seedFaces.insert(adjacentFace);
+                pendingFaces.push_back(adjacentFace);
+            }
+        }
+    }
+
+    while (!pendingFaces.empty() && faceChain.size() < 128)
+    {
+        const tag_t currentFace = pendingFaces.front();
+        pendingFaces.pop_front();
+        if (visitedFaces.find(currentFace) != visitedFaces.end())
+        {
+            continue;
+        }
+        visitedFaces.insert(currentFace);
+        if (seedFaces.find(currentFace) == seedFaces.end() &&
+            IsHoleFaceChainExpansionBarrier(currentFace, candidate))
+        {
+            continue;
+        }
+        faceChain.push_back(currentFace);
+
+        const std::vector<tag_t> edges = AskFaceEdges(currentFace);
+        for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex)
+        {
+            const std::vector<tag_t> adjacentFaces = AskEdgeAdjacentFaces(edges[edgeIndex]);
+            for (std::size_t adjacentIndex = 0; adjacentIndex < adjacentFaces.size(); ++adjacentIndex)
+            {
+                const tag_t adjacentFace = adjacentFaces[adjacentIndex];
+                if (visitedFaces.find(adjacentFace) == visitedFaces.end() &&
+                    !IsHoleFaceChainExpansionBarrier(adjacentFace, candidate))
+                {
+                    pendingFaces.push_back(adjacentFace);
+                }
+            }
+        }
+    }
+
+    return faceChain;
+}
+
+bool CreateTimestampedHoleFaceChainExtract(PendingHolePatch& patch)
+{
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    NXOpen::Part* workPart =
+        session != NULL && session->Parts() != NULL ? session->Parts()->Work() : NULL;
+    if (workPart == NULL || patch.extractedFaces.empty())
+    {
+        return false;
+    }
+
+    NXOpen::Features::ExtractFaceBuilder* extractBuilder = NULL;
+    try
+    {
+        std::vector<NXOpen::Face*> faces = ResolveFaces(patch.extractedFaces);
+        if (faces.empty())
+        {
+            return false;
+        }
+
+        extractBuilder = workPart->Features()->CreateExtractFaceBuilder(NULL);
+        extractBuilder->SetType(NXOpen::Features::ExtractFaceBuilder::ExtractTypeFace);
+        extractBuilder->SetFaceOption(NXOpen::Features::ExtractFaceBuilder::FaceOptionTypeFaceChain);
+        extractBuilder->SetParentPart(NXOpen::Features::ExtractFaceBuilder::ParentPartTypeWorkPart);
+        extractBuilder->SetAssociative(true);
+        extractBuilder->SetFixAtCurrentTimestamp(true);
+        extractBuilder->SetHideOriginal(false);
+        extractBuilder->SetDeleteHoles(false);
+        extractBuilder->SetInheritDisplayProperties(false);
+        extractBuilder->SetInheritMaterial(true);
+
+        NXOpen::SelectionIntentRuleOptions* ruleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+        ruleOptions->SetSelectedFromInactive(false);
+        NXOpen::FaceDumbRule* faceRule =
+            workPart->ScRuleFactory()->CreateRuleFaceDumb(faces, ruleOptions);
+        std::vector<NXOpen::SelectionIntentRule*> rules(1, faceRule);
+        extractBuilder->FaceChain()->ReplaceRules(rules, false);
+        delete ruleOptions;
+
+        NXOpen::Features::Feature* feature = extractBuilder->CommitFeature();
+        patch.extractedFeatureTag = feature != NULL ? feature->Tag() : NULL_TAG;
+        patch.extractedSheetBodyTag = AskFeatureBodyTag(patch.extractedFeatureTag);
+        extractBuilder->Destroy();
+        extractBuilder = NULL;
+        if (patch.extractedSheetBodyTag != NULL_TAG)
+        {
+            static_cast<void>(UF_OBJ_set_blank_status(patch.extractedSheetBodyTag, UF_OBJ_BLANKED));
+        }
+        DebugLog("  inner-loop face chain extracted at current timestamp: hostFace=" +
+            FormatTag(patch.hostFace) +
+            ", faces=[" + FormatTagList(patch.extractedFaces) + "]" +
+            ", extractFeature=" + FormatTag(patch.extractedFeatureTag) +
+            ", sheetBody=" + FormatTag(patch.extractedSheetBodyTag) +
+            ", fixAtCurrentTimestamp=1");
+        return patch.extractedFeatureTag != NULL_TAG && patch.extractedSheetBodyTag != NULL_TAG;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        DebugLog("  inner-loop face-chain extract failed: hostFace=" +
+            FormatTag(patch.hostFace) + ", NXException=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        DebugLog("  inner-loop face-chain extract failed: hostFace=" +
+            FormatTag(patch.hostFace) + ", unknown exception");
+    }
+
+    if (extractBuilder != NULL)
+    {
+        extractBuilder->Destroy();
+    }
+    DeleteModelObjectIfAlive(patch.extractedFeatureTag);
+    DeleteModelObjectIfAlive(patch.extractedSheetBodyTag);
+    patch.extractedFeatureTag = NULL_TAG;
+    patch.extractedSheetBodyTag = NULL_TAG;
+    return false;
+}
+
+bool SameInnerLoopEdges(
+    const std::vector<tag_t>& firstEdges,
+    const std::vector<tag_t>& secondEdges)
+{
+    if (firstEdges.size() != secondEdges.size())
+    {
+        return false;
+    }
+    const std::set<tag_t> firstSet(firstEdges.begin(), firstEdges.end());
+    const std::set<tag_t> secondSet(secondEdges.begin(), secondEdges.end());
+    return firstSet == secondSet;
+}
+
+bool InnerLoopAlreadyProtected(
+    const InnerHoleLoopCandidate& candidate,
+    const std::vector<PendingHolePatch>& pendingHolePatches)
+{
+    for (std::size_t patchIndex = 0; patchIndex < pendingHolePatches.size(); ++patchIndex)
+    {
+        if (SameInnerLoopEdges(candidate.edges, pendingHolePatches[patchIndex].sourceLoopEdges))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool InnerLoopWallIntersectsBoundingTool(
+    tag_t boundingToolBody,
+    const InnerHoleLoopCandidate& candidate,
+    const std::vector<tag_t>& wallFaces,
+    double& minimumDistance)
+{
+    minimumDistance = DBL_MAX;
+    double guess[3] = {candidate.center[0], candidate.center[1], candidate.center[2]};
+    for (std::size_t faceIndex = 0; faceIndex < wallFaces.size(); ++faceIndex)
+    {
+        double faceDistance = DBL_MAX;
+        if (AskMinimumDistance(
+                boundingToolBody,
+                wallFaces[faceIndex],
+                guess,
+                guess,
+                faceDistance))
+        {
+            minimumDistance = std::min(minimumDistance, faceDistance);
+            if (faceDistance <= 0.001)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+std::vector<PendingHolePatch> ExtractIntersectingInnerLoopFaceChainsBeforeSubtract(
+    tag_t boundingToolBody,
+    const std::vector<PendingHolePatch>& pendingHolePatches)
+{
+    std::vector<PendingHolePatch> intersectingPatches;
+    if (boundingToolBody == NULL_TAG || gActiveFaceChain.empty())
+    {
+        return intersectingPatches;
+    }
+
+    // Determine every hit before deleting any source face so one healed hole
+    // cannot change the topology used to recognize another hole in this group.
+    for (std::size_t candidateIndex = 0;
+        candidateIndex < gInnerHoleLoopCandidates.size();
+        ++candidateIndex)
+    {
+        const InnerHoleLoopCandidate& candidate = gInnerHoleLoopCandidates[candidateIndex];
+        if (!ContainsTag(gActiveFaceChain, candidate.hostFace) ||
+            InnerLoopAlreadyProtected(candidate, pendingHolePatches))
+        {
+            continue;
+        }
+
+        PendingHolePatch patch = {};
+        patch.hostFace = candidate.hostFace;
+        patch.sourceLoopEdges = candidate.edges;
+        patch.extractedFaces = CollectInnerLoopFaceChain(candidate);
+        patch.extractedFeatureTag = NULL_TAG;
+        patch.extractedSheetBodyTag = NULL_TAG;
+        patch.subtractFeatureTag = NULL_TAG;
+        patch.sourceFacesDeleted = false;
+        patch.origin = NXOpen::Point3d(
+            candidate.center[0], candidate.center[1], candidate.center[2]);
+        patch.normal = NXOpen::Vector3d(
+            candidate.normal[0], candidate.normal[1], candidate.normal[2]);
+        patch.projectedArea = candidate.projectedArea;
+        if (patch.extractedFaces.empty())
+        {
+            continue;
+        }
+
+        double minimumDistance = DBL_MAX;
+        const bool intersects = InnerLoopWallIntersectsBoundingTool(
+            boundingToolBody,
+            candidate,
+            patch.extractedFaces,
+            minimumDistance);
+        DebugLog("  original inner-loop face-chain/bounding-tool check: hostFace=" +
+            FormatTag(candidate.hostFace) +
+            ", boundingTool=" + FormatTag(boundingToolBody) +
+            ", extractedFaces=[" + FormatTagList(patch.extractedFaces) + "]" +
+            ", innerLoopArea=" + FormatDouble(candidate.projectedArea) +
+            ", minimumDistance=" + FormatDouble(minimumDistance) +
+            ", intersects=" + FormatTag(static_cast<tag_t>(intersects ? 1 : 0)));
+        if (intersects)
+        {
+            intersectingPatches.push_back(patch);
+        }
+    }
+
+    std::vector<PendingHolePatch> extractedPatches;
+    for (std::size_t patchIndex = 0; patchIndex < intersectingPatches.size(); ++patchIndex)
+    {
+        PendingHolePatch patch = intersectingPatches[patchIndex];
+        if (!CreateTimestampedHoleFaceChainExtract(patch))
+        {
+            continue;
+        }
+        patch.sourceFacesDeleted = DeleteFacesWithHealBuilder(patch.extractedFaces);
+        DebugLog("  intersecting inner-loop extract/delete before subtract: hostFace=" +
+            FormatTag(patch.hostFace) +
+            ", sourceFaces=[" + FormatTagList(patch.extractedFaces) + "]" +
+            ", extractFeature=" + FormatTag(patch.extractedFeatureTag) +
+            ", committed=" + FormatTag(static_cast<tag_t>(patch.sourceFacesDeleted ? 1 : 0)));
+        if (!patch.sourceFacesDeleted)
+        {
+            DeleteModelObjectIfAlive(patch.extractedFeatureTag);
+            DeleteModelObjectIfAlive(patch.extractedSheetBodyTag);
+            continue;
+        }
+        extractedPatches.push_back(patch);
+    }
+    DebugLog("Selective inner-loop extraction before bounding subtract: boundingTool=" +
+        FormatTag(boundingToolBody) +
+        ", candidates=" + FormatTag(static_cast<tag_t>(gInnerHoleLoopCandidates.size())) +
+        ", intersecting=" + FormatTag(static_cast<tag_t>(intersectingPatches.size())) +
+        ", extracted=" + FormatTag(static_cast<tag_t>(extractedPatches.size())));
+    return extractedPatches;
 }
 
 std::vector<tag_t> AskFeatureFaces(tag_t featureTag)
@@ -5386,6 +5935,121 @@ bool SubtractGapToolBodiesByGroup(
     return committed;
 }
 
+bool PatchInnerLoopFaceChainBackToBody(
+    tag_t targetBody,
+    PendingHolePatch& patch,
+    tag_t& patchFeatureTag)
+{
+    patchFeatureTag = NULL_TAG;
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    NXOpen::Part* workPart =
+        session != NULL && session->Parts() != NULL ? session->Parts()->Work() : NULL;
+    NXOpen::Body* target =
+        dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(targetBody));
+    NXOpen::DisplayableObject* tool =
+        dynamic_cast<NXOpen::DisplayableObject*>(
+            NXOpen::NXObjectManager::Get(patch.extractedSheetBodyTag));
+    if (workPart == NULL || target == NULL || tool == NULL)
+    {
+        return false;
+    }
+
+    NXOpen::Features::PatchBuilder* patchBuilder = NULL;
+    try
+    {
+        static_cast<void>(UF_OBJ_set_blank_status(patch.extractedSheetBodyTag, UF_OBJ_NOT_BLANKED));
+        patchBuilder = workPart->Features()->CreatePatchBuilder(NULL);
+        patchBuilder->Target()->SetValue(target);
+        patchBuilder->Tool()->SetValue(tool);
+        patchBuilder->SetCreateHolePatch(true);
+        patchBuilder->SetReverseDirection(false);
+        patchBuilder->SetTolerance(0.0);
+        NXOpen::Features::Feature* feature = patchBuilder->CommitFeature();
+        patchFeatureTag = feature != NULL ? feature->Tag() : NULL_TAG;
+        patchBuilder->Destroy();
+        patchBuilder = NULL;
+        static_cast<void>(UF_OBJ_set_blank_status(patch.extractedSheetBodyTag, UF_OBJ_BLANKED));
+        return patchFeatureTag != NULL_TAG;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        DebugLog("  inner-loop hole Patch failed: hostFace=" + FormatTag(patch.hostFace) +
+            ", sheetBody=" + FormatTag(patch.extractedSheetBodyTag) +
+            ", NXException=" + std::string(ex.Message()));
+    }
+    catch (...)
+    {
+        DebugLog("  inner-loop hole Patch failed: hostFace=" + FormatTag(patch.hostFace) +
+            ", sheetBody=" + FormatTag(patch.extractedSheetBodyTag) +
+            ", unknown exception");
+    }
+    if (patchBuilder != NULL)
+    {
+        patchBuilder->Destroy();
+    }
+    static_cast<void>(UF_OBJ_set_blank_status(patch.extractedSheetBodyTag, UF_OBJ_BLANKED));
+    return false;
+}
+
+void RestoreIntersectingFaceChainHolesWithPatch(
+    tag_t targetBody,
+    const std::set<tag_t>& successfullyCleanedSubtractFeatures,
+    std::vector<PendingHolePatch>& pendingHolePatches)
+{
+    int restoredCount = 0;
+    int skippedCount = 0;
+    int failedCount = 0;
+    DebugLog("Restore protected face-chain holes with Patch start: extracts=" +
+        FormatTag(static_cast<tag_t>(pendingHolePatches.size())));
+    for (std::size_t patchIndex = 0; patchIndex < pendingHolePatches.size(); ++patchIndex)
+    {
+        PendingHolePatch& patch = pendingHolePatches[patchIndex];
+        if (!patch.sourceFacesDeleted)
+        {
+            ++skippedCount;
+            DebugLog("  inner-loop Patch skipped because source faces were not deleted: hostFace=" +
+                FormatTag(patch.hostFace) +
+                ", extractFeature=" + FormatTag(patch.extractedFeatureTag));
+            DeleteModelObjectIfAlive(patch.extractedFeatureTag);
+            DeleteModelObjectIfAlive(patch.extractedSheetBodyTag);
+            continue;
+        }
+        if (patch.subtractFeatureTag != NULL_TAG &&
+            successfullyCleanedSubtractFeatures.find(patch.subtractFeatureTag) ==
+                successfullyCleanedSubtractFeatures.end())
+        {
+            DebugLog("  inner-loop Patch continues to restore previously deleted hole after feature-face cleanup failed: hostFace=" +
+                FormatTag(patch.hostFace) +
+                ", subtractFeature=" + FormatTag(patch.subtractFeatureTag) +
+                ", extractFeature=" + FormatTag(patch.extractedFeatureTag));
+        }
+
+        tag_t patchFeatureTag = NULL_TAG;
+        if (PatchInnerLoopFaceChainBackToBody(targetBody, patch, patchFeatureTag))
+        {
+            ++restoredCount;
+            DebugLog("  inner-loop hole restored with Patch: hostFace=" +
+                FormatTag(patch.hostFace) +
+                ", extractedFaces=[" + FormatTagList(patch.extractedFaces) + "]" +
+                ", extractFeature=" + FormatTag(patch.extractedFeatureTag) +
+                ", sheetBody=" + FormatTag(patch.extractedSheetBodyTag) +
+                ", patchFeature=" + FormatTag(patchFeatureTag) +
+                ", createHolePatch=1, tolerance=0.000000");
+        }
+        else
+        {
+            ++failedCount;
+        }
+    }
+
+    DebugLog("Restore protected face-chain holes with Patch result: extracts=" +
+        FormatTag(static_cast<tag_t>(pendingHolePatches.size())) +
+        ", restored=" + FormatTag(static_cast<tag_t>(restoredCount)) +
+        ", skippedSourceDeleteFailed=" + FormatTag(static_cast<tag_t>(skippedCount)) +
+        ", failed=" + FormatTag(static_cast<tag_t>(failedCount)));
+    pendingHolePatches.clear();
+}
+
 bool DeleteFeatureFacesByGroup(tag_t featureTag)
 {
     const std::vector<tag_t> featureFaces = AskFeatureFaces(featureTag);
@@ -5474,6 +6138,7 @@ bool DeleteGapGroupWithBoundingTool(
     const GapFaceGroup& group,
     double thickness,
     tag_t& subtractFeatureTag,
+    std::vector<PendingHolePatch>& pendingHolePatches,
     NXOpen::Session::UndoMarkId* retainedUndoMark = NULL)
 {
     subtractFeatureTag = NULL_TAG;
@@ -5519,6 +6184,11 @@ bool DeleteGapGroupWithBoundingTool(
         return false;
     }
 
+    std::vector<PendingHolePatch> newHolePatches =
+        ExtractIntersectingInnerLoopFaceChainsBeforeSubtract(
+            toolBodyTags.front(),
+            pendingHolePatches);
+
     const bool subtracted = SubtractGapToolBodiesByGroup(bodyTag, toolBodyTags, subtractFeatureTag);
     for (std::size_t toolIndex = 0; toolIndex < toolBodyTags.size(); ++toolIndex)
     {
@@ -5539,6 +6209,12 @@ bool DeleteGapGroupWithBoundingTool(
             session->DeleteUndoMark(boundingStartMark, "TianFenXI Bounding Fallback");
         }
         return false;
+    }
+
+    for (std::size_t index = 0; index < newHolePatches.size(); ++index)
+    {
+        newHolePatches[index].subtractFeatureTag = subtractFeatureTag;
+        pendingHolePatches.push_back(newHolePatches[index]);
     }
 
     DebugLog("  gap bounding fallback result: boxFeatures=[" +
@@ -5604,59 +6280,6 @@ void DeleteAllBSurfaceFaces(tag_t bodyTag)
         FormatTag(static_cast<tag_t>(committedGroups)) +
         ", committedFaces=" + FormatTag(static_cast<tag_t>(committedFaces)) +
         ", faces=" + FormatTag(static_cast<tag_t>(bSurfaceFaces.size())));
-}
-
-void PrepareBodyBeforeReplaceFallback(
-    tag_t bodyTag,
-    double thickness,
-    bool deleteREnabled,
-    double maxRadius)
-{
-    DebugLog("Prepare before replace fallback start: body=" +
-        FormatTag(bodyTag) +
-        ", deleteR=" + FormatTag(static_cast<tag_t>(deleteREnabled ? 1 : 0)) +
-        ", maxR=" + FormatDouble(maxRadius) +
-        ", thickness=" + FormatDouble(thickness));
-    DeleteSmallRadiusFacesIfRequested(
-        bodyTag,
-        thickness,
-        deleteREnabled,
-        maxRadius);
-    DeleteAllBSurfaceFaces(bodyTag);
-    DebugLog("Prepare before replace fallback done");
-}
-
-bool DeleteGapGroupWithBoundingToolOrReplace(
-    tag_t bodyTag,
-    const GapFaceGroup& group,
-    double thickness,
-    bool deleteREnabled,
-    double maxRadius,
-    std::vector<tag_t>& pendingSubtractFeatureTags)
-{
-    tag_t subtractFeatureTag = NULL_TAG;
-    const bool bounded = DeleteGapGroupWithBoundingTool(bodyTag, group, thickness, subtractFeatureTag);
-    if (bounded)
-    {
-        AddUniqueTag(pendingSubtractFeatureTags, subtractFeatureTag);
-        return true;
-    }
-
-    DebugLog("  gap bounding fallback failed, start replace face fallback");
-    ReplaceGapPlan plan = {};
-    const bool planned = TryBuildReplaceGapPlan(group, plan);
-    DebugLog("  gap replace fallback plan before prepare: planned=" +
-        FormatTag(static_cast<tag_t>(planned ? 1 : 0)));
-    if (!planned)
-    {
-        return false;
-    }
-
-    PrepareBodyBeforeReplaceFallback(bodyTag, thickness, deleteREnabled, maxRadius);
-    const bool replaced = ExecuteReplaceGapPlan(plan, group);
-    DebugLog("  gap replace fallback after bounding result: committed=" +
-        FormatTag(static_cast<tag_t>(replaced ? 1 : 0)));
-    return replaced;
 }
 
 bool GapGroupTouchesTangentCylinderFace(const GapFaceGroup& group)
@@ -5750,36 +6373,6 @@ bool GapGroupTouchesTangentCylinderFace(const GapFaceGroup& group)
     return false;
 }
 
-bool TryReplaceGapGroupAfterBoundingFailed(
-    tag_t bodyTag,
-    const GapFaceGroup& group,
-    double thickness,
-    bool deleteREnabled,
-    double maxRadius)
-{
-    DebugLog("  gap bounding failed, check tangent cylinder before replace");
-    if (!GapGroupTouchesTangentCylinderFace(group))
-    {
-        DebugLog("  gap replace skipped: no tangent cylinder after bounding failed");
-        return false;
-    }
-
-    ReplaceGapPlan plan = {};
-    const bool planned = TryBuildReplaceGapPlan(group, plan);
-    DebugLog("  gap replace fallback plan after bounding failed: planned=" +
-        FormatTag(static_cast<tag_t>(planned ? 1 : 0)));
-    if (!planned)
-    {
-        return false;
-    }
-
-    PrepareBodyBeforeReplaceFallback(bodyTag, thickness, deleteREnabled, maxRadius);
-    const bool replaced = ExecuteReplaceGapPlan(plan, group);
-    DebugLog("  gap replace fallback after bounding result: committed=" +
-        FormatTag(static_cast<tag_t>(replaced ? 1 : 0)));
-    return replaced;
-}
-
 bool DeleteGapGroupAfterMiddlePlaneFailed(
     tag_t bodyTag,
     const GapFaceGroup& group,
@@ -5787,7 +6380,8 @@ bool DeleteGapGroupAfterMiddlePlaneFailed(
     double thickness,
     bool deleteREnabled,
     double maxRadius,
-    std::vector<PendingSubtractCleanup>& pendingSubtractCleanups)
+    std::vector<PendingSubtractCleanup>& pendingSubtractCleanups,
+    std::vector<PendingHolePatch>& pendingHolePatches)
 {
     tag_t subtractFeatureTag = NULL_TAG;
     NXOpen::Session::UndoMarkId undoMark = static_cast<NXOpen::Session::UndoMarkId>(0);
@@ -5796,6 +6390,7 @@ bool DeleteGapGroupAfterMiddlePlaneFailed(
         group,
         thickness,
         subtractFeatureTag,
+        pendingHolePatches,
         &undoMark);
     if (bounded)
     {
@@ -5813,12 +6408,10 @@ bool DeleteGapGroupAfterMiddlePlaneFailed(
         return true;
     }
 
-    return TryReplaceGapGroupAfterBoundingFailed(
-        bodyTag,
-        group,
-        thickness,
-        deleteREnabled,
-        maxRadius);
+    DebugLog("  gap bounding failed: replace-face fallback disabled, group=" +
+        FormatTag(groupIndex) +
+        ", groupFaces=[" + FormatTagList(group.faces) + "]");
+    return false;
 }
 
 tag_t ResolveCurrentFaceTag(tag_t faceTag)
@@ -6512,18 +7105,6 @@ bool ExecuteReplaceGapPlan(const ReplaceGapPlan& plan, const GapFaceGroup& group
         ", targetFaces=" + FormatTag(static_cast<tag_t>(targetFaces.size())) +
         ", groupFaces=" + FormatTag(static_cast<tag_t>(group.faces.size())));
     return allReplaced;
-}
-
-bool TryReplaceGapGroupFaces(const GapFaceGroup& group)
-{
-    ReplaceGapPlan plan = {};
-    if (!TryBuildReplaceGapPlan(group, plan))
-    {
-        DebugLog("  replace face fallback result: committed=0, plan=0");
-        return false;
-    }
-
-    return ExecuteReplaceGapPlan(plan, group);
 }
 
 bool DeleteFacesWithHealBuilder(const std::vector<tag_t>& faceTags)
@@ -7884,6 +8465,8 @@ void DeleteGapGroupsWithMiddlePlanes(
     int createdCount = 0;
     int deletedCount = 0;
     std::vector<PendingSubtractCleanup> pendingSubtractCleanups;
+    std::vector<PendingHolePatch> pendingHolePatches;
+    std::set<tag_t> successfullyCleanedSubtractFeatures;
     std::vector<RemovedGapBlend> removedGapBlends;
     std::vector<tag_t> failedGroupIndexes;
     DebugLog("Delete gap groups with middle planes start: groups=" +
@@ -7928,7 +8511,8 @@ void DeleteGapGroupsWithMiddlePlanes(
                 thickness,
                 deleteREnabled,
                 maxRadius,
-                pendingSubtractCleanups);
+                pendingSubtractCleanups,
+                pendingHolePatches);
             if (bounded)
             {
                 ++deletedCount;
@@ -7965,7 +8549,8 @@ void DeleteGapGroupsWithMiddlePlanes(
                 thickness,
                 deleteREnabled,
                 maxRadius,
-                pendingSubtractCleanups);
+                pendingSubtractCleanups,
+                pendingHolePatches);
             if (bounded)
             {
                 ++deletedCount;
@@ -8003,78 +8588,132 @@ void DeleteGapGroupsWithMiddlePlanes(
     DeleteSmallRadiusFacesIfRequested(bodyTag, thickness, deleteREnabled, maxRadius);
     if (!pendingSubtractCleanups.empty())
     {
-        const bool deletedSubtractFaces = DeleteFeatureFacesByFeatures(pendingSubtractFeatureTags);
-        DebugLog("Delete deferred subtract feature faces after R result: committed=" +
-            FormatTag(static_cast<tag_t>(deletedSubtractFaces ? 1 : 0)) +
-            ", features=" + FormatTag(static_cast<tag_t>(pendingSubtractFeatureTags.size())));
         NXOpen::Session* session = NXOpen::Session::GetSession();
-        if (deletedSubtractFaces)
+
+        // The bounding-fallback undo marks are nested.  Rolling an older mark
+        // back after a later group has succeeded would also undo that later
+        // group.  Commit the completed bounding operations first, then give
+        // every feature-face deletion its own local undo scope.
+        for (std::size_t cleanupIndex = 0; cleanupIndex < pendingSubtractCleanups.size(); ++cleanupIndex)
         {
-            for (std::size_t cleanupIndex = 0; cleanupIndex < pendingSubtractCleanups.size(); ++cleanupIndex)
+            if (session != NULL && pendingSubtractCleanups[cleanupIndex].undoMark != 0)
             {
-                if (session != NULL && pendingSubtractCleanups[cleanupIndex].undoMark != 0)
-                {
-                    session->DeleteUndoMark(
-                        pendingSubtractCleanups[cleanupIndex].undoMark,
-                        "TianFenXI Bounding Fallback");
-                }
+                session->DeleteUndoMark(
+                    pendingSubtractCleanups[cleanupIndex].undoMark,
+                    "TianFenXI Bounding Fallback");
             }
         }
-        else
+
+        std::size_t committedCleanupCount = 0;
+        std::vector<std::size_t> retryCleanupIndexes;
+        for (std::size_t cleanupIndex = 0; cleanupIndex < pendingSubtractCleanups.size(); ++cleanupIndex)
         {
-            DebugLog("Delete deferred subtract feature faces failed, rollback bounding fallbacks and start replace fallback");
-            for (std::size_t reverseIndex = pendingSubtractCleanups.size(); reverseIndex > 0; --reverseIndex)
+            const PendingSubtractCleanup& cleanup = pendingSubtractCleanups[cleanupIndex];
+            NXOpen::Session::UndoMarkId cleanupMark =
+                static_cast<NXOpen::Session::UndoMarkId>(0);
+            if (session != NULL)
             {
-                const PendingSubtractCleanup& cleanup = pendingSubtractCleanups[reverseIndex - 1];
-                if (session != NULL && cleanup.undoMark != 0)
-                {
-                    DebugLog("  rollback bounding fallback: cleanup=" +
-                    FormatTag(static_cast<tag_t>(reverseIndex)) +
-                        ", group=" + FormatTag(cleanup.groupIndex) +
-                        ", subtractFeature=" + FormatTag(cleanup.subtractFeatureTag) +
-                        ", undoMark=" + FormatTag(static_cast<tag_t>(cleanup.undoMark)) +
-                        ", groupFaces=[" + FormatTagList(cleanup.group.faces) + "]");
-                    session->UndoToMark(
-                        cleanup.undoMark,
-                        "TianFenXI Bounding Fallback");
-                    session->DeleteUndoMark(
-                        cleanup.undoMark,
-                        "TianFenXI Bounding Fallback");
-                }
+                cleanupMark = session->SetUndoMark(
+                    NXOpen::Session::MarkVisibilityInvisible,
+                    "TianFenXI Delete Group Feature Faces");
             }
 
-            PrepareBodyBeforeReplaceFallback(bodyTag, thickness, deleteREnabled, maxRadius);
-            int replaceCount = 0;
-            for (std::size_t cleanupIndex = 0; cleanupIndex < pendingSubtractCleanups.size(); ++cleanupIndex)
+            const bool deletedSubtractFaces = DeleteFeatureFacesByGroup(cleanup.subtractFeatureTag);
+            DebugLog("Delete deferred subtract feature faces by group: cleanup=" +
+                FormatTag(static_cast<tag_t>(cleanupIndex + 1)) +
+                ", group=" + FormatTag(cleanup.groupIndex) +
+                ", subtractFeature=" + FormatTag(cleanup.subtractFeatureTag) +
+                ", committed=" + FormatTag(static_cast<tag_t>(deletedSubtractFaces ? 1 : 0)) +
+                ", groupFaces=[" + FormatTagList(cleanup.group.faces) + "]");
+
+            if (deletedSubtractFaces)
             {
-                ReplaceGapPlan plan = {};
-                const bool planned = TryBuildReplaceGapPlan(
-                    pendingSubtractCleanups[cleanupIndex].group,
-                    plan);
-                DebugLog("  replace after subtract cleanup failed plan: group=" +
-                    FormatTag(pendingSubtractCleanups[cleanupIndex].groupIndex) +
-                    ", subtractFeature=" + FormatTag(pendingSubtractCleanups[cleanupIndex].subtractFeatureTag) +
-                    ", planned=" + FormatTag(static_cast<tag_t>(planned ? 1 : 0)) +
-                    ", groupFaces=[" + FormatTagList(pendingSubtractCleanups[cleanupIndex].group.faces) + "]");
-                const bool replaced = planned &&
-                    ExecuteReplaceGapPlan(plan, pendingSubtractCleanups[cleanupIndex].group);
-                if (replaced)
+                ++committedCleanupCount;
+                successfullyCleanedSubtractFeatures.insert(cleanup.subtractFeatureTag);
+                if (session != NULL && cleanupMark != 0)
                 {
-                    ++replaceCount;
+                    session->DeleteUndoMark(
+                        cleanupMark,
+                        "TianFenXI Delete Group Feature Faces");
                 }
-                else
-                {
-                    AddUniqueTag(failedGroupIndexes, pendingSubtractCleanups[cleanupIndex].groupIndex);
-                }
-                DebugLog("  replace after subtract cleanup failed result: group=" +
-                    FormatTag(pendingSubtractCleanups[cleanupIndex].groupIndex) +
-                    ", committed=" + FormatTag(static_cast<tag_t>(replaced ? 1 : 0)));
+                continue;
             }
-            DebugLog("Replace fallback after subtract cleanup failed summary: committedGroups=" +
-                FormatTag(static_cast<tag_t>(replaceCount)) +
-                ", groups=" + FormatTag(static_cast<tag_t>(pendingSubtractCleanups.size())));
+
+            // Keep the failed delete-face attempt in the feature tree for
+            // diagnosis.  Do not undo this mark: NX may have left a failed or
+            // partially-created feature that explains the topology failure.
+            if (session != NULL && cleanupMark != 0)
+            {
+                session->DeleteUndoMark(
+                    cleanupMark,
+                    "TianFenXI Delete Group Feature Faces");
+            }
+            DebugLog("  first-pass delete-face failure retained until final retry: group=" +
+                FormatTag(cleanup.groupIndex) +
+                ", subtractFeature=" + FormatTag(cleanup.subtractFeatureTag));
+            retryCleanupIndexes.push_back(cleanupIndex);
         }
+
+        DebugLog("Retry failed delete-face groups after all first-pass groups: groups=" +
+            FormatTag(static_cast<tag_t>(retryCleanupIndexes.size())));
+        std::size_t retryCommittedCount = 0;
+        for (std::size_t retryIndex = 0; retryIndex < retryCleanupIndexes.size(); ++retryIndex)
+        {
+            const std::size_t cleanupIndex = retryCleanupIndexes[retryIndex];
+            const PendingSubtractCleanup& cleanup = pendingSubtractCleanups[cleanupIndex];
+            NXOpen::Session::UndoMarkId retryMark =
+                static_cast<NXOpen::Session::UndoMarkId>(0);
+            if (session != NULL)
+            {
+                retryMark = session->SetUndoMark(
+                    NXOpen::Session::MarkVisibilityInvisible,
+                    "TianFenXI Retry Delete Group Feature Faces");
+            }
+
+            const bool retryCommitted = DeleteFeatureFacesByGroup(cleanup.subtractFeatureTag);
+            DebugLog("Retry deferred subtract feature faces by group: retry=" +
+                FormatTag(static_cast<tag_t>(retryIndex + 1)) +
+                ", originalCleanup=" + FormatTag(static_cast<tag_t>(cleanupIndex + 1)) +
+                ", group=" + FormatTag(cleanup.groupIndex) +
+                ", subtractFeature=" + FormatTag(cleanup.subtractFeatureTag) +
+                ", committed=" + FormatTag(static_cast<tag_t>(retryCommitted ? 1 : 0)) +
+                ", groupFaces=[" + FormatTagList(cleanup.group.faces) + "]");
+
+            if (session != NULL && retryMark != 0)
+            {
+                session->DeleteUndoMark(
+                    retryMark,
+                    "TianFenXI Retry Delete Group Feature Faces");
+            }
+
+            if (retryCommitted)
+            {
+                ++retryCommittedCount;
+                ++committedCleanupCount;
+                successfullyCleanedSubtractFeatures.insert(cleanup.subtractFeatureTag);
+                continue;
+            }
+
+            DebugLog("  final failed delete-face feature retained for diagnosis: group=" +
+                FormatTag(cleanup.groupIndex) +
+                ", subtractFeature=" + FormatTag(cleanup.subtractFeatureTag));
+            AddUniqueTag(failedGroupIndexes, cleanup.groupIndex);
+        }
+
+        DebugLog("Delete deferred subtract feature faces by group summary: total=" +
+            FormatTag(static_cast<tag_t>(pendingSubtractCleanups.size())) +
+            ", committed=" + FormatTag(static_cast<tag_t>(committedCleanupCount)) +
+            ", failed=" + FormatTag(static_cast<tag_t>(
+                pendingSubtractCleanups.size() - committedCleanupCount)) +
+            ", firstPassFailed=" + FormatTag(static_cast<tag_t>(retryCleanupIndexes.size())) +
+            ", retryCommitted=" + FormatTag(static_cast<tag_t>(retryCommittedCount)) +
+            ", successful groups retained=1, final failed features retained=1, replace-face fallback disabled=1");
     }
+
+    RestoreIntersectingFaceChainHolesWithPatch(
+        bodyTag,
+        successfullyCleanedSubtractFeatures,
+        pendingHolePatches);
 
     DebugLog("Unified gap blend restore after all face operations");
     RestoreDeletedGapBlends(removedGapBlends, bodyTag);
@@ -8483,10 +9122,8 @@ int TianFenXI::apply_cb()
         SaveUiSettings();
         {
             SilentDisplayUpdateGuard silentDisplayGuard;
-            const tag_t bodyTagForRemoveParameters =
-                AskSelectedBaseBodyFromDialog(selection0, previewSelectedFaceTag, autoSelectedGapFaces);
             PreviewSelectedFaceChain(true);
-            RemoveParametersFromBody(bodyTagForRemoveParameters);
+            DebugLog("Remove parameters temporarily disabled for feature-tree diagnosis");
         }
         if (gLastGapDeleteFailedGroups > 0 && gLastGapDeleteSucceededGroups == 0)
         {
@@ -8610,8 +9247,8 @@ void TianFenXI::ConfigureFaceSelectionBlock()
 
     selection0->SetSelectionFilter(NXOpen::Selection::SelectionActionClearAndEnableSpecific, masks);
     selection0->SetSelectModeAsString("Multiple");
-    selection0->SetLabelString("选择面/排除边");
-    selection0->SetCue("请选择基准面，可按 Shift 选边排除区域");
+    selection0->SetLabelString("选择基面/增删间隙面");
+    selection0->SetCue("先选择基面；识别后可继续点选添加间隙面，或取消已选面");
 }
 
 void TianFenXI::UpdateDeleteRVisibility()
@@ -8750,6 +9387,7 @@ void TianFenXI::ClearPreviewHighlight(bool refresh)
 void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
 {
     DebugLog(std::string(createMiddlePlanes ? "Apply" : "Preview") + " selected face chain begin");
+    const std::vector<tag_t> previousSelectedGapFaces = autoSelectedGapFaces;
     ClearPreviewHighlight(false);
 
     if (selection0 == NULL)
@@ -8763,9 +9401,13 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
     std::vector<NXOpen::TaggedObject*> selectedObjects = properties->GetTaggedObjectVector("SelectedObjects");
     delete properties;
     const std::vector<tag_t> selectedFaceTags = FindSelectedFaceTags(selectedObjects);
-    if (!createMiddlePlanes && !autoSelectedGapFaces.empty())
+    if (!createMiddlePlanes && !previousSelectedGapFaces.empty())
     {
-        RememberDeselectedAutoGapFaces(autoSelectedGapFaces, selectedFaceTags, userDeselectedGapFaces);
+        RememberRemovedSelectedGapFaces(
+            previousSelectedGapFaces,
+            selectedFaceTags,
+            userDeselectedGapFaces,
+            userAddedGapFaces);
     }
 
     if (selectedObjects.empty())
@@ -8793,13 +9435,10 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
             FormatTag(previewSelectedFaceTag) +
             ", new=" + FormatTag(selectedFaceTag));
         userDeselectedGapFaces.clear();
+        userAddedGapFaces.clear();
     }
     previewSelectedFaceTag = selectedFaceTag;
     const std::vector<tag_t> selectedCurveTags = FindUserSelectedCurveTags(selectedObjects);
-    const std::vector<tag_t> selectedAutoGapFaces = FindSelectedAutoGapFaces(selectedObjects, autoSelectedGapFaces);
-    DebugLog("Preview selected face=" + FormatTag(selectedFaceTag) +
-        ", selected curves=" + FormatTag(static_cast<tag_t>(selectedCurveTags.size())) +
-        ", selected auto gap faces=" + FormatTag(static_cast<tag_t>(selectedAutoGapFaces.size())));
     tag_t bodyTag = NULL_TAG;
     if (UF_MODL_ask_face_body(selectedFaceTag, &bodyTag) != 0 || bodyTag == NULL_TAG)
     {
@@ -8808,6 +9447,19 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
         return;
     }
     DebugLog("Preview selected body=" + FormatTag(bodyTag));
+    if (!createMiddlePlanes)
+    {
+        RememberUserAddedGapFaces(
+            selectedFaceTags,
+            previousSelectedGapFaces,
+            selectedFaceTag,
+            bodyTag,
+            userDeselectedGapFaces,
+            userAddedGapFaces);
+    }
+    DebugLog("Preview selected face=" + FormatTag(selectedFaceTag) +
+        ", selected curves=" + FormatTag(static_cast<tag_t>(selectedCurveTags.size())) +
+        ", user added gap faces=" + FormatTag(static_cast<tag_t>(userAddedGapFaces.size())));
 
     double selectedPoint[3] = {0.0, 0.0, 0.0};
     double selectedNormal[3] = {0.0, 0.0, 0.0};
@@ -8819,6 +9471,92 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
     }
     DebugLog("Preview selected plane point=" + FormatVector3(selectedPoint) +
         ", normal=" + FormatVector3(selectedNormal));
+
+    const double gapDistance = ReadPositiveStringValue(string0, kDefaultGapDistance);
+    std::vector<tag_t> bodyFaceTags = AskBodyFaces(bodyTag);
+    std::sort(bodyFaceTags.begin(), bodyFaceTags.end());
+    const bool previewCacheHit =
+        gPreviewAnalysisCache.valid &&
+        gPreviewAnalysisCache.bodyTag == bodyTag &&
+        gPreviewAnalysisCache.selectedFaceTag == selectedFaceTag &&
+        std::fabs(gPreviewAnalysisCache.gapDistance - gapDistance) < 1.0e-9 &&
+        gPreviewAnalysisCache.bodyFaceTags == bodyFaceTags;
+    if (previewCacheHit)
+    {
+        DebugLog(std::string(createMiddlePlanes ? "Apply" : "Preview") +
+            " analysis cache hit: reuse face chain, boundary pairs and gap groups");
+        hasPreviewThickness = gPreviewAnalysisCache.hasThickness;
+        previewThickness = gPreviewAnalysisCache.thickness;
+        previewInwardNormal[0] = gPreviewAnalysisCache.inwardNormal[0];
+        previewInwardNormal[1] = gPreviewAnalysisCache.inwardNormal[1];
+        previewInwardNormal[2] = gPreviewAnalysisCache.inwardNormal[2];
+        highlightedFaceChain = gPreviewAnalysisCache.faceChain;
+        highlightedBoundaryEdges = FlattenGapEdgePairs(gPreviewAnalysisCache.gapEdgePairs);
+        const std::vector<GapFaceGroup> adjustedGapFaceGroups =
+            BuildUserAdjustedGapFaceGroups(
+                gPreviewAnalysisCache.gapFaceGroups,
+                userDeselectedGapFaces,
+                userAddedGapFaces);
+        highlightedGapFaces = FlattenGapFaceGroups(adjustedGapFaceGroups);
+        gInnerLoopHoleFaces = gPreviewAnalysisCache.innerLoopHoleFaces;
+        gInnerLoopHoleEdges = gPreviewAnalysisCache.innerLoopHoleEdges;
+        gPrecomputedThicknessFaces = gPreviewAnalysisCache.thicknessEndFaces;
+        gThicknessEndFacesReady = gPreviewAnalysisCache.thicknessEndFacesReady;
+
+        const std::set<std::size_t> skippedGroupIndexes = createMiddlePlanes ?
+            FindSkippedGapGroupIndexesByUserDeselectedFaces(
+                gPreviewAnalysisCache.gapFaceGroups,
+                userDeselectedGapFaces) :
+            std::set<std::size_t>();
+        skippedGapFaces = FlattenSkippedGapFaces(
+            gPreviewAnalysisCache.gapFaceGroups,
+            skippedGroupIndexes);
+        if (createMiddlePlanes)
+        {
+            gActiveFaceChain = highlightedFaceChain;
+            gPreviewAnalysisCache.valid = false;
+            DeleteGapGroupsWithMiddlePlanes(
+                adjustedGapFaceGroups,
+                bodyTag,
+                previewThickness,
+                toggle0 != NULL && toggle0->Value(),
+                ReadPositiveStringValue(string01, 5.0));
+        }
+        else
+        {
+            autoSelectedGapFaces = highlightedGapFaces;
+            highlightedGapFaces = autoSelectedGapFaces;
+            HighlightFaces(highlightedGapFaces);
+            std::vector<NXOpen::TaggedObject*> rewriteObjects =
+                BuildSelectionObjectsWithGapFaces(autoSelectedGapFaces);
+            NXOpen::BlockStyler::PropertyList* rewriteProperties = selection0->GetProperties();
+            try
+            {
+                updatingSelectionProgrammatically = true;
+                rewriteProperties->SetTaggedObjectVector("SelectedObjects", rewriteObjects);
+            }
+            catch (...)
+            {
+                updatingSelectionProgrammatically = false;
+                delete rewriteProperties;
+                throw;
+            }
+            updatingSelectionProgrammatically = false;
+            delete rewriteProperties;
+        }
+
+        DebugLog("Cached preview face chain count=" +
+            FormatTag(static_cast<tag_t>(highlightedFaceChain.size())) +
+            ", gapPairs=" + FormatTag(static_cast<tag_t>(gPreviewAnalysisCache.gapEdgePairs.size())) +
+            ", gapFaceGroups=" + FormatTag(static_cast<tag_t>(gPreviewAnalysisCache.gapFaceGroups.size())) +
+            ", gapDistance=" + FormatDouble(gapDistance) +
+            ", userDeselectedGapFaces=" + FormatTag(static_cast<tag_t>(userDeselectedGapFaces.size())) +
+            ", userAddedGapFaces=" + FormatTag(static_cast<tag_t>(userAddedGapFaces.size())) +
+            ", skippedGapGroups=" + FormatTag(static_cast<tag_t>(skippedGroupIndexes.size())) +
+            ", colored gap face count=" + FormatTag(static_cast<tag_t>(highlightedGapFaces.size())));
+        RefreshDisplay();
+        return;
+    }
 
     PrecomputeInnerLoopHoleTopology(bodyTag, selectedFaceTag);
     gPrecomputedThicknessFaces.clear();
@@ -8838,22 +9576,37 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
             return;
         }
 
-        const double gapDistance = ReadPositiveStringValue(string0, kDefaultGapDistance);
         const std::vector<GapEdgePair> gapEdgePairs = FindFaceChainGapEdgePairs(highlightedFaceChain, gapDistance);
         const std::vector<GapFaceGroup> gapFaceGroups =
             FindGapFaceGroupsFromGapEdgePairs(gapEdgePairs, highlightedFaceChain, thickness);
+        StorePreviewAnalysisCache(
+            bodyTag,
+            selectedFaceTag,
+            gapDistance,
+            false,
+            thickness,
+            inwardNormal,
+            bodyFaceTags,
+            highlightedFaceChain,
+            gapEdgePairs,
+            gapFaceGroups);
         highlightedBoundaryEdges = FlattenGapEdgePairs(gapEdgePairs);
-        highlightedGapFaces = FlattenGapFaceGroups(gapFaceGroups);
+        const std::vector<GapFaceGroup> adjustedGapFaceGroups =
+            BuildUserAdjustedGapFaceGroups(
+                gapFaceGroups,
+                userDeselectedGapFaces,
+                userAddedGapFaces);
+        highlightedGapFaces = FlattenGapFaceGroups(adjustedGapFaceGroups);
         const std::set<std::size_t> skippedGroupIndexes = createMiddlePlanes ?
             FindSkippedGapGroupIndexesByUserDeselectedFaces(gapFaceGroups, userDeselectedGapFaces) :
             std::set<std::size_t>();
         skippedGapFaces = FlattenSkippedGapFaces(gapFaceGroups, skippedGroupIndexes);
         if (createMiddlePlanes)
         {
-            const std::vector<GapFaceGroup> groupsToDelete =
-                FilterGapGroupsDeselectedFaces(gapFaceGroups, userDeselectedGapFaces);
+            gActiveFaceChain = highlightedFaceChain;
+            gPreviewAnalysisCache.valid = false;
             DeleteGapGroupsWithMiddlePlanes(
-                groupsToDelete,
+                adjustedGapFaceGroups,
                 bodyTag,
                 thickness,
                 toggle0 != NULL && toggle0->Value(),
@@ -8861,7 +9614,7 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
         }
         else
         {
-            autoSelectedGapFaces = FilterUserDeselectedGapFaces(highlightedGapFaces, userDeselectedGapFaces);
+            autoSelectedGapFaces = highlightedGapFaces;
             highlightedGapFaces = autoSelectedGapFaces;
             HighlightFaces(highlightedGapFaces);
             std::vector<NXOpen::TaggedObject*> rewriteObjects =
@@ -8887,6 +9640,7 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
             ", gapFaceGroups=" + FormatTag(static_cast<tag_t>(gapFaceGroups.size())) +
             ", gapDistance=" + FormatDouble(gapDistance) +
             ", userDeselectedGapFaces=" + FormatTag(static_cast<tag_t>(userDeselectedGapFaces.size())) +
+            ", userAddedGapFaces=" + FormatTag(static_cast<tag_t>(userAddedGapFaces.size())) +
             ", skippedGapGroups=" + FormatTag(static_cast<tag_t>(skippedGroupIndexes.size())) +
             ", colored gap face count=" +
             FormatTag(static_cast<tag_t>(highlightedGapFaces.size())));
@@ -8909,22 +9663,37 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
         return;
     }
 
-    const double gapDistance = ReadPositiveStringValue(string0, kDefaultGapDistance);
     const std::vector<GapEdgePair> gapEdgePairs = FindFaceChainGapEdgePairs(highlightedFaceChain, gapDistance);
     const std::vector<GapFaceGroup> gapFaceGroups =
         FindGapFaceGroupsFromGapEdgePairs(gapEdgePairs, highlightedFaceChain, thickness);
+    StorePreviewAnalysisCache(
+        bodyTag,
+        selectedFaceTag,
+        gapDistance,
+        true,
+        thickness,
+        inwardNormal,
+        bodyFaceTags,
+        highlightedFaceChain,
+        gapEdgePairs,
+        gapFaceGroups);
     highlightedBoundaryEdges = FlattenGapEdgePairs(gapEdgePairs);
-    highlightedGapFaces = FlattenGapFaceGroups(gapFaceGroups);
+    const std::vector<GapFaceGroup> adjustedGapFaceGroups =
+        BuildUserAdjustedGapFaceGroups(
+            gapFaceGroups,
+            userDeselectedGapFaces,
+            userAddedGapFaces);
+    highlightedGapFaces = FlattenGapFaceGroups(adjustedGapFaceGroups);
     const std::set<std::size_t> skippedGroupIndexes = createMiddlePlanes ?
         FindSkippedGapGroupIndexesByUserDeselectedFaces(gapFaceGroups, userDeselectedGapFaces) :
         std::set<std::size_t>();
     skippedGapFaces = FlattenSkippedGapFaces(gapFaceGroups, skippedGroupIndexes);
     if (createMiddlePlanes)
     {
-        const std::vector<GapFaceGroup> groupsToDelete =
-            FilterGapGroupsDeselectedFaces(gapFaceGroups, userDeselectedGapFaces);
+        gActiveFaceChain = highlightedFaceChain;
+        gPreviewAnalysisCache.valid = false;
         DeleteGapGroupsWithMiddlePlanes(
-            groupsToDelete,
+            adjustedGapFaceGroups,
             bodyTag,
             thickness,
             toggle0 != NULL && toggle0->Value(),
@@ -8932,7 +9701,7 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
     }
     else
     {
-        autoSelectedGapFaces = FilterUserDeselectedGapFaces(highlightedGapFaces, userDeselectedGapFaces);
+        autoSelectedGapFaces = highlightedGapFaces;
         highlightedGapFaces = autoSelectedGapFaces;
         HighlightFaces(highlightedGapFaces);
         std::vector<NXOpen::TaggedObject*> rewriteObjects =
@@ -8957,6 +9726,7 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
         ", gapFaceGroups=" + FormatTag(static_cast<tag_t>(gapFaceGroups.size())) +
         ", gapDistance=" + FormatDouble(gapDistance) +
         ", userDeselectedGapFaces=" + FormatTag(static_cast<tag_t>(userDeselectedGapFaces.size())) +
+        ", userAddedGapFaces=" + FormatTag(static_cast<tag_t>(userAddedGapFaces.size())) +
         ", skippedGapGroups=" + FormatTag(static_cast<tag_t>(skippedGroupIndexes.size())) +
         ", colored gap face count=" +
         FormatTag(static_cast<tag_t>(highlightedGapFaces.size())));

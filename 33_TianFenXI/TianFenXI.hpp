@@ -125,6 +125,7 @@ private:
     std::vector<tag_t> skippedGapFaces;
     std::vector<tag_t> autoSelectedGapFaces;
     std::vector<tag_t> userDeselectedGapFaces;
+    std::vector<tag_t> userAddedGapFaces;
     std::vector<tag_t> previewColoredFaces;
     std::vector<int> previewOriginalFaceColors;
     tag_t previewSelectedFaceTag;
