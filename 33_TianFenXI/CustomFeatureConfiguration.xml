@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CustomFeatureLib
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="CustomFeatureConfiguration_schema.xsd">
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::TwoPointSiBian"
+        FeatureName="2P_SiBian"
+        FeatureIcon="2P_BiLanCao"
+        FeatureLibrary="TwoPointSiBianCore"
+        FeatureUILibrary="TwoPointSiBianUI"
+        IsWithoutBody="true"/>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::ZheWanBiRangCao"
+        FeatureName="&#x6298;&#x5F2F;&#x907F;&#x8BA9;&#x69FD;"
+        FeatureIcon="ZheWanBiRangCao"
+        FeatureLibrary="ZheWanBiRangCaoCore"
+        FeatureUILibrary="ZheWanBiRangCao"
+        IsWithoutBody="true"/>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::CaiPinBan"
+        FeatureName="&#x62C6;&#x5E73;&#x677F;"
+        FeatureIcon="CaiPinBan"
+        FeatureLibrary="CaiPinBanCore"
+        FeatureUILibrary="CaiPinBan"
+        IsWithoutBody="true"/>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::CaiRBan"
+        FeatureName="&#x62C6;&#x5706;&#x5F27;&#x677F;"
+        FeatureIcon="CaiRBan"
+        FeatureLibrary="CaiRBanCore"
+        FeatureUILibrary="CaiRBan"
+        IsWithoutBody="true"/>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::CaiR1"
+        FeatureName="&#x5206;&#x5272;&#x5706;&#x89D2;1"
+        FeatureIcon="CaiR1"
+        FeatureLibrary="CaiR1CoreEdit"
+        FeatureUILibrary="CaiR1"
+        IsWithoutBody="true"/>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::TianFenXI"
+        FeatureName="&#x586B;&#x8865;&#x7F1D;&#x9699;"
+        FeatureIcon="TianFenXI"
+        FeatureLibrary="TianFenXICore"
+        FeatureUILibrary="TianFenXI"
+        IsWithoutBody="true"/>
+</CustomFeatureLib>

@@ -37,6 +37,14 @@
 #include <NXOpen/BlockStyler_Toggle.hxx>
 #include <vector>
 
+namespace NXOpen
+{
+namespace Features
+{
+class CustomFeaturePreUpdateEvent;
+}
+}
+
 //------------------------------------------------------------------------------
 //Bit Option for Property: SnapPointTypesEnabled
 //------------------------------------------------------------------------------
@@ -102,6 +110,8 @@ public:
     int apply_cb();
     int ok_cb();
     int update_cb(NXOpen::BlockStyler::UIBlock* block);
+    int BuildCustomFeatureConstruction(
+        NXOpen::Features::CustomFeaturePreUpdateEvent* event);
     PropertyList* GetBlockProperties(const char *blockID);
     
 private:
@@ -111,6 +121,10 @@ private:
     void SaveUiSettings();
     void PreviewSelectedFaceChain(bool createMiddlePlanes = false);
     void ClearPreviewHighlight(bool refresh = true);
+    bool CommitPackagedCustomFeature(
+        tag_t targetBodyTag,
+        const std::vector<tag_t>& createdFeatureTags,
+        std::string& error);
 
     const char* theDlxFileName;
     NXOpen::BlockStyler::BlockDialog* theDialog;
@@ -133,6 +147,8 @@ private:
     bool hasPreviewThickness;
     double previewThickness;
     double previewInwardNormal[3];
+    bool buildingCustomFeature;
+    std::vector<tag_t> pendingConstructionFeatureTags;
     
 };
 #endif //TIANFENXI_H_INCLUDED
