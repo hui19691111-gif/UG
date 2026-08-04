@@ -91,6 +91,7 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <queue>
 #include <random>
 #include <set>
@@ -806,10 +807,6 @@ int BanJinCaiTuDialog::apply_cb()
         {
             throw NXException::Create(1, "请先选择一个作为终止面的平面。");
         }
-        if (selectedFace->Tag() == selectedEndFace->Tag())
-        {
-            throw NXException::Create(1, "起始面和终止面不能是同一个面。");
-        }
         if (selectedSplitMethod < 0 || selectedSplitMethod > 1)
         {
             throw NXException::Create(1, "Invalid split method.");
@@ -837,7 +834,9 @@ int BanJinCaiTuDialog::apply_cb()
         }
 
         std::vector<RecognizedFaceRegion> bendFaces = CollectContinuousBendFaces(selectedFace, selectedEndFace);
-        bool reachedEndFace = false;
+        const bool sameStartAndEndFace =
+            selectedFace->Tag() == selectedEndFace->Tag();
+        int endFaceOccurrenceCount = 0;
         std::vector<tag_t> parentFaceTags;
         std::set<tag_t> uniqueParentFaceTags;
         for (std::size_t index = 0; index < bendFaces.size(); ++index)
@@ -850,16 +849,27 @@ int BanJinCaiTuDialog::apply_cb()
             const tag_t faceTag = bendFaces[index].face->Tag();
             if (faceTag == selectedEndFace->Tag())
             {
-                reachedEndFace = true;
+                ++endFaceOccurrenceCount;
             }
             if (uniqueParentFaceTags.insert(faceTag).second)
             {
                 parentFaceTags.push_back(faceTag);
             }
         }
+        const bool reachedEndFace = sameStartAndEndFace ?
+            endFaceOccurrenceCount >= 2 :
+            endFaceOccurrenceCount >= 1;
         if (!reachedEndFace)
         {
             throw NXException::Create(1, "没有从起始面的连续折弯路径中找到终止面，请检查两个面是否位于同一条折弯路径上。");
+        }
+        if (sameStartAndEndFace)
+        {
+            std::ostringstream sameFaceLog;
+            sameFaceLog << "same-start-end face=" << selectedFace->Tag()
+                        << ", occurrences=" << endFaceOccurrenceCount
+                        << ", action=extract_and_trim_twice";
+            AppendSectionDebugLog(sameFaceLog.str());
         }
         std::vector<tag_t> extractedSheetBodies;
         if (selectedSplitMethod == 0)
@@ -1253,13 +1263,19 @@ void BanJinCaiTuDialog::ClearSelectionPreview(bool undoPreview)
     {
     }
 
-    for (std::size_t index = 0;
-         index < selectionPreviewTranslucencies.size();
-         ++index)
+    // Boolean operations performed while committing the preview can split an
+    // original body into multiple bodies with new tags.  Restoring only the
+    // tags captured before preview therefore leaves the split-off bodies
+    // translucent.  Re-query every current body and cancel translucency for
+    // all of them.
+    const std::vector<tag_t> currentBodyTags = CollectCurrentBodyTags();
+    int translucencyClearedBodyCount = 0;
+    for (std::size_t index = 0; index < currentBodyTags.size(); ++index)
     {
-        UF_OBJ_set_translucency(
-            selectionPreviewTranslucencies[index].first,
-            selectionPreviewTranslucencies[index].second);
+        if (UF_OBJ_set_translucency(currentBodyTags[index], 0) == 0)
+        {
+            ++translucencyClearedBodyCount;
+        }
     }
     selectionPreviewTranslucencies.clear();
     selectionPreviewNewBodyTags.clear();
@@ -1280,7 +1296,9 @@ void BanJinCaiTuDialog::ClearSelectionPreview(bool undoPreview)
              << ", explicitlyDeletedFeatures="
              << explicitlyDeletedFeatureCount
              << ", remainingBodiesAfterUndo=" << remainingBodyCount
-             << ", explicitlyDeletedBodies=" << explicitlyDeletedBodyCount;
+             << ", explicitlyDeletedBodies=" << explicitlyDeletedBodyCount
+             << ", translucencyClearedBodies="
+             << translucencyClearedBodyCount;
     AppendSectionDebugLog(clearLog.str());
 }
 
@@ -3381,11 +3399,17 @@ void BanJinCaiTuDialog::LogTraversalDecision(
     double bendAngle,
     const char* decision) const
 {
-    (void)currentFaceTag;
-    (void)candidateFaceTag;
-    (void)edgeStats;
-    (void)bendAngle;
-    (void)decision;
+    std::ostringstream log;
+    log << "traversal-decision currentFace=" << currentFaceTag
+        << ", candidateFace=" << candidateFaceTag
+        << ", sharedEdges=" << edgeStats.totalSharedEdges
+        << ", linearSharedEdges=" << edgeStats.linearSharedEdges
+        << ", thicknessEdges=" << edgeStats.thicknessEdges
+        << ", parallelQualifiedEdges=" << edgeStats.parallelQualifiedEdges
+        << ", firstParallelEdge=" << edgeStats.firstParallelQualifiedEdgeTag
+        << ", bendAngle=" << std::setprecision(15) << bendAngle
+        << ", decision=" << (decision == NULL ? "" : decision);
+    AppendSectionDebugLog(log.str());
 }
 
 std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectContinuousBendFaces(
@@ -3400,12 +3424,245 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
 
     const TraversalContext context = BuildTraversalContext(seedFace);
 
+#if 0
+    // Search every qualified branch and reconstruct only the path that reaches
+    // the selected end face.  The former greedy walk discarded all but the
+    // locally nearest outgoing edge, so a valid longer chain could be lost at
+    // the first branch.
+    {
+        struct SearchRecord
+        {
+            tag_t faceTag;
+            tag_t incomingEdgeTag;
+            std::size_t parentIndex;
+        };
+        struct SearchCandidate
+        {
+            tag_t faceTag;
+            tag_t sharedEdgeTag;
+            double edgeDistance;
+        };
+
+        const tag_t seedFaceTag = seedFace->Tag();
+        const tag_t stopFaceTag = stopFace == NULL ? NULL_TAG : stopFace->Tag();
+        const bool stopIsSeedFace =
+            stopFaceTag != NULL_TAG && stopFaceTag == seedFaceTag;
+        const std::size_t noParent = static_cast<std::size_t>(-1);
+
+        std::vector<SearchRecord> records;
+        std::queue<std::size_t> pendingRecordIndices;
+        std::map<tag_t, std::size_t> recordIndexByFace;
+        SearchRecord seedRecord = {};
+        seedRecord.faceTag = seedFaceTag;
+        seedRecord.incomingEdgeTag = context.startBoundaryEdgeTag;
+        seedRecord.parentIndex = noParent;
+        records.push_back(seedRecord);
+        recordIndexByFace[seedFaceTag] = 0;
+
+        std::size_t foundRecordIndex = noParent;
+        std::size_t closingParentIndex = noParent;
+        tag_t closingIncomingEdgeTag = NULL_TAG;
+
+        const std::vector<tag_t> initialNeighborFaceTags =
+            CollectReferenceEdgeNeighborFaces(seedFaceTag, context.referenceEdgeTag);
+        for (std::size_t index = 0; index < initialNeighborFaceTags.size(); ++index)
+        {
+            const tag_t candidateFaceTag = initialNeighborFaceTags[index];
+            if (!IsContinuousBendNeighbor(seedFaceTag, candidateFaceTag, context))
+            {
+                continue;
+            }
+            const SharedEdgeStats edgeStats = AnalyzeSharedEdges(
+                seedFaceTag,
+                candidateFaceTag,
+                context.referenceEdgeDirection,
+                context.thickness);
+            if (edgeStats.firstParallelQualifiedEdgeTag == NULL_TAG ||
+                recordIndexByFace.find(candidateFaceTag) != recordIndexByFace.end())
+            {
+                continue;
+            }
+
+            SearchRecord record = {};
+            record.faceTag = candidateFaceTag;
+            record.incomingEdgeTag = edgeStats.firstParallelQualifiedEdgeTag;
+            record.parentIndex = 0;
+            records.push_back(record);
+            const std::size_t recordIndex = records.size() - 1;
+            recordIndexByFace[candidateFaceTag] = recordIndex;
+            pendingRecordIndices.push(recordIndex);
+            if (!stopIsSeedFace && candidateFaceTag == stopFaceTag)
+            {
+                foundRecordIndex = recordIndex;
+                break;
+            }
+        }
+
+        while (foundRecordIndex == noParent &&
+               closingParentIndex == noParent &&
+               !pendingRecordIndices.empty())
+        {
+            const std::size_t currentRecordIndex = pendingRecordIndices.front();
+            pendingRecordIndices.pop();
+            const SearchRecord currentRecord = records[currentRecordIndex];
+
+            const std::vector<tag_t> outgoingEdgeTags = CollectOutgoingChainEdges(
+                currentRecord.faceTag,
+                context.referenceEdgeDirection,
+                context.thickness,
+                currentRecord.incomingEdgeTag);
+            std::vector<SearchCandidate> candidates;
+            for (std::size_t edgeIndex = 0; edgeIndex < outgoingEdgeTags.size(); ++edgeIndex)
+            {
+                const tag_t outgoingEdgeTag = outgoingEdgeTags[edgeIndex];
+                const std::vector<tag_t> adjacentFaceTags =
+                    CollectReferenceEdgeNeighborFaces(currentRecord.faceTag, outgoingEdgeTag);
+                for (std::size_t faceIndex = 0; faceIndex < adjacentFaceTags.size(); ++faceIndex)
+                {
+                    const tag_t candidateFaceTag = adjacentFaceTags[faceIndex];
+                    const bool isClosingSeed =
+                        stopIsSeedFace && candidateFaceTag == seedFaceTag;
+                    if (!isClosingSeed &&
+                        recordIndexByFace.find(candidateFaceTag) != recordIndexByFace.end())
+                    {
+                        continue;
+                    }
+                    if (!IsContinuousBendNeighbor(
+                            currentRecord.faceTag, candidateFaceTag, context))
+                    {
+                        continue;
+                    }
+                    const SharedEdgeStats edgeStats = AnalyzeSharedEdges(
+                        currentRecord.faceTag,
+                        candidateFaceTag,
+                        context.referenceEdgeDirection,
+                        context.thickness);
+                    if (edgeStats.firstParallelQualifiedEdgeTag == NULL_TAG)
+                    {
+                        continue;
+                    }
+
+                    SearchCandidate candidate = {};
+                    candidate.faceTag = candidateFaceTag;
+                    candidate.sharedEdgeTag = outgoingEdgeTag;
+                    candidate.edgeDistance = ComputeEdgeMidpointDistance(
+                        currentRecord.incomingEdgeTag, outgoingEdgeTag);
+                    candidates.push_back(candidate);
+                }
+            }
+
+            std::sort(
+                candidates.begin(),
+                candidates.end(),
+                [](const SearchCandidate& lhs, const SearchCandidate& rhs)
+                {
+                    return lhs.edgeDistance < rhs.edgeDistance;
+                });
+
+            for (std::size_t index = 0; index < candidates.size(); ++index)
+            {
+                const SearchCandidate& candidate = candidates[index];
+                if (stopIsSeedFace && candidate.faceTag == seedFaceTag)
+                {
+                    closingParentIndex = currentRecordIndex;
+                    closingIncomingEdgeTag = candidate.sharedEdgeTag;
+                    AppendSectionDebugLog(
+                        "section: branch search returned to start face as terminal instance");
+                    break;
+                }
+
+                if (recordIndexByFace.find(candidate.faceTag) != recordIndexByFace.end())
+                {
+                    continue;
+                }
+                SearchRecord nextRecord = {};
+                nextRecord.faceTag = candidate.faceTag;
+                nextRecord.incomingEdgeTag = candidate.sharedEdgeTag;
+                nextRecord.parentIndex = currentRecordIndex;
+                records.push_back(nextRecord);
+                const std::size_t nextRecordIndex = records.size() - 1;
+                recordIndexByFace[candidate.faceTag] = nextRecordIndex;
+                pendingRecordIndices.push(nextRecordIndex);
+
+                if (!stopIsSeedFace && candidate.faceTag == stopFaceTag)
+                {
+                    foundRecordIndex = nextRecordIndex;
+                    break;
+                }
+            }
+        }
+
+        std::vector<std::size_t> pathRecordIndices;
+        std::size_t pathEndIndex = stopIsSeedFace ? closingParentIndex : foundRecordIndex;
+        while (pathEndIndex != noParent)
+        {
+            pathRecordIndices.push_back(pathEndIndex);
+            pathEndIndex = records[pathEndIndex].parentIndex;
+        }
+        std::reverse(pathRecordIndices.begin(), pathRecordIndices.end());
+
+        for (std::size_t index = 0; index < pathRecordIndices.size(); ++index)
+        {
+            const SearchRecord& record = records[pathRecordIndices[index]];
+            Face* nxFace = dynamic_cast<Face*>(NXObjectManager::Get(record.faceTag));
+            if (nxFace == NULL)
+            {
+                continue;
+            }
+            RecognizedFaceRegion region = {};
+            region.face = nxFace;
+            region.incomingEdgeTag = record.incomingEdgeTag;
+            region.outgoingEdgeTag =
+                index + 1 < pathRecordIndices.size() ?
+                records[pathRecordIndices[index + 1]].incomingEdgeTag :
+                NULL_TAG;
+            result.push_back(region);
+        }
+
+        if (stopIsSeedFace && closingParentIndex != noParent)
+        {
+            Face* terminalSeedFace = dynamic_cast<Face*>(NXObjectManager::Get(seedFaceTag));
+            if (terminalSeedFace != NULL)
+            {
+                RecognizedFaceRegion terminalRegion = {};
+                terminalRegion.face = terminalSeedFace;
+                terminalRegion.incomingEdgeTag = closingIncomingEdgeTag;
+                terminalRegion.outgoingEdgeTag = NULL_TAG;
+                if (!result.empty())
+                {
+                    result.back().outgoingEdgeTag = closingIncomingEdgeTag;
+                }
+                result.push_back(terminalRegion);
+            }
+        }
+
+        std::ostringstream resultLog;
+        resultLog << "section: branch search completed"
+                  << ", visitedFaces=" << records.size()
+                  << ", pathFaces=" << result.size()
+                  << ", stopFace=" << stopFaceTag
+                  << ", reached="
+                  << ((!stopIsSeedFace && foundRecordIndex != noParent) ||
+                      (stopIsSeedFace && closingParentIndex != noParent) ? 1 : 0);
+        AppendSectionDebugLog(resultLog.str());
+        return result;
+    }
+
+#else
+
     std::queue<TraversalNode> pendingFaces;
-    std::set<tag_t> visitedFaces;
+    // A face may legitimately appear more than once in a folded loop when it
+    // is entered through a different bend edge.  Track traversal states by
+    // (face, incoming edge), not by face alone.
+    std::set<std::pair<tag_t, tag_t> > visitedFaceEntryStates;
 
     const tag_t seedFaceTag = seedFace->Tag();
     const tag_t stopFaceTag = stopFace == NULL ? NULL_TAG : stopFace->Tag();
-    visitedFaces.insert(seedFaceTag);
+    const bool stopIsSeedFace =
+        stopFaceTag != NULL_TAG && stopFaceTag == seedFaceTag;
+    bool duplicateStopFaceQueued = false;
+    visitedFaceEntryStates.insert(
+        std::make_pair(seedFaceTag, context.startBoundaryEdgeTag));
 
     // 起始面仍计入结果，但传播入口只允许从点击位置最近的基准边开始。
     Face* seedNxFace = dynamic_cast<Face*>(NXObjectManager::Get(seedFaceTag));
@@ -3443,7 +3700,9 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
             continue;
         }
 
-        visitedFaces.insert(candidateFaceTag);
+        visitedFaceEntryStates.insert(std::make_pair(
+            candidateFaceTag,
+            edgeStats.firstParallelQualifiedEdgeTag));
         TraversalNode node = {};
         node.faceTag = candidateFaceTag;
         node.incomingEdgeTag = edgeStats.firstParallelQualifiedEdgeTag;
@@ -3500,7 +3759,6 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
         }
 
         std::vector<CandidateNeighbor> candidateNeighbors;
-        bool stoppedByThicknessEdge = false;
         for (std::size_t edgeIndex = 0; edgeIndex < outgoingEdgeTags.size(); ++edgeIndex)
         {
             const tag_t outgoingEdgeTag = outgoingEdgeTags[edgeIndex];
@@ -3510,7 +3768,15 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
             for (std::size_t index = 0; index < adjacentFaceTags.size(); ++index)
             {
                 const tag_t candidateFaceTag = adjacentFaceTags[index];
-                if (visitedFaces.find(candidateFaceTag) != visitedFaces.end())
+                const bool isClosingDuplicateStop =
+                    stopIsSeedFace &&
+                    candidateFaceTag == seedFaceTag &&
+                    !duplicateStopFaceQueued;
+                const std::pair<tag_t, tag_t> candidateEntryState =
+                    std::make_pair(candidateFaceTag, outgoingEdgeTag);
+                if (visitedFaceEntryStates.find(candidateEntryState) !=
+                        visitedFaceEntryStates.end() &&
+                    !isClosingDuplicateStop)
                 {
                     continue;
                 }
@@ -3542,15 +3808,6 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
                     break;
                 }
 
-                if (ShouldStopAtNextFaceByThicknessEdge(
-                        candidateFaceTag,
-                        outgoingEdgeTag,
-                        context.thickness))
-                {
-                    stoppedByThicknessEdge = true;
-                    continue;
-                }
-
                 CandidateNeighbor candidate = {};
                 candidate.faceTag = candidateFaceTag;
                 candidate.sharedEdgeTag = outgoingEdgeTag;
@@ -3566,11 +3823,6 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
             }
         }
 
-        if (candidateNeighbors.empty() && stoppedByThicknessEdge)
-        {
-            continue;
-        }
-
         if (candidateNeighbors.empty())
         {
             continue;
@@ -3578,6 +3830,17 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
 
         std::size_t bestIndex = 0;
         double bestDistance = candidateNeighbors[0].edgeDistance;
+        for (std::size_t index = 0; index < candidateNeighbors.size(); ++index)
+        {
+            std::ostringstream candidateLog;
+            candidateLog << "traversal-choice candidate currentFace=" << currentFaceTag
+                         << ", incomingEdge=" << currentNode.incomingEdgeTag
+                         << ", candidateFace=" << candidateNeighbors[index].faceTag
+                         << ", outgoingEdge=" << candidateNeighbors[index].sharedEdgeTag
+                         << ", distance=" << std::setprecision(15)
+                         << candidateNeighbors[index].edgeDistance;
+            AppendSectionDebugLog(candidateLog.str());
+        }
         for (std::size_t index = 1; index < candidateNeighbors.size(); ++index)
         {
             if (candidateNeighbors[index].edgeDistance < bestDistance)
@@ -3586,13 +3849,36 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
                 bestIndex = index;
             }
         }
+        {
+            std::ostringstream selectedLog;
+            selectedLog << "traversal-choice selected currentFace=" << currentFaceTag
+                        << ", incomingEdge=" << currentNode.incomingEdgeTag
+                        << ", nextFace=" << candidateNeighbors[bestIndex].faceTag
+                        << ", outgoingEdge=" << candidateNeighbors[bestIndex].sharedEdgeTag
+                        << ", distance=" << std::setprecision(15) << bestDistance;
+            AppendSectionDebugLog(selectedLog.str());
+        }
 
         if (!result.empty() && result.back().face != NULL && result.back().face->Tag() == currentFaceTag)
         {
             result.back().outgoingEdgeTag = candidateNeighbors[bestIndex].sharedEdgeTag;
         }
 
-        visitedFaces.insert(candidateNeighbors[bestIndex].faceTag);
+        const bool queuedClosingDuplicateStop =
+            stopIsSeedFace &&
+            candidateNeighbors[bestIndex].faceTag == seedFaceTag;
+        if (queuedClosingDuplicateStop)
+        {
+            duplicateStopFaceQueued = true;
+            AppendSectionDebugLog(
+                "section: closing path returned to start face; queued duplicate terminal instance");
+        }
+        else
+        {
+            visitedFaceEntryStates.insert(std::make_pair(
+                candidateNeighbors[bestIndex].faceTag,
+                candidateNeighbors[bestIndex].sharedEdgeTag));
+        }
         TraversalNode nextNode = {};
         nextNode.faceTag = candidateNeighbors[bestIndex].faceTag;
         nextNode.incomingEdgeTag = candidateNeighbors[bestIndex].sharedEdgeTag;
@@ -3600,6 +3886,7 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
     }
 
     return result;
+#endif
 }
 
 void BanJinCaiTuDialog::HighlightFaces(const std::vector<Face*>& faces) const
@@ -5839,7 +6126,6 @@ std::vector<tag_t> BanJinCaiTuDialog::ExtractRecognizedFaces(
     std::vector<tag_t>* sourceFaceTags) const
 {
     std::vector<tag_t> sheetBodyTags;
-    std::set<tag_t> extractedFaceTags;
     if (sourceFaceTags != NULL)
     {
         sourceFaceTags->clear();
@@ -5855,10 +6141,6 @@ std::vector<tag_t> BanJinCaiTuDialog::ExtractRecognizedFaces(
             }
 
             const tag_t faceTag = faceRegions[index].face->Tag();
-            if (!extractedFaceTags.insert(faceTag).second)
-            {
-                continue;
-            }
 
             tag_t sheetBodyTag = NULL_TAG;
             int rc = UF_MODL_extract_face(faceTag, 0, &sheetBodyTag);
@@ -5912,7 +6194,6 @@ std::vector<tag_t> BanJinCaiTuDialog::ExtractRecognizedFacesByShortestBendEdge(
     std::vector<tag_t>* sourceFaceTags) const
 {
     std::vector<tag_t> sheetBodyTags;
-    std::set<tag_t> extractedFaceTags;
     if (sourceFaceTags != NULL)
     {
         sourceFaceTags->clear();
@@ -5928,10 +6209,6 @@ std::vector<tag_t> BanJinCaiTuDialog::ExtractRecognizedFacesByShortestBendEdge(
             }
 
             const tag_t faceTag = faceRegions[index].face->Tag();
-            if (!extractedFaceTags.insert(faceTag).second)
-            {
-                continue;
-            }
 
             tag_t sheetBodyTag = NULL_TAG;
             const int extractRc = UF_MODL_extract_face(faceTag, 0, &sheetBodyTag);
