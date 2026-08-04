@@ -34,6 +34,7 @@
 #include <NXOpen/BlockStyler_SelectObject.hxx>
 #include <NXOpen/BlockStyler_Group.hxx>
 #include <NXOpen/BlockStyler_StringBlock.hxx>
+#include <NXOpen/BlockStyler_Enumeration.hxx>
 #include <NXOpen/BlockStyler_IntegerBlock.hxx>
 #include <NXOpen/BlockStyler_DoubleBlock.hxx>
 
@@ -150,12 +151,14 @@ private:
     NXOpen::BlockStyler::Toggle* toggle03;// Block type: Toggle
     NXOpen::BlockStyler::SelectObject* selection0;// Block type: Selection
     NXOpen::BlockStyler::Group* group;// Block type: Group
-    NXOpen::BlockStyler::StringBlock* stringCaiZi;// Block type: String
+    NXOpen::BlockStyler::Enumeration* enumMaterial;// Block type: Enumeration
     NXOpen::BlockStyler::IntegerBlock* integerSuLian;// Block type: Integer
     NXOpen::BlockStyler::Toggle* toggleDuiCen;// Block type: Toggle
     NXOpen::BlockStyler::Group* group0;
     NXOpen::BlockStyler::Toggle* toggle0;// Block type: Toggle
     NXOpen::BlockStyler::StringBlock* string0;// Block type: String
+    NXOpen::BlockStyler::Toggle* toggleSetBodyName;
+    NXOpen::BlockStyler::StringBlock* stringBodyName;
     NXOpen::BlockStyler::Toggle* toggle02;// Block type: Toggle
     NXOpen::BlockStyler::Toggle* toggle01;// Block type: Toggle
     NXOpen::BlockStyler::Group* group1;

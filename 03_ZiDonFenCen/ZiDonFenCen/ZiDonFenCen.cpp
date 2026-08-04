@@ -795,6 +795,80 @@ NXString MaterialPartAttributeTitle()
 	return NXString(kMaterialUtf8, NXString::UTF8);
 }
 
+std::string TrimConfigText(const std::string& value)
+{
+	size_t first = 0;
+	while (first < value.size() && std::isspace(static_cast<unsigned char>(value[first]))) ++first;
+	size_t last = value.size();
+	while (last > first && std::isspace(static_cast<unsigned char>(value[last - 1]))) --last;
+	return value.substr(first, last - first);
+}
+
+std::vector<std::string> LoadSharedMaterialOptions()
+{
+	std::vector<std::string> values;
+	std::ifstream file(L"D:\\UG智辉钣金插件\\config\\Write_Prat_Attr.ini", std::ios::binary);
+	std::string line;
+	bool inMaterials = false;
+	bool firstLine = true;
+	while (std::getline(file, line))
+	{
+		if (firstLine && line.size() >= 3 &&
+			static_cast<unsigned char>(line[0]) == 0xEF &&
+			static_cast<unsigned char>(line[1]) == 0xBB &&
+			static_cast<unsigned char>(line[2]) == 0xBF)
+		{
+			line.erase(0, 3);
+		}
+		firstLine = false;
+		const std::string value = TrimConfigText(line);
+		if (value.empty() || value[0] == '#' || value[0] == ';') continue;
+		if (value.front() == '[' && value.back() == ']')
+		{
+			inMaterials = TrimConfigText(value.substr(1, value.size() - 2)) == "\xE6\x9D\x90\xE6\x96\x99";
+			continue;
+		}
+		if (inMaterials && std::find(values.begin(), values.end(), value) == values.end()) values.push_back(value);
+	}
+	if (values.empty())
+	{
+		const char* defaults[] = {
+			"\xE5\x86\xB7\xE6\x9D\xBF",
+			"\xE4\xB8\x8D\xE9\x94\x88\xE9\x92\xA2",
+			"A3\xE9\x92\xA2",
+			"\xE9\x95\x80\xE9\x94\x8C\xE6\x9D\xBF",
+			"\xE9\x93\x9D\xE6\x9D\xBF",
+			"\xE9\x80\x8F\xE6\x98\x8E\xE4\xBA\x9A\xE5\x85\x8B\xE5\x8A\x9B",
+			"\xE8\x8C\xB6\xE8\x89\xB2\xE4\xBA\x9A\xE5\x85\x8B\xE5\x8A\x9B",
+			"\xE8\x8C\xB6\xE9\xBB\x91\xE8\x89\xB2\xE4\xBA\x9A\xE5\x85\x8B\xE5\x8A\x9B"
+		};
+		values.assign(defaults, defaults + sizeof(defaults) / sizeof(defaults[0]));
+	}
+	return values;
+}
+
+void InitializeMaterialEnumeration(Enumeration* block)
+{
+	if (block == NULL) return;
+	const std::vector<std::string> values = LoadSharedMaterialOptions();
+	std::vector<NXString> members;
+	for (size_t i = 0; i < values.size(); ++i) members.push_back(NXString(values[i], NXString::UTF8));
+	block->SetEnumMembers(members);
+}
+
+NXString MaterialEnumerationValue(Enumeration* block)
+{
+	return block != NULL ? block->ValueAsString() : NXString("");
+}
+
+void SetMaterialEnumerationValueIfPresent(Enumeration* block, const NXString& value)
+{
+	if (block == NULL) return;
+	const std::string target = NxStringForLog(value);
+	const std::vector<std::string> values = LoadSharedMaterialOptions();
+	if (std::find(values.begin(), values.end(), target) != values.end()) block->SetValueAsString(value);
+}
+
 const char* QuantityExpressionNameUtf8()
 {
 	return "\xE6\x95\xB0\xE9\x87\x8F";
@@ -853,6 +927,8 @@ void LoadZiDonFenCenDialogState(
 	DoubleBlock* doubleBatchMinLength,
 	Toggle* toggle0,
 	StringBlock* string0,
+	Toggle* toggleSetBodyName,
+	StringBlock* stringBodyName,
 	Toggle* toggle02,
 	Toggle* toggle01,
 	Toggle* toggleDuiCen,
@@ -901,6 +977,14 @@ void LoadZiDonFenCenDialogState(
 		const std::string savedNumber = ReadDialogStateString("number", fallbackNumber.c_str());
 		string0Props->SetString("Value", savedNumber.c_str());
 	}
+	if (toggleSetBodyName != NULL)
+	{
+		toggleSetBodyName->SetValue(ReadDialogStateInt("setBodyName", toggleSetBodyName->Value() ? 1 : 0) != 0);
+	}
+	if (stringBodyName != NULL)
+	{
+		SetStringBlockPropertyValue(stringBodyName, ReadDialogStateString("bodyName", NxStringForLog(stringBodyName->Value()).c_str()).c_str());
+	}
 	if (toggle02 != NULL)
 	{
 		toggle02->SetValue(ReadDialogStateInt("followAux", toggle02->Value() ? 1 : 0) != 0);
@@ -931,6 +1015,8 @@ void SaveZiDonFenCenDialogState(
 	DoubleBlock* doubleBatchMinLength,
 	Toggle* toggle0,
 	StringBlock* string0,
+	Toggle* toggleSetBodyName,
+	StringBlock* stringBodyName,
 	Toggle* toggle02,
 	Toggle* toggle01,
 	Toggle* toggleDuiCen,
@@ -946,6 +1032,8 @@ void SaveZiDonFenCenDialogState(
 	WriteDialogStateDouble("minLength", doubleBatchMinLength != NULL ? doubleBatchMinLength->Value() : 40.0);
 	WriteDialogStateInt("setNumber", BlockLogicalValue(toggle0) ? 1 : 0);
 	WriteDialogStateString("number", string0 != NULL ? NxStringForLog(string0->Value()) : "01-01");
+	WriteDialogStateInt("setBodyName", toggleSetBodyName != NULL && toggleSetBodyName->Value() ? 1 : 0);
+	WriteDialogStateString("bodyName", stringBodyName != NULL ? NxStringForLog(stringBodyName->Value()) : "");
 	WriteDialogStateInt("followAux", toggle02 != NULL && toggle02->Value() ? 1 : 0);
 	WriteDialogStateInt("randomColor", toggle01 != NULL && toggle01->Value() ? 1 : 0);
 	WriteDialogStateInt("mirror", toggleDuiCen != NULL && toggleDuiCen->Value() ? 1 : 0);
@@ -6177,6 +6265,9 @@ int ProcessBatchBodyQuantityInPart(
 	bool batchSetNumber,
 	std::string& batchNextNumber,
 	NXOpen::BlockStyler::StringBlock* numberBlock,
+	bool batchSetBodyName,
+	std::string& batchNextBodyName,
+	NXOpen::BlockStyler::StringBlock* bodyNameBlock,
 	const NXString& quantityExpressionName,
 	bool& needsRegenerate)
 {
@@ -6344,6 +6435,7 @@ int ProcessBatchBodyQuantityInPart(
 		const int matchedBodyLayer = tucen + 99;
 		const int sulian = static_cast<int>(groupBodies.size());
 		const int colorID = colorMatchedBodies ? PickSameBodyColor(color) : 0;
+		const std::string bodyNameValue = batchNextBodyName;
 		for (size_t i = 0; i < groupBodies.size(); ++i)
 		{
 			Body* groupBody = groupBodies[i];
@@ -6377,6 +6469,11 @@ int ProcessBatchBodyQuantityInPart(
 				UF_OBJ_set_name(groupBody->Tag(), bianhaoValue.c_str());
 				groupBody->SetUserAttribute("bianhao", -1, bianhaoValue.c_str(), Update::Option::OptionNow);
 			}
+			if (batchSetBodyName)
+			{
+				UF_OBJ_set_name(groupBody->Tag(), bodyNameValue.c_str());
+				groupBody->SetUserAttribute(NXString("\xE5\x90\x8D\xE7\xA7\xB0", NXString::UTF8), -1, bodyNameValue.c_str(), Update::Option::OptionNow);
+			}
 			groupBody->SetUserAttribute("sulian", -1, sulian, Update::Option::OptionNow);
 			groupBody->SetUserAttribute("cailiao", -1, materialValue, Update::Option::OptionNow);
 			groupBody->SetUserAttribute("MIRR", -1, mirrorBodies ? NXString("\xE5\xAF\xB9\xE7\xA7\xB0", NXString::UTF8) : NXString(""), Update::Option::OptionNow);
@@ -6394,6 +6491,16 @@ int ProcessBatchBodyQuantityInPart(
 				PropertyList* string0Props = numberBlock->GetProperties();
 				string0Props->SetString("Value", batchNextNumber.c_str());
 				delete string0Props;
+			}
+		}
+		if (batchSetBodyName && !bodyNameValue.empty())
+		{
+			batchNextBodyName = IncrementTrailingNumberText(bodyNameValue);
+			if (bodyNameBlock != NULL)
+			{
+				PropertyList* bodyNameProps = bodyNameBlock->GetProperties();
+				bodyNameProps->SetString("Value", batchNextBodyName.c_str());
+				delete bodyNameProps;
 			}
 		}
 	}
@@ -6433,12 +6540,14 @@ void ZiDonFenCen::initialize_cb()
 		toggle03 = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggle03"));
 		selection0 = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("selection0"));
 		group = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("group"));
-		stringCaiZi = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("stringCaiZi"));
+		enumMaterial = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(theDialog->TopBlock()->FindBlock("enumMaterial"));
 		integerSuLian = dynamic_cast<NXOpen::BlockStyler::IntegerBlock*>(theDialog->TopBlock()->FindBlock("integerSuLian"));
 		toggleDuiCen = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleDuiCen"));
 		group0 = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("group0"));
 		toggle0 = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggle0"));
 		string0 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string0"));
+		toggleSetBodyName = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleSetBodyName"));
+		stringBodyName = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("stringBodyName"));
 		toggle02 = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggle02"));
 		toggle01 = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggle01"));
 		group1 = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("group1"));
@@ -6451,13 +6560,14 @@ void ZiDonFenCen::initialize_cb()
 		doubleBatchMinWidth = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBatchMinWidth"));
 		doubleBatchMinLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBatchMinLength"));
 		selectionBatchComponents = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("selectionBatchComponents"));
+		InitializeMaterialEnumeration(enumMaterial);
 
-		//锟斤拷锟矫癸拷锟斤拷锟斤拷为 实锟斤拷
+		// 将选择过滤器限制为实体。
 		if (selection0 != NULL)
 		{
 			selection0->AddFilter(BlockStyler::SelectObject::FilterTypeSolidBodies);
 		}
-		// ??????????????????????????
+		// 实体选择过滤器设置完成。
 
 
 
@@ -6504,6 +6614,8 @@ void ZiDonFenCen::dialogShown_cb()
 			doubleBatchMinLength,
 			toggle0,
 			string0,
+			toggleSetBodyName,
+			stringBodyName,
 			toggle02,
 			toggle01,
 			toggleDuiCen,
@@ -6515,6 +6627,17 @@ void ZiDonFenCen::dialogShown_cb()
 			toggleBatchBodyQuantity->SetValue(true);
 		}
 		const bool batchMode = toggleBatchBodyQuantity != NULL && toggleBatchBodyQuantity->Value();
+		if (group != NULL) group->SetShow(true);
+		if (enumMaterial != NULL)
+		{
+			enumMaterial->SetShow(true);
+			enumMaterial->SetEnable(true);
+		}
+		if (integerSuLian != NULL)
+		{
+			integerSuLian->SetShow(true);
+			integerSuLian->SetEnable(false);
+		}
 		if (selection0 != NULL)
 		{
 			selection0->SetShow(!batchMode);
@@ -6572,7 +6695,7 @@ void ZiDonFenCen::dialogShown_cb()
 				<< " assemblyMode=" << (assemblyMode ? 1 : 0)
 				<< " minWidth=" << (doubleBatchMinWidth != NULL ? doubleBatchMinWidth->Value() : -1.0)
 				<< " minLength=" << (doubleBatchMinLength != NULL ? doubleBatchMinLength->Value() : -1.0)
-				<< " material=" << (stringCaiZi != NULL ? NxStringForLog(stringCaiZi->Value()) : "<null>")
+				<< " material=" << NxStringForLog(MaterialEnumerationValue(enumMaterial))
 				<< " quantity=" << (integerSuLian != NULL ? integerSuLian->Value() : -1)
 				<< " setNumber=" << (BlockLogicalValue(toggle0) ? 1 : 0)
 				<< " number=" << (string0 != NULL ? NxStringForLog(string0->Value()) : "<null>")
@@ -6591,6 +6714,10 @@ void ZiDonFenCen::dialogShown_cb()
 		{
 			string0->SetShow(false);
 		}
+		if (stringBodyName != NULL)
+		{
+			stringBodyName->SetShow(toggleSetBodyName != NULL && toggleSetBodyName->Value());
+		}
 		
 		if (BlockLogicalValue(toggle03))
 		{
@@ -6602,7 +6729,7 @@ void ZiDonFenCen::dialogShown_cb()
 			toggle02->SetShow(true);
 		}
 		// Dialog state is restored from ZiDonFenCen_state.ini.
-		//锟斤拷霉锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟绞碉拷锟?
+		// 遍历当前工作部件中的实体。
 		NXOpen::BodyCollection* Cbody = workPart->Bodies();
 		Body* body1;
 		NXOpen::BodyCollection::iterator Ite1 = Cbody->begin();
@@ -6636,7 +6763,7 @@ void ZiDonFenCen::dialogShown_cb()
 		NXString materialTitle = MaterialPartAttributeTitle();
 		if (workPart->HasUserAttribute(materialTitle, NXObject::AttributeType::AttributeTypeString, -1))
 		{
-			SetStringBlockPropertyValue(stringCaiZi, workPart->GetStringAttribute(materialTitle));
+			SetMaterialEnumerationValueIfPresent(enumMaterial, workPart->GetStringAttribute(materialTitle));
 			ZiDonFenCenDebugLog("dialogShown material loaded from part attribute");
 		}
 		else
@@ -6644,12 +6771,10 @@ void ZiDonFenCen::dialogShown_cb()
 			ZiDonFenCenDebugLog("dialogShown material part attribute missing");
 		}
 
-			if (workPart->HasUserAttribute("锟斤拷锟斤拷", NXObject::AttributeType::AttributeTypeString, -1))
+			if (workPart->HasUserAttribute("材料", NXObject::AttributeType::AttributeTypeString, -1))
 			{
-				SetStringBlockPropertyValue(stringCaiZi, workPart->GetStringAttribute("锟斤拷锟斤拷"));
+				SetMaterialEnumerationValueIfPresent(enumMaterial, workPart->GetStringAttribute("材料"));
 			}
-
-
     }
     catch(exception& ex)
     {
@@ -6750,7 +6875,9 @@ int ZiDonFenCen::apply_cb()
 					const bool followAuxiliaryBodies = BlockLogicalValue(toggle02);
 					const bool colorMatchedBodies = BlockLogicalValue(toggle01);
 					const bool mirrorBodies = BlockLogicalValue(toggleDuiCen);
-					const NXString materialValue = stringCaiZi != NULL ? stringCaiZi->Value() : NXString("");
+					const bool batchSetBodyName = toggleSetBodyName != NULL && toggleSetBodyName->Value();
+					std::string batchNextBodyName = stringBodyName != NULL ? StringBlockPropertyValue(stringBodyName) : std::string();
+					const NXString materialValue = MaterialEnumerationValue(enumMaterial);
 					{
 						std::ostringstream oss;
 						oss << "assembly batch begin"
@@ -6820,6 +6947,9 @@ int ZiDonFenCen::apply_cb()
 							batchSetNumber,
 							batchNextNumber,
 							string0,
+							batchSetBodyName,
+							batchNextBodyName,
+							stringBodyName,
 							quantityExpressionName,
 							needsRegenerate);
 						if (needsRegenerate && workPart != NULL)
@@ -7171,6 +7301,8 @@ int ZiDonFenCen::apply_cb()
 					}
 				}
 
+				const bool batchSetBodyName = toggleSetBodyName != NULL && toggleSetBodyName->Value() && stringBodyName != NULL;
+				const std::string batchBodyNameValue = batchSetBodyName ? StringBlockPropertyValue(stringBodyName) : std::string();
 				for (size_t i = 0; i < VBody_1.size(); ++i)
 				{
 					Body* groupBody = VBody_1[i];
@@ -7178,8 +7310,13 @@ int ZiDonFenCen::apply_cb()
 					{
 						continue;
 					}
+					if (batchSetBodyName)
+					{
+						UF_OBJ_set_name(groupBody->Tag(), batchBodyNameValue.c_str());
+						groupBody->SetUserAttribute(NXString("\xE5\x90\x8D\xE7\xA7\xB0", NXString::UTF8), -1, batchBodyNameValue.c_str(), Update::Option::OptionNow);
+					}
 					groupBody->SetUserAttribute("sulian", -1, sulian, Update::Option::OptionNow);
-					groupBody->SetUserAttribute("cailiao", -1, stringCaiZi->Value(), Update::Option::OptionNow);
+					groupBody->SetUserAttribute("cailiao", -1, MaterialEnumerationValue(enumMaterial), Update::Option::OptionNow);
 					if (BlockLogicalValue(toggleDuiCen))
 					{
 						groupBody->SetUserAttribute("MIRR", -1, NXString("\xE5\xAF\xB9\xE7\xA7\xB0", NXString::UTF8), Update::Option::OptionNow);
@@ -7203,6 +7340,10 @@ int ZiDonFenCen::apply_cb()
 						ZiDonFenCenDebugLog(oss.str());
 					}
 					++processedCount;
+				}
+				if (batchSetBodyName && !batchBodyNameValue.empty())
+				{
+					SetStringBlockPropertyValue(stringBodyName, IncrementTrailingNumberText(batchBodyNameValue));
 				}
 			}
 
@@ -7282,7 +7423,7 @@ int ZiDonFenCen::apply_cb()
 					}
 					MeasureDistance* measureDistance1;
 					measureDistance1 = workPart->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, VBody_1[i], VBody[ia]);
-					double distance1 = measureDistance1->Value();//锟斤拷取锟斤拷锟斤拷锟斤拷值
+					double distance1 = measureDistance1->Value();//获取测量值
 					delete measureDistance1;
 					measureDistance1 = NULL;
 					workPart->MeasureManager()->ClearPartTransientModification();
@@ -7364,6 +7505,17 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 		{
 			const bool batchMode = toggleBatchBodyQuantity != NULL && toggleBatchBodyQuantity->Value();
 			const bool assemblyMode = workPart != NULL && workPart->ComponentAssembly() != NULL && workPart->ComponentAssembly()->RootComponent() != NULL && !workPart->ComponentAssembly()->RootComponent()->GetChildren().empty();
+			if (group != NULL) group->SetShow(true);
+			if (enumMaterial != NULL)
+			{
+				enumMaterial->SetShow(true);
+				enumMaterial->SetEnable(true);
+			}
+			if (integerSuLian != NULL)
+			{
+				integerSuLian->SetShow(true);
+				integerSuLian->SetEnable(false);
+			}
 			if (selection0 != NULL)
 			{
 				selection0->SetShow(!batchMode);
@@ -7414,7 +7566,7 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				oss << "update.toggleBatchBodyQuantity batchMode=" << (batchMode ? 1 : 0)
 					<< " assemblyMode=" << (assemblyMode ? 1 : 0)
 					<< " fastenerFilter=" << (toggleBatchFastenerFilter != NULL && toggleBatchFastenerFilter->Value() ? 1 : 0)
-					<< " material=" << (stringCaiZi != NULL ? NxStringForLog(stringCaiZi->Value()) : "<null>")
+					<< " material=" << NxStringForLog(MaterialEnumerationValue(enumMaterial))
 					<< " number=" << (string0 != NULL ? NxStringForLog(string0->Value()) : "<null>");
 				ZiDonFenCenDebugLog(oss.str());
 			}
@@ -7462,7 +7614,7 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				return 0;
 			}
 			
-				NXOpen::Body* Body1(dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(VObjTag[0]->Tag())));//强锟斤拷转锟斤拷为NX锟斤拷锟斤拷
+				NXOpen::Body* Body1(dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(VObjTag[0]->Tag())));//强制转换为 NX 实体
 				if (Body1 == NULL)
 				{
 					ZiDonFenCenDebugLog("selection0 first selected object is not a body");
@@ -7477,7 +7629,7 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 						<< " bodyLayer=" << Body1->Layer()
 						<< " selectedCount=" << VObjTag.size()
 						<< " allBodiesBefore=" << VBody.size()
-						<< " materialInput=" << (stringCaiZi != NULL ? NxStringForLog(stringCaiZi->Value()) : "<null>")
+						<< " materialInput=" << NxStringForLog(MaterialEnumerationValue(enumMaterial))
 						<< " quantityInput=" << (integerSuLian != NULL ? integerSuLian->Value() : -1)
 						<< " setNumber=" << (BlockLogicalValue(toggle0) ? 1 : 0)
 						<< " numberInput=" << (string0 != NULL ? NxStringForLog(string0->Value()) : "<null>")
@@ -7494,11 +7646,11 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 					bianhaoValue = StringBlockPropertyValue(string0);
 					UF_OBJ_set_name(Body1->Tag(), bianhaoValue.c_str());
 					Body1->SetUserAttribute("bianhao", -1, bianhaoValue.c_str(), Update::Option::OptionNow);
-					string strbianhao = bianhaoValue;//char*转锟斤拷为string
+					string strbianhao = bianhaoValue;//转换为 string
 					string strbianhao1 = strbianhao;
 					string strbianhaotwo, strbianhaoone;
-					strbianhaotwo = strbianhao.erase(0, strbianhao.length() - 2);//删锟斤拷锟斤拷锟斤拷锟轿伙拷址锟斤拷锟角帮拷锟斤拷锟街凤拷
-					strbianhaoone = strbianhao.erase(0, strbianhao.length() - 1);//删锟斤拷锟斤拷锟?位锟街凤拷锟斤拷前锟斤拷锟斤拷址锟?
+					strbianhaotwo = strbianhao.erase(0, strbianhao.length() - 2);//保留编号末尾两位字符
+					strbianhaoone = strbianhao.erase(0, strbianhao.length() - 1);//保留编号末尾一位字符
 					int ot = stoi(strbianhaotwo, 0, 10);//string转int
 					int ot1 = stoi(strbianhaoone, 0, 10);//string转int	
 
@@ -7510,7 +7662,7 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 						string dd = cb;
 						strbianhao1.erase(strbianhao1.length() - 2, 2);
 						string newbianhao = strbianhao1 + dd;
-						//string转锟斤拷为char*
+						// string 通过 c_str() 转换为 const char*
 						const char* ab = newbianhao.c_str();
 
 						PropertyList* string0Props = string0->GetProperties();
@@ -7528,7 +7680,7 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 						string dd = cb;
 						strbianhao1.erase(strbianhao1.length() - 1, 1);
 						string newbianhao = strbianhao1 + dd;
-						//string转锟斤拷为char*
+						// string 通过 c_str() 转换为 const char*
 						const char* ab = newbianhao.c_str();
 
 						PropertyList* string0Props = string0->GetProperties();
@@ -7569,12 +7721,25 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 						}
 					}
 				}
+				if (toggleSetBodyName != NULL && toggleSetBodyName->Value() && stringBodyName != NULL)
+				{
+					const std::string bodyNameValue = StringBlockPropertyValue(stringBodyName);
+					for (size_t i = 0; i < VBody_1.size(); ++i)
+					{
+						if (VBody_1[i] != NULL)
+						{
+							UF_OBJ_set_name(VBody_1[i]->Tag(), bodyNameValue.c_str());
+							VBody_1[i]->SetUserAttribute(NXString("\xE5\x90\x8D\xE7\xA7\xB0", NXString::UTF8), -1, bodyNameValue.c_str(), Update::Option::OptionNow);
+						}
+					}
+					SetStringBlockPropertyValue(stringBodyName, IncrementTrailingNumberText(bodyNameValue));
+				}
 				needsRegenerate = true;
 
 				SetIntegerBlockPropertyValue(integerSuLian, sulian);
 
 				Body1->SetUserAttribute("sulian", -1, sulian,Update::Option::OptionNow);
-				Body1->SetUserAttribute("cailiao", -1, stringCaiZi->Value(), Update::Option::OptionNow);
+				Body1->SetUserAttribute("cailiao", -1, MaterialEnumerationValue(enumMaterial), Update::Option::OptionNow);
 				{
 					std::ostringstream oss;
 					oss << "selection0 sourceAttrs"
@@ -7632,11 +7797,11 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				UF_terminate();
 				ufInitialized = false;
         }
-		else if (block == stringCaiZi)
+		else if (block == enumMaterial)
 		{
 			std::ostringstream oss;
 			oss << "update.material"
-				<< " material=" << (stringCaiZi != NULL ? NxStringForLog(stringCaiZi->Value()) : "<null>");
+				<< " material=" << NxStringForLog(MaterialEnumerationValue(enumMaterial));
 			ZiDonFenCenDebugLog(oss.str());
 		}
 		else if (block == integerSuLian)
@@ -7676,6 +7841,14 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				<< " number=" << (string0 != NULL ? NxStringForLog(string0->Value()) : "<null>");
 			ZiDonFenCenDebugLog(oss.str());
 		}
+		else if (block == toggleSetBodyName)
+		{
+			if (stringBodyName != NULL) stringBodyName->SetShow(toggleSetBodyName != NULL && toggleSetBodyName->Value());
+		}
+		else if (block == stringBodyName)
+		{
+			ZiDonFenCenDebugLog(std::string("update.bodyName name=") + (stringBodyName != NULL ? NxStringForLog(stringBodyName->Value()) : "<null>"));
+		}
 		else if (block == toggle02)
 		{
 			std::ostringstream oss;
@@ -7702,6 +7875,8 @@ int ZiDonFenCen::update_cb(NXOpen::BlockStyler::UIBlock* block)
 			doubleBatchMinLength,
 			toggle0,
 			string0,
+			toggleSetBodyName,
+			stringBodyName,
 			toggle02,
 			toggle01,
 			toggleDuiCen,
@@ -7754,7 +7929,6 @@ int ZiDonFenCen::ask_xiantonti(Body* body1,vector<Body*> &VBody, std::vector<int
 		{
 			return 0;
 		}
-
 		const bool colorMatchedBodies = BlockLogicalValue(toggle01);
 		const int colorID = colorMatchedBodies ? PickSameBodyColor(color) : 0;
 		if (colorMatchedBodies)
