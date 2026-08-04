@@ -61,6 +61,8 @@
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_Group.hxx>
 #include <NXOpen/BlockStyler_SelectObject.hxx>
+#include <NXOpen/BlockStyler_Toggle.hxx>
+#include <NXOpen/BlockStyler_Enumeration.hxx>
 #include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/DisplayableObject.hxx>
@@ -154,6 +156,7 @@ private:
         double bodyCenter[3];
         double seedSideScore;
         double thickness;
+        tag_t startBoundaryEdgeTag;
         tag_t referenceEdgeTag;
         double referenceEdgeDirection[3];
         NXOpen::ListingWindow* listingWindow;
@@ -199,7 +202,16 @@ private:
     double ComputeAngleDegrees(const double lhs[3], const double rhs[3]) const;
     double DistancePointToSegment(const double point[3], const double start[3], const double end[3]) const;
     double ComputeEdgeMidpointDistance(tag_t firstEdgeTag, tag_t secondEdgeTag) const;
+    double ComputeParallelEdgePerpendicularDistance(
+        tag_t firstEdgeTag,
+        tag_t secondEdgeTag) const;
     bool TryGetLinearEdgeDirection(tag_t edgeTag, double direction[3]) const;
+    tag_t FindNearestLinearFaceEdge(tag_t faceTag, const NXOpen::Point3d& pickPoint) const;
+    tag_t FindParallelOuterBendEdge(
+        tag_t faceTag,
+        tag_t startEdgeTag,
+        const NXOpen::Point3d& pickPoint,
+        double thickness) const;
     tag_t FindNearestReferenceEdge(tag_t faceTag, const NXOpen::Point3d& pickPoint, double thickness) const;
     std::vector<tag_t> CollectReferenceEdgeNeighborFaces(tag_t seedFaceTag, tag_t referenceEdgeTag) const;
     bool IsBendReferenceEdge(tag_t seedFaceTag, tag_t edgeTag, double thickness) const;
@@ -219,11 +231,23 @@ private:
         const double referenceDirection[3],
         double thickness,
         tag_t incomingEdgeTag) const;
+    tag_t FindTerminalOuterBoundaryEdge(
+        tag_t faceTag,
+        tag_t adjacentBendEdgeTag,
+        bool chooseFarthest) const;
+    void CompleteTrimBoundaryEdges(
+        std::vector<RecognizedFaceRegion>& faceRegions) const;
+    void CompleteSharedBendEdges(
+        std::vector<RecognizedFaceRegion>& faceRegions) const;
     bool TrimExtractedFaceToInnerBand(
         tag_t sourceFaceTag,
         tag_t extractedSheetBodyTag,
         tag_t incomingEdgeTag,
         tag_t outgoingEdgeTag) const;
+    bool TrimExtractedFaceBetweenBendEndpoints(
+        tag_t sourceFaceTag,
+        tag_t extractedSheetBodyTag,
+        tag_t bendEdgeTag) const;
     bool AreDirectionsParallel(const double lhs[3], const double rhs[3], double toleranceDegrees) const;
     double ComputeSideScore(const FaceInfo& faceInfo, const double bodyCenter[3]) const;
     double EstimateThickness(NXOpen::Face* seedFace) const;
@@ -282,6 +306,7 @@ private:
     std::vector<tag_t> CollectBodyFaceTags(tag_t bodyTag) const;
     std::vector<tag_t> CollectSheetFaceTags(const std::vector<tag_t>& sheetBodyTags) const;
     tag_t FindSharedEdgeBetweenFaces(tag_t currentFaceTag, tag_t nextFaceTag) const;
+    bool AreEdgesCollinear(tag_t firstEdgeTag, tag_t secondEdgeTag) const;
     bool AreEdgesCollinearAndOverlapping(tag_t firstEdgeTag, tag_t secondEdgeTag) const;
     std::vector<tag_t> FindThicknessFacesConnectedToBendEdge(
         tag_t thickenedBodyTag,
@@ -294,6 +319,12 @@ private:
         const std::vector<RightAngleFacePair>& rightAnglePairs,
         const std::vector<tag_t>& thickenedBodyTags,
         double thickness) const;
+    void OffsetThicknessFacesUntilBendTrianglesDisappear(
+        const std::vector<RecognizedFaceRegion>& faceRegions,
+        const std::vector<tag_t>& thickenedBodyTags,
+        double thickness) const;
+    int DeleteTriangularFacesFromBodies(
+        const std::vector<tag_t>& bodyTags) const;
     bool ComputeBisectorArcData(
         const FaceInfo& currentInfo,
         const FaceInfo& nextInfo,
@@ -343,6 +374,9 @@ private:
     std::vector<tag_t> ExtractRecognizedFaces(
         const std::vector<RecognizedFaceRegion>& faceRegions,
         std::vector<tag_t>* sourceFaceTags) const;
+    std::vector<tag_t> ExtractRecognizedFacesByShortestBendEdge(
+        const std::vector<RecognizedFaceRegion>& faceRegions,
+        std::vector<tag_t>* sourceFaceTags) const;
     int DeleteHolesFromExtractedBodies(const std::vector<tag_t>& sheetBodyTags) const;
     int CreateFirstBendSectionCurves(
         tag_t firstBendEdgeTag,
@@ -353,26 +387,52 @@ private:
         const std::vector<tag_t>& sheetBodyTags,
         double thickness,
         bool alongPositiveNormal) const;
+    tag_t ConvertTrimmedFacesToSheetmetal(
+        const std::vector<tag_t>& sheetBodyTags,
+        double thickness) const;
+    tag_t DeleteCreatedSheetmetalRadiusFaces(double thickness) const;
     tag_t UniteBodies(const std::vector<tag_t>& bodyTags) const;
     NXOpen::Body* ResolveLiveBody(tag_t bodyTag) const;
     tag_t IntersectSelectedBodyWithToolBody(tag_t toolBodyTag) const;
     tag_t SubtractSelectedBodyByToolBody(tag_t toolBodyTag) const;
     void RemoveBodyParameters(const std::vector<tag_t>& bodyTags) const;
     void DeleteUnparameterizedBodies(const std::vector<tag_t>& bodyTags) const;
+    void FinalizeCommittedThickenedBodies(
+        const std::vector<tag_t>& thickenedBodyTags,
+        const std::vector<tag_t>& extractedSheetBodyTags) const;
+    void ApplyRandomPartColors(const std::vector<tag_t>& bodyTags) const;
     std::string BuildRegionSummary(
         NXOpen::Face* seedFace,
         const std::vector<RecognizedFaceRegion>& bendFaces,
         const TraversalContext& context) const;
+    int CreateSelectionPreview();
+    void ClearSelectionPreview(bool undoPreview);
+    void ResetCompletedSelectionState();
+    std::vector<tag_t> CollectCurrentBodyTags() const;
+    std::vector<tag_t> CollectCurrentFeatureTags() const;
 
     const char* theDlxFileName;
     NXOpen::BlockStyler::BlockDialog* theDialog;
     NXOpen::BlockStyler::Group* group0;
     NXOpen::BlockStyler::SelectObject* selection0;// Block type: Selection
     NXOpen::BlockStyler::SelectObject* selection1;// Block type: Selection
+    NXOpen::BlockStyler::Toggle* randomPartColor;// Block type: Toggle
+    NXOpen::BlockStyler::Enumeration* splitMethod;// Block type: Enumeration
     NXOpen::Point3d selectedPickPoint;
+    NXOpen::Point3d selectedEndPickPoint;
     NXOpen::Face* selectedFace;
     NXOpen::Face* selectedEndFace;
     NXOpen::Body* selectedBody;
+    bool useRandomPartColors;
+    int selectedSplitMethod;
+    bool selectionPreviewBuilding;
+    bool selectionPreviewActive;
+    NXOpen::Session::UndoMarkId selectionPreviewUndoMark;
+    std::vector<std::pair<tag_t, int>> selectionPreviewTranslucencies;
+    std::vector<tag_t> selectionPreviewNewBodyTags;
+    std::vector<tag_t> selectionPreviewNewFeatureTags;
+    std::vector<tag_t> pendingExtractedSheetBodyTags;
+    std::vector<tag_t> pendingThickenedBodyTags;
     
 };
 #endif //BANJINCAITUDIALOG_H_INCLUDED
