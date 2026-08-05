@@ -703,6 +703,12 @@ std::string NxStringForLog(const NXString& value)
 	return text != NULL ? std::string(text) : std::string();
 }
 
+std::string NxStringUtf8Text(const NXString& value)
+{
+	const char* text = value.GetUTF8Text();
+	return text != NULL ? std::string(text) : std::string();
+}
+
 bool ZiDonFenCenDebugLoggingEnabled()
 {
 	char value[16] = { 0 };
@@ -847,10 +853,21 @@ std::vector<std::string> LoadSharedMaterialOptions()
 	return values;
 }
 
-void InitializeMaterialEnumeration(Enumeration* block)
+void InitializeMaterialEnumeration(Enumeration* block, const std::string& inheritedMaterial = std::string())
 {
 	if (block == NULL) return;
-	const std::vector<std::string> values = LoadSharedMaterialOptions();
+	std::vector<std::string> values = LoadSharedMaterialOptions();
+	const std::string inherited = TrimConfigText(inheritedMaterial);
+	if (!inherited.empty())
+	{
+		// Block Styler can reject SetValueAsString immediately after the enum
+		// members are replaced.  Put the inherited part material first instead;
+		// SetEnumMembers then selects it as the initial value without a second
+		// property write.
+		std::vector<std::string>::iterator found = std::find(values.begin(), values.end(), inherited);
+		if (found != values.end()) values.erase(found);
+		values.insert(values.begin(), inherited);
+	}
 	std::vector<NXString> members;
 	for (size_t i = 0; i < values.size(); ++i) members.push_back(NXString(values[i], NXString::UTF8));
 	block->SetEnumMembers(members);
@@ -859,14 +876,6 @@ void InitializeMaterialEnumeration(Enumeration* block)
 NXString MaterialEnumerationValue(Enumeration* block)
 {
 	return block != NULL ? block->ValueAsString() : NXString("");
-}
-
-void SetMaterialEnumerationValueIfPresent(Enumeration* block, const NXString& value)
-{
-	if (block == NULL) return;
-	const std::string target = NxStringForLog(value);
-	const std::vector<std::string> values = LoadSharedMaterialOptions();
-	if (std::find(values.begin(), values.end(), target) != values.end()) block->SetValueAsString(value);
 }
 
 const char* QuantityExpressionNameUtf8()
@@ -6560,7 +6569,21 @@ void ZiDonFenCen::initialize_cb()
 		doubleBatchMinWidth = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBatchMinWidth"));
 		doubleBatchMinLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBatchMinLength"));
 		selectionBatchComponents = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("selectionBatchComponents"));
-		InitializeMaterialEnumeration(enumMaterial);
+		Part* materialSourcePart = Session::GetSession()->Parts()->Work();
+		if (assemblySelectionActive && !selectedAssemblyParts.empty() && selectedAssemblyParts[0] != NULL)
+		{
+			materialSourcePart = selectedAssemblyParts[0];
+		}
+		std::string inheritedMaterial;
+		const NXString materialTitle = MaterialPartAttributeTitle();
+		if (materialSourcePart != NULL && materialSourcePart->HasUserAttribute(materialTitle, NXObject::AttributeType::AttributeTypeString, -1))
+		{
+			// Material configuration and enum members are UTF-8.  Using locale
+			// bytes here truncates Chinese suffixes (for example A3钢 -> A3)
+			// when the value is later passed to NXString as UTF-8.
+			inheritedMaterial = NxStringUtf8Text(materialSourcePart->GetStringAttribute(materialTitle));
+		}
+		InitializeMaterialEnumeration(enumMaterial, inheritedMaterial);
 
 		// 将选择过滤器限制为实体。
 		if (selection0 != NULL)
@@ -6760,21 +6783,6 @@ void ZiDonFenCen::dialogShown_cb()
 			}
 			ZiDonFenCenDebugLog(oss.str());
 		}
-		NXString materialTitle = MaterialPartAttributeTitle();
-		if (workPart->HasUserAttribute(materialTitle, NXObject::AttributeType::AttributeTypeString, -1))
-		{
-			SetMaterialEnumerationValueIfPresent(enumMaterial, workPart->GetStringAttribute(materialTitle));
-			ZiDonFenCenDebugLog("dialogShown material loaded from part attribute");
-		}
-		else
-		{
-			ZiDonFenCenDebugLog("dialogShown material part attribute missing");
-		}
-
-			if (workPart->HasUserAttribute("材料", NXObject::AttributeType::AttributeTypeString, -1))
-			{
-				SetMaterialEnumerationValueIfPresent(enumMaterial, workPart->GetStringAttribute("材料"));
-			}
     }
     catch(exception& ex)
     {
