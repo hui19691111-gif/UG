@@ -89,6 +89,14 @@ struct SelectedDrawingPart
     bool assemblyDrawing = false;
 };
 
+struct SelectedLayerDrawingTarget
+{
+    SelectedDrawingPart part;
+    int targetLayer = 0;
+    int layerIndex = 0;
+    int layersPerSheet = 1;
+};
+
 std::filesystem::path CurrentModuleDirectory()
 {
     HMODULE module = nullptr;
@@ -475,26 +483,18 @@ bool IsOccurrenceHidden(tag_t occurrence)
 
 std::string BaseNameFromPathText(const std::string& pathText)
 {
-    try
-    {
-        std::filesystem::path path(pathText);
-        std::string stem = path.stem().u8string();
-        if (!stem.empty())
-        {
-            return stem;
-        }
-        std::string filename = path.filename().u8string();
-        if (!filename.empty())
-        {
-            return filename;
-        }
-    }
-    catch (...)
-    {
-    }
-
+    // NX returns part names as narrow text.  Converting that text through a
+    // std::filesystem::path on Windows makes the CRT interpret valid UTF-8 as
+    // the active code page, which turns Chinese names into mojibake.  A part
+    // display name only needs byte-preserving path/extension removal.
     const size_t slash = pathText.find_last_of("\\/");
-    return slash == std::string::npos ? pathText : pathText.substr(slash + 1);
+    std::string filename = slash == std::string::npos ? pathText : pathText.substr(slash + 1);
+    const size_t dot = filename.find_last_of('.');
+    if (dot != std::string::npos && dot > 0)
+    {
+        filename.erase(dot);
+    }
+    return filename;
 }
 
 std::string PartNameFromPartTag(tag_t part)
@@ -510,14 +510,7 @@ std::string PartNameFromPartTag(tag_t part)
         return "";
     }
 
-    try
-    {
-        return std::filesystem::path(partName).u8string();
-    }
-    catch (...)
-    {
-        return partName;
-    }
+    return AcpToUtf8(partName);
 }
 
 std::string PartNameFromOccurrence(tag_t occurrence)
@@ -535,14 +528,7 @@ std::string PartNameFromOccurrence(tag_t occurrence)
         char childName[MAX_FSPEC_BUFSIZE] = {0};
         if (UF_ASSEM_ask_part_name_of_child(instance, childName) == 0)
         {
-            try
-            {
-                return std::filesystem::path(childName).u8string();
-            }
-            catch (...)
-            {
-                return childName;
-            }
+            return AcpToUtf8(childName);
         }
     }
 
@@ -855,6 +841,87 @@ std::string FindPartValue(
     return FindValue(values, key, fallback);
 }
 
+std::vector<std::pair<int, int>> ParseLayerRanges(std::string text)
+{
+    std::vector<std::pair<int, int>> ranges;
+    std::replace(text.begin(), text.end(), ';', ',');
+    size_t start = 0;
+    while (start <= text.size())
+    {
+        const size_t comma = text.find(',', start);
+        const std::string token = TrimText(text.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+        if (!token.empty())
+        {
+            const size_t dash = token.find('-');
+            int first = ParseIntValue(dash == std::string::npos ? token : token.substr(0, dash), 0);
+            int last = ParseIntValue(dash == std::string::npos ? token : token.substr(dash + 1), 0);
+            first = std::max(1, std::min(256, first));
+            last = std::max(1, std::min(256, last));
+            if (first > last)
+            {
+                std::swap(first, last);
+            }
+            if (first > 0 && last > 0)
+            {
+                ranges.push_back({first, last});
+            }
+        }
+        if (comma == std::string::npos)
+        {
+            break;
+        }
+        start = comma + 1;
+    }
+    if (ranges.empty())
+    {
+        ranges.push_back({1, 256});
+    }
+    return ranges;
+}
+
+bool LayerInRanges(int layer, const std::vector<std::pair<int, int>>& ranges)
+{
+    return std::any_of(ranges.begin(), ranges.end(), [layer](const std::pair<int, int>& range) {
+        return layer >= range.first && layer <= range.second;
+    });
+}
+
+std::vector<int> CollectDrawablePartLayers(
+    tag_t partTag,
+    const std::vector<std::pair<int, int>>& ranges)
+{
+    std::set<int> layers;
+    NXOpen::Part* part = ResolvePartFromTag(partTag);
+    if (part == nullptr)
+    {
+        return {};
+    }
+    EnsurePartFullyLoaded(part);
+    try
+    {
+        if (part->Bodies() != nullptr)
+        {
+            for (NXOpen::BodyCollection::iterator it = part->Bodies()->begin(); it != part->Bodies()->end(); ++it)
+            {
+                NXOpen::Body* body = *it;
+                if (body == nullptr || !body->IsSolidBody() || body->IsSheetBody() || body->IsBlanked())
+                {
+                    continue;
+                }
+                const int layer = body->Layer();
+                if (layer >= 1 && layer <= 256 && LayerInRanges(layer, ranges))
+                {
+                    layers.insert(layer);
+                }
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    return std::vector<int>(layers.begin(), layers.end());
+}
+
 bool IsManualFrontDirectionModeText(std::string value)
 {
     value = TrimText(value);
@@ -941,7 +1008,10 @@ void WriteSinglePartRequest(
     const std::filesystem::path& requestPath,
     const std::map<std::string, std::string>& values,
     int index,
-    bool assemblyDrawing)
+    bool assemblyDrawing,
+    int targetLayer = 0,
+    int layerIndex = 0,
+    int layersPerSheet = 1)
 {
     static const std::vector<std::string> settingKeys = {
         "templatePath",
@@ -977,6 +1047,12 @@ void WriteSinglePartRequest(
     output << "action=create\n";
     output << "selectedOccurrenceTag=" << FindPartValue(values, index, "occurrenceTag") << '\n';
     output << "assemblyDrawing=" << (assemblyDrawing ? "true" : "false") << '\n';
+    output << "drawingTargetMode=" << (targetLayer > 0 ? "partLayers" : "partOrAssembly") << '\n';
+    output << "layerRange=" << FindValue(values, "layerRange", "1-256") << '\n';
+    output << "layersPerSheet=" << std::max(1, layersPerSheet) << '\n';
+    output << "targetLayer=" << targetLayer << '\n';
+    output << "layerIndex=" << layerIndex << '\n';
+    output << "appendToCurrentSheet=" << (targetLayer > 0 && layerIndex % std::max(1, layersPerSheet) != 0 ? "true" : "false") << '\n';
     for (const std::string& key : settingKeys)
     {
         output << key << '=' << FindPartValue(values, index, key, FindValue(values, key)) << '\n';
@@ -1260,99 +1336,6 @@ bool SetDrawingDisplayPart(tag_t partTag, tag_t sourceOccurrence)
     return nxDisplayStatus >= 0 && displayStatus == 0 && workStatus == 0 && actualDisplayPart == partTag && actualWorkPart == partTag;
 }
 
-void SwitchToDraftingApplication()
-{
-    try
-    {
-        NXOpen::Session* session = NXOpen::Session::GetSession();
-        if (session != nullptr)
-        {
-            session->ApplicationSwitchImmediate("UG_APP_DRAFTING");
-            if (NXOpen::Part* workPart = session->Parts()->Work())
-            {
-                workPart->Drafting()->EnterDraftingApplication();
-                if (workPart->Views() != nullptr && workPart->Views()->WorkView() != nullptr)
-                {
-                    workPart->Views()->WorkView()->UpdateCustomSymbols();
-                }
-            }
-            UF_DISP_make_display_up_to_date();
-            WriteLauncherLog("AutoCreateThreeViews: switched to drafting application.");
-            LogDrawingContext("after switch to drafting application");
-        }
-    }
-    catch (const NXOpen::NXException& ex)
-    {
-        WriteLauncherLog(std::string("AutoCreateThreeViews: switch to drafting application failed, NXException: ") + ex.Message() + ".");
-    }
-    catch (...)
-    {
-        WriteLauncherLog("AutoCreateThreeViews: switch to drafting application failed, unknown exception.");
-    }
-}
-
-void ActivateDrawingPartForDrafting(tag_t partTag, const std::string& reason)
-{
-    if (partTag == NULL_TAG)
-    {
-        return;
-    }
-
-    try
-    {
-        NXOpen::Session* session = NXOpen::Session::GetSession();
-        NXOpen::Part* part = dynamic_cast<NXOpen::Part*>(NXOpen::NXObjectManager::Get(partTag));
-        if (session == nullptr || session->Parts() == nullptr || part == nullptr)
-        {
-            return;
-        }
-
-        NXOpen::PartLoadStatus* loadStatus = nullptr;
-        const int status = static_cast<int>(
-                session->Parts()->SetActiveDisplay(
-                    part,
-                    NXOpen::DisplayPartOptionAllowAdditional,
-                    NXOpen::PartDisplayPartWorkPartOptionUseLast,
-                    &loadStatus));
-        if (loadStatus != nullptr)
-        {
-            delete loadStatus;
-        }
-        NXOpen::Part* workPart = session->Parts()->Work();
-        NXOpen::Part* displayPart = session->Parts()->Display();
-        session->ApplicationSwitchImmediate("UG_APP_DRAFTING");
-        if (workPart != nullptr)
-        {
-            workPart->Drafting()->EnterDraftingApplication();
-            if (workPart->Views() != nullptr && workPart->Views()->WorkView() != nullptr)
-            {
-                workPart->Views()->WorkView()->UpdateCustomSymbols();
-            }
-        }
-        UF_DISP_make_display_up_to_date();
-
-        std::ostringstream log;
-        log << "AutoCreateThreeViews: activate drawing display part, reason="
-            << reason
-            << ", part="
-            << static_cast<unsigned long long>(partTag)
-            << ", nxDisplayStatus=" << status
-            << ", journalWorkPart=" << static_cast<unsigned long long>(workPart != nullptr ? workPart->Tag() : NULL_TAG)
-            << ", journalDisplayPart=" << static_cast<unsigned long long>(displayPart != nullptr ? displayPart->Tag() : NULL_TAG)
-            << ".";
-        WriteLauncherLog(log.str());
-        LogDrawingContext("after activate drawing display");
-    }
-    catch (const NXOpen::NXException& ex)
-    {
-        WriteLauncherLog(std::string("AutoCreateThreeViews: activate drawing display failed, NXException: ") + ex.Message() + ".");
-    }
-    catch (...)
-    {
-        WriteLauncherLog("AutoCreateThreeViews: activate drawing display failed, unknown exception.");
-    }
-}
-
 void RestoreDrawingContext(tag_t previousDisplayPart, tag_t previousWorkOccurrence, tag_t previousWorkPart)
 {
     int status = 0;
@@ -1454,7 +1437,6 @@ bool ApplySelectedOccurrenceFromRequest(const std::filesystem::path& requestPath
         DisplaySelectedOccurrence(occurrenceTag);
         if (SetDrawingDisplayPart(PrototypePartFromOccurrence(occurrenceTag), occurrenceTag))
         {
-            SwitchToDraftingApplication();
             return true;
         }
     }
@@ -1469,20 +1451,17 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
 
     const std::map<std::string, std::string> values = ReadSimpleKeyValueFile(requestPath);
     const int partCount = ParseIntValue(FindValue(values, "selectedPartCount"), 0);
+    const bool layerDrawingMode =
+        TrimText(FindValue(values, "drawingTargetMode", "partOrAssembly")) == "partLayers";
     const tag_t previousDisplayPart = UF_PART_ask_display_part();
     const tag_t previousWorkOccurrence = UF_ASSEM_ask_work_occurrence();
     const tag_t previousWorkPart = UF_ASSEM_ask_work_part();
 
-    if (partCount <= 0)
+    if (partCount <= 0 && !layerDrawingMode)
     {
         if (ApplySelectedOccurrenceFromRequest(requestPath))
         {
-            const std::map<std::string, std::string> singleValues = ReadSimpleKeyValueFile(requestPath);
-            tag_t occurrenceTag = NULL_TAG;
-            if (ParseTagValue(FindValue(singleValues, "selectedOccurrenceTag"), occurrenceTag))
-            {
-                ActivateDrawingPartForDrafting(PrototypePartFromOccurrence(occurrenceTag), "before single drawing");
-            }
+            WriteLauncherLog("AutoCreateThreeViews: selected drawing part is active; defer drafting application entry until the sheet is created.");
         }
         ExecuteAutoCreateThreeViewsFromRequest(requestPath);
         WriteLauncherTiming("ui_request_total", batchStarted, "parts=1");
@@ -1490,6 +1469,23 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
     }
 
     std::vector<SelectedDrawingPart> drawingParts;
+    if (partCount <= 0)
+    {
+        tag_t occurrenceTag = NULL_TAG;
+        tag_t prototypePart = previousWorkPart != NULL_TAG ? previousWorkPart : previousDisplayPart;
+        if (ParseTagValue(FindValue(values, "selectedOccurrenceTag"), occurrenceTag))
+        {
+            const tag_t occurrencePrototype = PrototypePartFromOccurrence(occurrenceTag);
+            if (occurrencePrototype != NULL_TAG)
+            {
+                prototypePart = occurrencePrototype;
+            }
+        }
+        if (prototypePart != NULL_TAG)
+        {
+            drawingParts.push_back({0, occurrenceTag, prototypePart, false});
+        }
+    }
     for (int index = 0; index < partCount; ++index)
     {
         tag_t occurrenceTag = NULL_TAG;
@@ -1514,24 +1510,61 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
         }
     }
 
-    if (drawingParts.empty())
+    std::vector<SelectedLayerDrawingTarget> drawingTargets;
+    if (layerDrawingMode)
+    {
+        const std::vector<std::pair<int, int>> ranges =
+            ParseLayerRanges(FindValue(values, "layerRange", "1-256"));
+        const int layersPerSheet = std::max(1, ParseIntValue(FindValue(values, "layersPerSheet", "1"), 1));
+        std::set<tag_t> seenPrototypeParts;
+        for (const SelectedDrawingPart& selected : drawingParts)
+        {
+            if (!seenPrototypeParts.insert(selected.prototypePart).second)
+            {
+                WriteLauncherLog("AutoCreateThreeViews: layer drawing skipped duplicate prototype part.");
+                continue;
+            }
+            const std::vector<int> layers = CollectDrawablePartLayers(selected.prototypePart, ranges);
+            if (layers.empty())
+            {
+                AddAutoCreateThreeViewsRunResultLine(
+                    std::string(u8"跳过：") + ProgressPartDisplayName(values, selected.index, selected.prototypePart) +
+                    u8"，指定图层范围内没有可出图的可见实体。");
+                continue;
+            }
+            for (size_t layerIndex = 0; layerIndex < layers.size(); ++layerIndex)
+            {
+                drawingTargets.push_back({selected, layers[layerIndex], static_cast<int>(layerIndex), layersPerSheet});
+            }
+        }
+    }
+    else
+    {
+        for (const SelectedDrawingPart& selected : drawingParts)
+        {
+            drawingTargets.push_back({selected, 0, 0, 1});
+        }
+    }
+
+    if (drawingTargets.empty())
     {
         AddAutoCreateThreeViewsRunResultLine(u8"失败：没有可出图的选中零件。");
     }
 
-    if (!drawingParts.empty())
+    if (!drawingTargets.empty())
     {
         g_uiMonitor.showRunResults =
-            drawingParts.size() > 1 ||
-            (drawingParts.size() == 1 && drawingParts.front().assemblyDrawing);
+            layerDrawingMode ||
+            drawingTargets.size() > 1 ||
+            (drawingTargets.size() == 1 && drawingTargets.front().part.assemblyDrawing);
     }
 
     int progressIndex = 0;
-    const int progressTotal = static_cast<int>(drawingParts.size());
+    const int progressTotal = static_cast<int>(drawingTargets.size());
     bool hasManualFrontDirection = false;
-    for (const SelectedDrawingPart& selected : drawingParts)
+    for (const SelectedLayerDrawingTarget& target : drawingTargets)
     {
-        if (IsManualPartFrontDirection(values, selected.index))
+        if (IsManualPartFrontDirection(values, target.part.index))
         {
             hasManualFrontDirection = true;
             break;
@@ -1541,16 +1574,22 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
     {
         WriteProgressFile(requestPath, 0, progressTotal, progressTotal == 0 ? "No drawable parts." : "Starting drawing...", progressTotal == 0);
     }
-    for (const SelectedDrawingPart& selected : drawingParts)
+    for (const SelectedLayerDrawingTarget& target : drawingTargets)
     {
+        const SelectedDrawingPart& selected = target.part;
         const LauncherTimingClock::time_point partStarted = LauncherTimingClock::now();
         ++progressIndex;
-        const std::string progressPartName = ProgressPartDisplayName(values, selected.index, selected.prototypePart);
+        std::string progressPartName = ProgressPartDisplayName(values, selected.index, selected.prototypePart);
+        if (target.targetLayer > 0)
+        {
+            progressPartName += " L" + std::to_string(target.targetLayer);
+        }
         const bool manualFrontDirection = IsManualPartFrontDirection(values, selected.index);
         std::ostringstream progressLog;
         progressLog << "AutoCreateThreeViews: drawing progress "
                     << progressIndex << "/" << progressTotal
                     << ", part=" << progressPartName
+                    << ", targetLayer=" << target.targetLayer
                     << ".";
         WriteLauncherLog(progressLog.str());
         AddAutoCreateThreeViewsRunResultLine(
@@ -1586,13 +1625,20 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
             continue;
         }
 
-        ActivateDrawingPartForDrafting(selected.prototypePart, "before part drawing");
+        WriteLauncherLog("AutoCreateThreeViews: drawing part is active; defer drafting application entry until the sheet is created.");
 
         std::filesystem::path partRequestPath = requestPath;
         partRequestPath += ".part";
-        partRequestPath += std::to_string(selected.index);
+        partRequestPath += std::to_string(progressIndex);
         partRequestPath += ".request";
-        WriteSinglePartRequest(partRequestPath, values, selected.index, selected.assemblyDrawing);
+        WriteSinglePartRequest(
+            partRequestPath,
+            values,
+            selected.index,
+            layerDrawingMode ? false : selected.assemblyDrawing,
+            target.targetLayer,
+            target.layerIndex,
+            target.layersPerSheet);
         ExecuteAutoCreateThreeViewsFromRequest(partRequestPath);
         WriteLauncherTiming(
             "batch_part_total",
@@ -1842,11 +1888,7 @@ extern "C" DllExport void ufusr(char* param, int* returnCode, int rlen)
             }
             else
             {
-                const bool selectedOccurrenceApplied = ApplySelectedOccurrenceFromRequest(requestPath);
-                if (!selectedOccurrenceApplied)
-                {
-                    SwitchToDraftingApplication();
-                }
+                ApplySelectedOccurrenceFromRequest(requestPath);
                 status = ExecuteAutoCreateThreeViewsFromRequest(requestPath);
                 WriteLauncherLog("AutoCreateThreeViews: keep drawing part displayed after direct request.");
             }

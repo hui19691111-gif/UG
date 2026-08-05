@@ -6,6 +6,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using System.IO;
+using System.Diagnostics;
 using System.Text;
 using Microsoft.Win32;
 
@@ -148,6 +149,31 @@ public partial class MainWindow : Window
         TemplateComboBox.SelectedItem = existingItem;
     }
 
+    private void HelpButton_Click(object sender, RoutedEventArgs e)
+    {
+        OpenLocalHelp("AutoCreateThreeViews.html");
+    }
+
+    private static void OpenLocalHelp(string pageName)
+    {
+        string executableDirectory = AppContext.BaseDirectory.TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string applicationDirectory =
+            Directory.GetParent(executableDirectory)?.FullName ?? executableDirectory;
+        string helpPath = Path.Combine(applicationDirectory, "ZhihuiHelp", pageName);
+        if (!File.Exists(helpPath))
+        {
+            MessageBox.Show(
+                $"未找到帮助文件：\n{helpPath}",
+                "智辉钣金帮助",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
+        Process.Start(new ProcessStartInfo(helpPath) { UseShellExecute = true });
+    }
+
     private void NormalizeTemplatePaths()
     {
         string dataDirectory = GetDataDirectory();
@@ -243,6 +269,11 @@ public partial class MainWindow : Window
 
     private bool ShouldShowProgressForCurrentRequest()
     {
+        if (IsLayerDrawingMode())
+        {
+            return true;
+        }
+
         if (!assemblySelectionAvailable)
         {
             return false;
@@ -468,6 +499,74 @@ public partial class MainWindow : Window
         }
 
         ApplySelectedTabPanel();
+    }
+
+    private void DrawingTargetModeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        UpdateLayerDrawingOptionsVisibility();
+    }
+
+    private bool IsLayerDrawingMode()
+    {
+        return string.Equals(
+            SelectedComboBoxTag(DrawingTargetModeComboBox, "partOrAssembly"),
+            "partLayers",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void UpdateLayerDrawingOptionsVisibility()
+    {
+        if (LayerDrawingOptionsPanel == null)
+        {
+            return;
+        }
+
+        LayerDrawingOptionsPanel.Visibility = IsLayerDrawingMode()
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private void ValidateLayerDrawingOptions()
+    {
+        if (!IsLayerDrawingMode())
+        {
+            return;
+        }
+
+        if (IsManualFrontDirectionMode(SelectedComboBoxTag(FrontDirectionModeComboBox, "")))
+        {
+            throw new InvalidOperationException("按部件内图层出图时，每个图层需要自动计算方向，不能使用手动选面与X向。");
+        }
+
+        string rangeText = (LayerRangeTextBox.Text ?? "").Replace('，', ',').Trim();
+        bool hasRange = false;
+        foreach (string rawToken in rangeText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            string[] ends = rawToken.Split('-', StringSplitOptions.TrimEntries);
+            if (ends.Length is < 1 or > 2 ||
+                !int.TryParse(ends[0], out int first) ||
+                (ends.Length == 2 && !int.TryParse(ends[1], out _)) ||
+                first < 1 || first > 256)
+            {
+                throw new InvalidOperationException("图层范围格式不正确，请输入例如：1-50,80,100-120。图层只允许1到256。");
+            }
+            if (ends.Length == 2 &&
+                (!int.TryParse(ends[1], out int last) || last < 1 || last > 256))
+            {
+                throw new InvalidOperationException("图层范围只允许1到256。");
+            }
+            hasRange = true;
+        }
+        if (!hasRange)
+        {
+            throw new InvalidOperationException("请输入要出图的图层范围。");
+        }
+
+        if (!int.TryParse(LayersPerSheetTextBox.Text, out int layersPerSheet) ||
+            layersPerSheet < 1 || layersPerSheet > 16)
+        {
+            throw new InvalidOperationException("每张图纸页的图层数请输入1到16之间的整数。");
+        }
     }
 
     private void ProjectionMode_Checked(object sender, RoutedEventArgs e)
@@ -725,6 +824,7 @@ public partial class MainWindow : Window
     {
         base.OnContentRendered(e);
         ApplySelectedTabPanel();
+        UpdateLayerDrawingOptionsVisibility();
         ApplyProjectionMode();
         UpdatePreviewFromOptions();
     }
@@ -1274,6 +1374,9 @@ public partial class MainWindow : Window
 
         return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
+            ["drawingTargetMode"] = SelectedComboBoxTag(DrawingTargetModeComboBox, "partOrAssembly"),
+            ["layerRange"] = LayerRangeTextBox.Text.Trim(),
+            ["layersPerSheet"] = LayersPerSheetTextBox.Text.Trim(),
             ["templatePath"] = SelectedTemplatePath(),
             ["projection"] = isFirstAngle ? "first" : "third",
             ["frontDirectionMode"] = SelectedComboBoxTag(FrontDirectionModeComboBox, "largestFaceLongestEdge"),
@@ -1414,6 +1517,7 @@ public partial class MainWindow : Window
 
     private void WriteCreateDrawingRequest()
     {
+        ValidateLayerDrawingOptions();
         SaveCurrentPartOptions(showMessage: false);
 
         string requestPath = GetRequestPath();
@@ -2308,6 +2412,10 @@ public partial class MainWindow : Window
         {
             Dictionary<string, string> values = ReadKeyValueFile(settingsPath);
 
+            SelectComboBoxByTag(DrawingTargetModeComboBox, ReadText(values, "drawingTargetMode", "partOrAssembly"));
+            LayerRangeTextBox.Text = ReadText(values, "layerRange", LayerRangeTextBox.Text);
+            LayersPerSheetTextBox.Text = ReadText(values, "layersPerSheet", LayersPerSheetTextBox.Text);
+
             FirstAngleRadio.IsChecked = ReadBool(values, "firstAngle", FirstAngleRadio.IsChecked == true);
             ThirdAngleRadio.IsChecked = FirstAngleRadio.IsChecked != true;
 
@@ -2371,6 +2479,9 @@ public partial class MainWindow : Window
             EnsureDifferentAuxiliaryCorners();
             Dictionary<string, string> values = new()
             {
+                ["drawingTargetMode"] = SelectedComboBoxTag(DrawingTargetModeComboBox, "partOrAssembly"),
+                ["layerRange"] = LayerRangeTextBox.Text.Trim(),
+                ["layersPerSheet"] = LayersPerSheetTextBox.Text.Trim(),
                 ["firstAngle"] = BoolText(FirstAngleRadio.IsChecked == true),
                 ["frontDirectionMode"] = SelectedComboBoxTag(FrontDirectionModeComboBox, "largestFaceLongestEdge"),
                 ["viewSpacing"] = ViewSpacingTextBox.Text,

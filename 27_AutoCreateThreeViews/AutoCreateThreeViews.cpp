@@ -38,6 +38,7 @@
 #include <NXOpen/Drawings_DraftingViewCollection.hxx>
 #include <NXOpen/Drawings_DrawingSheet.hxx>
 #include <NXOpen/Drawings_DrawingSheetBuilder.hxx>
+#include <NXOpen/Drawings_DrawingSheetCollection.hxx>
 #include <NXOpen/Drawings_ProjectedView.hxx>
 #include <NXOpen/Drawings_ProjectedViewBuilder.hxx>
 #include <NXOpen/Drawings_SelectDraftingView.hxx>
@@ -67,6 +68,8 @@
 #include <NXOpen/DisplayManager.hxx>
 #include <NXOpen/DisplayModification.hxx>
 #include <NXOpen/DisplayableObject.hxx>
+#include <NXOpen/Layer.hxx>
+#include <NXOpen/Layer_LayerManager.hxx>
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/Expression.hxx>
 #include <NXOpen/ExpressionCollection.hxx>
@@ -137,6 +140,11 @@ namespace
 {
 struct RequestValues
 {
+    std::string drawingTargetMode = "partOrAssembly";
+    int targetLayer = 0;
+    int layerIndex = 0;
+    int layersPerSheet = 1;
+    bool appendToCurrentSheet = false;
     std::string templatePath;
     std::string frontDirectionMode = "largestFaceLongestEdge";
     double viewSpacing = 20.0;
@@ -166,6 +174,26 @@ struct RequestValues
     bool technicalRequirementIndexed = true;
     std::string technicalRequirementCorner = "TopLeft";
     std::string technicalRequirementText;
+};
+
+int g_activeTargetLayer = 0;
+
+class ScopedTargetDrawingLayer
+{
+public:
+    explicit ScopedTargetDrawingLayer(int layer)
+        : previous_(g_activeTargetLayer)
+    {
+        g_activeTargetLayer = layer;
+    }
+
+    ~ScopedTargetDrawingLayer()
+    {
+        g_activeTargetLayer = previous_;
+    }
+
+private:
+    int previous_ = 0;
 };
 
 struct PlannedView
@@ -1471,6 +1499,11 @@ RequestValues ReadRequestFile(const std::filesystem::path& requestPath)
     }
 
     RequestValues request;
+    request.drawingTargetMode = ReadText(values, "drawingTargetMode", "partOrAssembly");
+    request.targetLayer = std::max(0, std::min(256, static_cast<int>(ReadDouble(values, "targetLayer", 0.0))));
+    request.layerIndex = std::max(0, static_cast<int>(ReadDouble(values, "layerIndex", 0.0)));
+    request.layersPerSheet = std::max(1, static_cast<int>(ReadDouble(values, "layersPerSheet", 1.0)));
+    request.appendToCurrentSheet = ParseBool(values, "appendToCurrentSheet", false);
     request.templatePath = ReadText(values, "templatePath", "");
     request.frontDirectionMode = ReadText(values, "frontDirectionMode", "largestFaceLongestEdge");
     request.viewSpacing = std::max(5.0, ReadDouble(values, "viewSpacing", 20.0));
@@ -1500,6 +1533,14 @@ RequestValues ReadRequestFile(const std::filesystem::path& requestPath)
     request.technicalRequirementIndexed = ParseBool(values, "technicalRequirementIndexed", true);
     request.technicalRequirementCorner = ReadText(values, "technicalRequirementCorner", "TopLeft");
     request.technicalRequirementText = Trim(DecodeBase64OrOriginal(ReadText(values, "technicalRequirementText", "")));
+    if (request.targetLayer > 0)
+    {
+        // Layer drawing is a grouped orthographic drawing, never a sheet-metal flat-pattern drawing.
+        request.flat = false;
+        // Multi-layer sheets need a denser group layout than standalone part
+        // drawings.  Feature 08 uses compact fixed gaps for body groups.
+        request.viewSpacing = std::min(request.viewSpacing, 10.0);
+    }
     if (request.assemblyDrawing)
     {
         request.dimensionAngle = false;
@@ -1602,6 +1643,115 @@ void EnsureLayer230Visible(NXOpen::Session* session, NXOpen::Part* workPart)
     UF_DISP_make_display_up_to_date();
     WriteLine(session, "AutoCreateThreeViews: layer 230 opened before measuring and creating views.");
 }
+
+struct DrawingLayerStateSnapshot
+{
+    bool valid = false;
+    std::vector<int> status = std::vector<int>(UF_LAYER_MAX_LAYER + 1, UF_LAYER_INACTIVE_LAYER);
+};
+
+class ScopedDrawingLayerIsolation
+{
+public:
+    ScopedDrawingLayerIsolation(NXOpen::Session* session, int targetLayer)
+        : session_(session), targetLayer_(targetLayer)
+    {
+        if (targetLayer_ < UF_LAYER_MIN_LAYER || targetLayer_ > UF_LAYER_MAX_LAYER)
+        {
+            return;
+        }
+
+        for (int layer = UF_LAYER_MIN_LAYER; layer <= UF_LAYER_MAX_LAYER; ++layer)
+        {
+            if (UF_LAYER_ask_status(layer, &snapshot_.status[layer]) != 0)
+            {
+                WriteLine(session_, "AutoCreateThreeViews: save model layer states failed; layer isolation skipped.");
+                return;
+            }
+        }
+        snapshot_.valid = true;
+
+        // Feature 08 convention: layer 1 is always the work layer; only the
+        // requested body layer and drafting support layer 230 stay open.
+        UF_LAYER_set_status(1, UF_LAYER_WORK_LAYER);
+        for (int layer = UF_LAYER_MIN_LAYER; layer <= UF_LAYER_MAX_LAYER; ++layer)
+        {
+            if (layer == 1)
+            {
+                continue;
+            }
+            const bool keepOpen = layer == targetLayer_ || layer == 230;
+            const int result = UF_LAYER_set_status(
+                layer,
+                keepOpen ? UF_LAYER_ACTIVE_LAYER : UF_LAYER_INACTIVE_LAYER);
+            if (result != 0)
+            {
+                WriteLine(
+                    session_,
+                    "AutoCreateThreeViews: set model layer " + std::to_string(layer) +
+                        " status failed, UF error " + std::to_string(result) + ".");
+            }
+        }
+        UF_DISP_make_display_up_to_date();
+        active_ = true;
+        WriteLine(
+            session_,
+            "AutoCreateThreeViews: model layers isolated, workLayer=1, openLayers=1," +
+                std::to_string(targetLayer_) + ",230.");
+    }
+
+    ~ScopedDrawingLayerIsolation()
+    {
+        Restore();
+    }
+
+    ScopedDrawingLayerIsolation(const ScopedDrawingLayerIsolation&) = delete;
+    ScopedDrawingLayerIsolation& operator=(const ScopedDrawingLayerIsolation&) = delete;
+
+private:
+    void Restore()
+    {
+        if (!active_ || !snapshot_.valid)
+        {
+            return;
+        }
+
+        int originalWorkLayer = 1;
+        for (int layer = UF_LAYER_MIN_LAYER; layer <= UF_LAYER_MAX_LAYER; ++layer)
+        {
+            if (snapshot_.status[layer] == UF_LAYER_WORK_LAYER)
+            {
+                originalWorkLayer = layer;
+                break;
+            }
+        }
+        UF_LAYER_set_status(originalWorkLayer, UF_LAYER_WORK_LAYER);
+        for (int layer = UF_LAYER_MIN_LAYER; layer <= UF_LAYER_MAX_LAYER; ++layer)
+        {
+            if (layer == originalWorkLayer)
+            {
+                continue;
+            }
+            int status = snapshot_.status[layer];
+            if (status == UF_LAYER_WORK_LAYER)
+            {
+                status = UF_LAYER_ACTIVE_LAYER;
+            }
+            UF_LAYER_set_status(layer, status);
+        }
+        UF_DISP_make_display_up_to_date();
+        active_ = false;
+        WriteLine(
+            session_,
+            "AutoCreateThreeViews: restored model layer states, workLayer=" +
+                std::to_string(originalWorkLayer) + ".");
+    }
+
+    NXOpen::Session* session_ = nullptr;
+    int targetLayer_ = 0;
+    bool active_ = false;
+    DrawingLayerStateSnapshot snapshot_;
+};
 
 std::filesystem::path ProgressPathFromRequest(const std::filesystem::path& requestPath)
 {
@@ -1859,6 +2009,63 @@ bool HasPartName(NXOpen::Part* part)
     }
 }
 
+enum class BoundsBodyFilterResult
+{
+    Include,
+    HiddenBody,
+    HiddenLayer,
+    LayerAbove256
+};
+
+int AskObjectLayer(tag_t objectTag)
+{
+    UF_OBJ_disp_props_t displayProperties = {};
+    return objectTag != NULL_TAG && UF_OBJ_ask_display_properties(objectTag, &displayProperties) == 0
+        ? displayProperties.layer
+        : 0;
+}
+
+bool MatchesActiveTargetLayer(tag_t bodyTag)
+{
+    return g_activeTargetLayer <= 0 || AskObjectLayer(bodyTag) == g_activeTargetLayer;
+}
+
+BoundsBodyFilterResult ClassifyBodyForBounds(tag_t bodyTag, int& layer)
+{
+    layer = 0;
+    if (bodyTag == NULL_TAG)
+    {
+        return BoundsBodyFilterResult::HiddenBody;
+    }
+
+    UF_OBJ_disp_props_t displayProperties = {};
+    if (UF_OBJ_ask_display_properties(bodyTag, &displayProperties) != 0)
+    {
+        return BoundsBodyFilterResult::Include;
+    }
+
+    layer = displayProperties.layer;
+    if (displayProperties.blank_status != UF_OBJ_NOT_BLANKED)
+    {
+        return BoundsBodyFilterResult::HiddenBody;
+    }
+    if (layer > 256)
+    {
+        return BoundsBodyFilterResult::LayerAbove256;
+    }
+
+    int layerStatus = UF_LAYER_INACTIVE_LAYER;
+    if (layer != g_activeTargetLayer &&
+        layer >= UF_LAYER_MIN_LAYER &&
+        UF_LAYER_ask_status(layer, &layerStatus) == 0 &&
+        layerStatus == UF_LAYER_INACTIVE_LAYER)
+    {
+        return BoundsBodyFilterResult::HiddenLayer;
+    }
+
+    return BoundsBodyFilterResult::Include;
+}
+
 ModelBounds AskModelBounds(NXOpen::Part* part)
 {
     ModelBounds result;
@@ -1870,17 +2077,51 @@ ModelBounds AskModelBounds(NXOpen::Part* part)
     bool initialized = false;
     double minValues[3] = {0.0, 0.0, 0.0};
     double maxValues[3] = {0.0, 0.0, 0.0};
+    int includedBodyCount = 0;
+    int hiddenBodyCount = 0;
+    int hiddenLayerBodyCount = 0;
+    int layerAbove256BodyCount = 0;
+    std::set<int> excludedLayers;
+
+    auto accumulateVisibleBody = [&](tag_t bodyTag) {
+        if (!MatchesActiveTargetLayer(bodyTag))
+        {
+            return;
+        }
+        int layer = 0;
+        const BoundsBodyFilterResult filterResult = ClassifyBodyForBounds(bodyTag, layer);
+        if (filterResult == BoundsBodyFilterResult::HiddenBody)
+        {
+            ++hiddenBodyCount;
+            return;
+        }
+        if (filterResult == BoundsBodyFilterResult::HiddenLayer)
+        {
+            ++hiddenLayerBodyCount;
+            excludedLayers.insert(layer);
+            return;
+        }
+        if (filterResult == BoundsBodyFilterResult::LayerAbove256)
+        {
+            ++layerAbove256BodyCount;
+            excludedLayers.insert(layer);
+            return;
+        }
+
+        AccumulateBodyBounds(bodyTag, initialized, minValues, maxValues);
+        ++includedBodyCount;
+    };
 
     if (part->Bodies() != nullptr)
     {
         for (NXOpen::BodyCollection::iterator it = part->Bodies()->begin(); it != part->Bodies()->end(); ++it)
         {
             NXOpen::Body* body = *it;
-            if (body == nullptr || body->IsBlanked())
+            if (body == nullptr)
             {
                 continue;
             }
-            AccumulateBodyBounds(body->Tag(), initialized, minValues, maxValues);
+            accumulateVisibleBody(body->Tag());
         }
     }
 
@@ -1889,9 +2130,35 @@ ModelBounds AskModelBounds(NXOpen::Part* part)
         const std::vector<tag_t> visibleBodyTags = CollectVisibleSolidBodyTags(part);
         for (tag_t bodyTag : visibleBodyTags)
         {
-            AccumulateBodyBounds(bodyTag, initialized, minValues, maxValues);
+            accumulateVisibleBody(bodyTag);
         }
     }
+
+    std::ostringstream filterLog;
+    filterLog << "AutoCreateThreeViews: model bounds body filter included="
+              << includedBodyCount
+              << ", hiddenBodies="
+              << hiddenBodyCount
+              << ", hiddenLayerBodies="
+              << hiddenLayerBodyCount
+              << ", layerAbove256Bodies="
+              << layerAbove256BodyCount;
+    if (!excludedLayers.empty())
+    {
+        filterLog << ", excludedLayers=";
+        bool first = true;
+        for (int layer : excludedLayers)
+        {
+            if (!first)
+            {
+                filterLog << ",";
+            }
+            filterLog << layer;
+            first = false;
+        }
+    }
+    filterLog << ".";
+    WriteLine(nullptr, filterLog.str());
 
     if (!initialized)
     {
@@ -1924,7 +2191,7 @@ bool AskModelBoundsCenter(NXOpen::Part* part, NXOpen::Point3d& center)
     for (NXOpen::BodyCollection::iterator it = part->Bodies()->begin(); it != part->Bodies()->end(); ++it)
     {
         NXOpen::Body* body = *it;
-        if (body == nullptr || body->IsBlanked())
+        if (body == nullptr || body->IsBlanked() || !MatchesActiveTargetLayer(body->Tag()))
         {
             continue;
         }
@@ -3066,7 +3333,10 @@ void AddUniqueBodyOccurrence(
     std::vector<tag_t>& bodyOccurrences,
     std::set<tag_t>& seen)
 {
-    if (bodyTag == NULL_TAG || !IsSolidBodyTag(bodyTag) || seen.find(bodyTag) != seen.end())
+    if (bodyTag == NULL_TAG ||
+        !IsSolidBodyTag(bodyTag) ||
+        !MatchesActiveTargetLayer(bodyTag) ||
+        seen.find(bodyTag) != seen.end())
     {
         return;
     }
@@ -3846,7 +4116,7 @@ bool TryComputeAutoFrontDirectionFromLargestPlanarFace(
     for (NXOpen::BodyCollection::iterator it = part->Bodies()->begin(); it != part->Bodies()->end(); ++it)
     {
         NXOpen::Body* body = *it;
-        if (body == nullptr || body->IsBlanked())
+        if (body == nullptr || body->IsBlanked() || !MatchesActiveTargetLayer(body->Tag()))
         {
             continue;
         }
@@ -5047,8 +5317,10 @@ void PreferBackSideIfMoreCurves(
         return;
     }
 
-    const NXOpen::Point3d frontProbePoint(-5000.0, -5000.0, 0.0);
-    const NXOpen::Point3d backProbePoint(-5200.0, -5000.0, 0.0);
+    // Exact imported views must remain inside the drawing sheet when a
+    // view-dependent layer mask forces hidden-line regeneration.
+    const NXOpen::Point3d frontProbePoint(75.0, 125.0, 0.0);
+    const NXOpen::Point3d backProbePoint(220.0, 125.0, 0.0);
     AutoViewDirection backDirection = ReversedViewDirection(frontDirection);
     std::vector<NXOpen::Drawings::DraftingView*> temporaryViews;
 
@@ -5253,7 +5525,13 @@ void PreferOverallBoxDirectionWithMostCurves(
     std::vector<NXOpen::Drawings::BaseView*> probeViews(probes.size(), nullptr);
     for (size_t index = 0; index < probes.size(); ++index)
     {
-        const NXOpen::Point3d probePoint(-5000.0 - static_cast<double>(index) * 200.0, -5400.0, 0.0);
+        // Keep temporary exact views on-sheet.  NX 2412 rejects masked exact
+        // view updates outside the sheet with error 731009 and reports the
+        // secondary hidden-line/occurrence failure seen in the update dialog.
+        const NXOpen::Point3d probePoint(
+            index == 0 ? 75.0 : 220.0,
+            125.0,
+            0.0);
         NXOpen::Drawings::BaseView* probeView = CreateBaseView(
             session,
             part,
@@ -5831,6 +6109,18 @@ double BottomTitleBlockReserve(double sheetHeight)
 
 double EffectiveLayoutMargin(const RequestValues& request)
 {
+    // Layer drawing already divides the sheet into cells inside the page and
+    // above the title block.  Reusing the full-sheet annotation margin here
+    // subtracts it once again from every cell.  A two-row A4 layout then loses
+    // 76 mm from an 81.5 mm-high cell and is forced down to an unnecessarily
+    // small scale (for example 1:7).  Eight millimetres leaves room for the
+    // compact 5.33 mm dimensions and the layer caption without wasting most of
+    // the cell.
+    if (request.targetLayer > 0)
+    {
+        return 8.0;
+    }
+
     const bool createsDimensions =
         request.autoDimensions &&
         (request.dimensionOverall ||
@@ -6278,6 +6568,29 @@ LayoutBounds BoundsForAllViews(
         return projectedBounds;
     }
     return auxiliaryBounds;
+}
+
+void MoveViewGroupToCenter(
+    const std::vector<CreatedView>& projectedViews,
+    const std::vector<CreatedAuxiliaryView>& auxiliaryViews,
+    double targetCenterX,
+    double targetCenterY)
+{
+    const LayoutBounds bounds = BoundsForAllViews(projectedViews, auxiliaryViews);
+    if (bounds.maxX <= bounds.minX || bounds.maxY <= bounds.minY)
+    {
+        return;
+    }
+    const double dx = targetCenterX - (bounds.minX + bounds.maxX) * 0.5;
+    const double dy = targetCenterY - (bounds.minY + bounds.maxY) * 0.5;
+    for (const CreatedView& created : projectedViews)
+    {
+        MoveViewByDelta(created.view, dx, dy);
+    }
+    for (const CreatedAuxiliaryView& created : auxiliaryViews)
+    {
+        MoveViewByDelta(created.view, dx, dy);
+    }
 }
 
 bool BoundsOverlapWithGap(const LayoutBounds& first, const LayoutBounds& second, double gap)
@@ -16339,7 +16652,10 @@ void CreateProjectedOverallDimensions(
             continue;
         }
 
-        const double offset = std::max(8.0, request.viewSpacing * 0.6);
+        // Feature 08 places overall dimensions at 8 * 2 / 3 sheet units.
+        const double offset = request.targetLayer > 0
+            ? 8.0 * 2.0 / 3.0
+            : std::max(8.0, request.viewSpacing * 0.6);
         const std::vector<DraftingCurveExtent> extents = CollectDraftingCurveExtents(created.view);
         LayoutBounds overallBounds = bounds;
         bool hasVisibleCurveBounds = false;
@@ -16571,7 +16887,9 @@ void CreateFlatPatternOverallDimensions(
             continue;
         }
 
-        const double offset = std::max(8.0, request.viewSpacing * 0.6);
+        const double offset = request.targetLayer > 0
+            ? 8.0 * 2.0 / 3.0
+            : std::max(8.0, request.viewSpacing * 0.6);
         const std::vector<DraftingCurveExtent> extents = CollectDraftingCurveExtents(created.view);
         std::ostringstream log;
         log << "AutoCreateThreeViews: auto dimension flat pattern overall bounds"
@@ -16817,6 +17135,59 @@ void CreateFlatPatternNoteBelowView(
             }
             WriteLine(session, "AutoCreateThreeViews: flat pattern note failed, unknown exception.");
         }
+    }
+}
+
+void CreateLayerGroupNote(
+    NXOpen::Session* session,
+    NXOpen::Part* workPart,
+    const RequestValues& request,
+    const std::vector<CreatedView>& projectedViews,
+    const std::vector<CreatedAuxiliaryView>& auxiliaryViews)
+{
+    if (request.targetLayer <= 0 || workPart == nullptr || workPart->Annotations() == nullptr)
+    {
+        return;
+    }
+    const LayoutBounds bounds = BoundsForAllViews(projectedViews, auxiliaryViews);
+    if (bounds.maxX <= bounds.minX || bounds.maxY <= bounds.minY)
+    {
+        return;
+    }
+
+    NXOpen::Annotations::DraftingNoteBuilder* builder = nullptr;
+    try
+    {
+        NXOpen::Annotations::SimpleDraftingAid* nullAid = nullptr;
+        builder = workPart->Annotations()->CreateDraftingNoteBuilder(nullAid);
+        builder->Origin()->Plane()->SetPlaneMethod(NXOpen::Annotations::PlaneBuilder::PlaneMethodTypeXyPlane);
+        builder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
+        builder->Origin()->SetInferRelativeToGeometry(false);
+        const int noteFont = LoadChineseDraftNoteFont(session, workPart);
+        if (noteFont > 0)
+        {
+            builder->Style()->LetteringStyle()->SetGeneralTextFont(noteFont);
+        }
+        const std::string noteText = std::string(u8"图层 ") + std::to_string(request.targetLayer);
+        builder->Text()->TextBlock()->SetText(BuildDraftNoteLines(noteText));
+        NXOpen::View* nullView = nullptr;
+        const NXOpen::Point3d notePoint(
+            (bounds.minX + bounds.maxX) * 0.5,
+            bounds.minY - std::max(5.0, request.viewSpacing * 0.6),
+            0.0);
+        builder->Origin()->Origin()->SetValue(nullptr, nullView, notePoint);
+        builder->Commit();
+        builder->Destroy();
+        builder = nullptr;
+        WriteLine(session, "AutoCreateThreeViews: created layer group note for layer " + std::to_string(request.targetLayer) + ".");
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        if (builder != nullptr)
+        {
+            try { builder->Destroy(); } catch (...) {}
+        }
+        WriteLine(session, std::string("AutoCreateThreeViews: layer group note failed, NX ") + std::to_string(ex.ErrorCode()) + ": " + ex.Message());
     }
 }
 
@@ -17799,6 +18170,32 @@ int AutoCreateThreeViewsDialog::ExecuteCreateDrawing()
     }
 }
 
+bool IsDraftingApplicationActive(NXOpen::Session* session)
+{
+    int moduleId = 0;
+    if (UF_ask_application_module(&moduleId) == 0 && moduleId == UF_APP_DRAFTING)
+    {
+        return true;
+    }
+
+    if (session == nullptr)
+    {
+        return false;
+    }
+
+    const NXOpen::NXString applicationNameValue = session->ApplicationName();
+    const char* applicationName = applicationNameValue.GetLocaleText();
+    if (applicationName == nullptr)
+    {
+        return false;
+    }
+
+    const std::string name(applicationName);
+    return name.find("DRAFTING") != std::string::npos ||
+           name.find("Drafting") != std::string::npos ||
+           name.find("drafting") != std::string::npos;
+}
+
 int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestPath)
 {
     NXOpen::Session* session = NXOpen::Session::GetSession();
@@ -17818,6 +18215,8 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         ScopedPartTiming totalTiming(session, partLabel);
         TimingClock::time_point stageStarted = TimingClock::now();
         const RequestValues request = ReadRequestFile(requestPath);
+        const ScopedTargetDrawingLayer targetLayerScope(request.targetLayer);
+        const ScopedDrawingLayerIsolation modelLayerIsolation(session, request.targetLayer);
         WriteLine(session, "AutoCreateThreeViews: execute request work part=" + partLabel + ".");
         EnsureLayer230Visible(session, workPart);
         const ModelBounds bounds = AskModelBounds(workPart);
@@ -17890,7 +18289,23 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         }
 
         stageStarted = TimingClock::now();
-        NXOpen::Drawings::DraftingDrawingSheet* sheet = CreateDrawingSheet(session, workPart, request, 1.0);
+        NXOpen::Drawings::DraftingDrawingSheet* sheet = nullptr;
+        if (request.targetLayer > 0 && request.appendToCurrentSheet && workPart->DrawingSheets() != nullptr)
+        {
+            sheet = dynamic_cast<NXOpen::Drawings::DraftingDrawingSheet*>(
+                workPart->DrawingSheets()->CurrentDrawingSheet());
+            if (sheet != nullptr)
+            {
+                WriteLine(
+                    session,
+                    "AutoCreateThreeViews: append target layer " + std::to_string(request.targetLayer) +
+                        " to current drawing sheet.");
+            }
+        }
+        if (sheet == nullptr)
+        {
+            sheet = CreateDrawingSheet(session, workPart, request, 1.0);
+        }
         if (sheet == nullptr)
         {
             const std::string message = std::string(u8"失败：") + partLabel + u8"，创建图纸页失败。";
@@ -17900,8 +18315,16 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         }
         try
         {
-            session->ApplicationSwitchImmediate("UG_APP_DRAFTING");
-            workPart->Drafting()->EnterDraftingApplication();
+            if (!IsDraftingApplicationActive(session))
+            {
+                session->ApplicationSwitchImmediate("UG_APP_DRAFTING");
+                workPart->Drafting()->EnterDraftingApplication();
+                WriteLine(session, "AutoCreateThreeViews: entered drafting application after drawing sheet creation.");
+            }
+            else
+            {
+                WriteLine(session, "AutoCreateThreeViews: drafting application is already active; skipped duplicate application switch.");
+            }
             sheet->Open();
             UF_DRAW_open_drawing(sheet->Tag());
             UF_DISP_make_display_up_to_date();
@@ -17926,11 +18349,145 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         catch (...)
         {
         }
+        const double actualSheetLength = sheetLength;
+        const double actualSheetHeight = sheetHeight;
+        double targetCellCenterX = actualSheetLength * 0.5;
+        double targetCellCenterY = actualSheetHeight * 0.5;
+        int layerCellIndex = 0;
+        int layerCellCount = 1;
+        int layerColumns = 1;
+        int layerRows = 1;
+        int layerColumn = 0;
+        int layerRow = 0;
+        if (request.targetLayer > 0)
+        {
+            const int cellCount = std::max(1, request.layersPerSheet);
+            const int cellIndex = request.layerIndex % cellCount;
+            layerCellIndex = cellIndex;
+            layerCellCount = cellCount;
+            const double pagePadding = 6.0;
+            const double safeMinX = pagePadding;
+            const double safeMaxX = std::max(safeMinX + 20.0, actualSheetLength - pagePadding);
+            const double safeMinY = BottomTitleBlockReserve(actualSheetHeight) + pagePadding;
+            const double safeMaxY = std::max(safeMinY + 20.0, actualSheetHeight - pagePadding);
+            const double safeWidth = safeMaxX - safeMinX;
+            const double safeHeight = safeMaxY - safeMinY;
+
+            // Keep one grid decision for all groups appended to the same
+            // sheet.  On the first group, compare every possible row/column
+            // arrangement using the target body's projected aspect ratio.
+            static tag_t packedPartTag = NULL_TAG;
+            static int packedCellCount = 0;
+            static int packedColumns = 1;
+            static int packedRows = 1;
+            if (cellIndex == 0 || packedPartTag != workPart->Tag() || packedCellCount != cellCount)
+            {
+                double frontWidth = frontDirection.valid && frontDirection.edgeLength > 1.0e-6
+                    ? frontDirection.edgeLength
+                    : bounds.width;
+                double frontHeight = frontDirection.valid && frontDirection.faceArea > 1.0e-6
+                    ? frontDirection.faceArea / std::max(1.0e-6, frontWidth)
+                    : bounds.height;
+                const double sizes[3] = {bounds.sizeX, bounds.sizeY, bounds.sizeZ};
+                const int normalAxis = frontDirection.valid ? DominantAxisIndex(frontDirection.normal) : 2;
+                const double sideDepth = sizes[std::max(0, std::min(2, normalAxis))];
+
+                double estimatedWidth = std::max(1.0, frontWidth);
+                double estimatedHeight = std::max(1.0, frontHeight);
+                if (request.left) estimatedWidth += sideDepth;
+                if (request.right) estimatedWidth += sideDepth;
+                if (request.back) estimatedWidth += frontWidth;
+                if (request.top) estimatedHeight += sideDepth;
+                if (request.bottom) estimatedHeight += sideDepth;
+                if (request.backBottom) estimatedHeight += frontHeight;
+                if (request.iso)
+                {
+                    const double isoSize = std::max(frontWidth, frontHeight) * 0.55;
+                    estimatedWidth += isoSize;
+                    estimatedHeight = std::max(estimatedHeight, isoSize);
+                }
+
+                double bestScore = std::numeric_limits<double>::max();
+                for (int candidateColumns = 1; candidateColumns <= cellCount; ++candidateColumns)
+                {
+                    const int candidateRows =
+                        std::max(1, static_cast<int>(std::ceil(static_cast<double>(cellCount) / candidateColumns)));
+                    const double candidateCellWidth = safeWidth / candidateColumns;
+                    const double candidateCellHeight = safeHeight / candidateRows;
+                    const double fitScore = std::max(
+                        estimatedWidth / std::max(1.0, candidateCellWidth),
+                        estimatedHeight / std::max(1.0, candidateCellHeight));
+                    const int unusedCells = candidateColumns * candidateRows - cellCount;
+                    const double score = fitScore * (1.0 + unusedCells * 0.03);
+                    if (score < bestScore - 1.0e-9)
+                    {
+                        bestScore = score;
+                        packedColumns = candidateColumns;
+                        packedRows = candidateRows;
+                    }
+                }
+                packedPartTag = workPart->Tag();
+                packedCellCount = cellCount;
+
+                std::ostringstream packingLog;
+                packingLog << "AutoCreateThreeViews: smart layer packing"
+                           << ", estimatedGroup=" << estimatedWidth << "x" << estimatedHeight
+                           << ", sheetSpace=" << safeWidth << "x" << safeHeight
+                           << ", selectedGrid=" << packedColumns << "x" << packedRows
+                           << ", groups=" << cellCount << ".";
+                WriteLine(session, packingLog.str());
+            }
+
+            const int columns = packedColumns;
+            const int rows = packedRows;
+            const int column = cellIndex % columns;
+            const int row = cellIndex / columns;
+            layerColumns = columns;
+            layerRows = rows;
+            layerColumn = column;
+            layerRow = row;
+            const double cellWidth = (safeMaxX - safeMinX) / columns;
+            const double cellHeight = (safeMaxY - safeMinY) / rows;
+            const double rawCellCenterX = safeMinX + (static_cast<double>(column) + 0.5) * cellWidth;
+            const double rawCellCenterY = safeMaxY - (static_cast<double>(row) + 0.5) * cellHeight;
+            const double layoutCenterX = (safeMinX + safeMaxX) * 0.5;
+            const double layoutCenterY = (safeMinY + safeMaxY) * 0.5;
+            // Equal grid centers spread small body groups across the whole
+            // sheet.  Keep the same cell capacity for scale calculation, but
+            // pack final group centers toward the sheet center like feature 08.
+            const double horizontalPack = columns > 1 ? 0.65 : 1.0;
+            const double verticalPack = rows > 1 ? 0.72 : 1.0;
+            targetCellCenterX = layoutCenterX + (rawCellCenterX - layoutCenterX) * horizontalPack;
+            targetCellCenterY = layoutCenterY + (rawCellCenterY - layoutCenterY) * verticalPack;
+            sheetLength = cellWidth;
+            sheetHeight = cellHeight;
+
+            std::ostringstream cellLog;
+            cellLog << "AutoCreateThreeViews: layer layout targetLayer=" << request.targetLayer
+                    << ", cell=" << (cellIndex + 1) << "/" << cellCount
+                    << ", grid=" << columns << "x" << rows
+                    << ", cellSize=" << cellWidth << "x" << cellHeight
+                    << ", rawCenter=(" << rawCellCenterX << "," << rawCellCenterY << ")"
+                    << ", targetCenter=(" << targetCellCenterX << "," << targetCellCenterY << ").";
+            WriteLine(session, cellLog.str());
+        }
         WriteTimingLine(session, partLabel, "create_and_open_drawing_sheet", stageStarted);
 
         const double temporarySheetScaleDenominator = 1000.0;
         stageStarted = TimingClock::now();
-        ApplyDrawingSheetScale(session, workPart, sheet, temporarySheetScaleDenominator);
+        // Changing the sheet scale while appending another layer group also
+        // rescales existing views on that sheet.  NX keeps the projected-view
+        // alignment point, so an earlier side view can end up inside its front
+        // view.  Appended groups use explicit per-view scales and must leave the
+        // established sheet scale untouched.
+        if (!request.appendToCurrentSheet)
+        {
+            ApplyDrawingSheetScale(session, workPart, sheet, temporarySheetScaleDenominator);
+        }
+        else
+        {
+            WriteLine(session, "AutoCreateThreeViews: keep existing sheet scale while probing appended layer group.");
+        }
         const double viewScaleDenominator = temporarySheetScaleDenominator;
         if ((request.assemblyDrawing && !manualFrontDirection && !absoluteFrontDirection) ||
             frontDirectionMode == "overallBoxMaxArea")
@@ -18142,7 +18699,14 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         WriteTimingLine(session, partLabel, "measure_curves_and_choose_final_scale", stageStarted);
 
         stageStarted = TimingClock::now();
-        ApplyDrawingSheetScale(session, workPart, sheet, sheetScaleDenominator);
+        if (!request.appendToCurrentSheet)
+        {
+            ApplyDrawingSheetScale(session, workPart, sheet, sheetScaleDenominator);
+        }
+        else
+        {
+            WriteLine(session, "AutoCreateThreeViews: keep existing sheet scale while applying appended layer view scale.");
+        }
         SetAllCreatedViewScales(session, workPart, createdProjectedViews, auxiliaryViews, sheetScaleDenominator);
         UpdateCreatedDraftingViews(
             session,
@@ -18151,13 +18715,82 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             auxiliaryViews,
             "after_final_scale");
         ArrangeAllViewsInMemory(request, createdProjectedViews, auxiliaryViews, sheetLength, sheetHeight);
+        if (request.targetLayer > 0)
+        {
+            const double fixedLayerGroupGap = 20.0; // Same fixed group gap as feature 08.
+            static tag_t placedPartTag = NULL_TAG;
+            static int placedCellCount = 0;
+            static std::vector<LayoutBounds> placedLayerGroupBounds;
+            if (layerCellIndex == 0 ||
+                placedPartTag != workPart->Tag() ||
+                placedCellCount != layerCellCount)
+            {
+                placedPartTag = workPart->Tag();
+                placedCellCount = layerCellCount;
+                placedLayerGroupBounds.assign(static_cast<size_t>(layerCellCount), LayoutBounds());
+            }
+
+            const LayoutBounds currentGroupBounds = BoundsForAllViews(createdProjectedViews, auxiliaryViews);
+            if (currentGroupBounds.maxX > currentGroupBounds.minX &&
+                currentGroupBounds.maxY > currentGroupBounds.minY)
+            {
+                double fixedCenterX = targetCellCenterX;
+                double fixedCenterY = targetCellCenterY;
+                const double currentWidth = BoundsWidth(currentGroupBounds);
+                const double currentHeight = BoundsHeight(currentGroupBounds);
+
+                if (layerColumn > 0 && layerCellIndex > 0)
+                {
+                    const LayoutBounds& leftBounds = placedLayerGroupBounds[static_cast<size_t>(layerCellIndex - 1)];
+                    if (leftBounds.maxX > leftBounds.minX)
+                    {
+                        fixedCenterX = leftBounds.maxX + fixedLayerGroupGap + currentWidth * 0.5;
+                    }
+                }
+                if (layerRow > 0 && layerCellIndex >= layerColumns)
+                {
+                    const LayoutBounds& upperBounds =
+                        placedLayerGroupBounds[static_cast<size_t>(layerCellIndex - layerColumns)];
+                    if (upperBounds.maxY > upperBounds.minY)
+                    {
+                        fixedCenterY = upperBounds.minY - fixedLayerGroupGap - currentHeight * 0.5;
+                    }
+                }
+
+                MoveViewGroupToCenter(
+                    createdProjectedViews,
+                    auxiliaryViews,
+                    fixedCenterX,
+                    fixedCenterY);
+                placedLayerGroupBounds[static_cast<size_t>(layerCellIndex)] =
+                    BoundsForAllViews(createdProjectedViews, auxiliaryViews);
+
+                std::ostringstream fixedGapLog;
+                fixedGapLog << "AutoCreateThreeViews: fixed layer group placement"
+                            << ", layer=" << request.targetLayer
+                            << ", cell=" << (layerCellIndex + 1) << "/" << layerCellCount
+                            << ", grid=" << layerColumns << "x" << layerRows
+                            << ", fixedGap=" << fixedLayerGroupGap
+                            << ", center=(" << fixedCenterX << "," << fixedCenterY << ").";
+                WriteLine(session, fixedGapLog.str());
+            }
+        }
         WriteTimingLine(session, partLabel, "apply_final_scale_update_and_arrange", stageStarted);
 
         stageStarted = TimingClock::now();
         CreateProjectedOverallDimensions(session, workPart, request, createdProjectedViews, frontDirection);
         CreateFlatPatternOverallDimensions(session, workPart, request, auxiliaryViews);
         CreateFlatPatternNoteBelowView(session, workPart, request, auxiliaryViews);
-        CreateTechnicalRequirementNote(session, workPart, request, sheetLength, sheetHeight);
+        CreateLayerGroupNote(session, workPart, request, createdProjectedViews, auxiliaryViews);
+        if (request.targetLayer <= 0 || request.layerIndex % request.layersPerSheet == 0)
+        {
+            CreateTechnicalRequirementNote(
+                session,
+                workPart,
+                request,
+                actualSheetLength,
+                actualSheetHeight);
+        }
         WriteTimingLine(session, partLabel, "dimensions_and_notes", stageStarted);
 
         stageStarted = TimingClock::now();
