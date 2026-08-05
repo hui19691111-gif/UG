@@ -50,6 +50,8 @@
 #include <NXOpen/Drawings_ViewStyleVirtualIntersectionsBuilder.hxx>
 #include <NXOpen/Drawings_OrientationViewStyle.hxx>
 #include <NXOpen/Annotations_AnnotationManager.hxx>
+#include <NXOpen/Annotations_LineArrowStyleBuilder.hxx>
+#include <NXOpen/Annotations_StyleBuilder.hxx>
 #include <NXOpen/Annotations_BaseAngularDimension.hxx>
 #include <NXOpen/Annotations_BaseAngularDimensionBuilder.hxx>
 #include <NXOpen/Annotations_DimensionCollection.hxx>
@@ -66,6 +68,8 @@
 #include <NXOpen/Annotations_TextWithEditControlsBuilder.hxx>
 #include <NXOpen/Annotations_TextWithSymbolsBuilder.hxx>
 #include <NXOpen/DisplayManager.hxx>
+#include <NXOpen/Drafting_PreferencesBuilder.hxx>
+#include <NXOpen/Drafting_SettingsManager.hxx>
 #include <NXOpen/DisplayModification.hxx>
 #include <NXOpen/DisplayableObject.hxx>
 #include <NXOpen/Layer.hxx>
@@ -123,6 +127,7 @@
 #include <uf_modl_utilities.h>
 #include <uf_obj.h>
 #include <uf_object_types.h>
+#include <uf_part.h>
 #include <uf_ui_types.h>
 #include <uf_view.h>
 #ifndef WIN32_LEAN_AND_MEAN
@@ -146,6 +151,8 @@ struct RequestValues
     int layersPerSheet = 1;
     bool appendToCurrentSheet = false;
     std::string templatePath;
+    bool inheritDraftingPreferences = true;
+    std::string layerLayoutMode = "auto";
     std::string frontDirectionMode = "largestFaceLongestEdge";
     double viewSpacing = 20.0;
     double sheetMargin = 20.0;
@@ -1505,6 +1512,8 @@ RequestValues ReadRequestFile(const std::filesystem::path& requestPath)
     request.layersPerSheet = std::max(1, static_cast<int>(ReadDouble(values, "layersPerSheet", 1.0)));
     request.appendToCurrentSheet = ParseBool(values, "appendToCurrentSheet", false);
     request.templatePath = ReadText(values, "templatePath", "");
+    request.inheritDraftingPreferences = ParseBool(values, "inheritDraftingPreferences", true);
+    request.layerLayoutMode = ReadText(values, "layerLayoutMode", "auto");
     request.frontDirectionMode = ReadText(values, "frontDirectionMode", "largestFaceLongestEdge");
     request.viewSpacing = std::max(5.0, ReadDouble(values, "viewSpacing", 20.0));
     request.sheetMargin = std::max(5.0, ReadDouble(values, "sheetMargin", 20.0));
@@ -4934,6 +4943,361 @@ std::filesystem::path AutoTemplatePath(NXOpen::Part* part, const RequestValues& 
         dataDir /
         (request.firstAngle ? "A4-noviews-template1-ASM.prt" : "A4-noviews-template-ASM.prt");
     return std::filesystem::exists(assemblyTemplate) ? assemblyTemplate : partTemplate;
+}
+
+struct DraftingPreferencesSnapshot
+{
+    int integerParameters[100] = {};
+    double realParameters[70] = {};
+    char radiusValue[27] = {};
+    char diameterValue[27] = {};
+    UF_DRF_dimension_preferences_t dimension = {};
+    UF_DRF_line_arrow_preferences_t lineArrow = {};
+    UF_DRF_lettering_preferences_t lettering = {};
+    UF_DRF_symbol_preferences_t symbol = {};
+    UF_DRF_units_format_preferences_t unitsFormat = {};
+    UF_DRF_diameter_radius_preferences_t diameterRadius = {};
+    UF_DRF_hatch_fill_preferences_t hatchFill = {};
+    NXOpen::Annotations::ArrowheadType nxFirstArrowType =
+        NXOpen::Annotations::ArrowheadTypeFilledArrow;
+    NXOpen::Annotations::ArrowheadType nxSecondArrowType =
+        NXOpen::Annotations::ArrowheadTypeFilledArrow;
+    bool nxArrowTypesAvailable = false;
+};
+
+bool AskNxOpenArrowPreferences(tag_t templatePartTag, DraftingPreferencesSnapshot& snapshot, std::string& failure)
+{
+    NXOpen::Drafting::PreferencesBuilder* builder = nullptr;
+    try
+    {
+        NXOpen::Part* templatePart = dynamic_cast<NXOpen::Part*>(
+            NXOpen::NXObjectManager::Get(templatePartTag));
+        if (templatePart == nullptr || templatePart->SettingsManager() == nullptr)
+        {
+            failure = "NXOpen template drafting settings manager is unavailable";
+            return false;
+        }
+        builder = templatePart->SettingsManager()->CreatePreferencesBuilder();
+        builder->InheritSettingsFromPreferences();
+        NXOpen::Annotations::LineArrowStyleBuilder* lineArrow =
+            builder->AnnotationStyle()->LineArrowStyle();
+        snapshot.nxFirstArrowType = lineArrow->FirstArrowType();
+        snapshot.nxSecondArrowType = lineArrow->SecondArrowType();
+        snapshot.nxArrowTypesAvailable = true;
+        builder->Destroy();
+        return true;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        failure = std::string("NXOpen read arrow preferences failed: ") + ex.Message();
+        return false;
+    }
+    catch (...)
+    {
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        failure = "NXOpen read arrow preferences failed";
+        return false;
+    }
+}
+
+bool ApplyNxOpenArrowPreferences(
+    NXOpen::Part* targetPart,
+    const DraftingPreferencesSnapshot& snapshot,
+    std::string& failure)
+{
+    if (!snapshot.nxArrowTypesAvailable)
+    {
+        failure = "NXOpen template arrow preferences were not captured";
+        return false;
+    }
+
+    NXOpen::Drafting::PreferencesBuilder* builder = nullptr;
+    try
+    {
+        if (targetPart == nullptr || targetPart->SettingsManager() == nullptr)
+        {
+            failure = "NXOpen target drafting settings manager is unavailable";
+            return false;
+        }
+        builder = targetPart->SettingsManager()->CreatePreferencesBuilder();
+        builder->InheritSettingsFromPreferences();
+        NXOpen::Annotations::LineArrowStyleBuilder* lineArrow =
+            builder->AnnotationStyle()->LineArrowStyle();
+        lineArrow->SetFirstArrowType(snapshot.nxFirstArrowType);
+        lineArrow->SetSecondArrowType(snapshot.nxSecondArrowType);
+        builder->Commit();
+        builder->Destroy();
+        return true;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        failure = std::string("NXOpen write arrow preferences failed: ") + ex.Message();
+        return false;
+    }
+    catch (...)
+    {
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        failure = "NXOpen write arrow preferences failed";
+        return false;
+    }
+}
+
+std::string UfFailureText(int status)
+{
+    char message[256] = {};
+    if (status != 0 && UF_get_fail_message(status, message) == 0 && message[0] != '\0')
+    {
+        return message;
+    }
+    return "UF status " + std::to_string(status);
+}
+
+int AskDraftingPreferences(DraftingPreferencesSnapshot& snapshot, std::string& failedItem)
+{
+    struct PreferenceQuery
+    {
+        const char* item;
+        std::function<int()> query;
+    };
+
+    const std::vector<PreferenceQuery> queries = {
+        {"global drafting parameters", [&]() {
+             return UF_DRF_ask_preferences(
+                 snapshot.integerParameters,
+                 snapshot.realParameters,
+                 snapshot.radiusValue,
+                 snapshot.diameterValue);
+         }},
+        {"dimension preferences", [&]() { return UF_DRF_ask_dimension_preferences(&snapshot.dimension); }},
+        {"line and arrow preferences", [&]() { return UF_DRF_ask_line_arrow_preferences(&snapshot.lineArrow); }},
+        {"lettering preferences", [&]() { return UF_DRF_ask_lettering_preferences(&snapshot.lettering); }},
+        {"symbol preferences", [&]() { return UF_DRF_ask_symbol_preferences(&snapshot.symbol); }},
+        {"units and format preferences", [&]() { return UF_DRF_ask_units_format_preferences(&snapshot.unitsFormat); }},
+        {"diameter and radius preferences", [&]() { return UF_DRF_ask_diameter_radius_preferences(&snapshot.diameterRadius); }},
+        {"hatch and fill preferences", [&]() { return UF_DRF_ask_hatch_fill_preferences(&snapshot.hatchFill); }} };
+
+    for (const PreferenceQuery& entry : queries)
+    {
+        const int status = entry.query();
+        if (status != 0)
+        {
+            failedItem = entry.item;
+            return status;
+        }
+    }
+    return 0;
+}
+
+int SetDraftingPreferences(
+    DraftingPreferencesSnapshot& snapshot,
+    std::string& failedItem,
+    const DraftingPreferencesSnapshot* compatibilityFallback = nullptr)
+{
+    struct PreferenceSetter
+    {
+        const char* item;
+        std::function<int()> setter;
+    };
+
+    const std::vector<PreferenceSetter> setters = {
+        {"global drafting parameters", [&]() {
+             return UF_DRF_set_preferences(
+                 snapshot.integerParameters,
+                 snapshot.realParameters,
+                 snapshot.radiusValue,
+                 snapshot.diameterValue);
+         }},
+        {"dimension preferences", [&]() { return UF_DRF_set_dimension_preferences(&snapshot.dimension); }},
+        {"line and arrow preferences", [&]() {
+             int status = UF_DRF_set_line_arrow_preferences(&snapshot.lineArrow);
+             if (status == UF_DRF_INVALID_ARROW_TYPE && compatibilityFallback != nullptr)
+             {
+                 // NX can read newer/special arrow types from a part even
+                 // though the legacy UF setter rejects those enum values.
+                 // Preserve only the target part's compatible arrow types and
+                 // still inherit every other line/arrow preference.
+                 // The target part can contain the same newer value, so do
+                 // not reuse it here.  Use the universally supported filled
+                 // arrow for this legacy setter.  The aggregate drafting
+                 // preferences were already copied before this specialized
+                 // setter, so this only provides a compatible UF value.
+                 snapshot.lineArrow.first_arrow_type = UF_DRF_FILLED_ARROW;
+                 snapshot.lineArrow.second_arrow_type = UF_DRF_FILLED_ARROW;
+                 status = UF_DRF_set_line_arrow_preferences(&snapshot.lineArrow);
+                 if (status == UF_DRF_INVALID_ARROW_TYPE)
+                 {
+                     // Do not reject the whole preference set because a
+                     // legacy specialized setter cannot represent a modern
+                     // arrow.  The global preference copy remains valid.
+                     status = 0;
+                 }
+             }
+             return status;
+         }},
+        {"lettering preferences", [&]() { return UF_DRF_set_lettering_preferences(&snapshot.lettering); }},
+        {"symbol preferences", [&]() { return UF_DRF_set_symbol_preferences(&snapshot.symbol); }},
+        {"units and format preferences", [&]() { return UF_DRF_set_units_format_preferences(&snapshot.unitsFormat); }},
+        {"diameter and radius preferences", [&]() { return UF_DRF_set_diameter_radius_preferences(&snapshot.diameterRadius); }},
+        {"hatch and fill preferences", [&]() { return UF_DRF_set_hatch_fill_preferences(&snapshot.hatchFill); }} };
+
+    for (const PreferenceSetter& entry : setters)
+    {
+        const int status = entry.setter();
+        if (status != 0)
+        {
+            failedItem = entry.item;
+            return status;
+        }
+    }
+    return 0;
+}
+
+bool InheritDraftingPreferencesFromTemplate(
+    NXOpen::Session* session,
+    NXOpen::Part* targetPart,
+    const std::filesystem::path& templatePath)
+{
+    if (targetPart == nullptr || templatePath.empty() || !std::filesystem::exists(templatePath))
+    {
+        WriteLine(session, "AutoCreateThreeViews: drafting preference inheritance skipped; template is unavailable.");
+        return false;
+    }
+
+    const std::string templateName = LocalPathString(templatePath);
+    const int originalLoadState = UF_PART_is_loaded(templateName.c_str());
+    const bool templateWasLoaded = originalLoadState == 1 || originalLoadState == 2;
+    tag_t templatePart = templateWasLoaded ? UF_PART_ask_part_tag(templateName.c_str()) : NULL_TAG;
+    UF_PART_load_status_t loadStatus = {};
+    int openStatus = 0;
+    if (templatePart == NULL_TAG)
+    {
+        openStatus = UF_PART_open_quiet(templateName.c_str(), &templatePart, &loadStatus);
+        UF_PART_free_load_status(&loadStatus);
+    }
+
+    if (templatePart == NULL_TAG)
+    {
+        WriteLine(
+            session,
+            "AutoCreateThreeViews: failed to open template for drafting preferences, status=" +
+                std::to_string(openStatus) + ", " + UfFailureText(openStatus) + ".");
+        MessageBoxW(
+            nullptr,
+            (std::wstring(L"无法读取模板的制图首选项。\n\n模板路径：") + templatePath.wstring()).c_str(),
+            L"自动创建三视图 - 首选项继承失败",
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        return false;
+    }
+
+    DraftingPreferencesSnapshot templatePreferences;
+    DraftingPreferencesSnapshot targetPreferences;
+    std::string failedItem;
+    int status = 0;
+    UF_ASSEM_work_part_context_p_t previousContext = nullptr;
+    status = UF_ASSEM_set_work_part_context_quietly(templatePart, &previousContext);
+    if (status == 0)
+    {
+        status = AskDraftingPreferences(templatePreferences, failedItem);
+    }
+    if (status == 0 && !AskNxOpenArrowPreferences(templatePart, templatePreferences, failedItem))
+    {
+        status = 1;
+    }
+    const int restoreStatus = previousContext != nullptr
+                                  ? UF_ASSEM_restore_work_part_context_quietly(&previousContext)
+                                  : 0;
+    if (status == 0 && restoreStatus != 0)
+    {
+        status = restoreStatus;
+        failedItem = "restore target work part context";
+    }
+
+    if (status == 0)
+    {
+        status = AskDraftingPreferences(targetPreferences, failedItem);
+    }
+    if (status == 0)
+    {
+        const UF_DRF_arrowhead_and_fill_type_t templateFirstArrow =
+            templatePreferences.lineArrow.first_arrow_type;
+        const UF_DRF_arrowhead_and_fill_type_t templateSecondArrow =
+            templatePreferences.lineArrow.second_arrow_type;
+        status = SetDraftingPreferences(templatePreferences, failedItem, &targetPreferences);
+        if (status == 0 &&
+            (templatePreferences.lineArrow.first_arrow_type != templateFirstArrow ||
+             templatePreferences.lineArrow.second_arrow_type != templateSecondArrow))
+        {
+            WriteLine(
+                session,
+                "AutoCreateThreeViews: template uses an arrow type rejected by the legacy UF setter; "
+                "kept the target part arrow type and inherited the remaining line/arrow preferences.");
+        }
+        if (status == 0 &&
+            !ApplyNxOpenArrowPreferences(targetPart, templatePreferences, failedItem))
+        {
+            status = 1;
+        }
+        if (status != 0)
+        {
+            std::string rollbackItem;
+            const int rollbackStatus = SetDraftingPreferences(targetPreferences, rollbackItem);
+            WriteLine(
+                session,
+                "AutoCreateThreeViews: drafting preference inheritance rolled back, rollbackStatus=" +
+                    std::to_string(rollbackStatus) + ".");
+        }
+    }
+
+    if (!templateWasLoaded)
+    {
+        const int closeStatus = UF_PART_close(templatePart, 0, 2);
+        if (closeStatus != 0)
+        {
+            WriteLine(
+                session,
+                "AutoCreateThreeViews: temporary preference template close warning, status=" +
+                    std::to_string(closeStatus) + ".");
+        }
+    }
+
+    if (status != 0)
+    {
+        WriteLine(
+            session,
+            "AutoCreateThreeViews: drafting preference inheritance failed at " + failedItem +
+                ", status=" + std::to_string(status) + ", " + UfFailureText(status) + ".");
+        std::wostringstream message;
+        message << L"无法从模板继承制图首选项。\n\n"
+                << L"模板路径：" << templatePath.wstring() << L"\n"
+                << L"失败项目：" << failedItem.c_str() << L"\n"
+                << L"NX 状态码：" << status;
+        MessageBoxW(
+            nullptr,
+            message.str().c_str(),
+            L"自动创建三视图 - 首选项继承失败",
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        return false;
+    }
+
+    WriteLine(
+        session,
+        "AutoCreateThreeViews: inherited drafting preferences only from template " + templateName +
+            "; no drawing sheet objects were copied by this step.");
+    return true;
 }
 
 std::wstring TextToWide(const std::string& text)
@@ -18215,6 +18579,36 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         ScopedPartTiming totalTiming(session, partLabel);
         TimingClock::time_point stageStarted = TimingClock::now();
         const RequestValues request = ReadRequestFile(requestPath);
+        const bool firstPreferencePassForPart =
+            request.targetLayer <= 0 || request.layerIndex == 0;
+        if (request.inheritDraftingPreferences && firstPreferencePassForPart)
+        {
+            const std::filesystem::path preferenceTemplatePath = AutoTemplatePath(workPart, request);
+            WriteLine(
+                session,
+                "AutoCreateThreeViews: follow-template drafting preferences enabled; source=" +
+                    LocalPathString(preferenceTemplatePath) + ".");
+            if (!InheritDraftingPreferencesFromTemplate(session, workPart, preferenceTemplatePath))
+            {
+                const std::string message =
+                    std::string(u8"失败：") + partLabel + u8"，继承模板制图首选项失败。";
+                AddAutoCreateThreeViewsRunResultLine(message);
+                return 1;
+            }
+        }
+        else if (!request.inheritDraftingPreferences)
+        {
+            WriteLine(session, "AutoCreateThreeViews: follow-template drafting preferences disabled.");
+        }
+        else
+        {
+            WriteLine(
+                session,
+                "AutoCreateThreeViews: drafting preferences already inherited for this part; "
+                "skip repeated inheritance for layer index " + std::to_string(request.layerIndex) + ".");
+        }
+        WriteTimingLine(session, partLabel, "inherit_drafting_preferences", stageStarted);
+        stageStarted = TimingClock::now();
         const ScopedTargetDrawingLayer targetLayerScope(request.targetLayer);
         const ScopedDrawingLayerIsolation modelLayerIsolation(session, request.targetLayer);
         WriteLine(session, "AutoCreateThreeViews: execute request work part=" + partLabel + ".");
@@ -18365,11 +18759,16 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             const int cellIndex = request.layerIndex % cellCount;
             layerCellIndex = cellIndex;
             layerCellCount = cellCount;
-            const double pagePadding = 6.0;
-            const double safeMinX = pagePadding;
-            const double safeMaxX = std::max(safeMinX + 20.0, actualSheetLength - pagePadding);
-            const double safeMinY = BottomTitleBlockReserve(actualSheetHeight) + pagePadding;
-            const double safeMaxY = std::max(safeMinY + 20.0, actualSheetHeight - pagePadding);
+            // Use asymmetric page clearances for grouped layer drawings:
+            // make fuller use of the top/left/right edges, while reserving
+            // extra room above the title block for captions and dimensions.
+            const double sidePadding = 4.0;
+            const double topPadding = 4.0;
+            const double bottomAnnotationClearance = 22.0;
+            const double safeMinX = sidePadding;
+            const double safeMaxX = std::max(safeMinX + 20.0, actualSheetLength - sidePadding);
+            const double safeMinY = BottomTitleBlockReserve(actualSheetHeight) + bottomAnnotationClearance;
+            const double safeMaxY = std::max(safeMinY + 20.0, actualSheetHeight - topPadding);
             const double safeWidth = safeMaxX - safeMinX;
             const double safeHeight = safeMaxY - safeMinY;
 
@@ -18380,7 +18779,23 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             static int packedCellCount = 0;
             static int packedColumns = 1;
             static int packedRows = 1;
-            if (cellIndex == 0 || packedPartTag != workPart->Tag() || packedCellCount != cellCount)
+            static std::string packedLayoutMode;
+            std::string requestedLayoutMode = request.layerLayoutMode;
+            std::transform(
+                requestedLayoutMode.begin(),
+                requestedLayoutMode.end(),
+                requestedLayoutMode.begin(),
+                [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+            if (requestedLayoutMode != "matrix" &&
+                requestedLayoutMode != "horizontal" &&
+                requestedLayoutMode != "vertical")
+            {
+                requestedLayoutMode = "auto";
+            }
+            if (cellIndex == 0 ||
+                packedPartTag != workPart->Tag() ||
+                packedCellCount != cellCount ||
+                packedLayoutMode != requestedLayoutMode)
             {
                 double frontWidth = frontDirection.valid && frontDirection.edgeLength > 1.0e-6
                     ? frontDirection.edgeLength
@@ -18407,32 +18822,96 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                     estimatedHeight = std::max(estimatedHeight, isoSize);
                 }
 
-                double bestScore = std::numeric_limits<double>::max();
-                for (int candidateColumns = 1; candidateColumns <= cellCount; ++candidateColumns)
+                if (requestedLayoutMode == "horizontal")
                 {
-                    const int candidateRows =
-                        std::max(1, static_cast<int>(std::ceil(static_cast<double>(cellCount) / candidateColumns)));
-                    const double candidateCellWidth = safeWidth / candidateColumns;
-                    const double candidateCellHeight = safeHeight / candidateRows;
-                    const double fitScore = std::max(
-                        estimatedWidth / std::max(1.0, candidateCellWidth),
-                        estimatedHeight / std::max(1.0, candidateCellHeight));
-                    const int unusedCells = candidateColumns * candidateRows - cellCount;
-                    const double score = fitScore * (1.0 + unusedCells * 0.03);
-                    if (score < bestScore - 1.0e-9)
+                    packedColumns = cellCount;
+                    packedRows = 1;
+                }
+                else if (requestedLayoutMode == "vertical")
+                {
+                    packedColumns = 1;
+                    packedRows = cellCount;
+                }
+                else if (requestedLayoutMode == "matrix")
+                {
+                    packedColumns = std::max(
+                        1,
+                        static_cast<int>(std::ceil(std::sqrt(static_cast<double>(cellCount)))));
+                    packedRows = std::max(
+                        1,
+                        static_cast<int>(std::ceil(static_cast<double>(cellCount) / packedColumns)));
+                }
+                else
+                {
+                    double bestScore = std::numeric_limits<double>::max();
+                    const int horizontalViewCount =
+                        1 +
+                        (request.left ? 1 : 0) +
+                        (request.right ? 1 : 0) +
+                        (request.back ? 1 : 0) +
+                        (request.iso ? 1 : 0);
+                    const int verticalViewCount =
+                        1 +
+                        (request.top ? 1 : 0) +
+                        (request.bottom ? 1 : 0) +
+                        (request.backBottom ? 1 : 0);
+                    const double fixedPaperWidth =
+                        std::max(0, horizontalViewCount - 1) * request.viewSpacing;
+                    const double fixedPaperHeight =
+                        std::max(0, verticalViewCount - 1) * request.viewSpacing;
+                    for (int candidateColumns = 1; candidateColumns <= cellCount; ++candidateColumns)
                     {
-                        bestScore = score;
-                        packedColumns = candidateColumns;
-                        packedRows = candidateRows;
+                        const int candidateRows =
+                            std::max(1, static_cast<int>(std::ceil(static_cast<double>(cellCount) / candidateColumns)));
+                        const int unusedCells = candidateColumns * candidateRows - cellCount;
+                        if (unusedCells >= std::min(candidateColumns, candidateRows))
+                        {
+                            continue;
+                        }
+                        const double candidateCellWidth = safeWidth / candidateColumns;
+                        const double candidateCellHeight = safeHeight / candidateRows;
+                        const double cellMargin = EffectiveLayoutMargin(request);
+                        const double modelWidthSpace = std::max(
+                            1.0,
+                            candidateCellWidth - cellMargin * 2.0 - fixedPaperWidth);
+                        const double modelHeightSpace = std::max(
+                            1.0,
+                            candidateCellHeight - cellMargin * 2.0 - fixedPaperHeight);
+                        const double continuousDenominator = std::max(
+                            estimatedWidth / modelWidthSpace,
+                            estimatedHeight / modelHeightSpace);
+                        const double integerDenominator = std::max(1.0, std::ceil(continuousDenominator - 1.0e-9));
+                        const double gridImbalance =
+                            std::abs(candidateColumns - candidateRows) * 0.08;
+                        const double score =
+                            integerDenominator + unusedCells * 0.03 + gridImbalance;
+
+                        std::ostringstream candidateLog;
+                        candidateLog << "AutoCreateThreeViews: smart layer packing candidate"
+                                     << ", grid=" << candidateColumns << "x" << candidateRows
+                                     << ", cell=" << candidateCellWidth << "x" << candidateCellHeight
+                                     << ", fixedPaper=" << fixedPaperWidth << "x" << fixedPaperHeight
+                                     << ", estimatedScale=1:" << integerDenominator
+                                     << ", unused=" << unusedCells
+                                     << ", score=" << score << ".";
+                        WriteLine(session, candidateLog.str());
+                        if (score < bestScore - 1.0e-9)
+                        {
+                            bestScore = score;
+                            packedColumns = candidateColumns;
+                            packedRows = candidateRows;
+                        }
                     }
                 }
                 packedPartTag = workPart->Tag();
                 packedCellCount = cellCount;
+                packedLayoutMode = requestedLayoutMode;
 
                 std::ostringstream packingLog;
                 packingLog << "AutoCreateThreeViews: smart layer packing"
                            << ", estimatedGroup=" << estimatedWidth << "x" << estimatedHeight
                            << ", sheetSpace=" << safeWidth << "x" << safeHeight
+                           << ", mode=" << requestedLayoutMode
                            << ", selectedGrid=" << packedColumns << "x" << packedRows
                            << ", groups=" << cellCount << ".";
                 WriteLine(session, packingLog.str());
@@ -18455,8 +18934,8 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             // Equal grid centers spread small body groups across the whole
             // sheet.  Keep the same cell capacity for scale calculation, but
             // pack final group centers toward the sheet center like feature 08.
-            const double horizontalPack = columns > 1 ? 0.65 : 1.0;
-            const double verticalPack = rows > 1 ? 0.72 : 1.0;
+            const double horizontalPack = columns > 1 ? 0.90 : 1.0;
+            const double verticalPack = rows > 1 ? 0.90 : 1.0;
             targetCellCenterX = layoutCenterX + (rawCellCenterX - layoutCenterX) * horizontalPack;
             targetCellCenterY = layoutCenterY + (rawCellCenterY - layoutCenterY) * verticalPack;
             sheetLength = cellWidth;

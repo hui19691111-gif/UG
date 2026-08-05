@@ -107,6 +107,7 @@
             <TabItem x:Name="PartSelectionTab" Header="出图零件"/>
             <TabItem x:Name="ViewTab" Header="视图"/>
             <TabItem x:Name="AnnotationTab" Header="标注"/>
+            <TabItem x:Name="DraftingSettingsTab" Header="工程图设置" Visibility="Collapsed"/>
             <TabItem x:Name="TechnicalRequirementsTab" Header="技术要求库"/>
         </TabControl>
 
@@ -130,7 +131,7 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <Border Grid.Column="0" Background="White" BorderBrush="#D8DEE5" BorderThickness="1" Padding="12" Margin="0,0,10,0">
+            <Border x:Name="SettingsHostBorder" Grid.Column="0" Background="White" BorderBrush="#D8DEE5" BorderThickness="1" Padding="12" Margin="0,0,10,0">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <Grid>
                     <StackPanel x:Name="PartSelectionPanel">
@@ -199,6 +200,10 @@
                                 Padding="8"
                                 Margin="0,0,0,10">
                             <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto"/>
                                     <ColumnDefinition Width="*"/>
@@ -209,6 +214,18 @@
                                 <TextBox x:Name="LayerRangeTextBox" Grid.Column="1" Text="1-256" Margin="4,0,12,0"/>
                                 <TextBlock Grid.Column="2" Text="每页图层数：" VerticalAlignment="Center"/>
                                 <TextBox x:Name="LayersPerSheetTextBox" Grid.Column="3" Text="1" Margin="4,0,0,0"/>
+                                <TextBlock Grid.Row="1" Grid.Column="0" Text="图层排列：" VerticalAlignment="Center" Margin="0,8,0,0"/>
+                                <ComboBox x:Name="LayerLayoutModeComboBox"
+                                          Grid.Row="1"
+                                          Grid.Column="1"
+                                          Grid.ColumnSpan="3"
+                                          SelectedIndex="0"
+                                          Margin="4,8,0,0">
+                                    <ComboBoxItem Content="自动选择" Tag="auto"/>
+                                    <ComboBoxItem Content="矩阵排列" Tag="matrix"/>
+                                    <ComboBoxItem Content="横向排列" Tag="horizontal"/>
+                                    <ComboBoxItem Content="纵向排列" Tag="vertical"/>
+                                </ComboBox>
                             </Grid>
                         </Border>
                         <TextBlock Text="图纸模板："/>
@@ -226,6 +243,11 @@
                             </ComboBox>
                             <Button Grid.Column="1" Content="管理模板..." Height="28" Margin="6,2,0,8" Padding="0" Click="ManageTemplateButton_Click"/>
                         </Grid>
+                        <CheckBox x:Name="InheritDraftingPreferencesCheckBox"
+                                  Content="跟随模板制图首选项"
+                                  IsChecked="True"
+                                  Margin="0,2,0,12"
+                                  ToolTip="仅继承当前模板的制图首选项，不复制图纸页、图框和标题栏"/>
                         <TextBlock Text="投影方式："/>
                         <StackPanel Orientation="Horizontal" Margin="0,2,0,14">
                             <RadioButton x:Name="FirstAngleRadio"
@@ -363,6 +385,373 @@
                             </StackPanel>
                         </Border>
                     </StackPanel>
+                    <StackPanel x:Name="DraftingSettingsPanel" Visibility="Collapsed">
+                        <TextBlock Text="工程图设置" Style="{StaticResource GroupTitle}"/>
+                        <TextBlock Text="将常用制图首选项集中到这里，只影响插件新生成的图纸。"
+                                   Foreground="#5B6977"
+                                   TextWrapping="Wrap"
+                                   Margin="0,0,0,10"/>
+
+                        <Border BorderBrush="#9FC5DE" BorderThickness="1" Background="#F1F8FC" Padding="10" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="设置来源" FontWeight="SemiBold" Margin="0,0,0,7"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <RadioButton x:Name="DraftingFollowTemplateRadio"
+                                                 Content="跟随模板"
+                                                 GroupName="DraftingSettingsSource"
+                                                 IsChecked="True"
+                                                 Margin="0,0,18,0"
+                                                 Checked="DraftingSettingsSource_Changed"/>
+                                    <RadioButton x:Name="DraftingOverrideRadio"
+                                                 Content="插件统一设置"
+                                                 GroupName="DraftingSettingsSource"
+                                                 Checked="DraftingSettingsSource_Changed"/>
+                                </StackPanel>
+                                <TextBlock Text="跟随模板时不覆盖公司模板的线型、字体和标注样式。"
+                                           FontSize="11"
+                                           Foreground="#607D8B"
+                                           Margin="0,7,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="14"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                        <Border BorderBrush="#D8DEE5" BorderThickness="1" Background="#FBFCFD" Padding="9" Margin="0,0,0,8">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="模板来源：" FontWeight="SemiBold"/>
+                                <TextBlock Text="直接使用“视图”页当前选定的图纸模板" Foreground="#3F6F8F"/>
+                            </StackPanel>
+                        </Border>
+
+                        <StackPanel x:Name="DraftingOverrideOptionsPanel" IsEnabled="False">
+                            <Expander Header="视图显示" IsExpanded="True" Margin="0,0,0,8">
+                                <Border BorderBrush="#D8DEE5" BorderThickness="1" Background="#FBFCFD" Padding="9" Margin="0,5,0,0">
+                                    <StackPanel>
+                                        <UniformGrid Columns="2">
+                                            <CheckBox x:Name="DraftingHiddenLinesCheckBox" Content="显示隐藏线"/>
+                                            <CheckBox Content="显示光顺边" IsChecked="True"/>
+                                            <CheckBox Content="显示轮廓线" IsChecked="True"/>
+                                            <CheckBox Content="自动生成中心线" IsChecked="True"/>
+                                            <CheckBox Content="显示螺纹线" IsChecked="True"/>
+                                            <CheckBox Content="生成后隐藏视图边界" IsChecked="True"/>
+                                        </UniformGrid>
+                                        <Grid Margin="0,8,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="10"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="可见线："/>
+                                                <ComboBox SelectedIndex="0">
+                                                    <ComboBoxItem Content="黑色 / 标准实线 / 普通"/>
+                                                    <ComboBoxItem Content="跟随对象颜色"/>
+                                                </ComboBox>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2">
+                                                <TextBlock Text="隐藏线："/>
+                                                <ComboBox SelectedIndex="0">
+                                                    <ComboBoxItem Content="黑色 / 虚线 / 细"/>
+                                                    <ComboBoxItem Content="灰色 / 虚线 / 细"/>
+                                                </ComboBox>
+                                            </StackPanel>
+                                        </Grid>
+                                        <Grid Margin="0,7,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="10"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="视图质量："/>
+                                                <ComboBox SelectedIndex="0">
+                                                    <ComboBoxItem Content="精确视图"/>
+                                                    <ComboBoxItem Content="轻量化视图"/>
+                                                </ComboBox>
+                                            </StackPanel>
+                                            <CheckBox Grid.Column="2" Content="自动更新视图" IsChecked="True" VerticalAlignment="Center" Margin="0,18,0,0"/>
+                                        </Grid>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+
+                            <Expander Header="尺寸标注样式" IsExpanded="True" Margin="0,0,0,8">
+                                <Border BorderBrush="#D8DEE5" BorderThickness="1" Background="#FBFCFD" Padding="9" Margin="0,5,0,0">
+                                    <StackPanel>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="10"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="尺寸字体："/>
+                                                <ComboBox SelectedIndex="0">
+                                                    <ComboBoxItem Content="Arial Unicode MS"/>
+                                                    <ComboBoxItem Content="chinesef"/>
+                                                    <ComboBoxItem Content="跟随模板"/>
+                                                </ComboBox>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2">
+                                                <TextBlock Text="文字高度 (mm)："/>
+                                                <TextBox Text="3.5"/>
+                                            </StackPanel>
+                                        </Grid>
+                                        <Grid Margin="0,7,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="10"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="箭头："/>
+                                                <ComboBox SelectedIndex="0">
+                                                    <ComboBoxItem Content="实心闭合箭头"/>
+                                                    <ComboBoxItem Content="开放箭头"/>
+                                                    <ComboBoxItem Content="实心点"/>
+                                                </ComboBox>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2">
+                                                <TextBlock Text="箭头长度 (mm)："/>
+                                                <TextBox Text="3.5"/>
+                                            </StackPanel>
+                                        </Grid>
+                                        <Grid Margin="0,7,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="10"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="小数位数："/>
+                                                <ComboBox SelectedIndex="2">
+                                                    <ComboBoxItem Content="0"/>
+                                                    <ComboBoxItem Content="1"/>
+                                                    <ComboBoxItem Content="2"/>
+                                                    <ComboBoxItem Content="3"/>
+                                                </ComboBox>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2">
+                                                <TextBlock Text="尺寸颜色："/>
+                                                <ComboBox SelectedIndex="0">
+                                                    <ComboBoxItem Content="黑色"/>
+                                                    <ComboBoxItem Content="跟随模板"/>
+                                                    <ComboBoxItem Content="自定义..."/>
+                                                </ComboBox>
+                                            </StackPanel>
+                                        </Grid>
+                                        <UniformGrid Columns="2" Margin="0,7,0,0">
+                                            <CheckBox Content="显示前导零" IsChecked="True"/>
+                                            <CheckBox Content="显示末尾零"/>
+                                            <CheckBox Content="小空间文字自动移到外侧" IsChecked="True"/>
+                                            <CheckBox Content="启用双单位标注"/>
+                                        </UniformGrid>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+
+                            <Expander Header="注释与中心标记" IsExpanded="False" Margin="0,0,0,8">
+                                <Border BorderBrush="#D8DEE5" BorderThickness="1" Background="#FBFCFD" Padding="9" Margin="0,5,0,0">
+                                    <StackPanel>
+                                        <UniformGrid Columns="2">
+                                            <CheckBox Content="孔自动生成中心标记" IsChecked="True"/>
+                                            <CheckBox Content="圆弧生成中心标记" IsChecked="True"/>
+                                        </UniformGrid>
+                                        <Grid Margin="0,7,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="10"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="注释字体："/>
+                                                <ComboBox SelectedIndex="0"><ComboBoxItem Content="Arial Unicode MS"/><ComboBoxItem Content="跟随模板"/></ComboBox>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2">
+                                                <TextBlock Text="注释高度 (mm)："/>
+                                                <TextBox Text="3.5"/>
+                                            </StackPanel>
+                                        </Grid>
+                                    </StackPanel>
+                                </Border>
+                            </Expander>
+
+                            <UniformGrid Columns="3" Margin="0,3,0,0">
+                                <Button Content="保存为公司标准" Height="30" Margin="2" Padding="0"/>
+                                <Button Content="黑白出图预设" Height="30" Margin="2" Padding="0"/>
+                                <Button Content="恢复默认" Height="30" Margin="2" Padding="0"/>
+                            </UniformGrid>
+                        </StackPanel>
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="2">
+                                <Expander Header="UG 尺寸自动定位" IsExpanded="True" Margin="0,0,0,8">
+                                    <Border BorderBrush="#D8DEE5" BorderThickness="1" Background="#FBFCFD" Padding="9" Margin="0,5,0,0">
+                                        <StackPanel>
+                                            <TextBlock Text="以下选项对应 UG 制图自动化首选项，不使用插件自定义排列算法。"
+                                                       Foreground="#5B6977" TextWrapping="Wrap" Margin="0,0,0,8"/>
+                                            <CheckBox Content="使用 UG 自动文字和箭头放置" IsChecked="True" FontWeight="SemiBold"/>
+                                            <CheckBox Content="允许标注放在几何图形内部" Margin="0,6,0,0"/>
+                                            <Grid Margin="0,9,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="10"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="距几何最小距离 (mm)："/>
+                                                    <TextBox Text="8"/>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2">
+                                                    <TextBlock Text="距几何最大距离 (mm)："/>
+                                                    <TextBox Text="30"/>
+                                                </StackPanel>
+                                            </Grid>
+                                            <Grid Margin="0,7,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="10"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="标注之间的距离 (mm)："/>
+                                                    <TextBox Text="6"/>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2">
+                                                    <TextBlock Text="窄尺寸显示："/>
+                                                    <ComboBox SelectedIndex="1">
+                                                        <ComboBoxItem Content="不特殊处理"/>
+                                                        <ComboBoxItem Content="带引出线"/>
+                                                        <ComboBoxItem Content="引出线不带水平段"/>
+                                                        <ComboBoxItem Content="文字放在水平段上方"/>
+                                                    </ComboBox>
+                                                </StackPanel>
+                                            </Grid>
+                                            <Grid Margin="0,7,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="10"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="文字和箭头："/>
+                                                    <ComboBox SelectedIndex="0">
+                                                        <ComboBoxItem Content="UG 自动"/>
+                                                        <ComboBoxItem Content="箭头保持在内侧"/>
+                                                        <ComboBoxItem Content="箭头移到外侧"/>
+                                                    </ComboBox>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2">
+                                                    <TextBlock Text="自动化规则来源："/>
+                                                    <ComboBox SelectedIndex="0">
+                                                        <ComboBoxItem Content="跟随当前模板"/>
+                                                        <ComboBoxItem Content="UG 当前首选项"/>
+                                                    </ComboBox>
+                                                </StackPanel>
+                                            </Grid>
+                                        </StackPanel>
+                                    </Border>
+                                </Expander>
+
+                                <Expander Header="钣金展开图设置" IsExpanded="True" Margin="0,0,0,8">
+                                    <Border BorderBrush="#D8DEE5" BorderThickness="1" Background="#FBFCFD" Padding="9" Margin="0,5,0,0">
+                                        <StackPanel>
+                                            <CheckBox Content="对钣金展开图使用独立设置" IsChecked="True" FontWeight="SemiBold"/>
+                                            <UniformGrid Columns="2" Margin="0,7,0,0">
+                                                <CheckBox Content="显示折弯中心线" IsChecked="True"/>
+                                                <CheckBox Content="显示折弯范围线" IsChecked="True"/>
+                                                <CheckBox Content="显示折弯方向符号" IsChecked="True"/>
+                                                <CheckBox Content="生成折弯注释" IsChecked="True"/>
+                                                <CheckBox Content="显示切边"/>
+                                                <CheckBox Content="显示展开图隐藏线"/>
+                                                <CheckBox Content="自动生成孔中心标记" IsChecked="True"/>
+                                                <CheckBox Content="仅显示展开体" IsChecked="True"/>
+                                            </UniformGrid>
+                                            <Grid Margin="0,9,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="10"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="向上折弯线："/>
+                                                    <ComboBox SelectedIndex="0">
+                                                        <ComboBoxItem Content="红色 / 点划线 / 细"/>
+                                                        <ComboBoxItem Content="黑色 / 点划线 / 细"/>
+                                                    </ComboBox>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2">
+                                                    <TextBlock Text="向下折弯线："/>
+                                                    <ComboBox SelectedIndex="0">
+                                                        <ComboBoxItem Content="蓝色 / 双点划线 / 细"/>
+                                                        <ComboBoxItem Content="黑色 / 双点划线 / 细"/>
+                                                    </ComboBox>
+                                                </StackPanel>
+                                            </Grid>
+                                            <Grid Margin="0,7,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="10"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="展开图比例："/>
+                                                    <ComboBox SelectedIndex="0">
+                                                        <ComboBoxItem Content="自动适配"/>
+                                                        <ComboBoxItem Content="与主视图相同"/>
+                                                        <ComboBoxItem Content="1:1"/>
+                                                    </ComboBox>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2">
+                                                    <TextBlock Text="展开图位置："/>
+                                                    <ComboBox SelectedIndex="0">
+                                                        <ComboBoxItem Content="自动空白区域"/>
+                                                        <ComboBoxItem Content="左上"/>
+                                                        <ComboBoxItem Content="右上"/>
+                                                        <ComboBoxItem Content="左下"/>
+                                                        <ComboBoxItem Content="右下"/>
+                                                    </ComboBox>
+                                                </StackPanel>
+                                            </Grid>
+                                            <Grid Margin="0,7,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="10"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="折弯注释内容："/>
+                                                    <ComboBox SelectedIndex="0">
+                                                        <ComboBoxItem Content="角度 + 方向 + 内R"/>
+                                                        <ComboBoxItem Content="角度 + 方向"/>
+                                                        <ComboBoxItem Content="仅折弯方向"/>
+                                                    </ComboBox>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2">
+                                                    <TextBlock Text="折弯注释字高 (mm)："/>
+                                                    <TextBox Text="3.5"/>
+                                                </StackPanel>
+                                            </Grid>
+                                            <UniformGrid Columns="2" Margin="0,8,0,0">
+                                                <CheckBox Content="展开图自动最大外形尺寸" IsChecked="True"/>
+                                                <CheckBox Content="展开图自动孔定位尺寸" IsChecked="True"/>
+                                            </UniformGrid>
+                                            <UniformGrid Columns="3" Margin="0,9,0,0">
+                                                <Button Content="公司钣金标准" Height="28" Margin="2" Padding="0"/>
+                                                <Button Content="黑白打印" Height="28" Margin="2" Padding="0"/>
+                                                <Button Content="恢复默认" Height="28" Margin="2" Padding="0"/>
+                                            </UniformGrid>
+                                        </StackPanel>
+                                    </Border>
+                                </Expander>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
                     <StackPanel x:Name="TechnicalRequirementsPanel" Visibility="Collapsed">
                         <CheckBox x:Name="TechnicalRequirementEnabledCheckBox"
                                   Content="启用技术要求"
@@ -441,9 +830,9 @@
                 </ScrollViewer>
             </Border>
 
-            <Border Grid.Column="1" Background="White" BorderBrush="#D8DEE5" BorderThickness="1" Padding="10">
+            <Border x:Name="PreviewHostBorder" Grid.Column="1" Background="White" BorderBrush="#D8DEE5" BorderThickness="1" Padding="10">
                 <DockPanel>
-                    <TextBlock DockPanel.Dock="Top" Text="图纸预览" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                    <TextBlock x:Name="PreviewTitleTextBlock" DockPanel.Dock="Top" Text="图纸预览" FontWeight="SemiBold" Margin="0,0,0,8"/>
                     <Viewbox Stretch="Uniform">
                         <Canvas x:Name="PreviewCanvas" Width="620" Height="500" Background="White">
                             <Rectangle Canvas.Left="20" Canvas.Top="20" Width="580" Height="450" Stroke="#55616D" StrokeThickness="1.2"/>

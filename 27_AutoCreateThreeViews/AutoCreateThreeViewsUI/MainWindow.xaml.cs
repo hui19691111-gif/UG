@@ -501,6 +501,16 @@ public partial class MainWindow : Window
         ApplySelectedTabPanel();
     }
 
+    private void DraftingSettingsSource_Changed(object sender, RoutedEventArgs e)
+    {
+        if (DraftingOverrideOptionsPanel == null)
+        {
+            return;
+        }
+
+        DraftingOverrideOptionsPanel.IsEnabled = DraftingOverrideRadio?.IsChecked == true;
+    }
+
     private void DrawingTargetModeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         UpdateLayerDrawingOptionsVisibility();
@@ -835,6 +845,7 @@ public partial class MainWindow : Window
             PartSelectionPanel == null ||
             ViewSettingsPanel == null ||
             AnnotationSettingsPanel == null ||
+            DraftingSettingsPanel == null ||
             TechnicalRequirementsPanel == null)
         {
             return;
@@ -843,11 +854,23 @@ public partial class MainWindow : Window
         bool partSelected = ReferenceEquals(MainTabControl.SelectedItem, PartSelectionTab);
         bool viewSelected = ReferenceEquals(MainTabControl.SelectedItem, ViewTab);
         bool annotationSelected = ReferenceEquals(MainTabControl.SelectedItem, AnnotationTab);
+        bool draftingSettingsSelected = ReferenceEquals(MainTabControl.SelectedItem, DraftingSettingsTab);
         bool technicalSelected = ReferenceEquals(MainTabControl.SelectedItem, TechnicalRequirementsTab);
         PartSelectionPanel.Visibility = partSelected ? Visibility.Visible : Visibility.Collapsed;
         ViewSettingsPanel.Visibility = viewSelected ? Visibility.Visible : Visibility.Collapsed;
         AnnotationSettingsPanel.Visibility = annotationSelected ? Visibility.Visible : Visibility.Collapsed;
+        DraftingSettingsPanel.Visibility = draftingSettingsSelected ? Visibility.Visible : Visibility.Collapsed;
         TechnicalRequirementsPanel.Visibility = technicalSelected ? Visibility.Visible : Visibility.Collapsed;
+        if (SettingsHostBorder != null && PreviewHostBorder != null)
+        {
+            Grid.SetColumnSpan(SettingsHostBorder, draftingSettingsSelected ? 2 : 1);
+            SettingsHostBorder.Margin = draftingSettingsSelected
+                ? new Thickness(0)
+                : new Thickness(0, 0, 10, 0);
+            PreviewHostBorder.Visibility = draftingSettingsSelected
+                ? Visibility.Collapsed
+                : Visibility.Visible;
+        }
     }
 
     private void ApplyProjectionMode()
@@ -1377,7 +1400,9 @@ public partial class MainWindow : Window
             ["drawingTargetMode"] = SelectedComboBoxTag(DrawingTargetModeComboBox, "partOrAssembly"),
             ["layerRange"] = LayerRangeTextBox.Text.Trim(),
             ["layersPerSheet"] = LayersPerSheetTextBox.Text.Trim(),
+            ["layerLayoutMode"] = SelectedComboBoxTag(LayerLayoutModeComboBox, "auto"),
             ["templatePath"] = SelectedTemplatePath(),
+            ["inheritDraftingPreferences"] = BoolText(InheritDraftingPreferencesCheckBox.IsChecked == true),
             ["projection"] = isFirstAngle ? "first" : "third",
             ["frontDirectionMode"] = SelectedComboBoxTag(FrontDirectionModeComboBox, "largestFaceLongestEdge"),
             ["viewSpacing"] = ViewSpacingTextBox.Text,
@@ -1414,6 +1439,13 @@ public partial class MainWindow : Window
         isUpdatingPreview = true;
         try
         {
+            InheritDraftingPreferencesCheckBox.IsChecked = ReadBool(
+                values,
+                "inheritDraftingPreferences",
+                InheritDraftingPreferencesCheckBox.IsChecked == true);
+            SelectComboBoxByTag(
+                LayerLayoutModeComboBox,
+                ReadText(values, "layerLayoutMode", "auto"));
             FirstAngleRadio.IsChecked = ReadText(values, "projection", FirstAngleRadio.IsChecked == true ? "first" : "third") != "third";
             ThirdAngleRadio.IsChecked = FirstAngleRadio.IsChecked != true;
             SelectComboBoxByTag(FrontDirectionModeComboBox, ReadText(values, "frontDirectionMode", "largestFaceLongestEdge"));

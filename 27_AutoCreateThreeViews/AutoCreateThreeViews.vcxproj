@@ -52,7 +52,7 @@
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <SetChecksum>true</SetChecksum>
       <AdditionalLibraryDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libugopenint.lib;libufun.lib;libnxopencpp.lib;libnxopencpp_gateway.lib;libnxopencpp_annotations.lib;libnxopencpp_drawings.lib;libnxopencpp_features.lib;libnxopencpp_layer.lib;libnxopencpp_sheetmetal.lib;libnxopenuicpp.lib;user32.lib;shell32.lib;Crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libugopenint.lib;libufun.lib;libnxopencpp.lib;libnxopencpp_gateway.lib;libnxopencpp_annotations.lib;libnxopencpp_drafting.lib;libnxopencpp_drawings.lib;libnxopencpp_features.lib;libnxopencpp_layer.lib;libnxopencpp_sheetmetal.lib;libnxopenuicpp.lib;user32.lib;shell32.lib;Crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "$(ProjectDir)AutoCreateThreeViews.dlx" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)AutoCreateThreeViews.bmp" "$(OutDir)"&#x0D;&#x0A;copy /Y "$(ProjectDir)AutoCreateThreeViews.hole_rules.ini" "$(OutDir)"</Command>

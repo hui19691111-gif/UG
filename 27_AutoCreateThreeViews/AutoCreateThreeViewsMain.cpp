@@ -1015,6 +1015,8 @@ void WriteSinglePartRequest(
 {
     static const std::vector<std::string> settingKeys = {
         "templatePath",
+        "inheritDraftingPreferences",
+        "layerLayoutMode",
         "projection",
         "frontDirectionMode",
         "viewSpacing",
