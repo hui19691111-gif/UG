@@ -3488,6 +3488,43 @@ bool TryReadFlatPatternCsysDirection(
     }
 }
 
+NXOpen::Body* FindLargestTargetLayerSheetMetalBody(NXOpen::Part* part)
+{
+    if (part == nullptr || part->Bodies() == nullptr)
+    {
+        return nullptr;
+    }
+
+    NXOpen::Body* largestBody = nullptr;
+    double largestScore = -1.0;
+    for (NXOpen::BodyCollection::iterator it = part->Bodies()->begin(); it != part->Bodies()->end(); ++it)
+    {
+        NXOpen::Body* body = *it;
+        if (body == nullptr || !MatchesActiveTargetLayer(body->Tag()) || !IsSheetMetalBody(part, body))
+        {
+            continue;
+        }
+        double box[6] = {};
+        if (UF_MODL_ask_bounding_box(body->Tag(), box) != 0)
+        {
+            continue;
+        }
+        std::array<double, 3> dimensions = {
+            std::max(0.0, box[3] - box[0]),
+            std::max(0.0, box[4] - box[1]),
+            std::max(0.0, box[5] - box[2])};
+        std::sort(dimensions.begin(), dimensions.end(), std::greater<double>());
+        const double score = dimensions[0] * dimensions[1] * 1000.0 +
+            dimensions[0] * dimensions[1] * dimensions[2] + dimensions[0];
+        if (score > largestScore)
+        {
+            largestScore = score;
+            largestBody = body;
+        }
+    }
+    return largestBody;
+}
+
 bool TryComputeAutoFrontDirectionFromSheetMetalFlatPattern(
     NXOpen::Part* part,
     AutoViewDirection& result)
@@ -3507,6 +3544,9 @@ bool TryComputeAutoFrontDirectionFromSheetMetalFlatPattern(
         return false;
     }
 
+    NXOpen::Body* preferredLayerBody = g_activeTargetLayer > 0
+        ? FindLargestTargetLayerSheetMetalBody(part)
+        : nullptr;
     for (NXOpen::Features::Feature* feature : features)
     {
         if (feature == nullptr)
@@ -3539,8 +3579,20 @@ bool TryComputeAutoFrontDirectionFromSheetMetalFlatPattern(
             NXOpen::Face* upwardFace = flatPatternBuilder->UpwardFace()->Value();
             const tag_t upwardFaceTag = upwardFace->Tag();
             NXOpen::Body* upwardBody = upwardFace->GetBody();
-            if (upwardBody == nullptr || upwardBody->IsBlanked() || !IsSheetMetalBody(part, upwardBody))
+            if (upwardBody == nullptr || upwardBody->IsBlanked() ||
+                !MatchesActiveTargetLayer(upwardBody->Tag()) ||
+                !IsSheetMetalBody(part, upwardBody) ||
+                (preferredLayerBody != nullptr && upwardBody->Tag() != preferredLayerBody->Tag()))
             {
+                WriteLine(
+                    nullptr,
+                    "AutoCreateThreeViews: skip flat pattern direction feature=" +
+                        std::to_string(static_cast<unsigned long long>(flatPattern->Tag())) +
+                        ", bodyLayer=" + std::to_string(upwardBody != nullptr ? AskObjectLayer(upwardBody->Tag()) : 0) +
+                        ", targetLayer=" + std::to_string(g_activeTargetLayer) +
+                        ", preferredBody=" +
+                        std::to_string(static_cast<unsigned long long>(
+                            preferredLayerBody != nullptr ? preferredLayerBody->Tag() : NULL_TAG)) + ".");
                 flatPatternBuilder->Destroy();
                 continue;
             }
@@ -19386,26 +19438,15 @@ void AutoCreateThreeViewsDialog::dialog_shown_cb()
         InitializeTechnicalRequirementLibrary();
         LoadTechnicalRequirementLibrary();
 
-        RECT workArea = {};
-        HWND dialogWindow = FindNativeDialogWindow();
-        if (dialogWindow != nullptr && SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0))
-        {
-            const int availableWidth = workArea.right - workArea.left;
-            const int availableHeight = workArea.bottom - workArea.top;
-            const int desiredWidth = std::clamp(previewWidth_ + 510, 900, std::max(900, availableWidth - 40));
-            const int desiredHeight = std::clamp(previewHeight_ + 150, 560, std::max(560, availableHeight - 50));
-            const int left = workArea.left + std::max(0, (availableWidth - desiredWidth) / 2);
-            const int top = workArea.top + std::max(0, (availableHeight - desiredHeight) / 2);
-            SetWindowPos(dialogWindow, nullptr, left, top, desiredWidth, desiredHeight,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-            WriteLine(session_, "AutoCreateThreeViews: native dialog auto-sized preview=" +
-                std::to_string(previewWidth_) + "x" + std::to_string(previewHeight_) +
-                ", window=" + std::to_string(desiredWidth) + "x" + std::to_string(desiredHeight) + ".");
-        }
-        else
-        {
-            WriteLine(session_, "AutoCreateThreeViews: native dialog auto-size window handle was not found.");
-        }
+        // Do not enumerate or resize NX-owned windows from DialogShown.  A
+        // Block Styler layout pass can still be holding NX's UI lock here;
+        // SetWindowPos/EnumWindows re-enters that layout and can deadlock the
+        // main ugraf thread as soon as the dialog gains another native block.
+        // The DLX uses Allow Resize and its preview dimensions are configured
+        // during initialize_cb, so native layout remains responsive without
+        // forcing a Win32 resize in this callback.
+        WriteLine(session_,
+            "AutoCreateThreeViews: native dialog shown; use Block Styler responsive sizing without Win32 re-entry.");
         return;
     }
     catch (const NXOpen::NXException& ex)
