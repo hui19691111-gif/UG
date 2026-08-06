@@ -4,6 +4,8 @@
 #include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/DisplayableObject.hxx>
+#include <NXOpen/DisplayManager.hxx>
+#include <NXOpen/Drawings_DraftingDrawingSheet.hxx>
 #include <NXOpen/Drawings_DrawingSheetCollection.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
 #include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
@@ -25,6 +27,7 @@
 #include <uf_assem.h>
 #include <uf_defs.h>
 #include <uf_disp.h>
+#include <uf_draw.h>
 #include <uf_obj.h>
 #include <uf_part.h>
 #include <uf_view.h>
@@ -36,6 +39,7 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
@@ -96,6 +100,23 @@ struct SelectedLayerDrawingTarget
     int layerIndex = 0;
     int layersPerSheet = 1;
 };
+
+struct AsyncDrawingBatch
+{
+    std::filesystem::path requestPath;
+    std::map<std::string, std::string> values;
+    std::vector<SelectedLayerDrawingTarget> targets;
+    size_t nextTarget = 0;
+    bool layerDrawingMode = false;
+    bool directSingleRequest = false;
+    bool showRunResults = false;
+    bool targetContextReady = false;
+    bool completedSheetNeedsPresentation = false;
+    tag_t completedDrawingSheetTag = NULL_TAG;
+    std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+};
+
+std::unique_ptr<AsyncDrawingBatch> g_asyncDrawingBatch;
 
 std::filesystem::path CurrentModuleDirectory()
 {
@@ -1011,7 +1032,8 @@ void WriteSinglePartRequest(
     bool assemblyDrawing,
     int targetLayer = 0,
     int layerIndex = 0,
-    int layersPerSheet = 1)
+    int layersPerSheet = 1,
+    const std::string& executionPhase = "full")
 {
     static const std::vector<std::string> settingKeys = {
         "templatePath",
@@ -1020,7 +1042,9 @@ void WriteSinglePartRequest(
         "projection",
         "frontDirectionMode",
         "viewSpacing",
+        "viewGroupSpacing",
         "sheetMargin",
+        "showHiddenLines",
         "front",
         "top",
         "bottom",
@@ -1047,6 +1071,7 @@ void WriteSinglePartRequest(
 
     std::ofstream output(requestPath, std::ios::binary);
     output << "action=create\n";
+    output << "executionPhase=" << executionPhase << '\n';
     output << "selectedOccurrenceTag=" << FindPartValue(values, index, "occurrenceTag") << '\n';
     output << "assemblyDrawing=" << (assemblyDrawing ? "true" : "false") << '\n';
     output << "drawingTargetMode=" << (targetLayer > 0 ? "partLayers" : "partOrAssembly") << '\n';
@@ -1285,8 +1310,8 @@ bool SetDrawingDisplayPart(tag_t partTag, tag_t sourceOccurrence)
             nxDisplayStatus = static_cast<int>(
                 session->Parts()->SetActiveDisplay(
                     part,
-                    NXOpen::DisplayPartOptionAllowAdditional,
-                    NXOpen::PartDisplayPartWorkPartOptionUseLast,
+                    NXOpen::DisplayPartOptionReplaceExisting,
+                    NXOpen::PartDisplayPartWorkPartOptionSameAsDisplay,
                     &loadStatus));
             if (loadStatus != nullptr)
             {
@@ -1445,6 +1470,72 @@ bool ApplySelectedOccurrenceFromRequest(const std::filesystem::path& requestPath
     return false;
 }
 
+bool PreselectManualDirectionsBeforeDrawing(
+    const std::map<std::string, std::string>& values,
+    const std::vector<SelectedLayerDrawingTarget>& targets)
+{
+    ClearAutoCreateThreeViewsManualDirectionCache();
+
+    int manualTargetCount = 0;
+    for (const SelectedLayerDrawingTarget& target : targets)
+    {
+        if (IsManualPartFrontDirection(values, target.part.index))
+        {
+            ++manualTargetCount;
+        }
+    }
+    if (manualTargetCount == 0)
+    {
+        return true;
+    }
+
+    int selectionIndex = 0;
+    WriteLauncherLog(
+        "AutoCreateThreeViews: begin manual direction preselection before drawing, targets=" +
+            std::to_string(manualTargetCount) + ".");
+    for (const SelectedLayerDrawingTarget& target : targets)
+    {
+        if (!IsManualPartFrontDirection(values, target.part.index))
+        {
+            continue;
+        }
+
+        ++selectionIndex;
+        int clearedHighlights = 0;
+        UnhighlightKnownOccurrences(clearedHighlights);
+        UnhighlightDisplayedAssemblyTree(clearedHighlights);
+        g_highlightedOccurrence = NULL_TAG;
+        g_knownHighlightedOccurrences.clear();
+
+        if (!SetDrawingDisplayPart(target.part.prototypePart, target.part.occurrence))
+        {
+            AddAutoCreateThreeViewsRunResultLine(u8"失败：手动选择方向前无法切换到目标部件。");
+            ClearAutoCreateThreeViewsManualDirectionCache();
+            return false;
+        }
+
+        WriteLauncherLog(
+            "AutoCreateThreeViews: select manual direction " +
+                std::to_string(selectionIndex) + "/" + std::to_string(manualTargetCount) +
+                ", part=" + std::to_string(static_cast<unsigned long long>(target.part.prototypePart)) +
+                ", layer=" + std::to_string(target.targetLayer) + ".");
+        if (!PreselectAutoCreateThreeViewsManualDirection(
+                target.part.prototypePart,
+                target.targetLayer))
+        {
+            AddAutoCreateThreeViewsRunResultLine(
+                std::string(u8"取消：图层 ") + std::to_string(target.targetLayer) +
+                u8" 的主视图方向未选择，尚未开始出图。");
+            ClearAutoCreateThreeViewsManualDirectionCache();
+            return false;
+        }
+    }
+
+    WriteLauncherLog(
+        "AutoCreateThreeViews: all manual directions selected; start drawing batch.");
+    return true;
+}
+
 void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
 {
     const LauncherTimingClock::time_point batchStarted = LauncherTimingClock::now();
@@ -1536,7 +1627,14 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
             }
             for (size_t layerIndex = 0; layerIndex < layers.size(); ++layerIndex)
             {
-                drawingTargets.push_back({selected, layers[layerIndex], static_cast<int>(layerIndex), layersPerSheet});
+                const size_t pageStart = (layerIndex / static_cast<size_t>(layersPerSheet)) *
+                    static_cast<size_t>(layersPerSheet);
+                const int actualLayersOnPage = static_cast<int>(std::min(
+                    static_cast<size_t>(layersPerSheet),
+                    layers.size() - pageStart));
+                const int indexOnPage = static_cast<int>(layerIndex - pageStart);
+                drawingTargets.push_back(
+                    {selected, layers[layerIndex], indexOnPage, actualLayersOnPage});
             }
         }
     }
@@ -1551,6 +1649,14 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
     if (drawingTargets.empty())
     {
         AddAutoCreateThreeViewsRunResultLine(u8"失败：没有可出图的选中零件。");
+    }
+
+    if (!drawingTargets.empty() &&
+        !PreselectManualDirectionsBeforeDrawing(values, drawingTargets))
+    {
+        WriteProgressFile(requestPath, 0, 0, "Manual direction selection canceled.", true);
+        WriteLauncherLog("AutoCreateThreeViews: drawing batch canceled before creating any drawing sheet.");
+        return;
     }
 
     if (!drawingTargets.empty())
@@ -1661,6 +1767,311 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
     WriteLauncherLog("AutoCreateThreeViews: keep last drawing part displayed after UI request.");
 }
 
+std::unique_ptr<AsyncDrawingBatch> PrepareAsyncDrawingBatch(
+    const std::filesystem::path& requestPath)
+{
+    auto batch = std::make_unique<AsyncDrawingBatch>();
+    batch->requestPath = requestPath;
+    batch->values = ReadSimpleKeyValueFile(requestPath);
+    batch->started = std::chrono::steady_clock::now();
+    BeginAutoCreateThreeViewsRunResults();
+
+    const int partCount = ParseIntValue(FindValue(batch->values, "selectedPartCount"), 0);
+    batch->layerDrawingMode =
+        TrimText(FindValue(batch->values, "drawingTargetMode", "partOrAssembly")) == "partLayers";
+    const tag_t previousDisplayPart = UF_PART_ask_display_part();
+    const tag_t previousWorkPart = UF_ASSEM_ask_work_part();
+
+    if (partCount <= 0 && !batch->layerDrawingMode)
+    {
+        batch->directSingleRequest = true;
+        WriteProgressFile(requestPath, 0, 1, "Starting drawing...", false);
+        return batch;
+    }
+
+    std::vector<SelectedDrawingPart> drawingParts;
+    if (partCount <= 0)
+    {
+        tag_t occurrenceTag = NULL_TAG;
+        tag_t prototypePart = previousWorkPart != NULL_TAG ? previousWorkPart : previousDisplayPart;
+        if (ParseTagValue(FindValue(batch->values, "selectedOccurrenceTag"), occurrenceTag))
+        {
+            const tag_t occurrencePrototype = PrototypePartFromOccurrence(occurrenceTag);
+            if (occurrencePrototype != NULL_TAG)
+                prototypePart = occurrencePrototype;
+        }
+        if (prototypePart != NULL_TAG)
+            drawingParts.push_back({0, occurrenceTag, prototypePart, false});
+    }
+    for (int index = 0; index < partCount; ++index)
+    {
+        tag_t occurrenceTag = NULL_TAG;
+        if (!ParseTagValue(FindPartValue(batch->values, index, "occurrenceTag"), occurrenceTag))
+            continue;
+
+        const tag_t prototypePart = PrototypePartFromOccurrence(occurrenceTag);
+        if (prototypePart == NULL_TAG)
+        {
+            AddAutoCreateThreeViewsRunResultLine(
+                u8"已选组件无法获取原型部件，已跳过。");
+            continue;
+        }
+        const bool isRootOccurrence = IsRootOccurrence(occurrenceTag, previousDisplayPart);
+        drawingParts.push_back(
+            {index, occurrenceTag, prototypePart, isRootOccurrence || OccurrenceHasChildren(occurrenceTag)});
+    }
+
+    if (batch->layerDrawingMode)
+    {
+        const std::vector<std::pair<int, int>> ranges =
+            ParseLayerRanges(FindValue(batch->values, "layerRange", "1-256"));
+        const int layersPerSheet = std::max(
+            1,
+            ParseIntValue(FindValue(batch->values, "layersPerSheet", "1"), 1));
+        std::set<tag_t> seenPrototypeParts;
+        for (const SelectedDrawingPart& selected : drawingParts)
+        {
+            if (!seenPrototypeParts.insert(selected.prototypePart).second)
+                continue;
+            const std::vector<int> layers = CollectDrawablePartLayers(selected.prototypePart, ranges);
+            for (size_t layerIndex = 0; layerIndex < layers.size(); ++layerIndex)
+            {
+                const size_t pageStart = (layerIndex / static_cast<size_t>(layersPerSheet)) *
+                    static_cast<size_t>(layersPerSheet);
+                const int actualLayersOnPage = static_cast<int>(std::min(
+                    static_cast<size_t>(layersPerSheet),
+                    layers.size() - pageStart));
+                const int indexOnPage = static_cast<int>(layerIndex - pageStart);
+                batch->targets.push_back(
+                    {selected,
+                     layers[layerIndex],
+                     indexOnPage,
+                     actualLayersOnPage});
+            }
+        }
+    }
+    else
+    {
+        for (const SelectedDrawingPart& selected : drawingParts)
+            batch->targets.push_back({selected, 0, 0, 1});
+    }
+
+    if (batch->targets.empty())
+        AddAutoCreateThreeViewsRunResultLine(u8"没有找到可用于出图的部件或图层。");
+
+    if (!batch->targets.empty() &&
+        !PreselectManualDirectionsBeforeDrawing(batch->values, batch->targets))
+    {
+        batch->targets.clear();
+        AddAutoCreateThreeViewsRunResultLine(
+            u8"手动方向选择未完成，未创建任何图纸页。");
+    }
+
+    batch->showRunResults =
+        batch->layerDrawingMode ||
+        batch->targets.size() > 1 ||
+        (batch->targets.size() == 1 && batch->targets.front().part.assemblyDrawing);
+    WriteProgressFile(
+        requestPath,
+        0,
+        static_cast<int>(batch->targets.size()),
+        batch->targets.empty() ? "No drawable parts." : "Starting drawing...",
+        batch->targets.empty());
+    return batch;
+}
+
+bool ProcessNextAsyncDrawingTarget(AsyncDrawingBatch& batch)
+{
+    if (batch.directSingleRequest)
+    {
+        if (batch.nextTarget > 0)
+            return false;
+        batch.nextTarget = 1;
+        WriteProgressFile(batch.requestPath, 1, 1, "Drawing current part", false);
+        ApplySelectedOccurrenceFromRequest(batch.requestPath);
+        ExecuteAutoCreateThreeViewsFromRequest(batch.requestPath);
+        return false;
+    }
+
+    if (batch.completedSheetNeedsPresentation)
+    {
+        batch.completedSheetNeedsPresentation = false;
+        const tag_t displayPart = UF_PART_ask_display_part();
+        const tag_t workPart = UF_ASSEM_ask_work_part();
+        const tag_t requestedDrawing = batch.completedDrawingSheetTag;
+        batch.completedDrawingSheetTag = NULL_TAG;
+        int openDrawingStatus = 0;
+        try
+        {
+            NXOpen::Session* session = NXOpen::Session::GetSession();
+            if (requestedDrawing != NULL_TAG)
+            {
+                NXOpen::TaggedObject* taggedObject = NXOpen::NXObjectManager::Get(requestedDrawing);
+                NXOpen::Drawings::DraftingDrawingSheet* exactSheet =
+                    dynamic_cast<NXOpen::Drawings::DraftingDrawingSheet*>(taggedObject);
+                if (exactSheet != nullptr)
+                    exactSheet->Open();
+                openDrawingStatus = UF_DRAW_open_drawing(requestedDrawing);
+            }
+            UF_DISP_make_display_up_to_date();
+            if (session != nullptr && session->DisplayManager() != nullptr)
+                session->DisplayManager()->MakeUpToDate();
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            WriteLauncherLog(
+                "AutoCreateThreeViews: completed-sheet presentation update warning, NX " +
+                std::to_string(ex.ErrorCode()) + ", " + ex.Message() + ".");
+        }
+        catch (...)
+        {
+            WriteLauncherLog(
+                "AutoCreateThreeViews: completed-sheet presentation update warning, unknown exception.");
+        }
+
+        tag_t currentDrawing = NULL_TAG;
+        UF_DRAW_ask_current_drawing(&currentDrawing);
+
+        WriteLauncherLog(
+            "AutoCreateThreeViews: completed drawing sheet presented before next part switch, displayPart=" +
+            std::to_string(static_cast<unsigned long long>(displayPart)) +
+            ", workPart=" + std::to_string(static_cast<unsigned long long>(workPart)) +
+            ", requestedDrawing=" + std::to_string(static_cast<unsigned long long>(requestedDrawing)) +
+            ", openStatus=" + std::to_string(openDrawingStatus) +
+            ", drawing=" + std::to_string(static_cast<unsigned long long>(currentDrawing)) + ".");
+        return batch.nextTarget < batch.targets.size();
+    }
+
+    if (batch.nextTarget >= batch.targets.size())
+        return false;
+
+    const size_t targetIndex = batch.nextTarget;
+    const SelectedLayerDrawingTarget& target = batch.targets[targetIndex];
+    const SelectedDrawingPart& selected = target.part;
+    const int progressIndex = static_cast<int>(targetIndex + 1);
+    const int progressTotal = static_cast<int>(batch.targets.size());
+    const LauncherTimingClock::time_point partStarted = LauncherTimingClock::now();
+    std::string progressPartName =
+        ProgressPartDisplayName(batch.values, selected.index, selected.prototypePart);
+    if (target.targetLayer > 0)
+        progressPartName += " L" + std::to_string(target.targetLayer);
+
+    if (!batch.targetContextReady)
+    {
+    WriteLauncherLog(
+        "AutoCreateThreeViews: async drawing progress " +
+        std::to_string(progressIndex) + "/" + std::to_string(progressTotal) +
+        ", part=" + progressPartName + ".");
+    WriteProgressFile(
+        batch.requestPath,
+        progressIndex,
+        progressTotal,
+        "Drawing " + progressPartName,
+        false);
+
+    const bool manualFrontDirection =
+        IsManualPartFrontDirection(batch.values, selected.index);
+    if (!manualFrontDirection)
+    {
+        DisplaySelectedOccurrence(selected.occurrence);
+    }
+    else
+    {
+        int clearedHighlights = 0;
+        UnhighlightKnownOccurrences(clearedHighlights);
+        UnhighlightDisplayedAssemblyTree(clearedHighlights);
+        g_highlightedOccurrence = NULL_TAG;
+        g_knownHighlightedOccurrences.clear();
+    }
+    }
+
+    const bool contextWasPrepared = batch.targetContextReady;
+    const bool requiresPartSwitch =
+        !batch.targetContextReady &&
+        (UF_PART_ask_display_part() != selected.prototypePart ||
+         UF_ASSEM_ask_work_part() != selected.prototypePart);
+    if (requiresPartSwitch)
+    {
+        const LauncherTimingClock::time_point switchStarted = LauncherTimingClock::now();
+        if (!SetDrawingDisplayPart(selected.prototypePart, selected.occurrence))
+        {
+            AddAutoCreateThreeViewsRunResultLine(
+                u8"无法切换到目标部件，已跳过该出图项。");
+            ++batch.nextTarget;
+            return batch.nextTarget < batch.targets.size();
+        }
+        batch.targetContextReady = true;
+        WriteLauncherTiming(
+            "async_display_work_part_switch",
+            switchStarted,
+            "index=" + std::to_string(progressIndex) + "/" + std::to_string(progressTotal) +
+                ", part=" + progressPartName);
+        WriteLauncherLog(
+            "AutoCreateThreeViews: display/work part changed; return to NX before drawing creation.");
+        return true;
+    }
+
+    const bool drawingPartReady =
+        contextWasPrepared || SetDrawingDisplayPart(selected.prototypePart, selected.occurrence);
+
+    if (drawingPartReady)
+    {
+        std::filesystem::path partRequestPath = batch.requestPath;
+        partRequestPath += ".part" + std::to_string(progressIndex) + ".request";
+
+        batch.targetContextReady = false;
+        ++batch.nextTarget;
+        WriteSinglePartRequest(
+            partRequestPath,
+            batch.values,
+            selected.index,
+            batch.layerDrawingMode ? false : selected.assemblyDrawing,
+            target.targetLayer,
+            target.layerIndex,
+            target.layersPerSheet,
+            "full");
+        ExecuteAutoCreateThreeViewsFromRequest(partRequestPath);
+        std::error_code ignored;
+        std::filesystem::remove(partRequestPath, ignored);
+        batch.completedDrawingSheetTag = AskLastAutoCreateThreeViewsDrawingSheetTag();
+        batch.completedSheetNeedsPresentation =
+            batch.completedDrawingSheetTag != NULL_TAG;
+        if (batch.completedSheetNeedsPresentation)
+        {
+            WriteLauncherLog(
+                std::string("AutoCreateThreeViews: completed ") +
+                (batch.layerDrawingMode ? "layer group" : "sheet") +
+                " awaits a dedicated NX presentation callback, exactTag=" +
+                std::to_string(static_cast<unsigned long long>(batch.completedDrawingSheetTag)) + ".");
+            return true;
+        }
+    }
+    else
+    {
+        batch.targetContextReady = false;
+        ++batch.nextTarget;
+        AddAutoCreateThreeViewsRunResultLine(
+            u8"无法切换到目标部件，已跳过该出图项。");
+    }
+
+    WriteLauncherTiming(
+        "async_batch_part_total",
+        partStarted,
+        "index=" + std::to_string(progressIndex) + "/" + std::to_string(progressTotal) +
+            ", part=" + progressPartName);
+    return batch.nextTarget < batch.targets.size();
+}
+
+void FinalizeAsyncDrawingBatch(AsyncDrawingBatch& batch)
+{
+    const int total = batch.directSingleRequest
+        ? 1
+        : static_cast<int>(batch.targets.size());
+    WriteProgressFile(batch.requestPath, total, total, "Drawing finished.", true);
+    WriteLauncherTiming("async_ui_request_total", batch.started, "parts=" + std::to_string(total));
+    WriteLauncherLog("AutoCreateThreeViews: async drawing batch completed.");
+}
+
 void StopUiMonitor()
 {
     if (g_uiMonitor.timerId != 0)
@@ -1686,6 +2097,38 @@ void StopUiMonitor()
     g_uiMonitor.processing = false;
     g_uiMonitor.showRunResults = false;
     g_uiMonitor.active = false;
+    g_asyncDrawingBatch.reset();
+    CompleteAutoCreateThreeViewsNativeProgress();
+}
+
+void ScheduleDeferredMainDllUnload()
+{
+    const std::filesystem::path helperPath =
+        CurrentModuleDirectory() / L"AutoCreateThreeViewsUnloadHelper.dll";
+    if (!std::filesystem::exists(helperPath))
+    {
+        WriteLauncherLog(
+            "AutoCreateThreeViews: deferred unload helper is missing, path=" +
+            helperPath.string() + ".");
+        return;
+    }
+
+    UF_load_f_p_t scheduleUnload = nullptr;
+    std::string helper = helperPath.string();
+    const int loadStatus = UF_load_library(
+        helper.data(),
+        "ScheduleAutoCreateThreeViewsUnload",
+        &scheduleUnload);
+    if (loadStatus != 0 || scheduleUnload == nullptr)
+    {
+        WriteLauncherLog(
+            "AutoCreateThreeViews: deferred unload helper load failed, status=" +
+            std::to_string(loadStatus) + ".");
+        return;
+    }
+
+    scheduleUnload();
+    WriteLauncherLog("AutoCreateThreeViews: handed main DLL unload to the 500 ms helper.");
 }
 
 void CALLBACK UiMonitorTimerProc(HWND, UINT, UINT_PTR, DWORD)
@@ -1704,6 +2147,49 @@ void CALLBACK UiMonitorTimerProc(HWND, UINT, UINT_PTR, DWORD)
         std::ostringstream log;
         log << "AutoCreateThreeViews: UI monitor UF_initialize failed, status=" << initStatus << ".";
         WriteLauncherLog(log.str());
+        g_uiMonitor.processing = false;
+        return;
+    }
+
+    if (g_asyncDrawingBatch != nullptr)
+    {
+        try
+        {
+            const bool hasMore = ProcessNextAsyncDrawingTarget(*g_asyncDrawingBatch);
+            if (!hasMore)
+            {
+                FinalizeAsyncDrawingBatch(*g_asyncDrawingBatch);
+                ClearSelectionAndOccurrenceHighlights(true);
+                if (g_asyncDrawingBatch->showRunResults)
+                    ShowAutoCreateThreeViewsRunResults();
+                std::error_code ignored;
+                std::filesystem::remove(g_asyncDrawingBatch->requestPath, ignored);
+                CompleteAutoCreateThreeViewsNativeProgress();
+                g_asyncDrawingBatch.reset();
+                shouldStop = true;
+            }
+        }
+        catch (const std::exception& ex)
+        {
+            WriteLauncherLog(std::string("AutoCreateThreeViews: async batch exception: ") + ex.what() + ".");
+            CompleteAutoCreateThreeViewsNativeProgress();
+            g_asyncDrawingBatch.reset();
+            shouldStop = true;
+        }
+        catch (...)
+        {
+            WriteLauncherLog("AutoCreateThreeViews: async batch unknown exception.");
+            CompleteAutoCreateThreeViewsNativeProgress();
+            g_asyncDrawingBatch.reset();
+            shouldStop = true;
+        }
+
+        if (shouldStop)
+        {
+            StopUiMonitor();
+            ScheduleDeferredMainDllUnload();
+        }
+        UF_terminate();
         g_uiMonitor.processing = false;
         return;
     }
@@ -1847,6 +2333,45 @@ bool TryRunWpfDialogAndCreateDrawing()
 }
 }
 
+int ExecuteAutoCreateThreeViewsUiRequest(const std::filesystem::path& requestPath)
+{
+    ExecuteUiRequestParts(requestPath);
+    return 0;
+}
+
+int ScheduleAutoCreateThreeViewsUiRequest(const std::filesystem::path& requestPath)
+{
+    if (g_uiMonitor.active || g_asyncDrawingBatch != nullptr)
+    {
+        WriteLauncherLog("AutoCreateThreeViews: async drawing schedule rejected; another batch is active.");
+        return 1;
+    }
+
+    g_asyncDrawingBatch = PrepareAsyncDrawingBatch(requestPath);
+    if (g_asyncDrawingBatch == nullptr)
+        return 1;
+
+    g_uiMonitor.requestPath = requestPath;
+    g_uiMonitor.displayCommandPath.clear();
+    g_uiMonitor.processInfo = {};
+    g_uiMonitor.processing = false;
+    g_uiMonitor.showRunResults = g_asyncDrawingBatch->showRunResults;
+    g_uiMonitor.active = true;
+    // The refresh phase runs in its own callback.  A modest interval gives NX
+    // time to present the completed sheet before work on the next target starts.
+    g_uiMonitor.timerId = SetTimer(nullptr, 0, 200, UiMonitorTimerProc);
+    if (g_uiMonitor.timerId == 0)
+    {
+        WriteLauncherLog("AutoCreateThreeViews: async drawing SetTimer failed.");
+        StopUiMonitor();
+        return 1;
+    }
+
+    WriteLauncherLog(
+        "AutoCreateThreeViews: async drawing scheduled; each timer callback processes one target.");
+    return 0;
+}
+
 extern "C" DllExport void ufusr(char* param, int* returnCode, int rlen)
 {
     (void)rlen;
@@ -1856,7 +2381,9 @@ extern "C" DllExport void ufusr(char* param, int* returnCode, int rlen)
         return;
     }
 
-    WriteLauncherLog(std::string("AutoCreateThreeViews: DLL entry, build ") + __DATE__ + " " + __TIME__ + ", unload=UF_UNLOAD_SEL_DIALOG.");
+    WriteLauncherLog(
+        std::string("AutoCreateThreeViews: DLL entry, build ") + __DATE__ + " " + __TIME__ +
+        ", unload policy=native immediate or retained during asynchronous drawing.");
 
     if (returnCode != nullptr)
     {
@@ -1902,14 +2429,43 @@ extern "C" DllExport void ufusr(char* param, int* returnCode, int rlen)
             return;
         }
 
-        if (TryRunWpfDialogAndCreateDrawing())
+        bool nativeDialogFailed = false;
+        try
         {
-            UF_terminate();
-            return;
+            AutoCreateThreeViewsDialog dialog;
+            dialog.Launch();
+            WriteLauncherLog("AutoCreateThreeViews: UG native dialog closed.");
+            if (dialog.HasPendingDrawing())
+            {
+                WriteLauncherLog("AutoCreateThreeViews: execute drawing after native dialog returned.");
+                const int drawingStatus = dialog.ExecutePendingDrawing();
+                if (returnCode != nullptr)
+                    *returnCode = drawingStatus;
+            }
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            nativeDialogFailed = true;
+            WriteLauncherLog(
+                std::string("AutoCreateThreeViews: UG native dialog failed, NX ") +
+                std::to_string(ex.ErrorCode()) + ", " + ex.Message() + ".");
+        }
+        catch (const std::exception& ex)
+        {
+            nativeDialogFailed = true;
+            WriteLauncherLog(
+                std::string("AutoCreateThreeViews: UG native dialog failed: ") + ex.what() + ".");
+        }
+        catch (...)
+        {
+            nativeDialogFailed = true;
+            WriteLauncherLog("AutoCreateThreeViews: UG native dialog failed with unknown exception.");
         }
 
-        AutoCreateThreeViewsDialog dialog;
-        dialog.Launch();
+        if (nativeDialogFailed)
+        {
+            throw std::runtime_error("UG native dialog failed to launch.");
+        }
     }
     catch (const NXOpen::NXException& ex)
     {
@@ -1934,12 +2490,26 @@ extern "C" DllExport void ufusr(char* param, int* returnCode, int rlen)
 
 extern "C" DllExport int ufusr_ask_unload(void)
 {
-    WriteLauncherLog("AutoCreateThreeViews: ufusr_ask_unload called, return UF_UNLOAD_SEL_DIALOG.");
-    return UF_UNLOAD_SEL_DIALOG;
+    if (g_uiMonitor.active)
+    {
+        WriteLauncherLog(
+            "AutoCreateThreeViews: ufusr_ask_unload called while asynchronous drawing is active; "
+            "return UF_UNLOAD_SEL_DIALOG.");
+        return UF_UNLOAD_SEL_DIALOG;
+    }
+
+    WriteLauncherLog(
+        "AutoCreateThreeViews: ufusr_ask_unload called after native dialog closed; "
+        "return UF_UNLOAD_IMMEDIATELY for hot replacement.");
+    return UF_UNLOAD_IMMEDIATELY;
 }
 
 extern "C" DllExport void ufusr_cleanup(void)
 {
+    WriteLauncherLog(
+        std::string("AutoCreateThreeViews: ufusr_cleanup begin, monitorActive=") +
+        (g_uiMonitor.active ? "true" : "false") + ".");
     StopUiMonitor();
     ClearSelectionAndOccurrenceHighlights(false);
+    WriteLauncherLog("AutoCreateThreeViews: ufusr_cleanup completed; DLL is ready to unload.");
 }

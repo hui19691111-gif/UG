@@ -7,6 +7,13 @@
 #endif
 
 #include <NXOpen/BlockStyler_PropertyList.hxx>
+#include <NXOpen/BlockStyler_MultilineString.hxx>
+#include <NXOpen/BlockStyler_CompositeBlock.hxx>
+#include <NXOpen/BlockStyler_Label.hxx>
+#include <NXOpen/BlockStyler_Enumeration.hxx>
+#include <NXOpen/BlockStyler_Toggle.hxx>
+#include <NXOpen/BlockStyler_SelectObject.hxx>
+#include <NXOpen/Assemblies_Component.hxx>
 #include <stdexcept>
 #include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
@@ -46,6 +53,7 @@
 #include <NXOpen/Drawings_ViewPlacementBuilder.hxx>
 #include <NXOpen/Drawings_ViewScaleBuilder.hxx>
 #include <NXOpen/Drawings_ViewStyleBuilder.hxx>
+#include <NXOpen/Drawings_ViewStyleHiddenLinesBuilder.hxx>
 #include <NXOpen/Drawings_ViewStyleSmoothEdgesBuilder.hxx>
 #include <NXOpen/Drawings_ViewStyleVirtualIntersectionsBuilder.hxx>
 #include <NXOpen/Drawings_OrientationViewStyle.hxx>
@@ -98,6 +106,7 @@
 #include <NXOpen/UnitCollection.hxx>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -137,14 +146,65 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <commctrl.h>
+#include <shellapi.h>
+#include <objidl.h>
+#include <gdiplus.h>
+#include <cwchar>
 #ifdef CreateDialog
 #undef CreateDialog
 #endif
 
 namespace
 {
+// A blank drawing sheet makes NX automatically launch its interactive
+// "Base View" command as soon as control returns to the main UI.  Keep only
+// the stable tag of a tiny program-created placeholder between callbacks;
+// never retain an NXOpen pointer across the UI yield.
+std::map<tag_t, tag_t> g_preparedSheetPlaceholderViewTags;
+std::map<tag_t, tag_t> g_preparedDrawingSheetTags;
+tag_t g_lastCreatedDrawingSheetTag = NULL_TAG;
+
+struct NativeDialogWindowSearch
+{
+    DWORD processId = 0;
+    HWND window = nullptr;
+};
+
+BOOL CALLBACK FindNativeDialogWindow(HWND window, LPARAM parameter)
+{
+    NativeDialogWindowSearch* search = reinterpret_cast<NativeDialogWindowSearch*>(parameter);
+    if (search == nullptr)
+    {
+        return TRUE;
+    }
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    if (processId != search->processId)
+    {
+        return TRUE;
+    }
+    wchar_t title[512] = {};
+    GetWindowTextW(window, title, static_cast<int>(std::size(title)));
+    if (std::wcsstr(title, L"自动三视图出图") != nullptr)
+    {
+        search->window = window;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+HWND FindNativeDialogWindow()
+{
+    NativeDialogWindowSearch search;
+    search.processId = GetCurrentProcessId();
+    EnumWindows(FindNativeDialogWindow, reinterpret_cast<LPARAM>(&search));
+    return search.window;
+}
+
 struct RequestValues
 {
+    std::string executionPhase = "full";
     std::string drawingTargetMode = "partOrAssembly";
     int targetLayer = 0;
     int layerIndex = 0;
@@ -154,8 +214,9 @@ struct RequestValues
     bool inheritDraftingPreferences = true;
     std::string layerLayoutMode = "auto";
     std::string frontDirectionMode = "largestFaceLongestEdge";
-    double viewSpacing = 20.0;
-    double sheetMargin = 20.0;
+    double viewSpacing = 10.0;
+    double sheetMargin = 10.0;
+    double viewGroupSpacing = 20.0;
     bool firstAngle = true;
     bool front = true;
     bool top = false;
@@ -166,6 +227,7 @@ struct RequestValues
     bool backBottom = false;
     bool iso = true;
     bool flat = true;
+    bool showHiddenLines = false;
     bool autoDimensions = true;
     bool dimensionOverall = true;
     bool dimensionLinear = false;
@@ -236,6 +298,7 @@ struct ModelBounds
 };
 
 std::vector<tag_t> CollectVisibleSolidBodyTags(NXOpen::Part* part);
+bool MatchesActiveTargetLayer(tag_t bodyTag);
 
 void AccumulateBodyBounds(
     tag_t bodyTag,
@@ -470,6 +533,8 @@ struct AutoViewDirection
     tag_t edgeTag = NULL_TAG;
     bool valid = false;
 };
+
+std::map<std::pair<tag_t, int>, AutoViewDirection> g_manualFrontDirections;
 
 std::filesystem::path CurrentModuleDirectory()
 {
@@ -895,6 +960,175 @@ std::string LoadFlatPatternNoteFormat()
     }
 
     return defaultFormat;
+}
+
+std::filesystem::path LayerGroupNoteConfigFilePath()
+{
+    return CurrentModuleDirectory().parent_path() / "config" /
+        "AutoCreateThreeViews_layer_note_format.ini";
+}
+
+void EnsureDefaultLayerGroupNoteConfigFile()
+{
+    const std::filesystem::path path = LayerGroupNoteConfigFilePath();
+    std::error_code ignored;
+    std::filesystem::create_directories(path.parent_path(), ignored);
+    if (std::filesystem::is_regular_file(path, ignored))
+    {
+        return;
+    }
+
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file)
+    {
+        throw std::runtime_error("Unable to create layer note configuration file.");
+    }
+    const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
+    file.write(reinterpret_cast<const char*>(bom), sizeof(bom));
+    file << u8"# 自动三视图的图层注释格式\r\n"
+         << u8"# 可用占位符：{图层}、{编号}、{材料}、{数量}\r\n"
+         << u8"# 多行注释请使用 \\n，修改保存后下次出图立即生效。\r\n\r\n"
+         << u8"[图层注释]\r\n"
+         << u8"编号:{编号}  材料:{材料}  数量:{数量}\r\n";
+}
+
+std::string LoadLayerGroupNoteFormat()
+{
+    static const std::string defaultFormat =
+        u8"编号:{编号}  材料:{材料}  数量:{数量}";
+    try
+    {
+        EnsureDefaultLayerGroupNoteConfigFile();
+        std::ifstream file(LayerGroupNoteConfigFilePath(), std::ios::binary);
+        std::string line;
+        while (std::getline(file, line))
+        {
+            line = Trim(RemoveUtf8Bom(line));
+            if (line.empty() || line[0] == '#' || line[0] == ';' ||
+                (line.front() == '[' && line.back() == ']'))
+            {
+                continue;
+            }
+            const std::string key = "layer_note_format";
+            if (line.compare(0, key.size(), key) == 0)
+            {
+                const size_t equal = line.find('=');
+                if (equal != std::string::npos)
+                {
+                    line = Trim(line.substr(equal + 1));
+                }
+            }
+            if (!line.empty())
+            {
+                return DecodeConfigEscapes(line);
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    return defaultFormat;
+}
+
+bool OpenLayerGroupNoteConfigFile()
+{
+    EnsureDefaultLayerGroupNoteConfigFile();
+    const std::filesystem::path path = LayerGroupNoteConfigFilePath();
+    return reinterpret_cast<INT_PTR>(
+        ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+}
+
+std::string AttributeReferenceOrValue(
+    NXOpen::Part* part,
+    NXOpen::Body* body,
+    const std::vector<const char*>& names)
+{
+    for (const char* name : names)
+    {
+        const std::string reference = ObjectAttributeReferenceText(body, name);
+        if (!reference.empty())
+        {
+            return reference;
+        }
+    }
+    for (const char* name : names)
+    {
+        const std::string reference = PartAttributeReferenceText(part, name);
+        if (!reference.empty())
+        {
+            return reference;
+        }
+    }
+    return ReadBodyOrPartAttribute(part, body, names);
+}
+
+NXOpen::Body* FindLargestTargetLayerSolidBody(NXOpen::Part* part)
+{
+    if (part == nullptr || part->Bodies() == nullptr)
+    {
+        return nullptr;
+    }
+    NXOpen::Body* largestBody = nullptr;
+    double largestScore = -1.0;
+    for (NXOpen::BodyCollection::iterator it = part->Bodies()->begin(); it != part->Bodies()->end(); ++it)
+    {
+        NXOpen::Body* body = *it;
+        if (body == nullptr || !MatchesActiveTargetLayer(body->Tag()))
+        {
+            continue;
+        }
+        try
+        {
+            if (!body->IsSolidBody())
+            {
+                continue;
+            }
+        }
+        catch (...)
+        {
+            continue;
+        }
+        double box[6] = {};
+        if (UF_MODL_ask_bounding_box(body->Tag(), box) != 0)
+        {
+            continue;
+        }
+        std::array<double, 3> dimensions = {
+            std::max(0.0, box[3] - box[0]),
+            std::max(0.0, box[4] - box[1]),
+            std::max(0.0, box[5] - box[2])};
+        std::sort(dimensions.begin(), dimensions.end(), std::greater<double>());
+        const double score = dimensions[0] * dimensions[1] * 1000.0 +
+            dimensions[0] * dimensions[1] * dimensions[2] + dimensions[0];
+        if (score > largestScore)
+        {
+            largestScore = score;
+            largestBody = body;
+        }
+    }
+    return largestBody;
+}
+
+std::string BuildLayerGroupNoteText(NXOpen::Part* part, int targetLayer)
+{
+    NXOpen::Body* body = FindLargestTargetLayerSolidBody(part);
+    std::string number = AttributeReferenceOrValue(
+        part, body, {"bianhao", u8"编号", u8"图号"});
+    std::string material = AttributeReferenceOrValue(
+        part, body, {"cailiao", u8"材料", u8"材质"});
+    std::string quantity = ReadBodyQuantityReferenceText(part, body);
+    if (quantity.empty())
+    {
+        quantity = AttributeReferenceOrValue(
+            part, body, {"sulian", u8"数量", "qty", "Qty", "QTY"});
+    }
+
+    std::string text = LoadLayerGroupNoteFormat();
+    ReplaceAllText(text, u8"{图层}", std::to_string(targetLayer));
+    ReplaceAllText(text, u8"{编号}", number);
+    ReplaceAllText(text, u8"{材料}", material);
+    ReplaceAllText(text, u8"{数量}", quantity);
+    return Trim(text);
 }
 
 std::vector<NXOpen::NXString> BuildDraftNoteLines(const std::string& noteText, bool leadingBlank = true)
@@ -1470,6 +1704,28 @@ std::string DecodeBase64OrOriginal(const std::string& text)
     return decoded;
 }
 
+std::string EncodeBase64(const std::string& text)
+{
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string encoded;
+    encoded.reserve(((text.size() + 2) / 3) * 4);
+    for (size_t index = 0; index < text.size(); index += 3)
+    {
+        const unsigned int a = static_cast<unsigned char>(text[index]);
+        const unsigned int b = index + 1 < text.size()
+            ? static_cast<unsigned char>(text[index + 1]) : 0;
+        const unsigned int c = index + 2 < text.size()
+            ? static_cast<unsigned char>(text[index + 2]) : 0;
+        const unsigned int value = (a << 16) | (b << 8) | c;
+        encoded.push_back(alphabet[(value >> 18) & 0x3F]);
+        encoded.push_back(alphabet[(value >> 12) & 0x3F]);
+        encoded.push_back(index + 1 < text.size() ? alphabet[(value >> 6) & 0x3F] : '=');
+        encoded.push_back(index + 2 < text.size() ? alphabet[value & 0x3F] : '=');
+    }
+    return encoded;
+}
+
 std::filesystem::path PathFromUtf8(const std::string& value)
 {
     if (value.empty())
@@ -1506,6 +1762,7 @@ RequestValues ReadRequestFile(const std::filesystem::path& requestPath)
     }
 
     RequestValues request;
+    request.executionPhase = ReadText(values, "executionPhase", "full");
     request.drawingTargetMode = ReadText(values, "drawingTargetMode", "partOrAssembly");
     request.targetLayer = std::max(0, std::min(256, static_cast<int>(ReadDouble(values, "targetLayer", 0.0))));
     request.layerIndex = std::max(0, static_cast<int>(ReadDouble(values, "layerIndex", 0.0)));
@@ -1515,8 +1772,9 @@ RequestValues ReadRequestFile(const std::filesystem::path& requestPath)
     request.inheritDraftingPreferences = ParseBool(values, "inheritDraftingPreferences", true);
     request.layerLayoutMode = ReadText(values, "layerLayoutMode", "auto");
     request.frontDirectionMode = ReadText(values, "frontDirectionMode", "largestFaceLongestEdge");
-    request.viewSpacing = std::max(5.0, ReadDouble(values, "viewSpacing", 20.0));
-    request.sheetMargin = std::max(5.0, ReadDouble(values, "sheetMargin", 20.0));
+    request.viewSpacing = std::max(5.0, ReadDouble(values, "viewSpacing", 10.0));
+    request.sheetMargin = std::max(5.0, ReadDouble(values, "sheetMargin", 10.0));
+    request.viewGroupSpacing = std::max(0.0, ReadDouble(values, "viewGroupSpacing", 20.0));
     request.firstAngle = ReadText(values, "projection", "first") != "third";
     request.front = ParseBool(values, "front", true);
     request.top = ParseBool(values, "top", false);
@@ -1527,6 +1785,7 @@ RequestValues ReadRequestFile(const std::filesystem::path& requestPath)
     request.backBottom = ParseBool(values, "backBottom", false);
     request.iso = ParseBool(values, "iso", true);
     request.flat = ParseBool(values, "flat", true);
+    request.showHiddenLines = ParseBool(values, "showHiddenLines", false);
     request.autoDimensions = ParseBool(values, "autoDimensions", true);
     request.dimensionOverall = ParseBool(values, "dimensionOverall", true);
     request.dimensionLinear = false;
@@ -1542,14 +1801,6 @@ RequestValues ReadRequestFile(const std::filesystem::path& requestPath)
     request.technicalRequirementIndexed = ParseBool(values, "technicalRequirementIndexed", true);
     request.technicalRequirementCorner = ReadText(values, "technicalRequirementCorner", "TopLeft");
     request.technicalRequirementText = Trim(DecodeBase64OrOriginal(ReadText(values, "technicalRequirementText", "")));
-    if (request.targetLayer > 0)
-    {
-        // Layer drawing is a grouped orthographic drawing, never a sheet-metal flat-pattern drawing.
-        request.flat = false;
-        // Multi-layer sheets need a denser group layout than standalone part
-        // drawings.  Feature 08 uses compact fixed gaps for body groups.
-        request.viewSpacing = std::min(request.viewSpacing, 10.0);
-    }
     if (request.assemblyDrawing)
     {
         request.dimensionAngle = false;
@@ -1792,6 +2043,183 @@ void WriteProgressFile(
     catch (...)
     {
     }
+}
+
+std::wstring TextToWide(const std::string& text);
+
+struct NativeDrawingProgressMonitor
+{
+    std::filesystem::path progressPath;
+    HANDLE stopEvent = nullptr;
+    HANDLE thread = nullptr;
+};
+
+DWORD WINAPI NativeDrawingProgressThread(LPVOID parameter)
+{
+    NativeDrawingProgressMonitor* monitor = static_cast<NativeDrawingProgressMonitor*>(parameter);
+    if (monitor == nullptr)
+        return 1;
+
+    INITCOMMONCONTROLSEX controls = {sizeof(INITCOMMONCONTROLSEX), ICC_PROGRESS_CLASS};
+    InitCommonControlsEx(&controls);
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    const wchar_t* className = L"ZhihuiAutoCreateThreeViewsProgress";
+    WNDCLASSEXW windowClass = {};
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.hInstance = instance;
+    windowClass.lpfnWndProc = DefWindowProcW;
+    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    windowClass.lpszClassName = className;
+    RegisterClassExW(&windowClass);
+
+    RECT workArea = {};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+    const int width = 440;
+    const int height = 160;
+    const int left = workArea.left + std::max(0L, (workArea.right - workArea.left - width) / 2);
+    const int top = workArea.top + std::max(0L, (workArea.bottom - workArea.top - height) / 2);
+    HWND window = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW, className, L"生成图纸",
+        WS_CAPTION | WS_SYSMENU, left, top, width, height,
+        nullptr, nullptr, instance, nullptr);
+    if (window == nullptr)
+        return 2;
+
+    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    HWND heading = CreateWindowExW(
+        0, L"STATIC", L"生成图纸", WS_CHILD | WS_VISIBLE,
+        22, 18, 390, 24, window, nullptr, instance, nullptr);
+    HWND message = CreateWindowExW(
+        0, L"STATIC", L"正在准备生成图纸...", WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS,
+        22, 50, 390, 22, window, nullptr, instance, nullptr);
+    HWND progress = CreateWindowExW(
+        0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE | PBS_MARQUEE,
+        22, 82, 390, 18, window, nullptr, instance, nullptr);
+    SendMessageW(heading, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    SendMessageW(message, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    SendMessageW(progress, PBM_SETMARQUEE, TRUE, 30);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+
+    bool determinate = false;
+    bool done = false;
+    while (!done && WaitForSingleObject(monitor->stopEvent, 0) != WAIT_OBJECT_0)
+    {
+        MSG nativeMessage = {};
+        while (PeekMessageW(&nativeMessage, nullptr, 0, 0, PM_REMOVE))
+        {
+            if (nativeMessage.message == WM_QUIT)
+            {
+                done = true;
+                break;
+            }
+            TranslateMessage(&nativeMessage);
+            DispatchMessageW(&nativeMessage);
+        }
+        if (done || !IsWindow(window))
+            break;
+
+        try
+        {
+            std::ifstream input(monitor->progressPath, std::ios::binary);
+            std::map<std::string, std::string> values;
+            std::string line;
+            while (std::getline(input, line))
+            {
+                const size_t separator = line.find('=');
+                if (separator != std::string::npos)
+                    values[Trim(line.substr(0, separator))] = Trim(line.substr(separator + 1));
+            }
+            const int current = values.count("current") ? std::max(0, std::stoi(values["current"])) : 0;
+            const int total = values.count("total") ? std::max(0, std::stoi(values["total"])) : 0;
+            const std::string progressText = values.count("message")
+                ? values["message"] : std::string("Drawing...");
+            done = values.count("done") && values["done"] == "1";
+
+            std::wstring displayText = TextToWide(progressText);
+            if (total > 0)
+                displayText += L" (" + std::to_wstring(current) + L"/" + std::to_wstring(total) + L")";
+            SetWindowTextW(message, displayText.c_str());
+            if (total > 0)
+            {
+                if (!determinate)
+                {
+                    SendMessageW(progress, PBM_SETMARQUEE, FALSE, 0);
+                    determinate = true;
+                }
+                SendMessageW(progress, PBM_SETRANGE32, 0, total);
+                SendMessageW(progress, PBM_SETPOS, std::min(current, total), 0);
+            }
+            // The drawing engine keeps NX's main UI thread busy.  Force the
+            // progress thread to paint its own controls immediately instead
+            // of waiting for a move/resize event to expose the new content.
+            RedrawWindow(
+                window,
+                nullptr,
+                nullptr,
+                RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+
+        }
+        catch (...)
+        {
+        }
+        MsgWaitForMultipleObjects(
+            1,
+            &monitor->stopEvent,
+            FALSE,
+            150,
+            QS_ALLINPUT);
+    }
+
+    if (IsWindow(window))
+        DestroyWindow(window);
+    UnregisterClassW(className, instance);
+    return 0;
+}
+
+NativeDrawingProgressMonitor* StartDrawingProgressMonitor(const std::filesystem::path& requestPath)
+{
+    auto* monitor = new NativeDrawingProgressMonitor();
+    monitor->progressPath = ProgressPathFromRequest(requestPath);
+    std::error_code ignored;
+    std::filesystem::remove(monitor->progressPath, ignored);
+    monitor->stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (monitor->stopEvent != nullptr)
+        monitor->thread = CreateThread(nullptr, 0, NativeDrawingProgressThread, monitor, 0, nullptr);
+    if (monitor->stopEvent == nullptr || monitor->thread == nullptr)
+    {
+        if (monitor->thread != nullptr) CloseHandle(monitor->thread);
+        if (monitor->stopEvent != nullptr) CloseHandle(monitor->stopEvent);
+        delete monitor;
+        return nullptr;
+    }
+    return monitor;
+}
+
+NativeDrawingProgressMonitor* g_asyncDrawingProgressMonitor = nullptr;
+
+void StopDrawingProgressMonitor(NativeDrawingProgressMonitor* monitor);
+
+void CompleteAutoCreateThreeViewsNativeProgressImpl()
+{
+    NativeDrawingProgressMonitor* monitor = g_asyncDrawingProgressMonitor;
+    g_asyncDrawingProgressMonitor = nullptr;
+    StopDrawingProgressMonitor(monitor);
+}
+
+void StopDrawingProgressMonitor(NativeDrawingProgressMonitor* monitor)
+{
+    if (monitor == nullptr)
+        return;
+    if (WaitForSingleObject(monitor->thread, 1200) == WAIT_TIMEOUT)
+    {
+        SetEvent(monitor->stopEvent);
+        WaitForSingleObject(monitor->thread, 3000);
+    }
+    CloseHandle(monitor->thread);
+    CloseHandle(monitor->stopEvent);
+    delete monitor;
 }
 
 std::string PartResultName(NXOpen::Part* part)
@@ -4585,6 +5013,15 @@ AutoViewDirection ComputeFrontDirection(NXOpen::Part* part, const RequestValues&
 
     if (mode == "manualFaceX")
     {
+        const auto cached = g_manualFrontDirections.find({part == nullptr ? NULL_TAG : part->Tag(), request.targetLayer});
+        if (cached != g_manualFrontDirections.end())
+        {
+            WriteLine(
+                nullptr,
+                "AutoCreateThreeViews: using preselected manual front direction for layer " +
+                    std::to_string(request.targetLayer) + ".");
+            return cached->second;
+        }
         TryComputeFrontDirectionFromSelectedFaceAndX(part, result);
         return result;
     }
@@ -6028,24 +6465,127 @@ NXOpen::Drawings::BaseView* CreateFlatPatternView(
     const NXOpen::Point3d& placement,
     double scaleDenominator)
 {
-    const std::vector<std::string> exactNames = {
-        "Flat Pattern", "Flat-Pattern", "FlatPattern", "FLAT_PATTERN", "ZK", "UNFOLD",
-        "展开图", "展开", "平面展开", "展平"
-    };
-
-    NXOpen::ModelingView* modelView = FindModelingView(part, exactNames, false);
-    if (modelView == nullptr)
+    if (part == nullptr || part->Features() == nullptr ||
+        part->Features()->SheetmetalManager() == nullptr)
     {
-        modelView = FindModelingViewByKeyword(part, {"flat", "pattern", "unfold", "blank", "展开", "展平"});
+        WriteLine(session, "AutoCreateThreeViews: flat pattern view skipped; sheet-metal manager is unavailable.");
+        return nullptr;
     }
 
-    if (modelView == nullptr)
+    // A flat-pattern drafting view must use the exact modeling-view name owned
+    // by an NX FLAT_PATTERN feature.  Guessing names such as "展开图" can select
+    // an ordinary saved modeling view, which looks like another folded view.
+    std::vector<NXOpen::Features::Feature*> features;
+    try
     {
-        WriteLine(session, "AutoCreateThreeViews: flat pattern modeling view not found; fallback to current work view.");
-        modelView = FindModelingView(part, {}, true);
+        features = part->Features()->GetFeatures();
+    }
+    catch (...)
+    {
+        WriteLine(session, "AutoCreateThreeViews: flat pattern view skipped; features could not be enumerated.");
+        return nullptr;
     }
 
-    return CreateBaseViewFromModelingView(session, part, modelView, "flat pattern", placement, scaleDenominator);
+    for (NXOpen::Features::Feature* feature : features)
+    {
+        if (feature == nullptr)
+            continue;
+        NXOpen::Features::FlatPattern* flatPattern =
+            dynamic_cast<NXOpen::Features::FlatPattern*>(NXOpen::NXObjectManager::Get(feature->Tag()));
+        if (flatPattern == nullptr)
+            continue;
+
+        NXOpen::Features::SheetMetal::FlatPatternBuilder* flatPatternBuilder = nullptr;
+        try
+        {
+            flatPatternBuilder =
+                part->Features()->SheetmetalManager()->CreateFlatPatternBuilder(flatPattern);
+            if (flatPatternBuilder == nullptr)
+                continue;
+
+            // In multi-body layer drawing mode a part can own several flat
+            // pattern features.  Only use the feature whose upward-face body
+            // belongs to the layer currently being drawn; otherwise every
+            // layer group would either show the first body's flat pattern or
+            // fail after layer isolation hides that body.
+            if (g_activeTargetLayer > 0)
+            {
+                NXOpen::Face* upwardFace = flatPatternBuilder->UpwardFace() != nullptr
+                    ? flatPatternBuilder->UpwardFace()->Value()
+                    : nullptr;
+                NXOpen::Body* upwardBody = upwardFace != nullptr ? upwardFace->GetBody() : nullptr;
+                const int flatPatternLayer = upwardBody != nullptr ? AskObjectLayer(upwardBody->Tag()) : 0;
+                if (flatPatternLayer != g_activeTargetLayer)
+                {
+                    WriteLine(
+                        session,
+                        "AutoCreateThreeViews: skip flat pattern featureTag=" +
+                            std::to_string(static_cast<unsigned long long>(flatPattern->Tag())) +
+                            ", bodyLayer=" + std::to_string(flatPatternLayer) +
+                            ", targetLayer=" + std::to_string(g_activeTargetLayer) + ".");
+                    flatPatternBuilder->Destroy();
+                    flatPatternBuilder = nullptr;
+                    continue;
+                }
+            }
+
+            const NXOpen::NXString viewNameValue = flatPatternBuilder->FlatPatternViewName();
+            const std::string viewName = Trim(viewNameValue.GetLocaleText());
+            NXOpen::ModelingView* modelView = viewName.empty()
+                ? nullptr
+                : FindModelingView(part, {viewName}, false);
+            if (modelView == nullptr && !viewName.empty())
+            {
+                // Some localized NX versions require matching the displayed
+                // name rather than FindObject's journal identifier.
+                for (NXOpen::ModelingView* candidate : *part->ModelingViews())
+                {
+                    if (candidate != nullptr &&
+                        ToLowerAscii(candidate->Name().GetLocaleText()) == ToLowerAscii(viewName))
+                    {
+                        modelView = candidate;
+                        break;
+                    }
+                }
+            }
+            flatPatternBuilder->Destroy();
+            flatPatternBuilder = nullptr;
+
+            if (modelView != nullptr)
+            {
+                WriteLine(session,
+                    "AutoCreateThreeViews: flat pattern featureTag=" +
+                    std::to_string(static_cast<unsigned long long>(flatPattern->Tag())) +
+                    ", modelingView=" + viewName + ".");
+                return CreateBaseViewFromModelingView(
+                    session, part, modelView, "flat pattern", placement, scaleDenominator);
+            }
+            WriteLine(session,
+                "AutoCreateThreeViews: FLAT_PATTERN feature found but its modeling view was not found, name=" +
+                viewName + ".");
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            if (flatPatternBuilder != nullptr)
+            {
+                try { flatPatternBuilder->Destroy(); } catch (...) {}
+            }
+            WriteLine(session,
+                "AutoCreateThreeViews: inspect FLAT_PATTERN feature failed, NX " +
+                std::to_string(ex.ErrorCode()) + ", " + ex.Message());
+        }
+        catch (...)
+        {
+            if (flatPatternBuilder != nullptr)
+            {
+                try { flatPatternBuilder->Destroy(); } catch (...) {}
+            }
+        }
+    }
+
+    WriteLine(session,
+        "AutoCreateThreeViews: flat pattern view was not created; no valid NX FLAT_PATTERN modeling view exists.");
+    return nullptr;
 }
 
 NXOpen::Drawings::ProjectedView* CreateProjectedView(
@@ -7161,6 +7701,11 @@ bool ProjectedLayoutSizeAtDenominator(
     return width > 0.0 && height > 0.0;
 }
 
+double AuxiliaryViewScaleFactor(const CreatedAuxiliaryView& created)
+{
+    return created.label == "isometric" ? 0.7 : 1.0;
+}
+
 void AddAuxiliaryStackSize(
     const RequestValues& request,
     const std::vector<CreatedAuxiliaryView>& auxiliaryViews,
@@ -7185,6 +7730,10 @@ void AddAuxiliaryStackSize(
         {
             continue;
         }
+
+        const double scaleFactor = AuxiliaryViewScaleFactor(created);
+        size.width *= scaleFactor;
+        size.height *= scaleFactor;
 
         width = std::max(width, size.width);
         if (count > 0)
@@ -7227,6 +7776,10 @@ void AddAuxiliarySideStackSize(
         {
             continue;
         }
+
+        const double scaleFactor = AuxiliaryViewScaleFactor(created);
+        size.width *= scaleFactor;
+        size.height *= scaleFactor;
 
         width = std::max(width, size.width);
         if (count > 0)
@@ -7416,7 +7969,7 @@ void LogScaleFormulaDetails(
 
         LogViewCurveBounds(session, created.label, created.view, false);
 
-        const ViewLayoutSize size = ViewSizeAtDenominator(
+        ViewLayoutSize size = ViewSizeAtDenominator(
             AskCreatedViewSize(created.view, false),
             currentDenominator,
             targetDenominator);
@@ -7424,6 +7977,10 @@ void LogScaleFormulaDetails(
         {
             continue;
         }
+
+        const double scaleFactor = AuxiliaryViewScaleFactor(created);
+        size.width *= scaleFactor;
+        size.height *= scaleFactor;
 
         const std::string corner = EffectiveAuxiliaryCorner(request, created);
         const bool leftSide = corner == "TopLeft" || corner == "BottomLeft";
@@ -7678,6 +8235,54 @@ double ChooseScaleDenominatorFromOneToOneActualSizes(
     return finalDenominator;
 }
 
+void SetAllDrawingViewsToPageScale(
+    NXOpen::Session* session,
+    tag_t drawingTag,
+    double denominator,
+    const std::set<tag_t>& reducedIsometricViewTags)
+{
+    if (drawingTag == NULL_TAG || denominator <= 0.0)
+        return;
+
+    int viewCount = 0;
+    tag_t* viewTags = nullptr;
+    const int askStatus = UF_DRAW_ask_views(drawingTag, &viewCount, &viewTags);
+    if (askStatus != 0 || viewTags == nullptr)
+    {
+        WriteLine(
+            session,
+            "AutoCreateThreeViews: ask drawing views for unified page scale failed, status=" +
+                std::to_string(askStatus) + ".");
+        return;
+    }
+
+    int updatedCount = 0;
+    int reducedIsometricCount = 0;
+    for (int index = 0; index < viewCount; ++index)
+    {
+        if (viewTags[index] == NULL_TAG)
+            continue;
+        const bool reducedIsometric =
+            reducedIsometricViewTags.find(viewTags[index]) != reducedIsometricViewTags.end();
+        const double scale = (reducedIsometric ? 0.7 : 1.0) / denominator;
+        if (UF_DRAW_set_view_scale(viewTags[index], scale) == 0)
+        {
+            ++updatedCount;
+            if (reducedIsometric)
+                ++reducedIsometricCount;
+        }
+    }
+    UF_free(viewTags);
+
+    WriteLine(
+        session,
+        "AutoCreateThreeViews: unified all ordinary views on drawing page to 1:" +
+            std::to_string(static_cast<int>(denominator)) +
+            ", isometricViews=70%, reducedIsometricViews=" +
+            std::to_string(reducedIsometricCount) +
+            ", updatedViews=" + std::to_string(updatedCount) + ".");
+}
+
 void SetExistingBaseViewScale(
     NXOpen::Session* session,
     NXOpen::Part* part,
@@ -7796,6 +8401,53 @@ void SetAllCreatedViewScales(
         {
             SetExistingProjectedViewScale(session, part, projectedView, numerator, denominator);
         }
+    }
+}
+
+void ApplyHiddenLineDraftingPreference(
+    NXOpen::Session* session,
+    NXOpen::Part* part,
+    bool showHiddenLines)
+{
+    if (part == nullptr || part->SettingsManager() == nullptr)
+    {
+        return;
+    }
+
+    NXOpen::Drafting::PreferencesBuilder* builder = nullptr;
+    try
+    {
+        builder = part->SettingsManager()->CreatePreferencesBuilder();
+        NXOpen::Drawings::ViewStyleHiddenLinesBuilder* hiddenLines =
+            builder->ViewStyle()->ViewStyleHiddenLines();
+        // Hidden-line processing must remain enabled in both modes.  The UI
+        // switch controls visibility only through the hidden-line font.
+        hiddenLines->SetHiddenLine(true);
+        hiddenLines->SetSelfHidden(true);
+        hiddenLines->SetReferenceEdgesOnly(false);
+        hiddenLines->SetFont(
+            showHiddenLines
+                ? NXOpen::Preferences::FontDashed
+                : NXOpen::Preferences::FontInvisible);
+        builder->Commit();
+        builder->Destroy();
+        builder = nullptr;
+        WriteLine(
+            session,
+            std::string("AutoCreateThreeViews: drafting hidden-line font set to ") +
+                (showHiddenLines ? "dashed" : "invisible") +
+                "; processing and self-hidden edges enabled, reference-only disabled.");
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        if (builder != nullptr)
+        {
+            try { builder->Destroy(); } catch (...) {}
+        }
+        WriteLine(
+            session,
+            std::string("AutoCreateThreeViews: apply drafting hidden-line preference failed, NX ") +
+                std::to_string(ex.ErrorCode()) + ": " + ex.Message());
     }
 }
 
@@ -17513,8 +18165,15 @@ void CreateLayerGroupNote(
     {
         return;
     }
-    const LayoutBounds bounds = BoundsForAllViews(projectedViews, auxiliaryViews);
-    if (bounds.maxX <= bounds.minX || bounds.maxY <= bounds.minY)
+    const LayoutBounds groupBounds = BoundsForAllViews(projectedViews, auxiliaryViews);
+    LayoutBounds frontBounds;
+    NXOpen::Drawings::DraftingView* frontView = FindCreatedView(projectedViews, "front");
+    if (frontView == nullptr || !AskViewLayoutBounds(frontView, false, frontBounds))
+    {
+        frontBounds = groupBounds;
+    }
+    if (frontBounds.maxX <= frontBounds.minX ||
+        groupBounds.maxY <= groupBounds.minY)
     {
         return;
     }
@@ -17532,18 +18191,30 @@ void CreateLayerGroupNote(
         {
             builder->Style()->LetteringStyle()->SetGeneralTextFont(noteFont);
         }
-        const std::string noteText = std::string(u8"图层 ") + std::to_string(request.targetLayer);
+        const std::string noteText = BuildLayerGroupNoteText(workPart, request.targetLayer);
+        if (noteText.empty())
+        {
+            builder->Destroy();
+            builder = nullptr;
+            WriteLine(session, "AutoCreateThreeViews: layer group note skipped; configured text is empty.");
+            return;
+        }
         builder->Text()->TextBlock()->SetText(BuildDraftNoteLines(noteText));
         NXOpen::View* nullView = nullptr;
         const NXOpen::Point3d notePoint(
-            (bounds.minX + bounds.maxX) * 0.5,
-            bounds.minY - std::max(5.0, request.viewSpacing * 0.6),
+            (frontBounds.minX + frontBounds.maxX) * 0.5,
+            groupBounds.minY - std::max(5.0, request.viewSpacing * 0.6),
             0.0);
         builder->Origin()->Origin()->SetValue(nullptr, nullView, notePoint);
         builder->Commit();
         builder->Destroy();
         builder = nullptr;
-        WriteLine(session, "AutoCreateThreeViews: created layer group note for layer " + std::to_string(request.targetLayer) + ".");
+        WriteLine(session, "AutoCreateThreeViews: created configurable layer group note for layer " +
+            std::to_string(request.targetLayer) + ", largestBody=" +
+            std::to_string(static_cast<unsigned long long>(
+                FindLargestTargetLayerSolidBody(workPart) != nullptr
+                    ? FindLargestTargetLayerSolidBody(workPart)->Tag()
+                    : NULL_TAG)) + ".");
     }
     catch (const NXOpen::NXException& ex)
     {
@@ -18284,10 +18955,234 @@ void ShowAutoCreateThreeViewsRunResults()
     }
 }
 
+namespace
+{
+struct NativeAssemblyFilterMetadata
+{
+    bool assembly = false;
+    bool hasDrawing = false;
+    bool sheetMetal = false;
+    bool hidden = false;
+    std::string keywordText;
+    std::map<std::string, std::string> attributes;
+};
+
+std::string FormatNativeAttributeValue(const NXOpen::NXObject::AttributeInformation& attribute)
+{
+    std::ostringstream value;
+    switch (attribute.Type)
+    {
+    case NXOpen::NXObject::AttributeTypeBoolean:
+        return attribute.BooleanValue ? "true" : "false";
+    case NXOpen::NXObject::AttributeTypeInteger:
+        value << attribute.IntegerValue;
+        return value.str();
+    case NXOpen::NXObject::AttributeTypeReal:
+        value << std::setprecision(15) << attribute.RealValue;
+        return value.str();
+    case NXOpen::NXObject::AttributeTypeString:
+        return attribute.StringValue.GetText();
+    case NXOpen::NXObject::AttributeTypeTime:
+        return attribute.TimeValue.GetText();
+    default:
+        return "";
+    }
+}
+
+NativeAssemblyFilterMetadata ClassifyNativeAssemblyOccurrence(tag_t occurrence)
+{
+    NativeAssemblyFilterMetadata metadata;
+    if (occurrence == NULL_TAG)
+        return metadata;
+
+    tag_t* children = nullptr;
+    metadata.assembly = UF_ASSEM_ask_part_occ_children(occurrence, &children) > 0;
+    if (children != nullptr)
+        UF_free(children);
+
+    try
+    {
+        NXOpen::Assemblies::Component* component =
+            dynamic_cast<NXOpen::Assemblies::Component*>(NXOpen::NXObjectManager::Get(occurrence));
+        metadata.hidden = component != nullptr && component->IsBlanked();
+    }
+    catch (...)
+    {
+    }
+
+    try
+    {
+        const tag_t prototypeTag = UF_ASSEM_ask_prototype_of_occ(occurrence);
+        NXOpen::Part* part = dynamic_cast<NXOpen::Part*>(NXOpen::NXObjectManager::Get(prototypeTag));
+        if (part == nullptr)
+            return metadata;
+        if (!part->IsFullyLoaded())
+        {
+            NXOpen::PartLoadStatus* loadStatus = part->LoadFully();
+            delete loadStatus;
+        }
+
+        NXOpen::Drawings::DrawingSheetCollection* sheets = part->DrawingSheets();
+        metadata.hasDrawing = sheets != nullptr && sheets->begin() != sheets->end();
+        metadata.keywordText = std::string(part->Leaf().GetText()) + "\n" + part->FullPath().GetText();
+        try
+        {
+            char componentPartName[MAX_FSPEC_BUFSIZE] = {};
+            char referenceSetName[UF_OBJ_NAME_BUFSIZE] = {};
+            char instanceName[UF_CFI_MAX_FILE_NAME_BUFSIZE] = {};
+            double origin[3] = {};
+            double matrix[9] = {};
+            double transform[4][4] = {};
+            if (UF_ASSEM_ask_component_data(
+                    occurrence, componentPartName, referenceSetName, instanceName,
+                    origin, matrix, transform) == 0)
+            {
+                metadata.keywordText += std::string("\n") + instanceName + "\n" + componentPartName;
+            }
+        }
+        catch (...)
+        {
+        }
+
+        for (const NXOpen::NXObject::AttributeInformation& attribute : part->GetUserAttributes())
+        {
+            if (attribute.Unset)
+                continue;
+            const std::string title = Trim(attribute.Title.GetText());
+            if (title.empty())
+                continue;
+            const std::string value = FormatNativeAttributeValue(attribute);
+            metadata.attributes[title] = value;
+            metadata.keywordText += "\n" + title + "\n" + value;
+        }
+
+        if (part->Bodies() != nullptr && part->Features() != nullptr &&
+            part->Features()->SheetmetalManager() != nullptr)
+        {
+            NXOpen::Features::SheetMetal::SheetmetalManager* manager =
+                part->Features()->SheetmetalManager();
+            for (NXOpen::BodyCollection::iterator it = part->Bodies()->begin();
+                 it != part->Bodies()->end(); ++it)
+            {
+                NXOpen::Body* body = *it;
+                if (body == nullptr || !body->IsSolidBody() || body->IsSheetBody())
+                    continue;
+                try
+                {
+                    if (manager->GetBodyThickness(body) > 1.0e-6)
+                    {
+                        metadata.sheetMetal = true;
+                        break;
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    return metadata;
+}
+
+std::wstring NormalizeNativeFilterText(const std::string& value)
+{
+    std::wstring normalized = TextToWide(Trim(value));
+    if (!normalized.empty())
+        CharLowerBuffW(normalized.data(), static_cast<DWORD>(normalized.size()));
+    return normalized;
+}
+
+bool NativeFilterContains(const std::string& text, const std::string& keyword)
+{
+    const std::wstring expected = NormalizeNativeFilterText(keyword);
+    return !expected.empty() &&
+        NormalizeNativeFilterText(text).find(expected) != std::wstring::npos;
+}
+
+bool NativeFilterHasAttribute(
+    const NativeAssemblyFilterMetadata& metadata,
+    const std::string& attributeName,
+    std::string* actualValue = nullptr)
+{
+    const std::wstring expected = NormalizeNativeFilterText(attributeName);
+    if (expected.empty())
+        return false;
+    for (const auto& attribute : metadata.attributes)
+    {
+        if (NormalizeNativeFilterText(attribute.first) == expected)
+        {
+            if (actualValue != nullptr)
+                *actualValue = attribute.second;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool NativeFilterHasAttributeValue(
+    const NativeAssemblyFilterMetadata& metadata,
+    const std::string& attributeValue)
+{
+    const std::wstring expected = NormalizeNativeFilterText(attributeValue);
+    if (expected.empty())
+        return false;
+    for (const auto& attribute : metadata.attributes)
+    {
+        if (NormalizeNativeFilterText(attribute.second) == expected)
+            return true;
+    }
+    return false;
+}
+
+std::string NativeAssemblyMaterial(const NativeAssemblyFilterMetadata& metadata)
+{
+    static const char* materialAttributeNames[] = {
+        u8"材料", u8"材质", "MATERIAL", "MATERIAL_NAME", "MATL"};
+    for (const char* attributeName : materialAttributeNames)
+    {
+        std::string value;
+        if (NativeFilterHasAttribute(metadata, attributeName, &value) && !Trim(value).empty())
+            return Trim(value);
+    }
+    return "";
+}
+
+std::string NativeAssemblyDrawingNumber(const NativeAssemblyFilterMetadata& metadata)
+{
+    static const char* drawingNumberAttributeNames[] = {
+        u8"图号", u8"零件图号", "PART_NO", "PART_NUMBER", "ITEM_NO", "DRAWING_NO"};
+    for (const char* attributeName : drawingNumberAttributeNames)
+    {
+        std::string value;
+        if (NativeFilterHasAttribute(metadata, attributeName, &value) && !Trim(value).empty())
+            return Trim(value);
+    }
+    return "";
+}
+}
+
+void CompleteAutoCreateThreeViewsNativeProgress()
+{
+    CompleteAutoCreateThreeViewsNativeProgressImpl();
+}
+
 AutoCreateThreeViewsDialog::AutoCreateThreeViewsDialog()
     : ui_(NXOpen::UI::GetUI()),
       session_(NXOpen::Session::GetSession()),
-      dialog_(nullptr)
+      dialog_(nullptr),
+      classicUiRequested_(false),
+      previewRevision_(0),
+      previewWidth_(620),
+      previewHeight_(500),
+      projectionLayoutInitialized_(false),
+      projectionLayoutThirdAngle_(false),
+      assemblyTree_(nullptr),
+      assemblyStateUpdateInProgress_(false),
+      technicalRequirementTree_(nullptr),
+      technicalRequirementSelectedNode_(nullptr)
 {
     const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_AUTOCREATETHREEVIEWS_DLX);
 
@@ -18299,11 +19194,32 @@ AutoCreateThreeViewsDialog::AutoCreateThreeViewsDialog()
 
     }
 
+    // The checked-in DLX remains compatible with the legacy three-button
+    // dialog, but the native workflow executes only from OK.  Adjust the
+    // extracted temporary copy so NX renders its built-in OK/Cancel footer.
+    try
+    {
+        std::ifstream input(dlxPath, std::ios::binary);
+        std::string content((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        const size_t navigation = content.find("id=\"NavigationStyle\"");
+        const size_t selected = navigation == std::string::npos
+            ? std::string::npos
+            : content.find("selected=\"", navigation);
+        if (selected != std::string::npos && selected + 10 < content.size())
+        {
+            content[selected + 10] = '0';
+            std::ofstream output(dlxPath, std::ios::binary | std::ios::trunc);
+            output.write(content.data(), static_cast<std::streamsize>(content.size()));
+        }
+    }
+    catch (...)
+    {
+    }
+
     dialog_ = ui_->CreateDialog(dlxPath.c_str());
     dialog_->AddInitializeHandler(NXOpen::make_callback(this, &AutoCreateThreeViewsDialog::initialize_cb));
     dialog_->AddDialogShownHandler(NXOpen::make_callback(this, &AutoCreateThreeViewsDialog::dialog_shown_cb));
     dialog_->AddUpdateHandler(NXOpen::make_callback(this, &AutoCreateThreeViewsDialog::update_cb));
-    dialog_->AddApplyHandler(NXOpen::make_callback(this, &AutoCreateThreeViewsDialog::apply_cb));
     dialog_->AddOkHandler(NXOpen::make_callback(this, &AutoCreateThreeViewsDialog::ok_cb));
 }
 
@@ -18318,6 +19234,39 @@ NXOpen::BlockStyler::BlockDialog::DialogResponse AutoCreateThreeViewsDialog::Lau
     return dialog_->Launch();
 }
 
+bool AutoCreateThreeViewsDialog::ClassicUiRequested() const
+{
+    return classicUiRequested_;
+}
+
+bool AutoCreateThreeViewsDialog::HasPendingDrawing() const
+{
+    return !pendingRequestPath_.empty();
+}
+
+int AutoCreateThreeViewsDialog::ExecutePendingDrawing()
+{
+    if (pendingRequestPath_.empty())
+        return 0;
+
+    const std::filesystem::path requestPath = pendingRequestPath_;
+    pendingRequestPath_.clear();
+    CompleteAutoCreateThreeViewsNativeProgress();
+    g_asyncDrawingProgressMonitor = StartDrawingProgressMonitor(requestPath);
+    WriteLine(
+        session_,
+        std::string("AutoCreateThreeViews: native dialog closed; execute pending drawing, progress monitor=") +
+            (g_asyncDrawingProgressMonitor != nullptr ? "native-cpp" : "unavailable") + ".");
+    const int status = ScheduleAutoCreateThreeViewsUiRequest(requestPath);
+    if (status != 0)
+    {
+        CompleteAutoCreateThreeViewsNativeProgress();
+        std::error_code ignored;
+        std::filesystem::remove(requestPath, ignored);
+    }
+    return status;
+}
+
 std::string AutoCreateThreeViewsDialog::GetDialogFilePath() const
 {
     return (CurrentModuleDirectory() / "AutoCreateThreeViews.dlx").string();
@@ -18325,6 +19274,85 @@ std::string AutoCreateThreeViewsDialog::GetDialogFilePath() const
 
 void AutoCreateThreeViewsDialog::initialize_cb()
 {
+    try
+    {
+        if (dialog_ == nullptr || dialog_->TopBlock() == nullptr)
+        {
+            throw NXOpen::NXException::Create(1, "AutoCreateThreeViews native dialog initialization failed.");
+        }
+
+        ConfigureNativeEnums();
+
+        RECT workArea = {};
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0))
+        {
+            const int workWidth = std::max(800L, workArea.right - workArea.left);
+            const int workHeight = std::max(600L, workArea.bottom - workArea.top);
+            previewWidth_ = std::clamp(static_cast<int>(workWidth * 0.46), 430, 720);
+            // Reserve the lower-right area for the view-layout parameters.
+            previewHeight_ = std::clamp(static_cast<int>(workHeight * 0.50), 320, 450);
+        }
+
+        SetString("templateName", u8"自动匹配模板");
+        SetString("projectionMode", u8"第一角法");
+        SetString("mainViewDirection", "largestFaceLongestEdge");
+        SetString("viewSpacing", "10");
+        SetString("sheetMargin", "10");
+        SetString("viewGroupSpacing", "20");
+        SetLogical("classicUi", false);
+        SetLogical("inheritDraftingPreferences", true);
+        SetLogical("viewFront", true);
+        // The controls are physical positions in the selector.  In first-angle
+        // projection the top view belongs below the front view and the right
+        // view belongs on its left.
+        SetLogical("viewTop", false);
+        SetLogical("viewBottom", true);
+        SetLogical("viewLeft", true);
+        SetLogical("viewRight", false);
+        SetLogical("viewBack", false);
+        SetLogical("viewBackBottom", false);
+        SetLogical("thirdViewFront", true);
+        SetLogical("thirdViewTop", true);
+        SetLogical("thirdViewBottom", false);
+        SetLogical("thirdViewLeft", false);
+        SetLogical("thirdViewRight", true);
+        SetLogical("thirdViewBack", false);
+        SetLogical("thirdViewBackBottom", false);
+        SetLogical("viewIso", true);
+        SetLogical("viewFlat", false);
+        SetLogical("showHiddenLines", false);
+        SetLogical("dimensionOverall", true);
+        SetLogical("dimensionAngle", true);
+        SetLogical("dimensionHole", true);
+        SetLogical("dimensionHoleLocation", true);
+        SetLogical("dimensionInnerClosedCurve", true);
+        SetLogical("technicalRequirementEnabled", true);
+        SetLogical("technicalRequirementIndexed", true);
+        SetString("technicalRequirementCorner", u8"左上");
+        SetMultilineString("technicalRequirementText", "");
+        ConfigureNativeViewBitmaps();
+        LoadNativeDialogSettings();
+        ApplyNativeProjectionLayout(false);
+        UpdateNativePreview();
+        return;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        WriteLine(session_, std::string("AutoCreateThreeViews: native dialog initialize failed, NX ") +
+            std::to_string(ex.ErrorCode()) + ", " + ex.Message());
+        return;
+    }
+    catch (const std::exception& ex)
+    {
+        WriteLine(session_, std::string("AutoCreateThreeViews: native dialog initialize failed: ") + ex.what());
+        return;
+    }
+    catch (...)
+    {
+        WriteLine(session_, "AutoCreateThreeViews: native dialog initialize failed with unknown exception.");
+        return;
+    }
+
     if (dialog_ == nullptr || dialog_->TopBlock() == nullptr)
     {
         throw NXOpen::NXException::Create(1, "AutoCreateThreeViews dialog initialization failed.");
@@ -18349,6 +19377,49 @@ void AutoCreateThreeViewsDialog::initialize_cb()
 
 void AutoCreateThreeViewsDialog::dialog_shown_cb()
 {
+    try
+    {
+        NXOpen::Part* workPart = session_->Parts()->Work();
+        SetString("currentPart", workPart != nullptr ? workPart->Leaf().GetText() : u8"未打开工作部件");
+        InitializeNativeAssemblyList();
+        PopulateNativeAssemblyList();
+        InitializeTechnicalRequirementLibrary();
+        LoadTechnicalRequirementLibrary();
+
+        RECT workArea = {};
+        HWND dialogWindow = FindNativeDialogWindow();
+        if (dialogWindow != nullptr && SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0))
+        {
+            const int availableWidth = workArea.right - workArea.left;
+            const int availableHeight = workArea.bottom - workArea.top;
+            const int desiredWidth = std::clamp(previewWidth_ + 510, 900, std::max(900, availableWidth - 40));
+            const int desiredHeight = std::clamp(previewHeight_ + 150, 560, std::max(560, availableHeight - 50));
+            const int left = workArea.left + std::max(0, (availableWidth - desiredWidth) / 2);
+            const int top = workArea.top + std::max(0, (availableHeight - desiredHeight) / 2);
+            SetWindowPos(dialogWindow, nullptr, left, top, desiredWidth, desiredHeight,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            WriteLine(session_, "AutoCreateThreeViews: native dialog auto-sized preview=" +
+                std::to_string(previewWidth_) + "x" + std::to_string(previewHeight_) +
+                ", window=" + std::to_string(desiredWidth) + "x" + std::to_string(desiredHeight) + ".");
+        }
+        else
+        {
+            WriteLine(session_, "AutoCreateThreeViews: native dialog auto-size window handle was not found.");
+        }
+        return;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        WriteLine(session_, std::string("AutoCreateThreeViews: native dialog shown callback failed, NX ") +
+            std::to_string(ex.ErrorCode()) + ", " + ex.Message());
+        return;
+    }
+    catch (...)
+    {
+        WriteLine(session_, "AutoCreateThreeViews: native dialog shown callback failed.");
+        return;
+    }
+
     NXOpen::Part* workPart = session_->Parts()->Work();
     if (workPart != nullptr)
     {
@@ -18362,58 +19433,1053 @@ void AutoCreateThreeViewsDialog::dialog_shown_cb()
 
 int AutoCreateThreeViewsDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
-    (void)block;
+    try
+    {
+        if (block != nullptr)
+        {
+            const std::string blockId = block->Name().GetText();
+            static const std::set<std::string> previewBlocks = {
+                "projectionMode", "viewSpacing", "sheetMargin", "viewGroupSpacing", "viewFront", "viewTop",
+                "viewBottom", "viewLeft", "viewRight", "viewBack", "viewBackBottom",
+                "thirdViewFront", "thirdViewTop", "thirdViewBottom", "thirdViewLeft",
+                "thirdViewRight", "thirdViewBack", "thirdViewBackBottom",
+                "viewIso", "viewFlat", "isoCorner", "flatCorner", "auxAutoCompact"};
+            if (previewBlocks.find(blockId) != previewBlocks.end())
+            {
+                if (blockId == "projectionMode")
+                {
+                    ApplyNativeProjectionLayout(true);
+                }
+                UpdateNativePreview();
+            }
+            else if (blockId == "manageTemplates")
+            {
+                const std::filesystem::path templateDirectory = CurrentModuleDirectory().parent_path() / "DATA";
+                ShellExecuteW(nullptr, L"open", templateDirectory.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+            else if (blockId == "openLayerNoteConfig")
+            {
+                if (!OpenLayerGroupNoteConfigFile())
+                {
+                    ShowError(u8"无法打开图层注释配置文件：\n" +
+                        LayerGroupNoteConfigFilePath().u8string());
+                }
+            }
+            else if (blockId == "applyAssemblyFilters")
+            {
+                ApplyNativeAssemblyFilters();
+            }
+            else if (blockId == "refreshAssemblyList")
+            {
+                PopulateNativeAssemblyList();
+            }
+            else if (blockId == "clearAssemblyFilters")
+            {
+                static const char* filterToggles[] = {
+                    "filterRemoveParts", "filterRemoveAssemblies", "filterRemoveWithDrawing",
+                    "filterRemoveWithoutDrawing", "filterRemoveSheetMetal", "filterRemoveNonSheetMetal",
+                    "filterRemoveHidden", "filterRemoveKeywordMatches", "filterRemoveKeywordNonMatches",
+                    "filterRemoveHasAttribute", "filterRemoveMissingAttribute",
+                    "filterRemoveAttributeEquals", "filterRemoveWithoutAttributeValue"};
+                for (const char* filterToggle : filterToggles)
+                    SetLogical(filterToggle, false);
+                SetBlockString("assemblyFilterStatus", "Label", u8"过滤结果：已清除全部过滤选择");
+            }
+            else if (blockId == "technicalAddCategory")
+            {
+                AddTechnicalRequirementCategory();
+            }
+            else if (blockId == "technicalAddDetail")
+            {
+                AddTechnicalRequirementDetail();
+            }
+            else if (blockId == "technicalUpdate")
+            {
+                UpdateTechnicalRequirementNode();
+            }
+            else if (blockId == "technicalDelete")
+            {
+                DeleteTechnicalRequirementNode();
+            }
+            else if (blockId == "technicalSaveLibrary")
+            {
+                SaveTechnicalRequirementLibrary();
+            }
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        WriteLine(session_, std::string("AutoCreateThreeViews: native dialog update failed, NX ") +
+            std::to_string(ex.ErrorCode()) + ", " + ex.Message());
+    }
+    catch (...)
+    {
+        WriteLine(session_, "AutoCreateThreeViews: native dialog update failed.");
+    }
     return 0;
-}
-
-int AutoCreateThreeViewsDialog::apply_cb()
-{
-    return ExecuteCreateDrawing();
 }
 
 int AutoCreateThreeViewsDialog::ok_cb()
 {
+    SaveNativeDialogSettings();
     return ExecuteCreateDrawing();
 }
 
 AutoCreateThreeViewsDialog::DialogValues AutoCreateThreeViewsDialog::ReadDialogValues() const
 {
     DialogValues values;
-    values.templateName = ReadString("templateName", "A3横向-公司标准");
-    values.projectionMode = ReadString("projectionMode", "第三角法");
-    values.mainViewDirection = ReadString("mainViewDirection", "自动识别最大面");
-    values.scaleMode = ReadString("scaleMode", "自动适配优先1:1");
-    values.outputDirectory = ReadString("outputDirectory", "");
-    values.fileNamePattern = ReadString("fileNamePattern", "{图号}_{版本}_{日期}");
-    values.useCurrentWorkPart = ReadLogical("useCurrentWorkPart", true);
+    values.templateName = ReadString("templateName", u8"自动匹配模板");
+    values.projectionMode = ReadString("projectionMode", u8"第一角法");
+    values.mainViewDirection = ReadString("mainViewDirection", "largestFaceLongestEdge");
+    values.scaleMode = "auto";
+    values.outputDirectory.clear();
+    values.fileNamePattern.clear();
+    values.useCurrentWorkPart = true;
     values.createFrontView = ReadLogical("viewFront", true);
-    values.createTopView = ReadLogical("viewTop", true);
-    values.createRightView = ReadLogical("viewRight", true);
+    const bool thirdAngle = values.projectionMode.find(u8"第三") != std::string::npos ||
+        ToLowerAscii(values.projectionMode).find("third") != std::string::npos;
+    if (thirdAngle)
+    {
+        values.createFrontView = ReadLogical("thirdViewFront", true);
+        values.createTopView = ReadLogical("thirdViewTop", true);
+        values.createBottomView = ReadLogical("thirdViewBottom", false);
+        values.createLeftView = ReadLogical("thirdViewLeft", false);
+        values.createRightView = ReadLogical("thirdViewRight", true);
+        values.createBackView = ReadLogical("thirdViewBack", false);
+        values.createBackBottomView = ReadLogical("thirdViewBackBottom", false);
+    }
+    else
+    {
+        values.createTopView = ReadLogical("viewBottom", true);
+        values.createBottomView = ReadLogical("viewTop", false);
+        values.createLeftView = ReadLogical("viewRight", false);
+        values.createRightView = ReadLogical("viewLeft", true);
+        values.createBackView = ReadLogical("viewBack", false);
+        values.createBackBottomView = ReadLogical("viewBackBottom", false);
+    }
     values.createIsoView = ReadLogical("viewIso", true);
     values.createFlatPatternView = ReadLogical("viewFlat", false);
-    values.autoDimensions = ReadLogical("autoDimensions", true);
-    values.exportPdf = ReadLogical("exportPdf", true);
-    values.exportDwg = ReadLogical("exportDwg", true);
+    values.showHiddenLines = ReadLogical("showHiddenLines", false);
+    values.isoCorner = ReadString("isoCorner", u8"左上");
+    values.flatCorner = ReadString("flatCorner", u8"右下");
+    values.auxiliaryAutoCompact = ReadLogical("auxAutoCompact", false);
+    values.dimensionOverall = ReadLogical("dimensionOverall", true);
+    values.dimensionAngle = ReadLogical("dimensionAngle", true);
+    values.dimensionHole = ReadLogical("dimensionHole", true);
+    values.dimensionHoleLocation = ReadLogical("dimensionHoleLocation", true);
+    values.dimensionInnerClosedCurve = ReadLogical("dimensionInnerClosedCurve", true);
+    values.technicalRequirementEnabled = ReadLogical("technicalRequirementEnabled", true);
+    values.technicalRequirementIndexed = ReadLogical("technicalRequirementIndexed", true);
+    values.technicalRequirementCorner = ReadString("technicalRequirementCorner", u8"左上");
+    values.technicalRequirementText = ReadMultilineString("technicalRequirementText");
+    values.autoDimensions = values.dimensionOverall || values.dimensionAngle || values.dimensionHole ||
+        values.dimensionHoleLocation || values.dimensionInnerClosedCurve;
+    values.inheritDraftingPreferences = ReadLogical("inheritDraftingPreferences", true);
+    values.classicUi = ReadLogical("classicUi", false);
+    values.exportPdf = false;
+    values.exportDwg = false;
+    try { values.viewSpacing = std::stod(ReadString("viewSpacing", "10")); }
+    catch (...) { values.viewSpacing = 10.0; }
+    try { values.sheetMargin = std::stod(ReadString("sheetMargin", "10")); }
+    catch (...) { values.sheetMargin = 10.0; }
+    try { values.viewGroupSpacing = std::stod(ReadString("viewGroupSpacing", "20")); }
+    catch (...) { values.viewGroupSpacing = 20.0; }
+    values.viewSpacing = std::max(0.0, values.viewSpacing);
+    values.sheetMargin = std::max(0.0, values.sheetMargin);
+    values.viewGroupSpacing = std::max(0.0, values.viewGroupSpacing);
     return values;
+}
+
+void AutoCreateThreeViewsDialog::LoadNativeDialogSettings()
+{
+    wchar_t localAppData[MAX_PATH] = {};
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+        return;
+    const std::filesystem::path settingsPath =
+        std::filesystem::path(localAppData) / "Zhihui" / "AutoCreateThreeViews" /
+        "native_dialog_settings.ini";
+    std::ifstream input(settingsPath, std::ios::binary);
+    if (!input)
+        return;
+
+    std::map<std::string, std::string> values;
+    std::string line;
+    while (std::getline(input, line))
+    {
+        line = Trim(RemoveUtf8Bom(line));
+        const size_t equal = line.find('=');
+        if (equal != std::string::npos)
+            values[Trim(line.substr(0, equal))] = Trim(line.substr(equal + 1));
+    }
+    const auto text = [&](const char* key, const std::string& fallback) {
+        const auto found = values.find(key);
+        return found == values.end() ? fallback : found->second;
+    };
+    const auto logical = [&](const char* key, bool fallback) {
+        const std::string value = ToLowerAscii(text(key, fallback ? "true" : "false"));
+        return value == "true" || value == "1" || value == "yes" || value == "on";
+    };
+
+    SetString("drawingTargetMode", text("drawingTargetMode", u8"按部件/组件出图"));
+    SetString("layerRange", text("layerRange", "1-256"));
+    SetString("layersPerSheet", text("layersPerSheet", "1"));
+    SetString("templateName", text("templateName", u8"自动匹配模板"));
+    SetLogical("inheritDraftingPreferences", logical("inheritDraftingPreferences", true));
+    SetString("projectionMode", text("projectionMode", u8"第一角法"));
+    SetString("mainViewDirection", text("mainViewDirection", u8"最大平面最长直边"));
+    SetString("viewSpacing", text("viewSpacing", "10"));
+    SetString("viewGroupSpacing", text("viewGroupSpacing", "20"));
+    SetString("sheetMargin", text("sheetMargin", "10"));
+
+    const bool front = logical("viewFront", true);
+    const bool top = logical("viewTop", true);
+    const bool bottom = logical("viewBottom", false);
+    const bool left = logical("viewLeft", false);
+    const bool right = logical("viewRight", true);
+    const bool back = logical("viewBack", false);
+    const bool backBottom = logical("viewBackBottom", false);
+    SetLogical("viewFront", front);
+    SetLogical("viewBottom", top);
+    SetLogical("viewTop", bottom);
+    SetLogical("viewRight", left);
+    SetLogical("viewLeft", right);
+    SetLogical("viewBack", back);
+    SetLogical("viewBackBottom", backBottom);
+    SetLogical("thirdViewFront", front);
+    SetLogical("thirdViewTop", top);
+    SetLogical("thirdViewBottom", bottom);
+    SetLogical("thirdViewLeft", left);
+    SetLogical("thirdViewRight", right);
+    SetLogical("thirdViewBack", back);
+    SetLogical("thirdViewBackBottom", backBottom);
+
+    SetLogical("viewIso", logical("viewIso", true));
+    SetLogical("viewFlat", logical("viewFlat", false));
+    SetLogical("showHiddenLines", logical("showHiddenLines", false));
+    SetString("isoCorner", text("isoCorner", u8"左上"));
+    SetString("flatCorner", text("flatCorner", u8"右下"));
+    SetLogical("auxAutoCompact", logical("auxAutoCompact", false));
+    SetLogical("dimensionOverall", logical("dimensionOverall", true));
+    SetLogical("dimensionAngle", logical("dimensionAngle", true));
+    SetLogical("dimensionHole", logical("dimensionHole", true));
+    SetLogical("dimensionHoleLocation", logical("dimensionHoleLocation", true));
+    SetLogical("dimensionInnerClosedCurve", logical("dimensionInnerClosedCurve", true));
+    SetLogical("technicalRequirementEnabled", logical("technicalRequirementEnabled", true));
+    SetLogical("technicalRequirementIndexed", logical("technicalRequirementIndexed", true));
+    SetString("technicalRequirementCorner", text("technicalRequirementCorner", u8"左上"));
+    SetMultilineString(
+        "technicalRequirementText",
+        DecodeBase64OrOriginal(text("technicalRequirementTextBase64", "")));
+    SetLogical("filterRemoveParts", logical("filterRemoveParts", false));
+    SetLogical("filterRemoveAssemblies", logical("filterRemoveAssemblies", false));
+    SetLogical("filterRemoveWithDrawing", logical("filterRemoveWithDrawing", false));
+    SetLogical("filterRemoveWithoutDrawing", logical("filterRemoveWithoutDrawing", false));
+    SetLogical("filterRemoveSheetMetal", logical("filterRemoveSheetMetal", false));
+    SetLogical("filterRemoveNonSheetMetal", logical("filterRemoveNonSheetMetal", false));
+    SetLogical("filterRemoveHidden", logical("filterRemoveHidden", false));
+    SetLogical("filterRemoveKeywordMatches", logical("filterRemoveKeywordMatches", false));
+    SetLogical("filterRemoveKeywordNonMatches", logical("filterRemoveKeywordNonMatches", false));
+    const std::string legacyKeyword = text("filterKeyword", "");
+    SetString("filterKeywordMatches", text("filterKeywordMatches", legacyKeyword));
+    SetString("filterKeywordNonMatches", text("filterKeywordNonMatches", legacyKeyword));
+    SetLogical("filterRemoveHasAttribute", logical("filterRemoveHasAttribute", false));
+    SetLogical("filterRemoveMissingAttribute", logical("filterRemoveMissingAttribute", false));
+    const std::string legacyAttributeName = text("filterAttributeName", "");
+    const std::string legacyAttributeValue = text("filterAttributeValue", "");
+    SetString("filterHasAttributeName", text("filterHasAttributeName", legacyAttributeName));
+    SetString("filterMissingAttributeName", text("filterMissingAttributeName", legacyAttributeName));
+    SetLogical("filterRemoveAttributeEquals", logical("filterRemoveAttributeEquals", false));
+    SetString("filterEqualsAttributeName", text("filterEqualsAttributeName", legacyAttributeName));
+    SetString("filterEqualsAttributeValue", text("filterEqualsAttributeValue", legacyAttributeValue));
+    SetLogical("filterRemoveWithoutAttributeValue", logical("filterRemoveWithoutAttributeValue", false));
+    SetString("filterMissingAttributeValue", text("filterMissingAttributeValue", legacyAttributeValue));
+    WriteLine(session_, "AutoCreateThreeViews: restored native dialog settings from " + settingsPath.string() + ".");
+}
+
+void AutoCreateThreeViewsDialog::SaveNativeDialogSettings() const
+{
+    wchar_t localAppData[MAX_PATH] = {};
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+        return;
+    const std::filesystem::path settingsDirectory =
+        std::filesystem::path(localAppData) / "Zhihui" / "AutoCreateThreeViews";
+    std::error_code ignored;
+    std::filesystem::create_directories(settingsDirectory, ignored);
+    const std::filesystem::path settingsPath = settingsDirectory / "native_dialog_settings.ini";
+    std::ofstream output(settingsPath, std::ios::binary | std::ios::trunc);
+    if (!output)
+        return;
+
+    const DialogValues values = ReadDialogValues();
+    const auto boolean = [](bool value) { return value ? "true" : "false"; };
+    output << "drawingTargetMode=" << ReadString("drawingTargetMode", u8"按部件/组件出图") << "\n"
+           << "layerRange=" << ReadString("layerRange", "1-256") << "\n"
+           << "layersPerSheet=" << ReadString("layersPerSheet", "1") << "\n"
+           << "templateName=" << values.templateName << "\n"
+           << "inheritDraftingPreferences=" << boolean(values.inheritDraftingPreferences) << "\n"
+           << "projectionMode=" << values.projectionMode << "\n"
+           << "mainViewDirection=" << values.mainViewDirection << "\n"
+           << "viewSpacing=" << ReadString("viewSpacing", "10") << "\n"
+           << "viewGroupSpacing=" << ReadString("viewGroupSpacing", "20") << "\n"
+           << "sheetMargin=" << ReadString("sheetMargin", "10") << "\n"
+           << "showHiddenLines=" << boolean(values.showHiddenLines) << "\n"
+           << "viewFront=" << boolean(values.createFrontView) << "\n"
+           << "viewTop=" << boolean(values.createTopView) << "\n"
+           << "viewBottom=" << boolean(values.createBottomView) << "\n"
+           << "viewLeft=" << boolean(values.createLeftView) << "\n"
+           << "viewRight=" << boolean(values.createRightView) << "\n"
+           << "viewBack=" << boolean(values.createBackView) << "\n"
+           << "viewBackBottom=" << boolean(values.createBackBottomView) << "\n"
+           << "viewIso=" << boolean(values.createIsoView) << "\n"
+           << "viewFlat=" << boolean(values.createFlatPatternView) << "\n"
+           << "isoCorner=" << values.isoCorner << "\n"
+           << "flatCorner=" << values.flatCorner << "\n"
+           << "auxAutoCompact=" << boolean(values.auxiliaryAutoCompact) << "\n"
+           << "dimensionOverall=" << boolean(values.dimensionOverall) << "\n"
+           << "dimensionAngle=" << boolean(values.dimensionAngle) << "\n"
+           << "dimensionHole=" << boolean(values.dimensionHole) << "\n"
+           << "dimensionHoleLocation=" << boolean(values.dimensionHoleLocation) << "\n"
+           << "dimensionInnerClosedCurve=" << boolean(values.dimensionInnerClosedCurve) << "\n"
+           << "technicalRequirementEnabled=" << boolean(values.technicalRequirementEnabled) << "\n"
+           << "technicalRequirementIndexed=" << boolean(values.technicalRequirementIndexed) << "\n"
+           << "technicalRequirementCorner=" << values.technicalRequirementCorner << "\n"
+           << "technicalRequirementTextBase64=" << EncodeBase64(values.technicalRequirementText) << "\n"
+           << "filterRemoveParts=" << boolean(ReadLogical("filterRemoveParts", false)) << "\n"
+           << "filterRemoveAssemblies=" << boolean(ReadLogical("filterRemoveAssemblies", false)) << "\n"
+           << "filterRemoveWithDrawing=" << boolean(ReadLogical("filterRemoveWithDrawing", false)) << "\n"
+           << "filterRemoveWithoutDrawing=" << boolean(ReadLogical("filterRemoveWithoutDrawing", false)) << "\n"
+           << "filterRemoveSheetMetal=" << boolean(ReadLogical("filterRemoveSheetMetal", false)) << "\n"
+           << "filterRemoveNonSheetMetal=" << boolean(ReadLogical("filterRemoveNonSheetMetal", false)) << "\n"
+           << "filterRemoveHidden=" << boolean(ReadLogical("filterRemoveHidden", false)) << "\n"
+           << "filterRemoveKeywordMatches=" << boolean(ReadLogical("filterRemoveKeywordMatches", false)) << "\n"
+           << "filterRemoveKeywordNonMatches=" << boolean(ReadLogical("filterRemoveKeywordNonMatches", false)) << "\n"
+           << "filterKeywordMatches=" << ReadString("filterKeywordMatches", "") << "\n"
+           << "filterKeywordNonMatches=" << ReadString("filterKeywordNonMatches", "") << "\n"
+           << "filterRemoveHasAttribute=" << boolean(ReadLogical("filterRemoveHasAttribute", false)) << "\n"
+           << "filterRemoveMissingAttribute=" << boolean(ReadLogical("filterRemoveMissingAttribute", false)) << "\n"
+           << "filterHasAttributeName=" << ReadString("filterHasAttributeName", "") << "\n"
+           << "filterMissingAttributeName=" << ReadString("filterMissingAttributeName", "") << "\n"
+           << "filterRemoveAttributeEquals=" << boolean(ReadLogical("filterRemoveAttributeEquals", false)) << "\n"
+           << "filterEqualsAttributeName=" << ReadString("filterEqualsAttributeName", "") << "\n"
+           << "filterEqualsAttributeValue=" << ReadString("filterEqualsAttributeValue", "") << "\n"
+           << "filterRemoveWithoutAttributeValue=" << boolean(ReadLogical("filterRemoveWithoutAttributeValue", false)) << "\n"
+           << "filterMissingAttributeValue=" << ReadString("filterMissingAttributeValue", "") << "\n";
+    WriteLine(session_, "AutoCreateThreeViews: saved native dialog settings to " + settingsPath.string() + ".");
+}
+
+void AutoCreateThreeViewsDialog::InitializeNativeAssemblyList()
+{
+    if (assemblyTree_ != nullptr)
+        return;
+    NXOpen::BlockStyler::Tree* tree = dynamic_cast<NXOpen::BlockStyler::Tree*>(
+        dialog_->TopBlock()->FindBlock("assemblyPartList"));
+    if (tree == nullptr)
+        return;
+
+    tree->InsertColumn(0, NXOpen::NXString(u8"出图", NXOpen::NXString::UTF8), 55);
+    tree->InsertColumn(1, NXOpen::NXString(u8"部件名称", NXOpen::NXString::UTF8), 330);
+    tree->InsertColumn(2, NXOpen::NXString(u8"图号", NXOpen::NXString::UTF8), 150);
+    tree->InsertColumn(3, NXOpen::NXString(u8"类型", NXOpen::NXString::UTF8), 90);
+    tree->InsertColumn(4, NXOpen::NXString(u8"材料", NXOpen::NXString::UTF8), 140);
+    tree->InsertColumn(5, NXOpen::NXString(u8"状态", NXOpen::NXString::UTF8), 110);
+    tree->SetColumnResizePolicy(1, NXOpen::BlockStyler::Tree::ColumnResizePolicyResizeWithTree);
+    tree->SetSortRootNodes(false);
+    tree->SetOnStateChangeHandler(
+        NXOpen::make_callback(this, &AutoCreateThreeViewsDialog::OnNativeAssemblyStateChange));
+    assemblyTree_ = tree;
+}
+
+void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
+{
+    if (assemblyTree_ == nullptr)
+        return;
+
+    assemblyStateUpdateInProgress_ = true;
+    assemblyTree_->Redraw(false);
+    while (assemblyTree_->RootNode() != nullptr)
+        assemblyTree_->DeleteNode(assemblyTree_->RootNode());
+    assemblyNodes_.clear();
+    assemblyNodeOccurrences_.clear();
+
+    const tag_t displayPart = UF_PART_ask_display_part();
+    const tag_t rootOccurrence = displayPart != NULL_TAG
+        ? UF_ASSEM_ask_root_part_occ(displayPart)
+        : NULL_TAG;
+    int assemblyCount = 0;
+    int ordinaryPartCount = 0;
+    int sheetMetalCount = 0;
+    int drawingCount = 0;
+    int hiddenCount = 0;
+
+    std::function<void(tag_t, NXOpen::BlockStyler::Node*)> appendOccurrence;
+    appendOccurrence = [&](tag_t occurrence, NXOpen::BlockStyler::Node* parentNode)
+    {
+        if (occurrence == NULL_TAG)
+            return;
+
+        tag_t* children = nullptr;
+        const int childCount = UF_ASSEM_ask_part_occ_children(occurrence, &children);
+        const NativeAssemblyFilterMetadata metadata =
+            ClassifyNativeAssemblyOccurrence(occurrence);
+        assemblyCount += metadata.assembly ? 1 : 0;
+        sheetMetalCount += metadata.sheetMetal ? 1 : 0;
+        ordinaryPartCount += !metadata.assembly && !metadata.sheetMetal ? 1 : 0;
+        drawingCount += metadata.hasDrawing ? 1 : 0;
+        hiddenCount += metadata.hidden ? 1 : 0;
+
+        std::string name;
+        try
+        {
+            char partName[MAX_FSPEC_BUFSIZE] = {};
+            char refsetName[UF_OBJ_NAME_BUFSIZE] = {};
+            char instanceName[UF_CFI_MAX_FILE_NAME_BUFSIZE] = {};
+            double origin[3] = {};
+            double matrix[9] = {};
+            double transform[4][4] = {};
+            if (UF_ASSEM_ask_component_data(
+                    occurrence, partName, refsetName, instanceName,
+                    origin, matrix, transform) == 0)
+            {
+                name = Trim(instanceName);
+                if (name.empty() && partName[0] != '\0')
+                    name = std::filesystem::path(partName).stem().string();
+            }
+        }
+        catch (...)
+        {
+        }
+
+        try
+        {
+            const tag_t prototypeTag = UF_ASSEM_ask_prototype_of_occ(occurrence);
+            NXOpen::Part* prototypePart = dynamic_cast<NXOpen::Part*>(
+                NXOpen::NXObjectManager::Get(prototypeTag));
+            if (prototypePart != nullptr)
+            {
+                const std::string nxFileName = prototypePart->Leaf().GetText();
+                if (!nxFileName.empty())
+                    name = nxFileName;
+            }
+        }
+        catch (...)
+        {
+        }
+        if (name.empty())
+            name = std::string(u8"组件 ") + std::to_string(static_cast<unsigned long long>(occurrence));
+
+        NXOpen::BlockStyler::Node* node = assemblyTree_->CreateNode("");
+        assemblyTree_->InsertNode(
+            node, parentNode, nullptr, NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
+        node->SetColumnDisplayText(0, "");
+        // NX 2412 renders state 2 as checked and state 1 as unchecked.
+        node->SetState(2);
+        node->SetColumnDisplayText(1, NXOpen::NXString(name, NXOpen::NXString::UTF8));
+        node->SetColumnDisplayText(2, NXOpen::NXString(
+            NativeAssemblyDrawingNumber(metadata), NXOpen::NXString::UTF8));
+        node->SetColumnDisplayText(3, NXOpen::NXString(
+            metadata.assembly ? u8"装配体" : (metadata.sheetMetal ? u8"钣金" : u8"普通零件"),
+            NXOpen::NXString::UTF8));
+        node->SetColumnDisplayText(4, NXOpen::NXString(
+            NativeAssemblyMaterial(metadata), NXOpen::NXString::UTF8));
+        std::string status;
+        if (metadata.hidden)
+            status += u8"隐藏 ";
+        status += metadata.hasDrawing ? u8"已出图" : u8"未出图";
+        node->SetColumnDisplayText(5, NXOpen::NXString(status, NXOpen::NXString::UTF8));
+        assemblyNodes_.push_back(node);
+        assemblyNodeOccurrences_[node] = occurrence;
+
+        for (int index = 0; index < childCount; ++index)
+            appendOccurrence(children[index], node);
+        if (children != nullptr)
+            UF_free(children);
+    };
+
+    if (rootOccurrence != NULL_TAG)
+        appendOccurrence(rootOccurrence, nullptr);
+
+    for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
+        node->Expand(NXOpen::BlockStyler::Node::ExpandOptionExpand);
+
+    assemblyTree_->Redraw(true);
+    assemblyStateUpdateInProgress_ = false;
+    if (!assemblyNodes_.empty())
+    {
+        assemblyTree_->SelectNode(assemblyNodes_.front(), true, true);
+    }
+    SetBlockString("assemblyFilterStatus", "Label",
+        assemblyNodes_.empty()
+            ? std::string(u8"过滤结果：当前部件不是装配，按当前工作部件出图")
+            : std::string(u8"过滤结果：已加载 ") + std::to_string(assemblyNodes_.size()) +
+                u8" 个：装配 " + std::to_string(assemblyCount) +
+                u8"，普通零件 " + std::to_string(ordinaryPartCount) +
+                u8"，钣金 " + std::to_string(sheetMetalCount) + u8"；默认全部勾选");
+    WriteLine(session_, "AutoCreateThreeViews: native assembly list populated, rows=" +
+        std::to_string(assemblyNodes_.size()) +
+        ", assemblies=" + std::to_string(assemblyCount) +
+        ", ordinaryParts=" + std::to_string(ordinaryPartCount) +
+        ", sheetMetal=" + std::to_string(sheetMetalCount) +
+        ", withDrawing=" + std::to_string(drawingCount) +
+        ", hidden=" + std::to_string(hiddenCount) + ".");
+}
+
+void AutoCreateThreeViewsDialog::OnNativeAssemblyStateChange(
+    NXOpen::BlockStyler::Tree*,
+    NXOpen::BlockStyler::Node* node,
+    int)
+{
+    if (node == nullptr || assemblyStateUpdateInProgress_)
+        return;
+    node->SetState(node->GetState() == 2 ? 1 : 2);
+    int checked = 0;
+    for (NXOpen::BlockStyler::Node* row : assemblyNodes_)
+        checked += row != nullptr && row->GetState() == 2 ? 1 : 0;
+    SetBlockString("assemblyFilterStatus", "Label",
+        std::string(u8"过滤结果：已勾选 ") + std::to_string(checked) + u8" 个出图组件");
+}
+
+std::vector<tag_t> AutoCreateThreeViewsDialog::SelectedNativeOccurrenceTags() const
+{
+    std::vector<tag_t> tags;
+    if (assemblyTree_ == nullptr)
+        return tags;
+    for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
+    {
+        if (node == nullptr || node->GetState() != 2)
+            continue;
+        const auto found = assemblyNodeOccurrences_.find(node);
+        if (found != assemblyNodeOccurrences_.end() && found->second != NULL_TAG &&
+            std::find(tags.begin(), tags.end(), found->second) == tags.end())
+            tags.push_back(found->second);
+    }
+    return tags;
+}
+
+void AutoCreateThreeViewsDialog::ApplyNativeAssemblyFilters()
+{
+    if (assemblyTree_ == nullptr)
+        return;
+
+    const bool removeParts = ReadLogical("filterRemoveParts", false);
+    const bool removeAssemblies = ReadLogical("filterRemoveAssemblies", false);
+    const bool removeWithDrawing = ReadLogical("filterRemoveWithDrawing", false);
+    const bool removeWithoutDrawing = ReadLogical("filterRemoveWithoutDrawing", false);
+    const bool removeSheetMetal = ReadLogical("filterRemoveSheetMetal", false);
+    const bool removeNonSheetMetal = ReadLogical("filterRemoveNonSheetMetal", false);
+    const bool removeHidden = ReadLogical("filterRemoveHidden", false);
+    const bool removeKeywordMatches = ReadLogical("filterRemoveKeywordMatches", false);
+    const bool removeKeywordNonMatches = ReadLogical("filterRemoveKeywordNonMatches", false);
+    const bool removeHasAttribute = ReadLogical("filterRemoveHasAttribute", false);
+    const bool removeMissingAttribute = ReadLogical("filterRemoveMissingAttribute", false);
+    const bool removeAttributeEquals = ReadLogical("filterRemoveAttributeEquals", false);
+    const bool removeWithoutAttributeValue =
+        ReadLogical("filterRemoveWithoutAttributeValue", false);
+    const std::string keywordMatches = Trim(ReadString("filterKeywordMatches", ""));
+    const std::string keywordNonMatches = Trim(ReadString("filterKeywordNonMatches", ""));
+    const std::string hasAttributeName = Trim(ReadString("filterHasAttributeName", ""));
+    const std::string missingAttributeName = Trim(ReadString("filterMissingAttributeName", ""));
+    const std::string equalsAttributeName = Trim(ReadString("filterEqualsAttributeName", ""));
+    const std::string equalsAttributeValue = Trim(ReadString("filterEqualsAttributeValue", ""));
+    const std::string missingAttributeValue = Trim(ReadString("filterMissingAttributeValue", ""));
+
+    if (removeKeywordMatches && keywordMatches.empty())
+    {
+        ShowInfo(u8"请为“移除包含关键词”输入关键词。");
+        return;
+    }
+    if (removeKeywordNonMatches && keywordNonMatches.empty())
+    {
+        ShowInfo(u8"请为“移除不包含关键词”输入关键词。");
+        return;
+    }
+    if (removeHasAttribute && hasAttributeName.empty())
+    {
+        ShowInfo(u8"请为“移除具有属性名”输入属性名。");
+        return;
+    }
+    if (removeMissingAttribute && missingAttributeName.empty())
+    {
+        ShowInfo(u8"请为“移除缺少属性名”输入属性名。");
+        return;
+    }
+    if (removeAttributeEquals &&
+        (equalsAttributeName.empty() || equalsAttributeValue.empty()))
+    {
+        ShowInfo(u8"请为“移除属性名和值相等”同时输入属性名和属性值。");
+        return;
+    }
+    if (removeWithoutAttributeValue && missingAttributeValue.empty())
+    {
+        ShowInfo(u8"请为“移除没有该属性值”输入属性值。");
+        return;
+    }
+    const int ruleCount =
+        static_cast<int>(removeParts) + static_cast<int>(removeAssemblies) +
+        static_cast<int>(removeWithDrawing) + static_cast<int>(removeWithoutDrawing) +
+        static_cast<int>(removeSheetMetal) + static_cast<int>(removeNonSheetMetal) +
+        static_cast<int>(removeHidden) + static_cast<int>(removeKeywordMatches) +
+        static_cast<int>(removeKeywordNonMatches) + static_cast<int>(removeHasAttribute) +
+        static_cast<int>(removeMissingAttribute) + static_cast<int>(removeAttributeEquals) +
+        static_cast<int>(removeWithoutAttributeValue);
+    if (ruleCount == 0)
+    {
+        assemblyStateUpdateInProgress_ = true;
+        assemblyTree_->Redraw(false);
+        int restored = 0;
+        for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
+        {
+            if (node == nullptr)
+                continue;
+            node->SetState(2);
+            ++restored;
+        }
+        assemblyTree_->Redraw(true);
+        assemblyStateUpdateInProgress_ = false;
+        SetBlockString("assemblyFilterStatus", "Label",
+            std::string(u8"过滤结果：未选择过滤条件，已恢复全部 ") +
+                std::to_string(restored) + u8" 个出图勾选");
+        WriteLine(session_, "AutoCreateThreeViews: no native assembly filter selected; restored all " +
+            std::to_string(restored) + " rows.");
+        return;
+    }
+
+    int removed = 0;
+    int kept = 0;
+    int detectedWithDrawing = 0;
+    int detectedWithoutDrawing = 0;
+    int keywordMatchesHitCount = 0;
+    int keywordNonMatchesHitCount = 0;
+    assemblyStateUpdateInProgress_ = true;
+    assemblyTree_->Redraw(false);
+    // Every application starts from a clean, fully checked list. Previous
+    // filter results and manual states do not participate in this calculation.
+    for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
+    {
+        if (node != nullptr)
+            node->SetState(2);
+    }
+    for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
+    {
+        const auto occurrenceFound = assemblyNodeOccurrences_.find(node);
+        if (occurrenceFound == assemblyNodeOccurrences_.end())
+            continue;
+        const tag_t occurrence = occurrenceFound->second;
+        NativeAssemblyFilterMetadata metadata =
+            ClassifyNativeAssemblyOccurrence(occurrence);
+        // Keyword rules are intentionally limited to the displayed part name.
+        // Other visible columns have their own dedicated filter rules.
+        std::string visiblePartName;
+        try
+        {
+            visiblePartName = node->GetColumnDisplayText(1).GetText();
+        }
+        catch (...)
+        {
+        }
+        detectedWithDrawing += metadata.hasDrawing ? 1 : 0;
+        detectedWithoutDrawing += metadata.hasDrawing ? 0 : 1;
+        const bool hasAttribute =
+            NativeFilterHasAttribute(metadata, hasAttributeName);
+        const bool missingAttribute =
+            !NativeFilterHasAttribute(metadata, missingAttributeName);
+        std::string actualEqualsAttributeValue;
+        const bool hasEqualsAttribute = NativeFilterHasAttribute(
+            metadata, equalsAttributeName, &actualEqualsAttributeValue);
+        const bool attributeEquals =
+            hasEqualsAttribute &&
+            NormalizeNativeFilterText(actualEqualsAttributeValue) ==
+                NormalizeNativeFilterText(equalsAttributeValue);
+        const bool hasAttributeValue =
+            NativeFilterHasAttributeValue(metadata, missingAttributeValue);
+        const bool keywordMatchesHit =
+            removeKeywordMatches && NativeFilterContains(visiblePartName, keywordMatches);
+        const bool keywordNonMatchesHit =
+            removeKeywordNonMatches && !NativeFilterContains(visiblePartName, keywordNonMatches);
+        keywordMatchesHitCount += keywordMatchesHit ? 1 : 0;
+        keywordNonMatchesHitCount += keywordNonMatchesHit ? 1 : 0;
+        const bool remove =
+            (removeParts && !metadata.assembly && !metadata.sheetMetal) ||
+            (removeAssemblies && metadata.assembly) ||
+            (removeWithDrawing && metadata.hasDrawing) ||
+            (removeWithoutDrawing && !metadata.hasDrawing) ||
+            (removeSheetMetal && metadata.sheetMetal) ||
+            (removeNonSheetMetal && !metadata.sheetMetal) ||
+            (removeHidden && metadata.hidden) ||
+            keywordMatchesHit ||
+            keywordNonMatchesHit ||
+            (removeHasAttribute && hasAttribute) ||
+            (removeMissingAttribute && missingAttribute) ||
+            (removeAttributeEquals && attributeEquals) ||
+            (removeWithoutAttributeValue && !hasAttributeValue);
+        node->SetState(remove ? 1 : 2);
+        if (remove)
+            ++removed;
+        else
+            ++kept;
+    }
+    assemblyTree_->Redraw(true);
+    assemblyStateUpdateInProgress_ = false;
+    SetBlockString("assemblyFilterStatus", "Label",
+        std::string(u8"过滤结果：按 ") + std::to_string(ruleCount) + u8" 项条件取消 " +
+        std::to_string(removed) + u8" 个，勾选 " + std::to_string(kept) + u8" 个出图组件");
+    WriteLine(session_, "AutoCreateThreeViews: native assembly filters removed=" +
+        std::to_string(removed) + ", kept=" + std::to_string(kept) +
+        ", withDrawing=" + std::to_string(detectedWithDrawing) +
+        ", withoutDrawing=" + std::to_string(detectedWithoutDrawing) +
+        ", keywordMatches=[" + keywordMatches + "] hits=" +
+            std::to_string(keywordMatchesHitCount) +
+        ", keywordNonMatches=[" + keywordNonMatches + "] hits=" +
+            std::to_string(keywordNonMatchesHitCount) + ".");
+    if (kept == 0)
+    {
+        ShowInfo(
+            std::string(u8"过滤已执行，但没有保留任何出图组件。\n\n") +
+            u8"当前列表统计：\n已出图：" + std::to_string(detectedWithDrawing) +
+            u8" 个\n未出图：" + std::to_string(detectedWithoutDrawing) +
+            u8" 个\n\n请检查是否选择了覆盖全部组件的过滤条件。");
+    }
+}
+
+namespace
+{
+std::string NormalizeTechnicalRequirementEntry(const std::string& value)
+{
+    std::string normalized = value;
+    std::replace(normalized.begin(), normalized.end(), '\r', ' ');
+    std::replace(normalized.begin(), normalized.end(), '\n', ' ');
+    size_t duplicateSpace = std::string::npos;
+    while ((duplicateSpace = normalized.find("  ")) != std::string::npos)
+        normalized.replace(duplicateSpace, 2, " ");
+    return Trim(normalized);
+}
+}
+
+void AutoCreateThreeViewsDialog::InitializeTechnicalRequirementLibrary()
+{
+    if (technicalRequirementTree_ != nullptr)
+        return;
+    NXOpen::BlockStyler::Tree* tree = dynamic_cast<NXOpen::BlockStyler::Tree*>(
+        dialog_->TopBlock()->FindBlock("technicalRequirementTree"));
+    if (tree == nullptr)
+        return;
+    tree->InsertColumn(0, NXOpen::NXString(u8"技术要求分类与明细", NXOpen::NXString::UTF8), 720);
+    tree->SetColumnResizePolicy(0, NXOpen::BlockStyler::Tree::ColumnResizePolicyResizeWithTree);
+    tree->SetSortRootNodes(false);
+    tree->SetOnSelectHandler(
+        NXOpen::make_callback(this, &AutoCreateThreeViewsDialog::OnTechnicalRequirementSelect));
+    technicalRequirementTree_ = tree;
+}
+
+void AutoCreateThreeViewsDialog::LoadTechnicalRequirementLibrary()
+{
+    if (technicalRequirementTree_ == nullptr)
+        return;
+
+    technicalRequirementTree_->Redraw(false);
+    while (technicalRequirementTree_->RootNode() != nullptr)
+        technicalRequirementTree_->DeleteNode(technicalRequirementTree_->RootNode());
+    technicalRequirementSelectedNode_ = nullptr;
+    technicalRequirementDetailNodes_.clear();
+
+    const std::filesystem::path userPath =
+        std::filesystem::path(L"D:\\UG智辉钣金插件\\config\\technical_requirements.user.cfg");
+    const std::filesystem::path defaultPath = CurrentModuleDirectory() /
+        "AutoCreateThreeViewsUI" / "Assets" / "technical_requirements.default.cfg";
+    const std::filesystem::path libraryPath = std::filesystem::exists(userPath) ? userPath : defaultPath;
+    std::ifstream input(libraryPath, std::ios::binary);
+    if (!input)
+    {
+        technicalRequirementTree_->Redraw(true);
+        WriteLine(session_, "AutoCreateThreeViews: technical requirement library was not found: " +
+            libraryPath.string());
+        return;
+    }
+
+    bool insideLibrary = false;
+    NXOpen::BlockStyler::Node* currentCategory = nullptr;
+    std::string line;
+    while (std::getline(input, line))
+    {
+        line = Trim(RemoveUtf8Bom(line));
+        if (line.empty() || line[0] == '!')
+            continue;
+        if (ToLowerAscii(line) == ToLowerAscii("KEY_WORD TECHNICAL_NOTES_START"))
+        {
+            insideLibrary = true;
+            continue;
+        }
+        if (ToLowerAscii(line) == ToLowerAscii("KEY_WORD TECHNICAL_NOTES_END"))
+            break;
+        if (!insideLibrary)
+            continue;
+
+        const bool detail = line[0] == '+';
+        const std::string nodeText = Trim(detail ? line.substr(1) : line);
+        if (nodeText.empty())
+            continue;
+        if (!detail)
+        {
+            currentCategory = technicalRequirementTree_->CreateNode(
+                NXOpen::NXString(nodeText.c_str(), NXOpen::NXString::UTF8));
+            technicalRequirementTree_->InsertNode(
+                currentCategory, nullptr, nullptr,
+                NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
+            currentCategory->SetColumnDisplayText(
+                0, NXOpen::NXString(nodeText.c_str(), NXOpen::NXString::UTF8));
+            technicalRequirementDetailNodes_[currentCategory] = false;
+        }
+        else if (currentCategory != nullptr)
+        {
+            NXOpen::BlockStyler::Node* detailNode = technicalRequirementTree_->CreateNode(
+                NXOpen::NXString(nodeText.c_str(), NXOpen::NXString::UTF8));
+            technicalRequirementTree_->InsertNode(
+                detailNode, currentCategory, nullptr,
+                NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
+            detailNode->SetColumnDisplayText(
+                0, NXOpen::NXString(nodeText.c_str(), NXOpen::NXString::UTF8));
+            technicalRequirementDetailNodes_[detailNode] = true;
+        }
+    }
+    technicalRequirementTree_->Redraw(true);
+    WriteLine(session_, "AutoCreateThreeViews: loaded technical requirement library from " +
+        libraryPath.string() + ".");
+}
+
+void AutoCreateThreeViewsDialog::SaveTechnicalRequirementLibrary()
+{
+    if (technicalRequirementTree_ == nullptr)
+        return;
+    const std::filesystem::path userPath =
+        std::filesystem::path(L"D:\\UG智辉钣金插件\\config\\technical_requirements.user.cfg");
+    std::error_code ignored;
+    std::filesystem::create_directories(userPath.parent_path(), ignored);
+    std::ofstream output(userPath, std::ios::binary | std::ios::trunc);
+    if (!output)
+        throw std::runtime_error(u8"无法写入技术要求库：" + userPath.string());
+    output << "KEY_WORD TECHNICAL_NOTES_START\n";
+    for (NXOpen::BlockStyler::Node* category = technicalRequirementTree_->RootNode();
+         category != nullptr;
+         category = category->NextSiblingNode())
+    {
+        const std::string categoryText = Trim(category->GetColumnDisplayText(0).GetText());
+        if (categoryText.empty())
+            continue;
+        output << categoryText << "\n";
+        for (NXOpen::BlockStyler::Node* detail = category->FirstChildNode();
+             detail != nullptr;
+             detail = detail->NextSiblingNode())
+        {
+            const std::string detailText = Trim(detail->GetColumnDisplayText(0).GetText());
+            if (!detailText.empty())
+                output << "+" << detailText << "\n";
+        }
+    }
+    output << "KEY_WORD TECHNICAL_NOTES_END\n";
+    output.close();
+    if (!output)
+        throw std::runtime_error(u8"技术要求库写入失败：" + userPath.string());
+    if (ui_ != nullptr && ui_->NXMessageBox() != nullptr)
+    {
+        std::string message = u8"技术要求库已保存。\n";
+        message += userPath.u8string();
+        ui_->NXMessageBox()->Show(
+            NXOpen::NXString(u8"技术要求库", NXOpen::NXString::UTF8),
+            NXOpen::NXMessageBox::DialogTypeInformation,
+            NXOpen::NXString(message.c_str(), NXOpen::NXString::UTF8));
+    }
+}
+
+void AutoCreateThreeViewsDialog::OnTechnicalRequirementSelect(
+    NXOpen::BlockStyler::Tree*,
+    NXOpen::BlockStyler::Node* node,
+    int,
+    bool selected)
+{
+    if (!selected || node == nullptr)
+        return;
+    technicalRequirementSelectedNode_ = node;
+    const std::string text = Trim(node->GetColumnDisplayText(0).GetText());
+    SetMultilineString("technicalRequirementEdit", text);
+    const auto found = technicalRequirementDetailNodes_.find(node);
+    if (found != technicalRequirementDetailNodes_.end() && found->second)
+        AppendTechnicalRequirement(text);
+}
+
+void AutoCreateThreeViewsDialog::AppendTechnicalRequirement(const std::string& text)
+{
+    const std::string note = Trim(text);
+    if (note.empty())
+        return;
+    std::vector<std::string> details;
+    std::istringstream input(ReadMultilineString("technicalRequirementText"));
+    std::string line;
+    auto withoutIndex = [](const std::string& value) {
+        const std::string trimmed = Trim(value);
+        const size_t dot = trimmed.find('.');
+        if (dot == std::string::npos || dot == 0)
+            return trimmed;
+        if (std::all_of(trimmed.begin(), trimmed.begin() + static_cast<std::ptrdiff_t>(dot),
+                [](unsigned char ch) { return std::isdigit(ch) != 0; }))
+            return Trim(trimmed.substr(dot + 1));
+        return trimmed;
+    };
+    while (std::getline(input, line))
+    {
+        line = Trim(line);
+        if (line.empty() || line == u8"技术要求")
+            continue;
+        if (withoutIndex(line) == note)
+            return;
+        details.push_back(line);
+    }
+    details.push_back(ReadLogical("technicalRequirementIndexed", true)
+        ? std::to_string(details.size() + 1) + ". " + note
+        : note);
+    std::ostringstream output;
+    output << u8"技术要求";
+    for (const std::string& detail : details)
+        output << "\n" << detail;
+    SetMultilineString("technicalRequirementText", output.str());
+    SetLogical("technicalRequirementEnabled", true);
+}
+
+void AutoCreateThreeViewsDialog::AddTechnicalRequirementCategory()
+{
+    if (technicalRequirementTree_ == nullptr)
+        return;
+    const std::string text = NormalizeTechnicalRequirementEntry(
+        ReadMultilineString("technicalRequirementEdit"));
+    if (text.empty())
+        return;
+    NXOpen::BlockStyler::Node* node = technicalRequirementTree_->CreateNode(
+        NXOpen::NXString(text.c_str(), NXOpen::NXString::UTF8));
+    technicalRequirementTree_->InsertNode(
+        node, nullptr, nullptr, NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
+    node->SetColumnDisplayText(0, NXOpen::NXString(text.c_str(), NXOpen::NXString::UTF8));
+    technicalRequirementDetailNodes_[node] = false;
+    technicalRequirementTree_->SelectNode(node, true, true);
+}
+
+void AutoCreateThreeViewsDialog::AddTechnicalRequirementDetail()
+{
+    if (technicalRequirementTree_ == nullptr)
+        return;
+    const std::string text = NormalizeTechnicalRequirementEntry(
+        ReadMultilineString("technicalRequirementEdit"));
+    if (text.empty())
+        return;
+    NXOpen::BlockStyler::Node* category = technicalRequirementSelectedNode_;
+    if (category != nullptr && technicalRequirementDetailNodes_[category])
+        category = category->ParentNode();
+    if (category == nullptr)
+        category = technicalRequirementTree_->RootNode();
+    if (category == nullptr)
+    {
+        if (ui_ != nullptr && ui_->NXMessageBox() != nullptr)
+            ui_->NXMessageBox()->Show(
+                NXOpen::NXString(u8"技术要求库", NXOpen::NXString::UTF8),
+                NXOpen::NXMessageBox::DialogTypeInformation,
+                NXOpen::NXString(u8"请先新增或选择一个分类。", NXOpen::NXString::UTF8));
+        return;
+    }
+    NXOpen::BlockStyler::Node* node = technicalRequirementTree_->CreateNode(
+        NXOpen::NXString(text.c_str(), NXOpen::NXString::UTF8));
+    technicalRequirementTree_->InsertNode(
+        node, category, nullptr, NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
+    node->SetColumnDisplayText(0, NXOpen::NXString(text.c_str(), NXOpen::NXString::UTF8));
+    technicalRequirementDetailNodes_[node] = true;
+    technicalRequirementTree_->SelectNode(node, true, true);
+}
+
+void AutoCreateThreeViewsDialog::UpdateTechnicalRequirementNode()
+{
+    if (technicalRequirementSelectedNode_ == nullptr)
+        return;
+    const std::string text = NormalizeTechnicalRequirementEntry(
+        ReadMultilineString("technicalRequirementEdit"));
+    if (text.empty())
+        return;
+    technicalRequirementSelectedNode_->SetColumnDisplayText(
+        0, NXOpen::NXString(text.c_str(), NXOpen::NXString::UTF8));
+}
+
+void AutoCreateThreeViewsDialog::DeleteTechnicalRequirementNode()
+{
+    if (technicalRequirementTree_ == nullptr || technicalRequirementSelectedNode_ == nullptr)
+        return;
+    std::function<void(NXOpen::BlockStyler::Node*)> eraseNodeData;
+    eraseNodeData = [&](NXOpen::BlockStyler::Node* node) {
+        for (NXOpen::BlockStyler::Node* child = node->FirstChildNode(); child != nullptr;)
+        {
+            NXOpen::BlockStyler::Node* next = child->NextSiblingNode();
+            eraseNodeData(child);
+            child = next;
+        }
+        technicalRequirementDetailNodes_.erase(node);
+    };
+    NXOpen::BlockStyler::Node* deleting = technicalRequirementSelectedNode_;
+    eraseNodeData(deleting);
+    technicalRequirementSelectedNode_ = nullptr;
+    SetMultilineString("technicalRequirementEdit", "");
+    technicalRequirementTree_->DeleteNode(deleting);
 }
 
 std::string AutoCreateThreeViewsDialog::ReadString(const char* blockId, const std::string& fallback) const
 {
+    NXOpen::BlockStyler::PropertyList* properties = nullptr;
     try
     {
-        NXOpen::BlockStyler::PropertyList* properties = dialog_->GetBlockProperties(blockId);
+        properties = dialog_->GetBlockProperties(blockId);
         if (properties == nullptr)
         {
             return fallback;
         }
-
-        const NXOpen::NXString value = properties->GetString("Value");
-        delete properties;
-        return value.GetText();
+        try
+        {
+            const NXOpen::NXString value = properties->GetString("Value");
+            delete properties;
+            return value.GetText();
+        }
+        catch (...)
+        {
+            const NXOpen::NXString value = properties->GetEnumAsString("Value");
+            delete properties;
+            return value.GetText();
+        }
     }
     catch (...)
     {
+        delete properties;
         return fallback;
+    }
+}
+
+std::string AutoCreateThreeViewsDialog::ReadMultilineString(const char* blockId) const
+{
+    NXOpen::BlockStyler::PropertyList* properties = nullptr;
+    try
+    {
+        properties = dialog_->GetBlockProperties(blockId);
+        if (properties == nullptr)
+            return "";
+        const std::vector<NXOpen::NXString> lines = properties->GetStrings("Value");
+        delete properties;
+        properties = nullptr;
+        std::ostringstream text;
+        for (size_t index = 0; index < lines.size(); ++index)
+        {
+            if (index > 0)
+                text << "\n";
+            text << lines[index].GetText();
+        }
+        return text.str();
+    }
+    catch (...)
+    {
+        delete properties;
+        return "";
     }
 }
 
@@ -18439,17 +20505,56 @@ bool AutoCreateThreeViewsDialog::ReadLogical(const char* blockId, bool fallback)
 
 void AutoCreateThreeViewsDialog::SetString(const char* blockId, const std::string& value) const
 {
+    NXOpen::BlockStyler::PropertyList* properties = nullptr;
     try
     {
-        NXOpen::BlockStyler::PropertyList* properties = dialog_->GetBlockProperties(blockId);
+        properties = dialog_->GetBlockProperties(blockId);
         if (properties != nullptr)
         {
-            properties->SetString("Value", value.c_str());
+            try
+            {
+                properties->SetString("Value", value.c_str());
+            }
+            catch (...)
+            {
+                properties->SetEnumAsString("Value", value.c_str());
+            }
             delete properties;
         }
     }
     catch (...)
     {
+        delete properties;
+    }
+}
+
+void AutoCreateThreeViewsDialog::SetMultilineString(
+    const char* blockId,
+    const std::string& value) const
+{
+    NXOpen::BlockStyler::PropertyList* properties = nullptr;
+    try
+    {
+        properties = dialog_->GetBlockProperties(blockId);
+        if (properties == nullptr)
+            return;
+        std::vector<NXOpen::NXString> lines;
+        std::istringstream input(value);
+        std::string line;
+        while (std::getline(input, line))
+        {
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            lines.emplace_back(line.c_str(), NXOpen::NXString::UTF8);
+        }
+        if (lines.empty())
+            lines.emplace_back("", NXOpen::NXString::UTF8);
+        properties->SetStrings("Value", lines);
+        delete properties;
+    }
+    catch (...)
+    {
+        delete properties;
     }
 }
 
@@ -18466,6 +20571,664 @@ void AutoCreateThreeViewsDialog::SetLogical(const char* blockId, bool value) con
     }
     catch (...)
     {
+    }
+}
+
+void AutoCreateThreeViewsDialog::SetBlockString(
+    const char* blockId,
+    const char* propertyName,
+    const std::string& value) const
+{
+    try
+    {
+        NXOpen::BlockStyler::PropertyList* properties = dialog_->GetBlockProperties(blockId);
+        if (properties != nullptr)
+        {
+            properties->SetString(propertyName, value.c_str());
+            delete properties;
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+void AutoCreateThreeViewsDialog::ConfigureNativeEnums() const
+{
+    auto configure = [&](const char* blockId,
+                         const std::vector<std::string>& memberTexts,
+                         const std::string& defaultValue,
+                         bool radioBox) {
+        try
+        {
+            NXOpen::BlockStyler::UIBlock* block = dialog_->TopBlock()->FindBlock(blockId);
+            NXOpen::BlockStyler::Enumeration* enumeration =
+                dynamic_cast<NXOpen::BlockStyler::Enumeration*>(block);
+            if (enumeration == nullptr)
+            {
+                WriteLine(session_, std::string("AutoCreateThreeViews: enum block not found: ") + blockId + ".");
+                return;
+            }
+            std::vector<NXOpen::NXString> members;
+            members.reserve(memberTexts.size());
+            for (const std::string& text : memberTexts)
+            {
+                members.emplace_back(text.c_str(), NXOpen::NXString::UTF8);
+            }
+            enumeration->SetEnumMembers(members);
+            enumeration->SetPresentationStyleAsString(radioBox ? "Radio Box" : "Option Menu");
+            if (radioBox)
+            {
+                enumeration->SetLayoutAsString("Horizontal");
+            }
+            enumeration->SetValueAsString(NXOpen::NXString(defaultValue.c_str(), NXOpen::NXString::UTF8));
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            WriteLine(session_, std::string("AutoCreateThreeViews: enum configuration failed for ") +
+                blockId + ", NX " + std::to_string(ex.ErrorCode()) + ", " + ex.Message());
+        }
+    };
+
+    configure("drawingTargetMode", {u8"按部件/组件出图", u8"按部件内图层出图"}, u8"按部件/组件出图", false);
+
+    std::vector<std::string> templateMembers = {u8"自动匹配模板"};
+    const std::filesystem::path templateDirectory =
+        CurrentModuleDirectory().parent_path() / "DATA";
+    std::vector<std::string> discoveredTemplates;
+    std::error_code templateScanError;
+    if (std::filesystem::exists(templateDirectory, templateScanError))
+    {
+        for (const std::filesystem::directory_entry& entry :
+             std::filesystem::directory_iterator(templateDirectory, templateScanError))
+        {
+            if (templateScanError || !entry.is_regular_file())
+                continue;
+            if (ToLowerAscii(entry.path().extension().string()) != ".prt")
+                continue;
+            discoveredTemplates.push_back(entry.path().filename().u8string());
+        }
+    }
+    std::sort(discoveredTemplates.begin(), discoveredTemplates.end(),
+        [](const std::string& left, const std::string& right) {
+            return ToLowerAscii(left) < ToLowerAscii(right);
+        });
+    const std::vector<std::string> preferredTemplates = {
+        "A4-noviews-template.prt",
+        "A4-noviews-template1.prt",
+        "A4-noviews-template-ASM.prt",
+        "A4-noviews-template1-ASM.prt"};
+    for (const std::string& preferred : preferredTemplates)
+    {
+        const auto found = std::find_if(discoveredTemplates.begin(), discoveredTemplates.end(),
+            [&](const std::string& candidate) {
+                return ToLowerAscii(candidate) == ToLowerAscii(preferred);
+            });
+        if (found != discoveredTemplates.end())
+            templateMembers.push_back(*found);
+    }
+    for (const std::string& candidate : discoveredTemplates)
+    {
+        if (std::find(templateMembers.begin(), templateMembers.end(), candidate) == templateMembers.end())
+            templateMembers.push_back(candidate);
+    }
+    if (templateMembers.size() == 1)
+    {
+        templateMembers.insert(templateMembers.end(), preferredTemplates.begin(), preferredTemplates.end());
+    }
+    WriteLine(session_, "AutoCreateThreeViews: discovered " +
+        std::to_string(templateMembers.size() - 1) + " drawing templates in " +
+        templateDirectory.string() + ".");
+    configure("templateName", templateMembers, u8"自动匹配模板", false);
+    configure("projectionMode", {u8"第一角法", u8"第三角法"}, u8"第一角法", true);
+    configure("mainViewDirection", {u8"最大平面最长直边", u8"展开基面展开X向", u8"手选面跟X向", u8"绝对坐标"}, u8"最大平面最长直边", false);
+    configure("isoCorner", {u8"左上", u8"右上", u8"左下", u8"右下"}, u8"左上", true);
+    configure("flatCorner", {u8"左上", u8"右上", u8"左下", u8"右下"}, u8"右下", true);
+    configure("technicalRequirementCorner", {u8"左上", u8"右上", u8"左下", u8"右下"}, u8"左上", true);
+}
+
+void AutoCreateThreeViewsDialog::ConfigureNativeViewBitmaps() const
+{
+    const std::filesystem::path imageDirectory =
+        CurrentModuleDirectory() / "AutoCreateThreeViewsUI" / "Assets" / "ViewButtons";
+    const std::pair<const char*, const char*> images[] = {
+        {"viewTop", "bottom.png"},
+        {"viewLeft", "right.png"},
+        {"viewFront", "front.png"},
+        {"viewRight", "left.png"},
+        {"viewBack", "back.png"},
+        {"viewBottom", "top.png"},
+        {"viewBackBottom", "backbottom.png"},
+        {"thirdViewTop", "top.png"},
+        {"thirdViewLeft", "left.png"},
+        {"thirdViewFront", "front.png"},
+        {"thirdViewRight", "right.png"},
+        {"thirdViewBack", "back.png"},
+        {"thirdViewBottom", "bottom.png"},
+        {"thirdViewBackBottom", "backbottom.png"},
+        {"viewIso", "iso.png"},
+        {"viewFlat", "flat.png"}};
+
+    for (const auto& image : images)
+    {
+        const std::filesystem::path imagePath = imageDirectory / image.second;
+        if (std::filesystem::exists(imagePath))
+        {
+            try
+            {
+                NXOpen::BlockStyler::UIBlock* block = dialog_->TopBlock()->FindBlock(image.first);
+                NXOpen::BlockStyler::Toggle* toggle =
+                    dynamic_cast<NXOpen::BlockStyler::Toggle*>(block);
+                if (toggle != nullptr)
+                {
+                    // Set BitmapOnly through the typed API before changing the
+                    // image.  The generic property API can make NX interpret a
+                    // PNG as a state-image definition and request "*.png.sc".
+                    toggle->SetBitmapOnly(true);
+                    toggle->SetBitmap(imagePath.string().c_str());
+                }
+                else
+                {
+                    SetBlockString(image.first, "Bitmap", imagePath.string());
+                }
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                WriteLine(session_, std::string("AutoCreateThreeViews: selector bitmap update failed for ") +
+                    image.first + ", NX " + std::to_string(ex.ErrorCode()) + ", " + ex.Message());
+            }
+        }
+    }
+}
+
+void AutoCreateThreeViewsDialog::ApplyNativeProjectionLayout(bool preserveSelection)
+{
+    const std::string projection = ReadString("projectionMode", u8"第一角法");
+    const bool newThirdAngle = projection.find(u8"第三") != std::string::npos ||
+        ToLowerAscii(projection).find("third") != std::string::npos;
+
+    if (preserveSelection && projectionLayoutInitialized_ &&
+        newThirdAngle != projectionLayoutThirdAngle_)
+    {
+        const char* sourceFront = projectionLayoutThirdAngle_ ? "thirdViewFront" : "viewFront";
+        const char* sourceTop = projectionLayoutThirdAngle_ ? "thirdViewTop" : "viewBottom";
+        const char* sourceBottom = projectionLayoutThirdAngle_ ? "thirdViewBottom" : "viewTop";
+        const char* sourceLeft = projectionLayoutThirdAngle_ ? "thirdViewLeft" : "viewRight";
+        const char* sourceRight = projectionLayoutThirdAngle_ ? "thirdViewRight" : "viewLeft";
+        const char* sourceBack = projectionLayoutThirdAngle_ ? "thirdViewBack" : "viewBack";
+        const char* sourceBackBottom = projectionLayoutThirdAngle_ ? "thirdViewBackBottom" : "viewBackBottom";
+
+        const bool semanticFront = ReadLogical(sourceFront, true);
+        const bool semanticTop = ReadLogical(sourceTop, true);
+        const bool semanticBottom = ReadLogical(sourceBottom, false);
+        const bool semanticLeft = ReadLogical(sourceLeft, false);
+        const bool semanticRight = ReadLogical(sourceRight, true);
+        const bool semanticBack = ReadLogical(sourceBack, false);
+        const bool semanticBackBottom = ReadLogical(sourceBackBottom, false);
+
+        if (newThirdAngle)
+        {
+            SetLogical("thirdViewFront", semanticFront);
+            SetLogical("thirdViewTop", semanticTop);
+            SetLogical("thirdViewBottom", semanticBottom);
+            SetLogical("thirdViewLeft", semanticLeft);
+            SetLogical("thirdViewRight", semanticRight);
+            SetLogical("thirdViewBack", semanticBack);
+            SetLogical("thirdViewBackBottom", semanticBackBottom);
+        }
+        else
+        {
+            SetLogical("viewFront", semanticFront);
+            SetLogical("viewBottom", semanticTop);
+            SetLogical("viewTop", semanticBottom);
+            SetLogical("viewRight", semanticLeft);
+            SetLogical("viewLeft", semanticRight);
+            SetLogical("viewBack", semanticBack);
+            SetLogical("viewBackBottom", semanticBackBottom);
+        }
+    }
+
+    projectionLayoutInitialized_ = true;
+    projectionLayoutThirdAngle_ = newThirdAngle;
+    if (NXOpen::BlockStyler::UIBlock* firstGroup =
+            dialog_->TopBlock()->FindBlock("viewSelectionGroup"))
+        firstGroup->SetShow(!newThirdAngle);
+    if (NXOpen::BlockStyler::UIBlock* thirdGroup =
+            dialog_->TopBlock()->FindBlock("thirdAngleViewSelectionGroup"))
+        thirdGroup->SetShow(newThirdAngle);
+    WriteLine(session_, std::string("AutoCreateThreeViews: selector projection layout changed to ") +
+        (newThirdAngle ? "third angle." : "first angle."));
+}
+
+std::filesystem::path AutoCreateThreeViewsDialog::BuildNativePreviewBitmap(const DialogValues& values)
+{
+    const int width = previewWidth_;
+    const int height = previewHeight_;
+
+    // Prefer a composited PNG made from the same view assets as the classic
+    // WPF preview.  The hand-drawn bitmap below remains as a safe fallback if
+    // GDI+ or an image asset is unavailable on a customer workstation.
+    ULONG_PTR gdiplusToken = 0;
+    Gdiplus::GdiplusStartupInput gdiplusInput;
+    if (Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusInput, nullptr) == Gdiplus::Ok)
+    {
+        try
+        {
+            const std::filesystem::path imageDirectory =
+                CurrentModuleDirectory() / "AutoCreateThreeViewsUI" / "Assets" / "ViewButtons";
+            wchar_t tempDirectory[MAX_PATH] = {};
+            const DWORD tempLength = GetTempPathW(MAX_PATH, tempDirectory);
+            std::filesystem::path previewDirectory = tempLength > 0
+                ? std::filesystem::path(tempDirectory) / "Zhihui" / "AutoCreateThreeViews"
+                : CurrentModuleDirectory();
+            std::error_code ignored;
+            std::filesystem::create_directories(previewDirectory, ignored);
+            const std::filesystem::path previewPath = previewDirectory /
+                ("native_preview_" + std::to_string(GetCurrentProcessId()) + "_" +
+                    std::to_string(++previewRevision_) + ".png");
+
+            Gdiplus::Bitmap canvas(width, height, PixelFormat32bppARGB);
+            Gdiplus::Graphics graphics(&canvas);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+            graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+            graphics.Clear(Gdiplus::Color(255, 255, 255, 255));
+
+            Gdiplus::Pen borderPen(Gdiplus::Color(255, 70, 85, 95), 1.2f);
+            Gdiplus::Pen lightPen(Gdiplus::Color(255, 125, 140, 150), 1.0f);
+            graphics.DrawRectangle(&borderPen, 10, 10, width - 21, height - 21);
+
+            const int titleX = width - 205;
+            const int titleY = height - 102;
+            const int titleW = 195;
+            const int titleH = 92;
+            graphics.DrawRectangle(&borderPen, titleX, titleY, titleW, titleH);
+            graphics.DrawLine(&lightPen, titleX, titleY + 30, titleX + titleW, titleY + 30);
+            graphics.DrawLine(&lightPen, titleX, titleY + 60, titleX + titleW, titleY + 60);
+            graphics.DrawLine(&lightPen, titleX + 105, titleY, titleX + 105, titleY + titleH);
+
+            Gdiplus::FontFamily fontFamily(L"Microsoft YaHei UI");
+            Gdiplus::Font smallFont(&fontFamily, 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+            Gdiplus::Font titleFont(&fontFamily, 11.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+            Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 25, 35, 45));
+            graphics.DrawString(L"自动三视图", -1, &titleFont,
+                Gdiplus::PointF(static_cast<Gdiplus::REAL>(titleX + 8), static_cast<Gdiplus::REAL>(titleY + 7)), &textBrush);
+            graphics.DrawString(L"比例  自动适配", -1, &smallFont,
+                Gdiplus::PointF(static_cast<Gdiplus::REAL>(titleX + 8), static_cast<Gdiplus::REAL>(titleY + 38)), &textBrush);
+            graphics.DrawString(L"单位  MM", -1, &smallFont,
+                Gdiplus::PointF(static_cast<Gdiplus::REAL>(titleX + 8), static_cast<Gdiplus::REAL>(titleY + 68)), &textBrush);
+
+            auto drawAsset = [&](const wchar_t* fileName, int x, int y, int slotWidth, int slotHeight) {
+                const std::filesystem::path path = imageDirectory / fileName;
+                if (!std::filesystem::exists(path))
+                {
+                    return false;
+                }
+                Gdiplus::Image image(path.c_str());
+                if (image.GetLastStatus() != Gdiplus::Ok)
+                {
+                    return false;
+                }
+                const UINT sourceWidth = image.GetWidth();
+                const UINT sourceHeight = image.GetHeight();
+                if (sourceWidth == 0 || sourceHeight == 0)
+                {
+                    return false;
+                }
+                const double scale = std::min(
+                    static_cast<double>(slotWidth) / static_cast<double>(sourceWidth),
+                    static_cast<double>(slotHeight) / static_cast<double>(sourceHeight));
+                const int drawWidth = std::max(1, static_cast<int>(std::lround(sourceWidth * scale)));
+                const int drawHeight = std::max(1, static_cast<int>(std::lround(sourceHeight * scale)));
+                const int drawX = x + (slotWidth - drawWidth) / 2;
+                const int drawY = y + (slotHeight - drawHeight) / 2;
+                graphics.DrawImage(&image, drawX, drawY, drawWidth, drawHeight);
+                return true;
+            };
+
+            const bool thirdAngle = values.projectionMode.find(u8"第三") != std::string::npos ||
+                ToLowerAscii(values.projectionMode).find("third") != std::string::npos;
+            // Every orthographic view is positioned by its projection centre.
+            // Keeping fixed centres (instead of chaining image edges) guarantees
+            // exact horizontal/vertical alignment even when icons have very
+            // different aspect ratios.
+            const double layoutScale = std::clamp(
+                std::min(static_cast<double>(width) / 620.0, static_cast<double>(height) / 500.0),
+                0.68,
+                1.12);
+            const int centerX = width / 2;
+            const int centerY = std::max(95, (height - 92) / 2);
+            const int horizontalStep = static_cast<int>(std::lround(135.0 * layoutScale));
+            const int verticalStep = static_cast<int>(std::lround(100.0 * layoutScale));
+            const int regularSlotWidth = static_cast<int>(std::lround(112.0 * layoutScale));
+            const int regularSlotHeight = static_cast<int>(std::lround(68.0 * layoutScale));
+            const int sideSlotWidth = static_cast<int>(std::lround(64.0 * layoutScale));
+            const int sideSlotHeight = regularSlotHeight;
+            struct PreviewView
+            {
+                const wchar_t* fileName;
+                int x;
+                int y;
+                int width;
+                int height;
+            };
+            std::vector<PreviewView> orthographicViews;
+            const auto addView = [&](const wchar_t* fileName, int x, int y, int slotWidth, int slotHeight)
+            {
+                orthographicViews.push_back({fileName, x, y, slotWidth, slotHeight});
+            };
+            if (values.createFrontView)
+            {
+                addView(L"front.png", centerX - regularSlotWidth / 2, centerY - regularSlotHeight / 2,
+                    regularSlotWidth, regularSlotHeight);
+            }
+            if (values.createTopView)
+            {
+                const int y = thirdAngle ? centerY - verticalStep : centerY + verticalStep;
+                addView(L"top.png", centerX - regularSlotWidth / 2, y - regularSlotHeight / 2,
+                    regularSlotWidth, regularSlotHeight);
+            }
+            if (values.createBottomView)
+            {
+                const int y = thirdAngle ? centerY + verticalStep : centerY - verticalStep;
+                addView(L"bottom.png", centerX - regularSlotWidth / 2, y - regularSlotHeight / 2,
+                    regularSlotWidth, regularSlotHeight);
+            }
+            if (values.createLeftView)
+            {
+                const int x = thirdAngle ? centerX - horizontalStep : centerX + horizontalStep;
+                addView(L"left.png", x - sideSlotWidth / 2, centerY - sideSlotHeight / 2,
+                    sideSlotWidth, sideSlotHeight);
+            }
+            if (values.createRightView)
+            {
+                const int x = thirdAngle ? centerX + horizontalStep : centerX - horizontalStep;
+                addView(L"right.png", x - sideSlotWidth / 2, centerY - sideSlotHeight / 2,
+                    sideSlotWidth, sideSlotHeight);
+            }
+            if (values.createBackView)
+            {
+                const int backOffset = static_cast<int>(std::lround(horizontalStep * 1.75));
+                // The rear view occupies the far-right selector position in
+                // both projection conventions; it is not a left/right pair.
+                const int x = centerX + backOffset;
+                addView(L"back.png", x - regularSlotWidth / 2, centerY - regularSlotHeight / 2,
+                    regularSlotWidth, regularSlotHeight);
+            }
+            if (values.createBackBottomView)
+            {
+                // This optional view has its own fixed lower slot and must not
+                // be exchanged with the top/bottom orthographic pair.
+                const int y = centerY + verticalStep * 2;
+                addView(L"backbottom.png", centerX - regularSlotWidth / 2, y - regularSlotHeight / 2,
+                    regularSlotWidth, regularSlotHeight);
+            }
+            // Centre the complete selected orthographic set, not merely the
+            // front-view anchor.  This keeps asymmetric selections visually
+            // centred as side/top/bottom views are enabled or disabled.
+            if (!orthographicViews.empty())
+            {
+                int minimumX = orthographicViews.front().x;
+                int minimumY = orthographicViews.front().y;
+                int maximumX = orthographicViews.front().x + orthographicViews.front().width;
+                int maximumY = orthographicViews.front().y + orthographicViews.front().height;
+                for (const PreviewView& view : orthographicViews)
+                {
+                    minimumX = std::min(minimumX, view.x);
+                    minimumY = std::min(minimumY, view.y);
+                    maximumX = std::max(maximumX, view.x + view.width);
+                    maximumY = std::max(maximumY, view.y + view.height);
+                }
+                const int availableCentreY = (height - 70) / 2;
+                const int offsetX = width / 2 - (minimumX + maximumX) / 2;
+                const int offsetY = availableCentreY - (minimumY + maximumY) / 2;
+                for (const PreviewView& view : orthographicViews)
+                {
+                    drawAsset(view.fileName, view.x + offsetX, view.y + offsetY,
+                        view.width, view.height);
+                }
+            }
+            if (values.createIsoView)
+            {
+                const int isoWidth = static_cast<int>(std::lround(104.0 * layoutScale));
+                const int isoHeight = static_cast<int>(std::lround(78.0 * layoutScale));
+                const bool right = values.isoCorner.find(u8"右") != std::string::npos;
+                const bool bottom = values.isoCorner.find(u8"下") != std::string::npos;
+                const int x = right ? width - isoWidth - 32 : 32;
+                const int y = bottom ? height - isoHeight - 42 : 34;
+                drawAsset(L"iso.png", x, y, isoWidth, isoHeight);
+            }
+            if (values.createFlatPatternView)
+            {
+                const int flatWidth = static_cast<int>(std::lround(135.0 * layoutScale));
+                const int flatHeight = static_cast<int>(std::lround(78.0 * layoutScale));
+                const bool right = values.flatCorner.find(u8"右") != std::string::npos;
+                const bool bottom = values.flatCorner.find(u8"下") != std::string::npos;
+                const int x = right ? width - flatWidth - 32 : 32;
+                int y = bottom ? height - flatHeight - 42 : 34;
+                if (values.createIsoView && values.flatCorner == values.isoCorner)
+                {
+                    y += bottom ? -flatHeight - 10 : flatHeight + 10;
+                }
+                drawAsset(L"flat.png", x, y, flatWidth, flatHeight);
+            }
+
+            graphics.DrawString(
+                thirdAngle ? L"第三角法" : L"第一角法",
+                -1,
+                &smallFont,
+                Gdiplus::PointF(static_cast<Gdiplus::REAL>(width - 90), 22.0f),
+                &textBrush);
+
+            UINT encoderCount = 0;
+            UINT encoderBytes = 0;
+            Gdiplus::GetImageEncodersSize(&encoderCount, &encoderBytes);
+            std::vector<unsigned char> encoderStorage(encoderBytes);
+            Gdiplus::ImageCodecInfo* encoders =
+                reinterpret_cast<Gdiplus::ImageCodecInfo*>(encoderStorage.data());
+            CLSID pngEncoder = {};
+            bool foundEncoder = false;
+            if (encoderBytes > 0 &&
+                Gdiplus::GetImageEncoders(encoderCount, encoderBytes, encoders) == Gdiplus::Ok)
+            {
+                for (UINT index = 0; index < encoderCount; ++index)
+                {
+                    if (encoders[index].MimeType != nullptr &&
+                        std::wcscmp(encoders[index].MimeType, L"image/png") == 0)
+                    {
+                        pngEncoder = encoders[index].Clsid;
+                        foundEncoder = true;
+                        break;
+                    }
+                }
+            }
+
+            if (foundEncoder && canvas.Save(previewPath.c_str(), &pngEncoder, nullptr) == Gdiplus::Ok)
+            {
+                Gdiplus::GdiplusShutdown(gdiplusToken);
+                return previewPath;
+            }
+        }
+        catch (...)
+        {
+        }
+        Gdiplus::GdiplusShutdown(gdiplusToken);
+    }
+
+    const int rowStride = (width * 3 + 3) & ~3;
+    std::vector<unsigned char> pixels(static_cast<size_t>(rowStride) * height, 255);
+
+    auto putPixel = [&](int x, int y, unsigned char r, unsigned char g, unsigned char b) {
+        if (x < 0 || x >= width || y < 0 || y >= height)
+        {
+            return;
+        }
+        const int storedY = height - 1 - y;
+        unsigned char* pixel = pixels.data() + static_cast<size_t>(storedY) * rowStride + x * 3;
+        pixel[0] = b;
+        pixel[1] = g;
+        pixel[2] = r;
+    };
+    auto line = [&](int x0, int y0, int x1, int y1, unsigned char r, unsigned char g, unsigned char b) {
+        const int dx = std::abs(x1 - x0);
+        const int sx = x0 < x1 ? 1 : -1;
+        const int dy = -std::abs(y1 - y0);
+        const int sy = y0 < y1 ? 1 : -1;
+        int error = dx + dy;
+        for (;;)
+        {
+            putPixel(x0, y0, r, g, b);
+            if (x0 == x1 && y0 == y1)
+            {
+                break;
+            }
+            const int twice = error * 2;
+            if (twice >= dy) { error += dy; x0 += sx; }
+            if (twice <= dx) { error += dx; y0 += sy; }
+        }
+    };
+    auto rectangle = [&](int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b) {
+        line(x, y, x + w, y, r, g, b);
+        line(x + w, y, x + w, y + h, r, g, b);
+        line(x + w, y + h, x, y + h, r, g, b);
+        line(x, y + h, x, y, r, g, b);
+    };
+    auto viewRectangle = [&](int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b) {
+        rectangle(x, y, w, h, r, g, b);
+        line(x + 7, y + 7, x + w - 7, y + h - 7, 150, 160, 170);
+        line(x + w - 7, y + 7, x + 7, y + h - 7, 150, 160, 170);
+    };
+
+    rectangle(12, 12, width - 24, height - 24, 70, 85, 95);
+    rectangle(width - 205, height - 100, 193, 88, 80, 105, 115);
+    line(width - 205, height - 72, width - 12, height - 72, 80, 105, 115);
+    line(width - 205, height - 44, width - 12, height - 44, 80, 105, 115);
+
+    const bool thirdAngle = values.projectionMode.find(u8"第三") != std::string::npos ||
+        ToLowerAscii(values.projectionMode).find("third") != std::string::npos;
+    const int centerX = 305;
+    const int centerY = 235;
+    const int viewWidth = 90;
+    const int viewHeight = 52;
+    const int horizontalGap = 28;
+    const int verticalGap = 28;
+
+    if (values.createFrontView)
+    {
+        viewRectangle(centerX - viewWidth / 2, centerY - viewHeight / 2, viewWidth, viewHeight, 0, 90, 155);
+    }
+    if (values.createTopView)
+    {
+        const int y = thirdAngle ? centerY - viewHeight - verticalGap : centerY + verticalGap;
+        viewRectangle(centerX - viewWidth / 2, y - viewHeight / 2, viewWidth, viewHeight, 35, 55, 70);
+    }
+    if (values.createBottomView)
+    {
+        const int y = thirdAngle ? centerY + viewHeight + verticalGap : centerY - viewHeight - verticalGap;
+        viewRectangle(centerX - viewWidth / 2, y - viewHeight / 2, viewWidth, viewHeight, 35, 55, 70);
+    }
+    if (values.createLeftView)
+    {
+        const int x = thirdAngle ? centerX - viewWidth - horizontalGap : centerX + viewWidth + horizontalGap;
+        viewRectangle(x - 36, centerY - viewHeight / 2, 72, viewHeight, 35, 55, 70);
+    }
+    if (values.createRightView)
+    {
+        const int x = thirdAngle ? centerX + viewWidth + horizontalGap : centerX - viewWidth - horizontalGap;
+        viewRectangle(x - 36, centerY - viewHeight / 2, 72, viewHeight, 35, 55, 70);
+    }
+    if (values.createBackView)
+    {
+        const int x = thirdAngle ? centerX + (viewWidth + horizontalGap) * 2 : centerX - (viewWidth + horizontalGap) * 2;
+        viewRectangle(x - 36, centerY - viewHeight / 2, 72, viewHeight, 35, 55, 70);
+    }
+    if (values.createBackBottomView)
+    {
+        viewRectangle(centerX - viewWidth / 2, centerY + (viewHeight + verticalGap) * 2 - viewHeight / 2,
+            viewWidth, viewHeight, 35, 55, 70);
+    }
+    if (values.createIsoView)
+    {
+        const int x = 75;
+        const int y = 75;
+        line(x, y + 25, x + 42, y, 0, 120, 95);
+        line(x + 42, y, x + 84, y + 25, 0, 120, 95);
+        line(x + 84, y + 25, x + 42, y + 52, 0, 120, 95);
+        line(x + 42, y + 52, x, y + 25, 0, 120, 95);
+        line(x + 42, y, x + 42, y + 52, 0, 120, 95);
+    }
+    if (values.createFlatPatternView)
+    {
+        viewRectangle(55, height - 165, 130, 62, 130, 80, 15);
+    }
+
+    wchar_t tempDirectory[MAX_PATH] = {};
+    const DWORD tempLength = GetTempPathW(MAX_PATH, tempDirectory);
+    std::filesystem::path previewDirectory = tempLength > 0
+        ? std::filesystem::path(tempDirectory) / "Zhihui" / "AutoCreateThreeViews"
+        : CurrentModuleDirectory();
+    std::error_code ignored;
+    std::filesystem::create_directories(previewDirectory, ignored);
+    const std::filesystem::path previewPath = previewDirectory /
+        ("native_preview_" + std::to_string(GetCurrentProcessId()) + "_" +
+            std::to_string(++previewRevision_) + ".bmp");
+
+    BITMAPFILEHEADER fileHeader = {};
+    BITMAPINFOHEADER infoHeader = {};
+    fileHeader.bfType = 0x4D42;
+    fileHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    fileHeader.bfSize = fileHeader.bfOffBits + static_cast<DWORD>(pixels.size());
+    infoHeader.biSize = sizeof(BITMAPINFOHEADER);
+    infoHeader.biWidth = width;
+    infoHeader.biHeight = height;
+    infoHeader.biPlanes = 1;
+    infoHeader.biBitCount = 24;
+    infoHeader.biCompression = BI_RGB;
+    infoHeader.biSizeImage = static_cast<DWORD>(pixels.size());
+
+    std::ofstream output(previewPath, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(&fileHeader), sizeof(fileHeader));
+    output.write(reinterpret_cast<const char*>(&infoHeader), sizeof(infoHeader));
+    output.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+    if (!output)
+    {
+        return std::filesystem::path();
+    }
+    return previewPath;
+}
+
+void AutoCreateThreeViewsDialog::UpdateNativePreview()
+{
+    const std::filesystem::path previewPath = BuildNativePreviewBitmap(ReadDialogValues());
+    if (previewPath.empty() || dialog_ == nullptr || dialog_->TopBlock() == nullptr)
+    {
+        return;
+    }
+
+    try
+    {
+        NXOpen::BlockStyler::UIBlock* previewBlock = dialog_->TopBlock()->FindBlock("previewArea");
+        NXOpen::BlockStyler::Label* previewLabel =
+            dynamic_cast<NXOpen::BlockStyler::Label*>(previewBlock);
+        if (previewLabel == nullptr)
+        {
+            WriteLine(session_, "AutoCreateThreeViews: native preview block was not a Label.");
+            return;
+        }
+        previewLabel->SetBitmap(previewPath.string().c_str());
+        WriteLine(session_, "AutoCreateThreeViews: native preview image loaded from " + previewPath.string() + ".");
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        WriteLine(session_, std::string("AutoCreateThreeViews: native preview image load failed, NX ") +
+            std::to_string(ex.ErrorCode()) + ", " + ex.Message());
+    }
+    catch (const std::exception& ex)
+    {
+        WriteLine(session_, std::string("AutoCreateThreeViews: native preview image load failed: ") + ex.what());
+    }
+    catch (...)
+    {
+        WriteLine(session_, "AutoCreateThreeViews: native preview image load failed with unknown exception.");
     }
 }
 
@@ -18488,6 +21251,157 @@ int AutoCreateThreeViewsDialog::ExecuteCreateDrawing()
 {
     try
     {
+        {
+            NXOpen::Part* nativeWorkPart = session_->Parts()->Work();
+            if (nativeWorkPart == nullptr)
+            {
+                if (ui_ != nullptr && ui_->NXMessageBox() != nullptr)
+                {
+                    ui_->NXMessageBox()->Show(
+                        u8"自动三视图",
+                        NXOpen::NXMessageBox::DialogTypeError,
+                        u8"请先打开一个工作部件。");
+                }
+                return 1;
+            }
+
+            const DialogValues nativeValues = ReadDialogValues();
+            const bool thirdAngle =
+                nativeValues.projectionMode.find(u8"第三") != std::string::npos ||
+                ToLowerAscii(nativeValues.projectionMode).find("third") != std::string::npos;
+            std::string templatePath = Trim(nativeValues.templateName);
+            if (templatePath == u8"自动匹配模板")
+            {
+                templatePath.clear();
+            }
+            else if (!templatePath.empty() && !std::filesystem::path(templatePath).is_absolute())
+            {
+                templatePath = (CurrentModuleDirectory().parent_path() / "DATA" / templatePath).string();
+            }
+            std::string frontDirectionMode = Trim(nativeValues.mainViewDirection);
+            if (frontDirectionMode.find(u8"最大平面") != std::string::npos)
+                frontDirectionMode = "largestFaceLongestEdge";
+            else if (frontDirectionMode.find(u8"展开基面") != std::string::npos)
+                frontDirectionMode = "flatPatternX";
+            else if (frontDirectionMode.find(u8"手选面") != std::string::npos)
+                frontDirectionMode = "manualFaceX";
+            else if (frontDirectionMode.find(u8"绝对坐标") != std::string::npos)
+                frontDirectionMode = "absoluteCoordinate";
+            if (frontDirectionMode.empty())
+            {
+                frontDirectionMode = "largestFaceLongestEdge";
+            }
+
+            const std::string drawingTargetText = ReadString("drawingTargetMode", u8"按部件/组件出图");
+            const std::string drawingTargetMode = drawingTargetText.find(u8"图层") != std::string::npos
+                ? "partLayers" : "partOrAssembly";
+            const std::string layerRange = ReadString("layerRange", "1-256");
+            const std::string layersPerSheet = ReadString("layersPerSheet", "1");
+            const std::string layerLayoutMode = "auto";
+            auto cornerCode = [](const std::string& value) {
+                const bool right = value.find(u8"右") != std::string::npos;
+                const bool bottom = value.find(u8"下") != std::string::npos;
+                if (right && bottom) return std::string("BottomRight");
+                if (right) return std::string("TopRight");
+                if (bottom) return std::string("BottomLeft");
+                return std::string("TopLeft");
+            };
+            auto technicalCornerCode = [](const std::string& value) {
+                const std::string lower = ToLowerAscii(value);
+                if (value.find(u8"右下") != std::string::npos || lower == "bottomright")
+                    return std::string("BottomRight");
+                if (value.find(u8"右上") != std::string::npos || lower == "topright")
+                    return std::string("TopRight");
+                if (value.find(u8"左下") != std::string::npos || lower == "bottomleft")
+                    return std::string("BottomLeft");
+                return std::string("TopLeft");
+            };
+
+            wchar_t tempDirectory[MAX_PATH] = {};
+            const DWORD tempLength = GetTempPathW(MAX_PATH, tempDirectory);
+            const std::filesystem::path requestDirectory = tempLength > 0
+                ? std::filesystem::path(tempDirectory) / "Zhihui" / "AutoCreateThreeViews"
+                : CurrentModuleDirectory();
+            std::error_code ignored;
+            std::filesystem::create_directories(requestDirectory, ignored);
+            const std::filesystem::path requestPath = requestDirectory /
+                ("native_request_" + std::to_string(GetCurrentProcessId()) + ".txt");
+
+            // The established drawing engine consumes physical projection
+            // slots.  The native dialog keeps semantic view selections, so
+            // first-angle mode must translate them back to the same slot
+            // booleans used by the original WPF dialog.
+            const bool requestTop = thirdAngle
+                ? nativeValues.createTopView
+                : nativeValues.createBottomView;
+            const bool requestBottom = thirdAngle
+                ? nativeValues.createBottomView
+                : nativeValues.createTopView;
+            const bool requestLeft = thirdAngle
+                ? nativeValues.createLeftView
+                : nativeValues.createRightView;
+            const bool requestRight = thirdAngle
+                ? nativeValues.createRightView
+                : nativeValues.createLeftView;
+            const std::vector<tag_t> selectedOccurrences = SelectedNativeOccurrenceTags();
+
+            std::ofstream request(requestPath, std::ios::binary | std::ios::trunc);
+            request << "action=create\n"
+                    << "selectedPartCount=" << selectedOccurrences.size() << "\n";
+            for (size_t selectedIndex = 0; selectedIndex < selectedOccurrences.size(); ++selectedIndex)
+            {
+                request << "part" << selectedIndex << ".occurrenceTag="
+                        << static_cast<unsigned long long>(selectedOccurrences[selectedIndex]) << "\n";
+            }
+            request << "drawingTargetMode=" << drawingTargetMode << "\n"
+                    << "layerRange=" << layerRange << "\n"
+                    << "layersPerSheet=" << layersPerSheet << "\n"
+                    << "layerLayoutMode=" << layerLayoutMode << "\n"
+                    << "assemblyDrawing=" << (UF_ASSEM_ask_root_part_occ(nativeWorkPart->Tag()) != NULL_TAG ? "true" : "false") << "\n"
+                    << "templatePath=" << templatePath << "\n"
+                    << "inheritDraftingPreferences=" << (nativeValues.inheritDraftingPreferences ? "true" : "false") << "\n"
+                    << "projection=" << (thirdAngle ? "third" : "first") << "\n"
+                    << "frontDirectionMode=" << frontDirectionMode << "\n"
+                    << "viewSpacing=" << nativeValues.viewSpacing << "\n"
+                    << "sheetMargin=" << nativeValues.sheetMargin << "\n"
+                    << "viewGroupSpacing=" << nativeValues.viewGroupSpacing << "\n"
+                    << "showHiddenLines=" << (nativeValues.showHiddenLines ? "true" : "false") << "\n"
+                    << "front=" << (nativeValues.createFrontView ? "true" : "false") << "\n"
+                    << "top=" << (requestTop ? "true" : "false") << "\n"
+                    << "bottom=" << (requestBottom ? "true" : "false") << "\n"
+                    << "left=" << (requestLeft ? "true" : "false") << "\n"
+                    << "right=" << (requestRight ? "true" : "false") << "\n"
+                    << "back=" << (nativeValues.createBackView ? "true" : "false") << "\n"
+                    << "backBottom=" << (nativeValues.createBackBottomView ? "true" : "false") << "\n"
+                    << "iso=" << (nativeValues.createIsoView ? "true" : "false") << "\n"
+                    << "flat=" << (nativeValues.createFlatPatternView ? "true" : "false") << "\n"
+                    << "isoCorner=" << cornerCode(nativeValues.isoCorner) << "\n"
+                    << "flatCorner=" << cornerCode(nativeValues.flatCorner) << "\n"
+                    << "auxAutoCompact=" << (nativeValues.auxiliaryAutoCompact ? "true" : "false") << "\n"
+                    << "autoDimensions=" << (nativeValues.autoDimensions ? "true" : "false") << "\n"
+                    << "dimensionOverall=" << (nativeValues.dimensionOverall ? "true" : "false") << "\n"
+                    << "dimensionLinear=false\n"
+                    << "dimensionAngle=" << (nativeValues.dimensionAngle ? "true" : "false") << "\n"
+                    << "dimensionHole=" << (nativeValues.dimensionHole ? "true" : "false") << "\n"
+                    << "dimensionHoleLocation=" << (nativeValues.dimensionHoleLocation ? "true" : "false") << "\n"
+                    << "dimensionInnerClosedCurve=" << (nativeValues.dimensionInnerClosedCurve ? "true" : "false") << "\n"
+                    << "technicalRequirementEnabled=" << (nativeValues.technicalRequirementEnabled ? "true" : "false") << "\n"
+                    << "technicalRequirementIndexed=" << (nativeValues.technicalRequirementIndexed ? "true" : "false") << "\n"
+                    << "technicalRequirementCorner=" << technicalCornerCode(nativeValues.technicalRequirementCorner) << "\n"
+                    << "technicalRequirementText=" << EncodeBase64(nativeValues.technicalRequirementText) << "\n";
+            request.close();
+            if (!request)
+            {
+                throw std::runtime_error("Unable to write native dialog request file.");
+            }
+
+            pendingRequestPath_ = requestPath;
+            WriteLine(
+                session_,
+                "AutoCreateThreeViews: drawing request prepared; wait for native dialog to close before execution.");
+            return 0;
+        }
+
         NXOpen::Part* workPart = session_->Parts()->Work();
         if (workPart == nullptr)
         {
@@ -18560,6 +21474,54 @@ bool IsDraftingApplicationActive(NXOpen::Session* session)
            name.find("drafting") != std::string::npos;
 }
 
+tag_t AskLastAutoCreateThreeViewsDrawingSheetTag()
+{
+    return g_lastCreatedDrawingSheetTag;
+}
+
+void ClearAutoCreateThreeViewsManualDirectionCache()
+{
+    g_manualFrontDirections.clear();
+}
+
+bool PreselectAutoCreateThreeViewsManualDirection(tag_t partTag, int targetLayer)
+{
+    if (partTag == NULL_TAG)
+    {
+        WriteLine(nullptr, "AutoCreateThreeViews: manual direction preselection failed; part tag is null.");
+        return false;
+    }
+    NXOpen::Part* part = dynamic_cast<NXOpen::Part*>(NXOpen::NXObjectManager::Get(partTag));
+    if (part == nullptr)
+    {
+        WriteLine(nullptr, "AutoCreateThreeViews: manual direction preselection failed; part is unavailable.");
+        return false;
+    }
+
+    const int normalizedLayer = std::max(0, std::min(256, targetLayer));
+    const ScopedTargetDrawingLayer targetLayerScope(normalizedLayer);
+    const ScopedDrawingLayerIsolation modelLayerIsolation(NXOpen::Session::GetSession(), normalizedLayer);
+    EnsureLayer230Visible(NXOpen::Session::GetSession(), part);
+
+    AutoViewDirection direction;
+    if (!TryComputeFrontDirectionFromSelectedFaceAndX(part, direction) || !direction.valid)
+    {
+        WriteLine(
+            nullptr,
+            "AutoCreateThreeViews: manual direction preselection canceled for layer " +
+                std::to_string(normalizedLayer) + ".");
+        return false;
+    }
+
+    g_manualFrontDirections[{partTag, normalizedLayer}] = direction;
+    WriteLine(
+        nullptr,
+        "AutoCreateThreeViews: cached manual front direction before drawing, part=" +
+            std::to_string(static_cast<unsigned long long>(partTag)) +
+            ", layer=" + std::to_string(normalizedLayer) + ".");
+    return true;
+}
+
 int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestPath)
 {
     NXOpen::Session* session = NXOpen::Session::GetSession();
@@ -18579,9 +21541,20 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         ScopedPartTiming totalTiming(session, partLabel);
         TimingClock::time_point stageStarted = TimingClock::now();
         const RequestValues request = ReadRequestFile(requestPath);
+        // A layer-page batch invokes this entry point once per layer.  Keep the
+        // exact sheet tag across append requests because NX can temporarily
+        // report CurrentDrawingSheet() as null after the manual-direction/model
+        // selection phase.  A non-append request starts a new page and therefore
+        // deliberately invalidates the previous tag.
+        if (!request.appendToCurrentSheet)
+        {
+            g_lastCreatedDrawingSheetTag = NULL_TAG;
+        }
+        const bool prepareSheetOnly = request.executionPhase == "prepareSheet";
+        const bool populatePreparedSheet = request.executionPhase == "populatePreparedSheet";
         const bool firstPreferencePassForPart =
             request.targetLayer <= 0 || request.layerIndex == 0;
-        if (request.inheritDraftingPreferences && firstPreferencePassForPart)
+        if (request.inheritDraftingPreferences && firstPreferencePassForPart && !populatePreparedSheet)
         {
             const std::filesystem::path preferenceTemplatePath = AutoTemplatePath(workPart, request);
             WriteLine(
@@ -18600,6 +21573,13 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         {
             WriteLine(session, "AutoCreateThreeViews: follow-template drafting preferences disabled.");
         }
+        else if (populatePreparedSheet)
+        {
+            WriteLine(
+                session,
+                "AutoCreateThreeViews: drafting preferences were applied during the prepare-sheet phase; "
+                "skip repeated inheritance while populating the displayed sheet.");
+        }
         else
         {
             WriteLine(
@@ -18607,7 +21587,89 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                 "AutoCreateThreeViews: drafting preferences already inherited for this part; "
                 "skip repeated inheritance for layer index " + std::to_string(request.layerIndex) + ".");
         }
+        const bool applyHiddenLinePreferenceForPart =
+            firstPreferencePassForPart && !populatePreparedSheet;
+        if (applyHiddenLinePreferenceForPart)
+        {
+            ApplyHiddenLineDraftingPreference(session, workPart, request.showHiddenLines);
+        }
+        else
+        {
+            WriteLine(
+                session,
+                "AutoCreateThreeViews: drafting hidden-line preference already applied for this part; "
+                "skip repeated preference update.");
+        }
         WriteTimingLine(session, partLabel, "inherit_drafting_preferences", stageStarted);
+
+        if (prepareSheetOnly)
+        {
+            stageStarted = TimingClock::now();
+            NXOpen::Drawings::DraftingDrawingSheet* preparedSheet =
+                CreateDrawingSheet(session, workPart, request, 1.0);
+            if (preparedSheet == nullptr)
+            {
+                const std::string message =
+                    std::string(u8"失败：") + partLabel + u8"，创建图纸页失败。";
+                WriteLine(session, "AutoCreateThreeViews: " + message);
+                AddAutoCreateThreeViewsRunResultLine(message);
+                return 1;
+            }
+
+            try
+            {
+                if (!IsDraftingApplicationActive(session))
+                {
+                    session->ApplicationSwitchImmediate("UG_APP_DRAFTING");
+                    workPart->Drafting()->EnterDraftingApplication();
+                    WriteLine(
+                        session,
+                        "AutoCreateThreeViews: entered drafting application during prepare-sheet phase.");
+                }
+                preparedSheet->Open();
+                UF_DRAW_open_drawing(preparedSheet->Tag());
+                g_preparedDrawingSheetTags[workPart->Tag()] = preparedSheet->Tag();
+
+                NXOpen::Drawings::BaseView* placeholderView = CreateBaseView(
+                    session,
+                    workPart,
+                    "sheet presentation placeholder",
+                    {"Top"},
+                    NXOpen::Point3d(148.5, 105.0, 0.0),
+                    false,
+                    1000.0,
+                    nullptr);
+                if (placeholderView == nullptr)
+                {
+                    WriteLine(
+                        session,
+                        "AutoCreateThreeViews: failed to create sheet presentation placeholder; "
+                        "do not return an empty sheet to NX.");
+                    return 1;
+                }
+                g_preparedSheetPlaceholderViewTags[workPart->Tag()] = placeholderView->Tag();
+                WriteLine(
+                    session,
+                    "AutoCreateThreeViews: sheet presentation placeholder created, tag=" +
+                        std::to_string(static_cast<unsigned long long>(placeholderView->Tag())) + ".");
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                WriteLine(
+                    session,
+                    std::string("AutoCreateThreeViews: prepare-sheet open failed, NXException: ") +
+                        ex.Message() + ".");
+                return ex.ErrorCode();
+            }
+
+            WriteTimingLine(session, partLabel, "prepare_and_open_drawing_sheet", stageStarted);
+            WriteLine(
+                session,
+                "AutoCreateThreeViews: prepared and opened drawing sheet with a placeholder; "
+                "return to NX without launching the interactive Base View command.");
+            return 0;
+        }
+
         stageStarted = TimingClock::now();
         const ScopedTargetDrawingLayer targetLayerScope(request.targetLayer);
         const ScopedDrawingLayerIsolation modelLayerIsolation(session, request.targetLayer);
@@ -18684,19 +21746,65 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
 
         stageStarted = TimingClock::now();
         NXOpen::Drawings::DraftingDrawingSheet* sheet = nullptr;
-        if (request.targetLayer > 0 && request.appendToCurrentSheet && workPart->DrawingSheets() != nullptr)
+        if (populatePreparedSheet && workPart->DrawingSheets() != nullptr)
         {
-            sheet = dynamic_cast<NXOpen::Drawings::DraftingDrawingSheet*>(
-                workPart->DrawingSheets()->CurrentDrawingSheet());
+            const auto preparedSheetIt = g_preparedDrawingSheetTags.find(workPart->Tag());
+            if (preparedSheetIt != g_preparedDrawingSheetTags.end())
+            {
+                try
+                {
+                    NXOpen::TaggedObject* preparedObject =
+                        NXOpen::NXObjectManager::Get(preparedSheetIt->second);
+                    sheet = dynamic_cast<NXOpen::Drawings::DraftingDrawingSheet*>(preparedObject);
+                }
+                catch (...)
+                {
+                }
+                g_preparedDrawingSheetTags.erase(preparedSheetIt);
+            }
+            if (sheet == nullptr)
+            {
+                sheet = dynamic_cast<NXOpen::Drawings::DraftingDrawingSheet*>(
+                    workPart->DrawingSheets()->CurrentDrawingSheet());
+            }
+            if (sheet != nullptr)
+            {
+                WriteLine(
+                    session,
+                    "AutoCreateThreeViews: populate the prepared drawing sheet reacquired by stable tag, tag=" +
+                        std::to_string(static_cast<unsigned long long>(sheet->Tag())) + ".");
+            }
+        }
+        else if (request.targetLayer > 0 && request.appendToCurrentSheet && workPart->DrawingSheets() != nullptr)
+        {
+            if (g_lastCreatedDrawingSheetTag != NULL_TAG)
+            {
+                try
+                {
+                    NXOpen::TaggedObject* previousSheetObject =
+                        NXOpen::NXObjectManager::Get(g_lastCreatedDrawingSheetTag);
+                    sheet = dynamic_cast<NXOpen::Drawings::DraftingDrawingSheet*>(previousSheetObject);
+                }
+                catch (...)
+                {
+                    sheet = nullptr;
+                }
+            }
+            if (sheet == nullptr)
+            {
+                sheet = dynamic_cast<NXOpen::Drawings::DraftingDrawingSheet*>(
+                    workPart->DrawingSheets()->CurrentDrawingSheet());
+            }
             if (sheet != nullptr)
             {
                 WriteLine(
                     session,
                     "AutoCreateThreeViews: append target layer " + std::to_string(request.targetLayer) +
-                        " to current drawing sheet.");
+                        " to retained drawing sheet tag=" +
+                        std::to_string(static_cast<unsigned long long>(sheet->Tag())) + ".");
             }
         }
-        if (sheet == nullptr)
+        if (sheet == nullptr && !populatePreparedSheet)
         {
             sheet = CreateDrawingSheet(session, workPart, request, 1.0);
         }
@@ -18707,22 +21815,63 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             AddAutoCreateThreeViewsRunResultLine(message);
             return 1;
         }
+        g_lastCreatedDrawingSheetTag = sheet->Tag();
+        WriteLine(
+            session,
+            "AutoCreateThreeViews: retained exact created drawing sheet tag=" +
+                std::to_string(static_cast<unsigned long long>(g_lastCreatedDrawingSheetTag)) + ".");
         try
         {
             if (!IsDraftingApplicationActive(session))
             {
                 session->ApplicationSwitchImmediate("UG_APP_DRAFTING");
-                workPart->Drafting()->EnterDraftingApplication();
                 WriteLine(session, "AutoCreateThreeViews: entered drafting application after drawing sheet creation.");
             }
             else
             {
-                WriteLine(session, "AutoCreateThreeViews: drafting application is already active; skipped duplicate application switch.");
+                WriteLine(
+                    session,
+                    "AutoCreateThreeViews: drafting application is globally active; "
+                    "re-enter drafting for the newly displayed work part.");
             }
+            // ApplicationName is session-global.  After SetActiveDisplay changes
+            // the work part, NX can still report UG_APP_DRAFTING while the new
+            // part is showing its modeling view.  Enter drafting for every new
+            // drawing part so UF_DRAW_ask_current_drawing does not alternate
+            // between a valid sheet and NULL_TAG.
+            workPart->Drafting()->EnterDraftingApplication();
             sheet->Open();
             UF_DRAW_open_drawing(sheet->Tag());
-            UF_DISP_make_display_up_to_date();
             WriteLine(session, "AutoCreateThreeViews: current drafting sheet opened before view creation.");
+
+            if (populatePreparedSheet)
+            {
+                const auto placeholderIt = g_preparedSheetPlaceholderViewTags.find(workPart->Tag());
+                if (placeholderIt != g_preparedSheetPlaceholderViewTags.end())
+                {
+                    std::vector<NXOpen::Drawings::DraftingView*> placeholderViews;
+                    try
+                    {
+                        NXOpen::TaggedObject* object =
+                            NXOpen::NXObjectManager::Get(placeholderIt->second);
+                        NXOpen::Drawings::DraftingView* placeholderView =
+                            dynamic_cast<NXOpen::Drawings::DraftingView*>(object);
+                        if (placeholderView != nullptr)
+                            placeholderViews.push_back(placeholderView);
+                    }
+                    catch (...)
+                    {
+                    }
+                    g_preparedSheetPlaceholderViewTags.erase(placeholderIt);
+                    if (!placeholderViews.empty())
+                    {
+                        DeleteTemporaryDraftingViews(workPart, placeholderViews);
+                        WriteLine(
+                            session,
+                            "AutoCreateThreeViews: removed sheet presentation placeholder before formal views.");
+                    }
+                }
+            }
         }
         catch (const NXOpen::NXException& ex)
         {
@@ -18753,24 +21902,47 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         int layerRows = 1;
         int layerColumn = 0;
         int layerRow = 0;
+        static tag_t unifiedLayerSheetTag = NULL_TAG;
+        static double unifiedLayerPageDenominator = 1.0;
+        static std::set<tag_t> reducedLayerIsoViewTags;
+        static int placedCellCount = 0;
+        static std::vector<LayoutBounds> placedLayerGroupBounds;
         if (request.targetLayer > 0)
         {
             const int cellCount = std::max(1, request.layersPerSheet);
             const int cellIndex = request.layerIndex % cellCount;
             layerCellIndex = cellIndex;
             layerCellCount = cellCount;
-            // Use asymmetric page clearances for grouped layer drawings:
-            // make fuller use of the top/left/right edges, while reserving
-            // extra room above the title block for captions and dimensions.
-            const double sidePadding = 4.0;
-            const double topPadding = 4.0;
-            const double bottomAnnotationClearance = 22.0;
-            const double safeMinX = sidePadding;
-            const double safeMaxX = std::max(safeMinX + 20.0, actualSheetLength - sidePadding);
-            const double safeMinY = BottomTitleBlockReserve(actualSheetHeight) + bottomAnnotationClearance;
-            const double safeMaxY = std::max(safeMinY + 20.0, actualSheetHeight - topPadding);
+            // Lay out against the actual drawing-sheet size.  The former
+            // fixed 4 mm side/top padding and extra 22 mm bottom clearance
+            // ignored the margin entered in the dialog, so changing that
+            // value had no effect in layer mode.
+            const double pageMargin = std::max(
+                0.0,
+                std::min(
+                    request.sheetMargin,
+                    std::min(actualSheetLength, actualSheetHeight) * 0.25));
+            const double safeMinX = pageMargin;
+            const double safeMaxX = std::max(safeMinX + 20.0, actualSheetLength - pageMargin);
+            const double titleBlockClearance = 5.0;
+            const double safeMinY = std::max(
+                pageMargin,
+                BottomTitleBlockReserve(actualSheetHeight) + titleBlockClearance);
+            const double safeMaxY = std::max(safeMinY + 20.0, actualSheetHeight - pageMargin);
             const double safeWidth = safeMaxX - safeMinX;
             const double safeHeight = safeMaxY - safeMinY;
+
+            std::ostringstream pageBoundsLog;
+            pageBoundsLog << std::fixed << std::setprecision(2)
+                          << "AutoCreateThreeViews: layer page bounds sheet="
+                          << actualSheetLength << "x" << actualSheetHeight
+                          << ", configuredMargin=" << request.sheetMargin
+                          << ", appliedMargin=" << pageMargin
+                          << ", titleBlockTop=" << BottomTitleBlockReserve(actualSheetHeight)
+                          << ", titleBlockClearance=" << titleBlockClearance
+                          << ", safeBounds=(" << safeMinX << "," << safeMinY
+                          << ")-(" << safeMaxX << "," << safeMaxY << ").";
+            WriteLine(session, pageBoundsLog.str());
 
             // Keep one grid decision for all groups appended to the same
             // sheet.  On the first group, compare every possible row/column
@@ -18868,8 +22040,18 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                         {
                             continue;
                         }
-                        const double candidateCellWidth = safeWidth / candidateColumns;
-                        const double candidateCellHeight = safeHeight / candidateRows;
+                        const double candidateHorizontalGap = candidateColumns > 1
+                            ? std::min(request.viewGroupSpacing,
+                                std::max(0.0, (safeWidth - candidateColumns * 20.0) / (candidateColumns - 1)))
+                            : 0.0;
+                        const double candidateVerticalGap = candidateRows > 1
+                            ? std::min(request.viewGroupSpacing,
+                                std::max(0.0, (safeHeight - candidateRows * 20.0) / (candidateRows - 1)))
+                            : 0.0;
+                        const double candidateCellWidth =
+                            (safeWidth - (candidateColumns - 1) * candidateHorizontalGap) / candidateColumns;
+                        const double candidateCellHeight =
+                            (safeHeight - (candidateRows - 1) * candidateVerticalGap) / candidateRows;
                         const double cellMargin = EffectiveLayoutMargin(request);
                         const double modelWidthSpace = std::max(
                             1.0,
@@ -18890,6 +22072,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                         candidateLog << "AutoCreateThreeViews: smart layer packing candidate"
                                      << ", grid=" << candidateColumns << "x" << candidateRows
                                      << ", cell=" << candidateCellWidth << "x" << candidateCellHeight
+                                     << ", groupGap=" << candidateHorizontalGap << "x" << candidateVerticalGap
                                      << ", fixedPaper=" << fixedPaperWidth << "x" << fixedPaperHeight
                                      << ", estimatedScale=1:" << integerDenominator
                                      << ", unused=" << unusedCells
@@ -18925,19 +22108,32 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             layerRows = rows;
             layerColumn = column;
             layerRow = row;
-            const double cellWidth = (safeMaxX - safeMinX) / columns;
-            const double cellHeight = (safeMaxY - safeMinY) / rows;
-            const double rawCellCenterX = safeMinX + (static_cast<double>(column) + 0.5) * cellWidth;
-            const double rawCellCenterY = safeMaxY - (static_cast<double>(row) + 0.5) * cellHeight;
-            const double layoutCenterX = (safeMinX + safeMaxX) * 0.5;
-            const double layoutCenterY = (safeMinY + safeMaxY) * 0.5;
-            // Equal grid centers spread small body groups across the whole
-            // sheet.  Keep the same cell capacity for scale calculation, but
-            // pack final group centers toward the sheet center like feature 08.
-            const double horizontalPack = columns > 1 ? 0.90 : 1.0;
-            const double verticalPack = rows > 1 ? 0.90 : 1.0;
-            targetCellCenterX = layoutCenterX + (rawCellCenterX - layoutCenterX) * horizontalPack;
-            targetCellCenterY = layoutCenterY + (rawCellCenterY - layoutCenterY) * verticalPack;
+            if (cellIndex == 0 || unifiedLayerSheetTag != sheet->Tag() || placedCellCount != cellCount)
+            {
+                unifiedLayerSheetTag = sheet->Tag();
+                unifiedLayerPageDenominator = 1.0;
+                reducedLayerIsoViewTags.clear();
+                placedCellCount = cellCount;
+                placedLayerGroupBounds.assign(static_cast<size_t>(cellCount), LayoutBounds());
+            }
+            const double horizontalGroupGap = columns > 1
+                ? std::min(request.viewGroupSpacing,
+                    std::max(0.0, (safeWidth - columns * 20.0) / (columns - 1)))
+                : 0.0;
+            const double verticalGroupGap = rows > 1
+                ? std::min(request.viewGroupSpacing,
+                    std::max(0.0, (safeHeight - rows * 20.0) / (rows - 1)))
+                : 0.0;
+            const double cellWidth =
+                (safeMaxX - safeMinX - (columns - 1) * horizontalGroupGap) / columns;
+            const double cellHeight =
+                (safeMaxY - safeMinY - (rows - 1) * verticalGroupGap) / rows;
+            const double rawCellCenterX = safeMinX + column * (cellWidth + horizontalGroupGap) + cellWidth * 0.5;
+            const double rawCellCenterY = safeMaxY - row * (cellHeight + verticalGroupGap) - cellHeight * 0.5;
+            // The explicit gap is part of both scale calculation and final
+            // placement, so group-to-group spacing remains the requested value.
+            targetCellCenterX = rawCellCenterX;
+            targetCellCenterY = rawCellCenterY;
             sheetLength = cellWidth;
             sheetHeight = cellHeight;
 
@@ -18946,6 +22142,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                     << ", cell=" << (cellIndex + 1) << "/" << cellCount
                     << ", grid=" << columns << "x" << rows
                     << ", cellSize=" << cellWidth << "x" << cellHeight
+                    << ", groupGap=" << horizontalGroupGap << "x" << verticalGroupGap
                     << ", rawCenter=(" << rawCellCenterX << "," << rawCellCenterY << ")"
                     << ", targetCenter=(" << targetCellCenterX << "," << targetCellCenterY << ").";
             WriteLine(session, cellLog.str());
@@ -19109,6 +22306,10 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             if (isoView != nullptr)
             {
                 auxiliaryViews.push_back({"isometric", request.isoCorner, isoView});
+                if (request.targetLayer > 0)
+                {
+                    reducedLayerIsoViewTags.insert(isoView->Tag());
+                }
                 ++createdCount;
             }
         }
@@ -19153,32 +22354,47 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             measuredScaleDenominator,
             sheetLength,
             sheetHeight);
-        double finalContentWidth = 0.0;
-        double finalContentHeight = 0.0;
-        if (AllLayoutSizeAtDenominator(
-                request,
-                createdProjectedViews,
-                auxiliaryViews,
-                measuredScaleDenominator,
-                sheetScaleDenominator,
-                finalContentWidth,
-                finalContentHeight))
+        if (request.targetLayer > 0)
         {
-            const double usableWidth = ScaleUsableWidth(request, sheetLength);
-            const double usableHeight = ScaleUsableHeight(request, sheetHeight);
-            const double usage = std::max(
-                finalContentWidth / std::max(1.0, usableWidth),
-                finalContentHeight / std::max(1.0, usableHeight));
-            if (usage > 0.90)
+            const double layerRequiredDenominator = sheetScaleDenominator;
+            const double previousPageDenominator = unifiedLayerPageDenominator;
+            unifiedLayerPageDenominator = std::max(unifiedLayerPageDenominator, sheetScaleDenominator);
+            sheetScaleDenominator = unifiedLayerPageDenominator;
+
+            // Existing group bounds were measured at the previous common
+            // scale.  Their centers stay fixed when the page scale changes;
+            // shrink their recorded sizes so subsequent groups retain the
+            // requested physical gap rather than using stale bounds.
+            if (previousPageDenominator > 0.0 &&
+                unifiedLayerPageDenominator > previousPageDenominator + 1.0e-9)
             {
-                sheetScaleDenominator += 1.0;
-                WriteLine(session, "AutoCreateThreeViews: final layout usage is tight; enlarge scale before visible layout to 1:" + std::to_string(static_cast<int>(sheetScaleDenominator)) + ".");
+                const double sizeFactor = previousPageDenominator / unifiedLayerPageDenominator;
+                for (LayoutBounds& groupBounds : placedLayerGroupBounds)
+                {
+                    if (groupBounds.maxX <= groupBounds.minX || groupBounds.maxY <= groupBounds.minY)
+                        continue;
+                    const double centerX = (groupBounds.minX + groupBounds.maxX) * 0.5;
+                    const double centerY = (groupBounds.minY + groupBounds.maxY) * 0.5;
+                    const double halfWidth = BoundsWidth(groupBounds) * sizeFactor * 0.5;
+                    const double halfHeight = BoundsHeight(groupBounds) * sizeFactor * 0.5;
+                    groupBounds.minX = centerX - halfWidth;
+                    groupBounds.maxX = centerX + halfWidth;
+                    groupBounds.minY = centerY - halfHeight;
+                    groupBounds.maxY = centerY + halfHeight;
+                }
             }
+
+            WriteLine(
+                session,
+                "AutoCreateThreeViews: unified layer page denominator=1:" +
+                    std::to_string(static_cast<int>(unifiedLayerPageDenominator)) +
+                    ", layerRequired=1:" +
+                    std::to_string(static_cast<int>(layerRequiredDenominator)) + ".");
         }
         WriteTimingLine(session, partLabel, "measure_curves_and_choose_final_scale", stageStarted);
 
         stageStarted = TimingClock::now();
-        if (!request.appendToCurrentSheet)
+        if (request.targetLayer > 0 || !request.appendToCurrentSheet)
         {
             ApplyDrawingSheetScale(session, workPart, sheet, sheetScaleDenominator);
         }
@@ -19186,7 +22402,18 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         {
             WriteLine(session, "AutoCreateThreeViews: keep existing sheet scale while applying appended layer view scale.");
         }
-        SetAllCreatedViewScales(session, workPart, createdProjectedViews, auxiliaryViews, sheetScaleDenominator);
+        if (request.targetLayer > 0)
+        {
+            SetAllDrawingViewsToPageScale(
+                session,
+                sheet->Tag(),
+                sheetScaleDenominator,
+                reducedLayerIsoViewTags);
+        }
+        else
+        {
+            SetAllCreatedViewScales(session, workPart, createdProjectedViews, auxiliaryViews, sheetScaleDenominator);
+        }
         UpdateCreatedDraftingViews(
             session,
             workPart,
@@ -19196,10 +22423,8 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         ArrangeAllViewsInMemory(request, createdProjectedViews, auxiliaryViews, sheetLength, sheetHeight);
         if (request.targetLayer > 0)
         {
-            const double fixedLayerGroupGap = 20.0; // Same fixed group gap as feature 08.
+            const double fixedLayerGroupGap = request.viewGroupSpacing;
             static tag_t placedPartTag = NULL_TAG;
-            static int placedCellCount = 0;
-            static std::vector<LayoutBounds> placedLayerGroupBounds;
             if (layerCellIndex == 0 ||
                 placedPartTag != workPart->Tag() ||
                 placedCellCount != layerCellCount)
