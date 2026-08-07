@@ -6,6 +6,8 @@
 #include <NXOpen/ColorManager.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
+#include <NXOpen/DisplayManager.hxx>
+#include <NXOpen/DisplayModification.hxx>
 #include <NXOpen/DisplayableObject.hxx>
 #include <NXOpen/Expression.hxx>
 #include <NXOpen/Edge.hxx>
@@ -36,6 +38,8 @@
 #include <NXOpen/Tooling_ToolingSession.hxx>
 #include <NXOpen/UI.hxx>
 #include <NXOpen/Update.hxx>
+#include <NXOpen/View.hxx>
+#include <NXOpen/ViewCollection.hxx>
 #include <NXOpen/ugmath.hxx>
 
 #include <NXOpen/BlockStyler_BlockDialog.hxx>
@@ -65,6 +69,7 @@
 #include <uf.h>
 #include <uf_assem.h>
 #include <uf_eval.h>
+#include <uf_disp.h>
 #include <uf_modl.h>
 #include <uf_modl_types.h>
 #include <uf_obj.h>
@@ -73,6 +78,7 @@
 #include <uf_ui_types.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -81,6 +87,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -202,7 +209,7 @@ const char* kDefaultConfigText =
     "\xEF\xBB\xBF; KeZi engraving text template configuration\r\n"
     "; 可用变量: {文件名} {体名} {属性} {部件属性:属性名} {体属性:属性名} {流水号} {文本}\r\n"
     "; 示例: 模板={文件名}-{体名}-{体属性:bianhao}-{流水号}-{文本}\r\n"
-    "; 流水号样式可填 1、01、001 或 A；A 表示 A,B,C... 字母递增\r\n"
+    "; 流水号样式可填 1、01 或 001，仅支持数字递增\r\n"
     "[KeZi]\r\n"
     "模板={文本}\r\n"
     "文本=\r\n"
@@ -227,6 +234,8 @@ const char* kDefaultConfigText =
     "V形文本=0\r\n"
     "编号设为部件名=0\r\n"
     "刻相同=0\r\n"
+    "相同随机色=0\r\n"
+    "所有可见方通自动刻字=0\r\n"
     "隐藏已刻字体=0\r\n"
     "模式=0\r\n"
     "长向居中=0\r\n"
@@ -260,6 +269,8 @@ struct KeZiConfig
     bool vShape = false;
     bool renameComponentToText = false;
     bool engraveSameBodies = false;
+    bool sameRandomColor = false;
+    bool autoEngraveVisibleTubes = false;
     bool hideEngravedText = false;
     bool centerLongSide = false;
     bool centerShortSide = false;
@@ -728,6 +739,8 @@ KeZiConfig LoadConfig()
     config.vShape = ToBool(ValueOr(values, {"V形文本", "vShape"}, config.vShape ? "1" : "0"), config.vShape);
     config.renameComponentToText = ToBool(ValueOr(values, {"编号设为部件名", "renameComponentToText"}, config.renameComponentToText ? "1" : "0"), config.renameComponentToText);
     config.engraveSameBodies = ToBool(ValueOr(values, {"刻相同", "engraveSameBodies"}, config.engraveSameBodies ? "1" : "0"), config.engraveSameBodies);
+    config.sameRandomColor = ToBool(ValueOr(values, {"相同随机色", "sameRandomColor"}, config.sameRandomColor ? "1" : "0"), config.sameRandomColor);
+    config.autoEngraveVisibleTubes = ToBool(ValueOr(values, {"所有可见方通自动刻字", "autoEngraveVisibleTubes"}, config.autoEngraveVisibleTubes ? "1" : "0"), config.autoEngraveVisibleTubes);
     config.hideEngravedText = ToBool(ValueOr(values, {"隐藏已刻字体", "hideEngravedText"}, config.hideEngravedText ? "1" : "0"), config.hideEngravedText);
     config.centerLongSide = ToBool(ValueOr(values, {"长向居中", "centerLongSide"}, config.centerLongSide ? "1" : "0"), config.centerLongSide);
     config.centerShortSide = ToBool(ValueOr(values, {"短向居中", "centerShortSide"}, config.centerShortSide ? "1" : "0"), config.centerShortSide);
@@ -1987,6 +2000,89 @@ int FindSameBodyMatchingPlaneFaceGroup(const SameBodyFingerprint& fingerprint, c
     return bestGroupIndex;
 }
 
+void WriteIntegerAttribute(NXObject* object, const std::string& name, const int value)
+{
+    if (object == nullptr || name.empty())
+    {
+        return;
+    }
+    try
+    {
+        UF_ATTR_value_t attribute = {};
+        attribute.type = UF_ATTR_integer;
+        attribute.value.integer = value;
+        UF_ATTR_assign(object->Tag(), const_cast<char*>(name.c_str()), attribute);
+    }
+    catch (...)
+    {
+    }
+}
+
+int NextRandomBodyColor()
+{
+    static std::mt19937 generator(static_cast<unsigned int>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count()));
+    static std::uniform_int_distribution<int> colors(1, 216);
+    return colors(generator);
+}
+
+void ApplySameBodyGroupMetadata(const std::vector<Body*>& bodies, const bool applyRandomColor)
+{
+    if (bodies.empty())
+    {
+        return;
+    }
+    const int quantity = static_cast<int>(bodies.size());
+    const int color = applyRandomColor ? NextRandomBodyColor() : 0;
+    for (Body* body : bodies)
+    {
+        if (body == nullptr)
+        {
+            continue;
+        }
+        WriteIntegerAttribute(body, "sulian", quantity);
+        if (applyRandomColor)
+        {
+            bool displayModificationApplied = false;
+            try
+            {
+                Session* session = Session::GetSession();
+                DisplayModification* modification = session != nullptr && session->DisplayManager() != nullptr
+                                                        ? session->DisplayManager()->NewDisplayModification()
+                                                        : nullptr;
+                if (modification != nullptr)
+                {
+                    modification->SetApplyToAllFaces(true);
+                    modification->SetApplyToOwningParts(false);
+                    modification->SetNewColor(color);
+                    std::vector<DisplayableObject*> objects(1, body);
+                    modification->Apply(objects);
+                    delete modification;
+                    displayModificationApplied = true;
+                }
+            }
+            catch (...)
+            {
+            }
+            if (!displayModificationApplied)
+            {
+                UF_OBJ_set_color(body->Tag(), color);
+                for (Face* face : body->GetFaces())
+                {
+                    if (face != nullptr)
+                    {
+                        UF_OBJ_set_color(face->Tag(), color);
+                    }
+                }
+            }
+        }
+    }
+    if (applyRandomColor)
+    {
+        UF_DISP_regenerate_display();
+    }
+}
+
 int FindSameBodyLargestPlaneFaceGroup(const SameBodyFingerprint& fingerprint, size_t expectedCount)
 {
     int bestGroupIndex = -1;
@@ -2531,6 +2627,8 @@ struct TextSettings
     bool vShape = false;
     bool renameComponentToText = false;
     bool engraveSameBodies = false;
+    bool sameRandomColor = false;
+    bool autoEngraveVisibleTubes = false;
     bool hideEngravedText = false;
     bool centerLongSide = false;
     bool centerShortSide = false;
@@ -2832,19 +2930,6 @@ bool AskPlanarFaceData(Face* face, const Point3d* referencePoint, Point3d* point
 
 std::string SerialNumberText(const KeZiConfig& config)
 {
-    if (config.serialStyle == "A" || config.serialStyle == "a")
-    {
-        int value = std::max(1, config.serialStart);
-        std::string letters;
-        while (value > 0)
-        {
-            --value;
-            letters.insert(letters.begin(), static_cast<char>('A' + (value % 26)));
-            value /= 26;
-        }
-        return letters;
-    }
-
     int width = config.serialPad;
     if (!config.serialStyle.empty() &&
         std::all_of(config.serialStyle.begin(), config.serialStyle.end(), [](unsigned char ch) { return std::isdigit(ch); }))
@@ -2946,41 +3031,7 @@ bool IncrementTextSerial(const std::string& text, std::string* nextText)
         return true;
     }
 
-    begin = end;
-    while (begin > 0 && std::isalpha(static_cast<unsigned char>(text[begin - 1])))
-    {
-        --begin;
-    }
-    if (begin == end)
-    {
-        return false;
-    }
-
-    std::string letters = text.substr(begin, end - begin);
-    int carry = 1;
-    for (std::size_t i = letters.size(); i > 0 && carry != 0; --i)
-    {
-        char& ch = letters[i - 1];
-        const bool lower = std::islower(static_cast<unsigned char>(ch)) != 0;
-        const char base = lower ? 'a' : 'A';
-        const char maxCh = lower ? 'z' : 'Z';
-        if (ch >= maxCh)
-        {
-            ch = base;
-        }
-        else
-        {
-            ++ch;
-            carry = 0;
-        }
-    }
-    if (carry != 0)
-    {
-        letters.insert(letters.begin(), std::islower(static_cast<unsigned char>(letters.front())) ? 'a' : 'A');
-    }
-
-    *nextText = text.substr(0, begin) + letters + text.substr(end);
-    return true;
+    return false;
 }
 
 bool LooksLikeSerialValue(const std::string& text)
@@ -2991,16 +3042,8 @@ bool LooksLikeSerialValue(const std::string& text)
         return false;
     }
 
-    const bool allDigits = std::all_of(value.begin(), value.end(), [](unsigned char ch) {
-        return std::isdigit(ch) != 0;
-    });
-    if (allDigits)
-    {
-        return true;
-    }
-
     return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
-        return std::isalpha(ch) != 0;
+        return std::isdigit(ch) != 0;
     });
 }
 
@@ -3201,17 +3244,6 @@ bool ExtractTrailingSerial(const std::string& value, std::string* serialPart)
     std::size_t end = trimmed.size();
     std::size_t begin = end;
     while (begin > 0 && std::isdigit(static_cast<unsigned char>(trimmed[begin - 1])))
-    {
-        --begin;
-    }
-    if (begin < end)
-    {
-        *serialPart = trimmed.substr(begin, end - begin);
-        return true;
-    }
-
-    begin = end;
-    while (begin > 0 && std::isupper(static_cast<unsigned char>(trimmed[begin - 1])))
     {
         --begin;
     }
@@ -3506,7 +3538,9 @@ std::string ExpandTextTemplate(const std::string& textTemplate,
                                const std::string& userText,
                                NXObject* body,
                                Part* part,
-                               const KeZiConfig& config)
+                               const KeZiConfig& config,
+                               const std::string* explicitTextValue = nullptr,
+                               const std::string* explicitSerialValue = nullptr)
 {
     std::string result = textTemplate.empty() ? "{文本}" : textTemplate;
     NXObject* partObject = dynamic_cast<NXObject*>(part);
@@ -3515,11 +3549,21 @@ std::string ExpandTextTemplate(const std::string& textTemplate,
     const std::vector<TemplateToken> tokens = BuildTemplateTokens(result, body, partObject, bodyName, fileName, config);
     const bool hasTextToken = std::any_of(tokens.begin(), tokens.end(), [](const TemplateToken& token) { return token.kind == TemplateToken::Kind::Text; });
     const bool hasSerialToken = std::any_of(tokens.begin(), tokens.end(), [](const TemplateToken& token) { return token.kind == TemplateToken::Kind::Serial; });
-    std::string resolvedUserText = userText;
-    std::string serial = SerialNumberText(config);
-    if (hasTextToken || hasSerialToken)
+    std::string resolvedUserText = explicitTextValue != nullptr ? *explicitTextValue : userText;
+    std::string serial = explicitSerialValue != nullptr ? *explicitSerialValue : SerialNumberText(config);
+    if ((hasTextToken || hasSerialToken) && (explicitTextValue == nullptr || explicitSerialValue == nullptr))
     {
-        ResolveEditableValuesFromDisplay(tokens, userText, config, &resolvedUserText, &serial);
+        std::string parsedText = userText;
+        std::string parsedSerial = SerialNumberText(config);
+        ResolveEditableValuesFromDisplay(tokens, userText, config, &parsedText, &parsedSerial);
+        if (explicitTextValue == nullptr)
+        {
+            resolvedUserText = parsedText;
+        }
+        if (explicitSerialValue == nullptr)
+        {
+            serial = parsedSerial;
+        }
     }
 
     const auto replaceAll = [&result](const std::string& key, const std::string& replacement) {
@@ -3701,6 +3745,8 @@ private:
         verticalText_ = dynamic_cast<Toggle*>(top->FindBlock("verticalText"));
         renameComponentToText_ = dynamic_cast<Toggle*>(top->FindBlock("renameComponentToText"));
         engraveSameBodies_ = dynamic_cast<Toggle*>(top->FindBlock("engraveSameBodies"));
+        sameRandomColor_ = dynamic_cast<Toggle*>(top->FindBlock("sameRandomColor"));
+        autoEngraveVisibleTubes_ = dynamic_cast<Toggle*>(top->FindBlock("autoEngraveVisibleTubes"));
         hideEngravedText_ = dynamic_cast<Toggle*>(top->FindBlock("hideEngravedText"));
         editConfig_ = dynamic_cast<Button*>(top->FindBlock("editConfig"));
         Log(session_, "初始化对话框: FindBlock完成");
@@ -3835,6 +3881,14 @@ private:
         if (engraveSameBodies_ != nullptr)
         {
             engraveSameBodies_->SetValue(config_.engraveSameBodies && !isAssemblyContext_);
+        }
+        if (sameRandomColor_ != nullptr)
+        {
+            sameRandomColor_->SetValue(config_.sameRandomColor && !isAssemblyContext_);
+        }
+        if (autoEngraveVisibleTubes_ != nullptr)
+        {
+            autoEngraveVisibleTubes_->SetValue(config_.autoEngraveVisibleTubes);
         }
         if (hideEngravedText_ != nullptr)
         {
@@ -3996,6 +4050,18 @@ private:
             UpdateUiState();
             RefreshPreview();
         }
+        else if (block == autoEngraveVisibleTubes_)
+        {
+            UpdateUiState();
+            if (ReadToggle(autoEngraveVisibleTubes_, false))
+            {
+                ClearPreviewBuilder();
+            }
+            else
+            {
+                RefreshPreview();
+            }
+        }
         else if (block == manualFace_)
         {
             MoveOrientationToSelectedFace();
@@ -4145,6 +4211,8 @@ private:
         WriteConfigValue("V形文本", BoolText(settings.vShape));
         WriteConfigValue("编号设为部件名", BoolText(settings.renameComponentToText));
         WriteConfigValue("刻相同", BoolText(settings.engraveSameBodies));
+        WriteConfigValue("相同随机色", BoolText(settings.sameRandomColor));
+        WriteConfigValue("所有可见方通自动刻字", BoolText(settings.autoEngraveVisibleTubes));
         WriteConfigValue("隐藏已刻字体", BoolText(settings.hideEngravedText));
         WriteConfigValue("长向居中", BoolText(settings.centerLongSide));
         WriteConfigValue("短向居中", BoolText(settings.centerShortSide));
@@ -4169,6 +4237,8 @@ private:
         config_.vShape = settings.vShape;
         config_.renameComponentToText = settings.renameComponentToText;
         config_.engraveSameBodies = settings.engraveSameBodies;
+        config_.sameRandomColor = settings.sameRandomColor;
+        config_.autoEngraveVisibleTubes = settings.autoEngraveVisibleTubes;
         config_.hideEngravedText = settings.hideEngravedText;
         config_.centerLongSide = settings.centerLongSide;
         config_.centerShortSide = settings.centerShortSide;
@@ -4366,6 +4436,22 @@ private:
             hideEngravedText_->SetShow(true);
             hideEngravedText_->SetEnable(true);
         }
+        if (sameRandomColor_ != nullptr)
+        {
+            const bool showForSinglePart = !isAssemblyContext_;
+            sameRandomColor_->SetShow(showForSinglePart);
+            sameRandomColor_->SetEnable(showForSinglePart);
+            if (!showForSinglePart)
+            {
+                sameRandomColor_->SetValue(false);
+            }
+        }
+        const bool autoEngraveVisibleTubes = ReadToggle(autoEngraveVisibleTubes_, false);
+        if (manualFace_ != nullptr)
+        {
+            manualFace_->SetShow(!autoEngraveVisibleTubes);
+            manualFace_->SetEnable(!autoEngraveVisibleTubes);
+        }
         const bool lockAspect = ReadToggle(lockAspect_, true);
         if (wScale_ != nullptr)
         {
@@ -4416,6 +4502,8 @@ private:
         settings.vShape = ReadToggle(verticalText_, false);
         settings.renameComponentToText = isAssemblyContext_ && ReadToggle(renameComponentToText_, false);
         settings.engraveSameBodies = !isAssemblyContext_ && ReadToggle(engraveSameBodies_, false);
+        settings.sameRandomColor = !isAssemblyContext_ && ReadToggle(sameRandomColor_, false);
+        settings.autoEngraveVisibleTubes = ReadToggle(autoEngraveVisibleTubes_, false);
         settings.hideEngravedText = ReadToggle(hideEngravedText_, false);
         settings.centerLongSide = ReadToggle(centerLongSide_, false);
         settings.centerShortSide = ReadToggle(centerShortSide_, false);
@@ -5261,6 +5349,689 @@ private:
         builder->Commit();
     }
 
+    struct AutoTubeEngravingTarget
+    {
+        Body* body = nullptr;
+        Face* face = nullptr;
+        Point3d origin;
+        Matrix3x3 matrix;
+        double screenX = 0.0;
+        double screenY = 0.0;
+    };
+
+    static std::size_t Utf8CharacterCount(const std::string& text)
+    {
+        std::size_t count = 0;
+        for (unsigned char ch : text)
+        {
+            if ((ch & 0xC0) != 0x80)
+            {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    bool TextEnvelopeFitsFace(Face* face,
+                              const Point3d& origin,
+                              const Vector3d& longAxis,
+                              const Vector3d& shortAxis,
+                              const double halfLong,
+                              const double halfShort,
+                              const double sampleSpacing) const
+    {
+        if (face == nullptr || halfLong <= 0.0 || halfShort <= 0.0)
+        {
+            return false;
+        }
+
+        const double spacing = std::max(0.5, sampleSpacing);
+        const int longSamples = std::clamp(static_cast<int>(std::ceil((2.0 * halfLong) / spacing)) + 1, 5, 61);
+        const int shortSamples = std::clamp(static_cast<int>(std::ceil((2.0 * halfShort) / spacing)) + 1, 5, 21);
+        const auto pointIsInside = [face, &origin, &longAxis, &shortAxis](const double longOffset, const double shortOffset) {
+            const Point3d sample = OffsetPoint(OffsetPoint(origin, longAxis, longOffset), shortAxis, shortOffset);
+            double point[3] = {sample.X, sample.Y, sample.Z};
+            int status = 0;
+            return UF_MODL_ask_point_containment(point, face->Tag(), &status) == 0 && status == 1;
+        };
+
+        // Most rejected locations intersect an opening or an outer boundary.  Check
+        // representative points first, then retain the original dense scan for safety.
+        static const double quickFractions[][2] = {
+            {0.0, 0.0}, {-1.0, -1.0}, {-1.0, 1.0}, {1.0, -1.0}, {1.0, 1.0},
+            {-1.0, 0.0}, {1.0, 0.0}, {0.0, -1.0}, {0.0, 1.0},
+            {-0.5, 0.0}, {0.5, 0.0}, {0.0, -0.5}, {0.0, 0.5}
+        };
+        for (const auto& fraction : quickFractions)
+        {
+            if (!pointIsInside(fraction[0] * halfLong, fraction[1] * halfShort))
+            {
+                return false;
+            }
+        }
+        for (int longIndex = 0; longIndex < longSamples; ++longIndex)
+        {
+            const double longFraction = longSamples == 1 ? 0.0 : static_cast<double>(longIndex) / static_cast<double>(longSamples - 1);
+            const double longOffset = -halfLong + 2.0 * halfLong * longFraction;
+            for (int shortIndex = 0; shortIndex < shortSamples; ++shortIndex)
+            {
+                const double shortFraction = shortSamples == 1 ? 0.0 : static_cast<double>(shortIndex) / static_cast<double>(shortSamples - 1);
+                const double shortOffset = -halfShort + 2.0 * halfShort * shortFraction;
+                if (!pointIsInside(longOffset, shortOffset))
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    bool FindAutomaticTextOrigin(Face* face,
+                                 const Point3d& faceCenter,
+                                 const Vector3d& longAxis,
+                                 const Vector3d& shortAxis,
+                                 const double longSpan,
+                                 const double shortSpan,
+                                 const TextSettings& settings,
+                                 const std::string& text,
+                                 Point3d* origin) const
+    {
+        if (face == nullptr || origin == nullptr)
+        {
+            return false;
+        }
+
+        const double height = std::max(0.1, settings.height);
+        const double estimatedNaturalWidth = std::max(
+            height,
+            height * 0.65 * static_cast<double>(std::max<std::size_t>(1, Utf8CharacterCount(text))) * settings.widthScale / 100.0);
+        const double textWidth = settings.textLength > 0.0 ? settings.textLength : estimatedNaturalWidth;
+        const double clearance = std::max(0.5, height * 0.2);
+        const double halfLong = 0.5 * textWidth + clearance;
+        const double halfShort = 0.5 * height + clearance;
+        const double maximumLongOffset = 0.5 * longSpan - halfLong;
+        if (maximumLongOffset < 0.0 || 0.5 * shortSpan < halfShort)
+        {
+            return false;
+        }
+
+        const double spacing = std::max(0.5, height * 0.25);
+        const double searchStep = std::max(1.0, height * 0.5);
+        const int steps = static_cast<int>(std::ceil(maximumLongOffset / searchStep));
+        for (int step = 0; step <= steps; ++step)
+        {
+            const double distance = std::min(maximumLongOffset, static_cast<double>(step) * searchStep);
+            const int directionCount = step == 0 ? 1 : 2;
+            for (int directionIndex = 0; directionIndex < directionCount; ++directionIndex)
+            {
+                const double signedDistance = step == 0 || directionIndex == 0 ? distance : -distance;
+                const Point3d candidate = OffsetPoint(faceCenter, longAxis, signedDistance);
+                if (TextEnvelopeFitsFace(face, candidate, longAxis, shortAxis, halfLong, halfShort, spacing))
+                {
+                    *origin = candidate;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool BuildAutomaticTubeTarget(Body* body,
+                                  const Vector3d& viewX,
+                                  const Vector3d& viewY,
+                                  const Vector3d& viewZ,
+                                  const TextSettings& settings,
+                                  AutoTubeEngravingTarget* target) const
+    {
+        if (body == nullptr || target == nullptr || body->IsBlanked() || !body->IsSolidBody())
+        {
+            return false;
+        }
+
+        struct FaceChoice
+        {
+            Face* face = nullptr;
+            Point3d center;
+            Vector3d normal;
+            Vector3d longAxis;
+            Vector3d shortAxis;
+            double longSpan = 0.0;
+            double shortSpan = 0.0;
+            double alignment = 0.0;
+            double area = 0.0;
+            double planeOffset = 0.0;
+        };
+
+        std::vector<FaceChoice> choices;
+        int elongatedPlanarFaceCount = 0;
+        for (Face* face : body->GetFaces())
+        {
+            try
+            {
+                Point3d facePoint;
+                Vector3d faceNormal;
+                if (!AskPlanarFaceData(face, nullptr, &facePoint, &faceNormal))
+                {
+                    continue;
+                }
+                faceNormal = Normalize(faceNormal, Vector3d(0.0, 0.0, 1.0));
+
+                Vector3d longAxis;
+                Vector3d shortAxis;
+                if (!FaceLongShortAxes(face, faceNormal, &longAxis, &shortAxis))
+                {
+                    continue;
+                }
+                if (Dot(longAxis, viewX) < 0.0)
+                {
+                    longAxis = Vector3d(-longAxis.X, -longAxis.Y, -longAxis.Z);
+                }
+                shortAxis = Normalize(Cross(faceNormal, longAxis), shortAxis);
+                longAxis = Normalize(Cross(shortAxis, faceNormal), longAxis);
+
+                const std::vector<Point3d> vertices = FaceVertices(face);
+                double longCenter = 0.0;
+                double shortCenter = 0.0;
+                const double longSpan = ProjectionSpan(vertices, longAxis, &longCenter);
+                const double shortSpan = ProjectionSpan(vertices, shortAxis, &shortCenter);
+                if (longSpan < std::max(shortSpan * 1.5, settings.height * 3.0) || shortSpan < settings.height * 1.2)
+                {
+                    continue;
+                }
+                ++elongatedPlanarFaceCount;
+
+                const double alignment = Dot(faceNormal, viewZ);
+                if (alignment <= 0.05)
+                {
+                    continue;
+                }
+
+                // Auto face selection only needs the planar center and relative area.
+                // Using the face point and vertex projection avoids an expensive exact
+                // area/centroid measurement on every face.
+                Point3d center = facePoint;
+                const double currentLong = center.X * longAxis.X + center.Y * longAxis.Y + center.Z * longAxis.Z;
+                const double currentShort = center.X * shortAxis.X + center.Y * shortAxis.Y + center.Z * shortAxis.Z;
+                center = OffsetPoint(center, longAxis, longCenter - currentLong);
+                center = OffsetPoint(center, shortAxis, shortCenter - currentShort);
+
+                FaceChoice choice;
+                choice.face = face;
+                choice.center = center;
+                choice.normal = faceNormal;
+                choice.longAxis = longAxis;
+                choice.shortAxis = shortAxis;
+                choice.longSpan = longSpan;
+                choice.shortSpan = shortSpan;
+                choice.alignment = alignment;
+                choice.area = longSpan * shortSpan;
+                choice.planeOffset = center.X * faceNormal.X + center.Y * faceNormal.Y + center.Z * faceNormal.Z;
+                choices.push_back(choice);
+            }
+            catch (...)
+            {
+            }
+        }
+
+        if (elongatedPlanarFaceCount < 4 || choices.empty())
+        {
+            return false;
+        }
+
+        std::vector<FaceChoice> exteriorChoices;
+        for (std::size_t candidateIndex = 0; candidateIndex < choices.size(); ++candidateIndex)
+        {
+            bool hasOuterParallelFace = false;
+            for (std::size_t otherIndex = 0; otherIndex < choices.size(); ++otherIndex)
+            {
+                if (candidateIndex == otherIndex)
+                {
+                    continue;
+                }
+                const FaceChoice& candidate = choices[candidateIndex];
+                const FaceChoice& other = choices[otherIndex];
+                if (Dot(candidate.normal, other.normal) > 0.98 &&
+                    other.planeOffset > candidate.planeOffset + kSameBodyDistanceTolerance)
+                {
+                    hasOuterParallelFace = true;
+                    break;
+                }
+            }
+            if (!hasOuterParallelFace)
+            {
+                exteriorChoices.push_back(choices[candidateIndex]);
+            }
+        }
+        if (exteriorChoices.empty())
+        {
+            return false;
+        }
+
+        std::sort(exteriorChoices.begin(), exteriorChoices.end(), [](const FaceChoice& lhs, const FaceChoice& rhs) {
+            if (std::fabs(lhs.alignment - rhs.alignment) > 0.02)
+            {
+                return lhs.alignment > rhs.alignment;
+            }
+            return lhs.area > rhs.area;
+        });
+
+        for (const FaceChoice& choice : exteriorChoices)
+        {
+            Point3d origin;
+            if (!FindAutomaticTextOrigin(
+                    choice.face,
+                    choice.center,
+                    choice.longAxis,
+                    choice.shortAxis,
+                    choice.longSpan,
+                    choice.shortSpan,
+                    settings,
+                    settings.text,
+                    &origin))
+            {
+                continue;
+            }
+
+            target->body = body;
+            target->face = choice.face;
+            target->origin = origin;
+            target->matrix = MakeMatrix(choice.longAxis, choice.shortAxis, choice.normal);
+            target->screenX = origin.X * viewX.X + origin.Y * viewX.Y + origin.Z * viewX.Z;
+            target->screenY = origin.X * viewY.X + origin.Y * viewY.Y + origin.Z * viewY.Z;
+            return true;
+        }
+        return false;
+    }
+
+    std::vector<AutoTubeEngravingTarget> CollectAutomaticTubeTargets(Part* part,
+                                                                     const TextSettings& settings,
+                                                                     int* visibleBodyCount) const
+    {
+        std::vector<AutoTubeEngravingTarget> targets;
+        if (visibleBodyCount != nullptr)
+        {
+            *visibleBodyCount = 0;
+        }
+        if (part == nullptr || part->Views() == nullptr)
+        {
+            return targets;
+        }
+
+        View* workView = part->Views()->WorkView();
+        if (workView == nullptr)
+        {
+            return targets;
+        }
+        const Matrix3x3 viewMatrix = workView->Matrix();
+        const Vector3d viewX = Normalize(Vector3d(viewMatrix.Xx, viewMatrix.Xy, viewMatrix.Xz), Vector3d(1.0, 0.0, 0.0));
+        const Vector3d viewY = Normalize(Vector3d(viewMatrix.Yx, viewMatrix.Yy, viewMatrix.Yz), Vector3d(0.0, 1.0, 0.0));
+        const Vector3d viewZ = Normalize(Vector3d(viewMatrix.Zx, viewMatrix.Zy, viewMatrix.Zz), Vector3d(0.0, 0.0, 1.0));
+
+        const std::vector<Body*> bodies = CollectVisibleBodies(part);
+        if (visibleBodyCount != nullptr)
+        {
+            *visibleBodyCount = static_cast<int>(bodies.size());
+        }
+        for (Body* body : bodies)
+        {
+            AutoTubeEngravingTarget target;
+            if (BuildAutomaticTubeTarget(body, viewX, viewY, viewZ, settings, &target))
+            {
+                targets.push_back(target);
+            }
+        }
+        std::sort(targets.begin(), targets.end(), [](const AutoTubeEngravingTarget& lhs, const AutoTubeEngravingTarget& rhs) {
+            if (std::fabs(lhs.screenY - rhs.screenY) > 0.01)
+            {
+                return lhs.screenY > rhs.screenY;
+            }
+            return lhs.screenX < rhs.screenX;
+        });
+        return targets;
+    }
+
+    void ApplyAutomaticVisibleTubeEngraving(const TextSettings& settings)
+    {
+        const auto automaticStartedAt = std::chrono::steady_clock::now();
+        Part* workPart = session_ != nullptr && session_->Parts() != nullptr ? session_->Parts()->Work() : nullptr;
+        if (workPart == nullptr)
+        {
+            throw std::runtime_error("Could not get the current work part for automatic tube engraving.");
+        }
+
+        int visibleBodyCount = 0;
+        const std::vector<AutoTubeEngravingTarget> targets = CollectAutomaticTubeTargets(workPart, settings, &visibleBodyCount);
+        if (targets.empty())
+        {
+            throw std::runtime_error("当前工作部件中没有找到朝向当前视图且有足够刻字空间的可见方通。");
+        }
+
+        const std::string textTemplate = EffectiveTextTemplate(settings);
+        const bool hasSerial = TextTemplateHasSerial(textTemplate);
+        int firstSerial = std::max(0, config_.serialStart);
+        std::string batchSerialStyle = config_.serialStyle;
+        std::string batchEditableText = settings.text;
+        if (hasSerial)
+        {
+            NXObject* partObject = dynamic_cast<NXObject*>(workPart);
+            const std::string firstBodyName = targets.front().body == nullptr ? std::string() : ToString(targets.front().body->Name());
+            const std::vector<TemplateToken> firstTokens = BuildTemplateTokens(
+                textTemplate, targets.front().body, partObject, firstBodyName, PartLeafName(workPart), config_);
+            std::string dialogSerial = SerialNumberText(config_);
+            ResolveEditableValuesFromDisplay(firstTokens, settings.text, config_, &batchEditableText, &dialogSerial);
+            dialogSerial = Trim(dialogSerial);
+            const bool numericDialogSerial = !dialogSerial.empty() &&
+                std::all_of(dialogSerial.begin(), dialogSerial.end(), [](unsigned char ch) { return std::isdigit(ch); });
+            if (numericDialogSerial)
+            {
+                try
+                {
+                    const long long parsed = std::stoll(dialogSerial);
+                    if (parsed >= 0 && parsed <= std::numeric_limits<int>::max())
+                    {
+                        firstSerial = static_cast<int>(parsed);
+                        batchSerialStyle = dialogSerial;
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+
+        const auto analysisFinishedAt = std::chrono::steady_clock::now();
+        const long long selectionMilliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(analysisFinishedAt - automaticStartedAt).count();
+        int successfulCount = 0;
+        int failedCount = 0;
+        int serialOffset = 0;
+        int sameBodyGroupCount = 0;
+        std::vector<bool> processedTargets(targets.size(), false);
+        std::vector<Body*> cachedVisibleBodies;
+        std::vector<SameBodyFingerprint> cachedFingerprints;
+        if (settings.engraveSameBodies || settings.sameRandomColor)
+        {
+            cachedVisibleBodies = CollectVisibleBodies(workPart);
+            cachedFingerprints.reserve(cachedVisibleBodies.size());
+            for (Body* body : cachedVisibleBodies)
+            {
+                cachedFingerprints.push_back(BuildSameBodyFingerprint(body));
+            }
+        }
+
+        int coloredGroupCount = 0;
+        if (settings.sameRandomColor && cachedVisibleBodies.size() == cachedFingerprints.size())
+        {
+            std::vector<bool> metadataAssigned(cachedVisibleBodies.size(), false);
+            for (std::size_t referenceIndex = 0; referenceIndex < cachedVisibleBodies.size(); ++referenceIndex)
+            {
+                if (metadataAssigned[referenceIndex])
+                {
+                    continue;
+                }
+                metadataAssigned[referenceIndex] = true;
+                std::vector<Body*> metadataGroup(1, cachedVisibleBodies[referenceIndex]);
+                for (std::size_t candidateIndex = referenceIndex + 1; candidateIndex < cachedVisibleBodies.size(); ++candidateIndex)
+                {
+                    if (!metadataAssigned[candidateIndex] &&
+                        SameBodyFingerprintsMatch(cachedFingerprints[referenceIndex], cachedFingerprints[candidateIndex]))
+                    {
+                        metadataAssigned[candidateIndex] = true;
+                        metadataGroup.push_back(cachedVisibleBodies[candidateIndex]);
+                    }
+                }
+
+                const bool containsAutomaticTube = std::any_of(
+                    metadataGroup.begin(), metadataGroup.end(), [&targets](Body* body) {
+                        return std::any_of(targets.begin(), targets.end(), [body](const AutoTubeEngravingTarget& target) {
+                            return target.body == body;
+                        });
+                    });
+                if (containsAutomaticTube)
+                {
+                    ApplySameBodyGroupMetadata(metadataGroup, true);
+                    ++coloredGroupCount;
+                }
+            }
+        }
+
+        for (std::size_t representativeIndex = 0; representativeIndex < targets.size(); ++representativeIndex)
+        {
+            if (processedTargets[representativeIndex])
+            {
+                continue;
+            }
+            processedTargets[representativeIndex] = true;
+            const AutoTubeEngravingTarget& representative = targets[representativeIndex];
+            std::vector<AutoTubeEngravingTarget> groupTargets(1, representative);
+            if (settings.engraveSameBodies)
+            {
+                try
+                {
+                    Point3d referenceFacePoint;
+                    Vector3d referenceFaceNormal;
+                    if (!AskPlanarFaceData(representative.face, &representative.origin, &referenceFacePoint, &referenceFaceNormal))
+                    {
+                        throw std::runtime_error("无法获取自动基准刻字面数据。");
+                    }
+
+                    std::vector<Body*> matchingBodies;
+                    std::size_t referenceFingerprintIndex = cachedVisibleBodies.size();
+                    for (std::size_t index = 0; index < cachedVisibleBodies.size(); ++index)
+                    {
+                        if (cachedVisibleBodies[index] == representative.body)
+                        {
+                            referenceFingerprintIndex = index;
+                            break;
+                        }
+                    }
+                    if (referenceFingerprintIndex < cachedFingerprints.size())
+                    {
+                        const SameBodyFingerprint& referenceFingerprint = cachedFingerprints[referenceFingerprintIndex];
+                        for (std::size_t index = 0; index < cachedVisibleBodies.size(); ++index)
+                        {
+                            if (index != referenceFingerprintIndex &&
+                                SameBodyFingerprintsMatch(referenceFingerprint, cachedFingerprints[index]))
+                            {
+                                matchingBodies.push_back(cachedVisibleBodies[index]);
+                            }
+                        }
+                    }
+                    for (Body* matchingBody : matchingBodies)
+                    {
+                        bool alreadyProcessed = false;
+                        for (std::size_t candidateIndex = 0; candidateIndex < targets.size(); ++candidateIndex)
+                        {
+                            if (targets[candidateIndex].body == matchingBody)
+                            {
+                                alreadyProcessed = processedTargets[candidateIndex];
+                                processedTargets[candidateIndex] = true;
+                                break;
+                            }
+                        }
+                        if (alreadyProcessed)
+                        {
+                            continue;
+                        }
+
+                        Face* sameFace = nullptr;
+                        Point3d sameFacePoint;
+                        Vector3d sameFaceNormal;
+                        SameBodyPlaneFaceFeature referenceFeature = {};
+                        SameBodyPlaneFaceFeature sameFeature = {};
+                        if (!FindMatchingFaceForSameBody(
+                                matchingBody,
+                                representative.face,
+                                referenceFacePoint,
+                                referenceFaceNormal,
+                                &sameFace,
+                                &sameFacePoint,
+                                &sameFaceNormal,
+                                &referenceFeature,
+                                &sameFeature))
+                        {
+                            continue;
+                        }
+
+                        AutoTubeEngravingTarget sameTarget;
+                        sameTarget.body = matchingBody;
+                        sameTarget.face = sameFace;
+                        sameTarget.origin = TransferSameBodyTextOrigin(representative.origin, referenceFeature.frame, sameFeature.frame);
+                        sameTarget.matrix = TransferSameBodyTextMatrix(representative.matrix, referenceFeature.frame, sameFeature.frame);
+                        groupTargets.push_back(sameTarget);
+                    }
+                }
+                catch (const std::exception& ex)
+                {
+                    Log(session_, std::string("自动刻相同分组失败，按单体处理: ") + ex.what());
+                }
+                catch (...)
+                {
+                    Log(session_, "自动刻相同分组失败，按单体处理: 未知异常");
+                }
+            }
+            ++sameBodyGroupCount;
+
+            std::string resolvedText;
+            try
+            {
+                KeZiConfig targetConfig = config_;
+                targetConfig.serialStart = firstSerial + serialOffset;
+                targetConfig.serialStyle = batchSerialStyle;
+                targetConfig.serialPad = static_cast<int>(batchSerialStyle.size());
+                NXObject* partObject = dynamic_cast<NXObject*>(workPart);
+                const std::string bodyName = representative.body == nullptr ? std::string() : ToString(representative.body->Name());
+                const std::vector<TemplateToken> tokens = BuildTemplateTokens(textTemplate, representative.body, partObject, bodyName, PartLeafName(workPart), targetConfig);
+                std::string editableText = batchEditableText;
+                std::string ignoredSerial = SerialNumberText(targetConfig);
+                ResolveEditableValuesFromDisplay(tokens, settings.text, targetConfig, &editableText, &ignoredSerial);
+                const std::string explicitSerial = SerialNumberText(targetConfig);
+                resolvedText = ExpandTextTemplate(
+                    textTemplate,
+                    settings.text,
+                    representative.body,
+                    workPart,
+                    targetConfig,
+                    &editableText,
+                    &explicitSerial);
+                if (resolvedText.empty())
+                {
+                    failedCount += static_cast<int>(groupTargets.size());
+                    continue;
+                }
+            }
+            catch (const NXException& ex)
+            {
+                failedCount += static_cast<int>(groupTargets.size());
+                Log(session_, std::string("自动方通规则解析失败: ") + ex.Message());
+                continue;
+            }
+            catch (const std::exception& ex)
+            {
+                failedCount += static_cast<int>(groupTargets.size());
+                Log(session_, std::string("自动方通规则解析失败: ") + ex.what());
+                continue;
+            }
+            catch (...)
+            {
+                failedCount += static_cast<int>(groupTargets.size());
+                Log(session_, "自动方通规则解析失败: 未知异常");
+                continue;
+            }
+
+            int groupSuccessCount = 0;
+            for (const AutoTubeEngravingTarget& target : groupTargets)
+            {
+                try
+                {
+                    std::unique_ptr<Tooling::InsertTextBuilder, void (*)(Tooling::InsertTextBuilder*)> builder(
+                        nullptr,
+                        [](Tooling::InsertTextBuilder* value) {
+                            if (value != nullptr)
+                            {
+                                try { value->Destroy(); } catch (...) {}
+                            }
+                        });
+                    NXObject* textUdo = nullptr;
+                    builder.reset(CreatePreparedBuilder(&textUdo, target.face, &target.origin, &target.matrix, &resolvedText));
+                    CommitPreparedBuilder(builder.get(), textUdo);
+                    builder.reset();
+
+                    WriteStringAttribute(target.body, "bianhao", resolvedText);
+                    SetObjectNameSafe(session_, target.body, resolvedText);
+                    if (settings.hideEngravedText)
+                    {
+                        HideEngravedBody(target.body);
+                    }
+                    ++successfulCount;
+                    ++groupSuccessCount;
+                }
+                catch (const NXException& ex)
+                {
+                    ++failedCount;
+                    Log(session_, std::string("自动方通刻字失败: ") + ex.Message());
+                }
+                catch (const std::exception& ex)
+                {
+                    ++failedCount;
+                    Log(session_, std::string("自动方通刻字失败: ") + ex.what());
+                }
+                catch (...)
+                {
+                    ++failedCount;
+                    Log(session_, "自动方通刻字失败: 未知异常");
+                }
+            }
+            if (hasSerial && groupSuccessCount > 0)
+            {
+                ++serialOffset;
+            }
+        }
+
+        SaveCurrentRule();
+        SaveDialogValues();
+        if (hasSerial && serialOffset > 0)
+        {
+            config_.serialStart = firstSerial + serialOffset;
+            config_.serialStyle = batchSerialStyle;
+            config_.serialPad = static_cast<int>(batchSerialStyle.size());
+            WriteConfigValue("起始号", std::to_string(config_.serialStart));
+            WriteConfigValue("流水号样式", config_.serialStyle);
+
+            KeZiConfig nextConfig = config_;
+            NXObject* partObject = dynamic_cast<NXObject*>(workPart);
+            const std::string firstBodyName = targets.front().body == nullptr ? std::string() : ToString(targets.front().body->Name());
+            const std::vector<TemplateToken> displayTokens = BuildTemplateTokens(
+                textTemplate, targets.front().body, partObject, firstBodyName, PartLeafName(workPart), nextConfig);
+            const std::string nextDisplayText = ComposeTemplateDisplayText(displayTokens, batchEditableText, SerialNumberText(nextConfig));
+            config_.text = nextDisplayText;
+            WriteConfigValue("文本", nextDisplayText);
+            if (textValue_ != nullptr)
+            {
+                updatingResolvedText_ = true;
+                textValue_->SetValue(nextDisplayText.c_str());
+                updatingResolvedText_ = false;
+            }
+        }
+        if (successfulCount == 0)
+        {
+            throw std::runtime_error("找到了方通候选面，但所有刻字操作都失败。");
+        }
+
+        std::ostringstream summary;
+        const auto completedAt = std::chrono::steady_clock::now();
+        const long long processingMilliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(completedAt - analysisFinishedAt).count();
+        summary << "自动方通刻字完成\n"
+                << "可见实体: " << visibleBodyCount << "\n"
+                << "识别方通: " << targets.size() << "\n"
+                << "刻字分组: " << sameBodyGroupCount << "\n"
+                << "成功: " << successfulCount << "\n"
+                << "失败: " << failedCount << "\n"
+                << "随机色分组: " << coloredGroupCount << "\n"
+                << "识别选面耗时: " << selectionMilliseconds << " ms\n"
+                << "分组及刻字耗时: " << processingMilliseconds << " ms";
+        ui_->NXMessageBox()->Show("刻字", NXMessageBox::DialogTypeInformation, summary.str().c_str());
+    }
+
     void ApplyEngraving()
     {
         Log(session_, "开始提交刻字");
@@ -5291,8 +6062,15 @@ private:
         ClearPreviewBuilder();
         Face* selectedFace = SelectedFace();
         const TextSettings settings = ReadSettings();
+        if (settings.autoEngraveVisibleTubes)
+        {
+            ApplyAutomaticVisibleTubeEngraving(settings);
+            Log(session_, "自动方通刻字完成");
+            return;
+        }
         const bool renameComponentToText = settings.renameComponentToText;
         const bool engraveSameBodies = settings.engraveSameBodies;
+        const bool sameRandomColor = settings.sameRandomColor;
         const bool hideEngravedText = settings.hideEngravedText;
         WorkContextGuard workContext(session_, selectedFace);
         NXObject* textUdo = nullptr;
@@ -5329,9 +6107,13 @@ private:
         Log(session_, std::string("应用文本: 对话框=") + dialogTextAtApply + ", 解析=" + lastResolvedText_ + ", 使用=" + committedText);
 
         std::vector<SameBodyEngravingTarget> sameBodyTargets;
-        if (engraveSameBodies && hasSameBodyReference && committedWorkPart != nullptr && referenceBody != nullptr && !committedText.empty())
+        std::vector<Body*> matchingBodies;
+        if ((engraveSameBodies || sameRandomColor) && hasSameBodyReference && committedWorkPart != nullptr && referenceBody != nullptr)
         {
-            const std::vector<Body*> matchingBodies = FindMatchingVisibleBodies(committedWorkPart, referenceBody);
+            matchingBodies = FindMatchingVisibleBodies(committedWorkPart, referenceBody);
+        }
+        if (engraveSameBodies && !committedText.empty())
+        {
             for (Body* sameBody : matchingBodies)
             {
                 Face* sameFace = nullptr;
@@ -5351,6 +6133,12 @@ private:
                 target.matrix = TransferSameBodyTextMatrix(referenceMatrix, referenceFeature.frame, sameFeature.frame);
                 sameBodyTargets.push_back(target);
             }
+        }
+        if (sameRandomColor && referenceBody != nullptr)
+        {
+            std::vector<Body*> metadataBodies(1, referenceBody);
+            metadataBodies.insert(metadataBodies.end(), matchingBodies.begin(), matchingBodies.end());
+            ApplySameBodyGroupMetadata(metadataBodies, true);
         }
 
         CommitPreparedBuilder(builder.get(), textUdo);
@@ -5500,6 +6288,8 @@ private:
     Toggle* verticalText_ = nullptr;
     Toggle* renameComponentToText_ = nullptr;
     Toggle* engraveSameBodies_ = nullptr;
+    Toggle* sameRandomColor_ = nullptr;
+    Toggle* autoEngraveVisibleTubes_ = nullptr;
     Toggle* hideEngravedText_ = nullptr;
     Button* editConfig_ = nullptr;
     Tooling::InsertTextBuilder* previewBuilder_ = nullptr;
