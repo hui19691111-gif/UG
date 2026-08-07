@@ -5,11 +5,19 @@
 #include <NXOpen/BasePart.hxx>
 #include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
+#include <NXOpen/FontCollection.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXObjectManager.hxx>
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
 #include <NXOpen/Session.hxx>
+#include <NXOpen/UI.hxx>
+#include <NXOpen/BlockStyler_BlockDialog.hxx>
+#include <NXOpen/BlockStyler_CompositeBlock.hxx>
+#include <NXOpen/BlockStyler_Node.hxx>
+#include <NXOpen/BlockStyler_PropertyList.hxx>
+#include <NXOpen/BlockStyler_Tree.hxx>
+#include <NXOpen/BlockStyler_UIBlock.hxx>
 
 #include <uf.h>
 #include <uf_assem.h>
@@ -29,6 +37,7 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -42,6 +51,10 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+
+#ifdef CreateDialog
+#undef CreateDialog
+#endif
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
@@ -907,10 +920,17 @@ namespace
         names.insert(kBodyNameAttributeName);
         for (const BodyRecord& body : bodies)
         {
-            const auto values = CollectBodyAttributeMap(body.attributeTag != NULL_TAG ? body.attributeTag : body.tag);
-            for (const auto& item : values)
+            const auto addNames = [&names](const std::map<std::string, std::string>& values)
             {
-                names.insert(item.first);
+                for (const auto& item : values)
+                {
+                    names.insert(item.first);
+                }
+            };
+            addNames(CollectBodyAttributeMap(body.attributeTag != NULL_TAG ? body.attributeTag : body.tag));
+            if (body.fromAssemblyComponent && body.tag != NULL_TAG && body.tag != body.attributeTag)
+            {
+                addNames(CollectBodyAttributeMap(body.tag));
             }
         }
         return std::vector<std::string>(names.begin(), names.end());
@@ -1522,12 +1542,35 @@ namespace
 
     bool TryReadAttribute(const BodyRecord& body, size_t bodyIndex, const std::string& name, std::string& value)
     {
-        if (Trim(name) == kBodyNameAttributeName)
+        const std::string trimmedName = Trim(name);
+        if (trimmedName == kBodyNameAttributeName)
         {
             value = ReadBodyDisplayName(body, bodyIndex);
             return !Trim(value).empty();
         }
-        return TryReadAttributeFromMap(body.attributeTag != NULL_TAG ? body.attributeTag : body.tag, name, value);
+        if (body.fromAssemblyComponent && body.tag != NULL_TAG &&
+            TryReadAttributeFromMap(body.tag, trimmedName, value))
+        {
+            return true;
+        }
+        const tag_t attributeTag = body.attributeTag != NULL_TAG ? body.attributeTag : body.tag;
+        if (attributeTag != NULL_TAG && attributeTag != body.tag &&
+            TryReadAttributeFromMap(attributeTag, trimmedName, value))
+        {
+            return true;
+        }
+        if (!body.fromAssemblyComponent && attributeTag == body.tag &&
+            TryReadAttributeFromMap(attributeTag, trimmedName, value))
+        {
+            return true;
+        }
+        if (trimmedName == "文件名称" || trimmedName == "零件名称" ||
+            trimmedName == "部件名称" || trimmedName == "组件名称")
+        {
+            value = ReadBodyDisplayName(body, bodyIndex);
+            return !Trim(value).empty();
+        }
+        return false;
     }
 
     std::vector<BodyValueRow> BuildRows(const std::vector<BodyRecord>& bodies, const std::vector<std::string>* includedBodyNames, const std::map<std::string, std::vector<std::string>>& manualRows, const std::vector<ColumnDef>& columns)
@@ -1546,7 +1589,7 @@ namespace
             BodyValueRow row;
             row.bodyTag = body.attributeTag != NULL_TAG ? body.attributeTag : body.tag;
             row.bodyName = bodyName;
-            bool keep = false;
+            bool keep = body.fromAssemblyComponent;
             for (const ColumnDef& column : columns)
             {
                 std::string value;
@@ -1589,6 +1632,1265 @@ namespace
             }
         }
         return orderedRows;
+    }
+
+    std::string NormalizeCellText(const std::string& text);
+
+    std::filesystem::path NativeSettingsPath()
+    {
+        return CurrentModuleDirectory().parent_path() / "config" / "MinXiBiaoUI.settings.json";
+    }
+
+    void LoadNativeSettings(std::vector<std::string>& selectedColumns,
+                            std::vector<std::string>& headerTitles,
+                            std::vector<bool>& dedupKeys,
+                            TableOptions& options)
+    {
+        selectedColumns.assign(kAttributeColumnCount, std::string());
+        headerTitles = {"列1", "列2", "列3", "列4", "列5", "列6", "列7", "列8"};
+        dedupKeys.assign(kAttributeColumnCount, false);
+        const std::string json = ReadAllText(NativeSettingsPath());
+        if (json.empty())
+        {
+            return;
+        }
+
+        std::vector<std::string> savedColumns;
+        if (ParseJsonStringArray(json, "selectedColumns", savedColumns, kAttributeColumnCount))
+        {
+            for (size_t i = 0; i < savedColumns.size() && i < selectedColumns.size(); ++i)
+            {
+                selectedColumns[i] = savedColumns[i];
+            }
+        }
+        std::vector<std::string> savedTitles;
+        if (ParseJsonStringArray(json, "headerTitles", savedTitles, kAttributeColumnCount))
+        {
+            for (size_t i = 0; i < savedTitles.size() && i < headerTitles.size(); ++i)
+            {
+                headerTitles[i] = savedTitles[i];
+            }
+        }
+        std::vector<std::string> savedDedupKeys;
+        if (ParseJsonStringArray(json, "dedupKeys", savedDedupKeys, kAttributeColumnCount))
+        {
+            for (size_t i = 0; i < savedDedupKeys.size() && i < dedupKeys.size(); ++i)
+            {
+                const std::string value = ToLowerAscii(Trim(savedDedupKeys[i]));
+                dedupKeys[i] = value == "true" || value == "1" || value == "yes";
+            }
+        }
+        std::string headerLocation;
+        if (ParseJsonStringValue(json, "headerLocation", headerLocation))
+        {
+            options.headerBelow = ToLowerAscii(headerLocation) == "below";
+        }
+        double textHeight = options.textHeight;
+        if (ParseJsonDoubleValue(json, "textHeight", textHeight))
+        {
+            options.textHeight = ClampDouble(textHeight, 1.0, 20.0);
+        }
+    }
+
+    void SaveNativeSettings(const std::vector<std::string>& selectedColumns,
+                            const std::vector<std::string>& headerTitles,
+                            const std::vector<bool>& dedupKeys,
+                            const TableOptions& options)
+    {
+        try
+        {
+            const std::filesystem::path path = NativeSettingsPath();
+            std::error_code ignored;
+            std::filesystem::create_directories(path.parent_path(), ignored);
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!out)
+            {
+                LogBodyScan("SaveNativeSettings failed path=" + path.u8string());
+                return;
+            }
+            out << "{\n  \"selectedColumns\": [";
+            for (size_t i = 0; i < kAttributeColumnCount; ++i)
+            {
+                if (i > 0) out << ", ";
+                out << "\"" << JsonEscape(i < selectedColumns.size() ? selectedColumns[i] : std::string()) << "\"";
+            }
+            out << "],\n  \"headerTitles\": [";
+            for (size_t i = 0; i < kAttributeColumnCount; ++i)
+            {
+                if (i > 0) out << ", ";
+                out << "\"" << JsonEscape(i < headerTitles.size() ? headerTitles[i] : std::string()) << "\"";
+            }
+            out << "],\n  \"dedupKeys\": [";
+            for (size_t i = 0; i < kAttributeColumnCount; ++i)
+            {
+                if (i > 0) out << ", ";
+                out << "\"" << (i < dedupKeys.size() && dedupKeys[i] ? "true" : "false") << "\"";
+            }
+            out << "],\n  \"headerLocation\": \"" << (options.headerBelow ? "below" : "above") << "\",\n"
+                << "  \"textHeight\": " << std::setprecision(15) << options.textHeight << "\n}\n";
+        }
+        catch (const std::exception& ex)
+        {
+            LogBodyScan(std::string("SaveNativeSettings exception: ") + ex.what());
+        }
+        catch (...)
+        {
+            LogBodyScan("SaveNativeSettings unknown exception");
+        }
+    }
+
+    class NativeConfigurator
+    {
+    public:
+        NativeConfigurator(const std::vector<BodyRecord>& bodies,
+                           std::vector<ColumnDef>& columns,
+                           std::vector<std::string>& includedBodyNames,
+                           std::map<std::string, std::vector<std::string>>& manualRows,
+                           TableOptions& options)
+            : bodies_(bodies),
+              outputColumns_(columns),
+              outputBodyNames_(includedBodyNames),
+              outputManualRows_(manualRows),
+              outputOptions_(options)
+        {
+            attributes_ = CollectAttributeNames(bodies_);
+            LoadNativeSettings(selectedColumns_, headerTitles_, dedupKeys_, workingOptions_);
+
+            const std::filesystem::path dlxPath = CurrentModuleDirectory() / "MinXiBiao.dlx";
+            if (!std::filesystem::exists(dlxPath))
+            {
+                throw std::runtime_error("未找到 UG 原生对话框：MinXiBiao.dlx");
+            }
+            NXOpen::UI* ui = NXOpen::UI::GetUI();
+            if (ui == nullptr)
+            {
+                throw std::runtime_error("无法获取 UG 用户界面。");
+            }
+            const std::string dlxSystemPath = Utf8ToSystem(dlxPath.u8string());
+            dialog_ = ui->CreateDialog(dlxSystemPath.c_str());
+            if (dialog_ == nullptr)
+            {
+                throw std::runtime_error("无法创建 UG 原生明细表对话框。");
+            }
+            dialog_->AddInitializeHandler(NXOpen::make_callback(this, &NativeConfigurator::Initialize));
+            dialog_->AddDialogShownHandler(NXOpen::make_callback(this, &NativeConfigurator::DialogShown));
+            dialog_->AddUpdateHandler(NXOpen::make_callback(this, &NativeConfigurator::Update));
+            dialog_->AddOkHandler(NXOpen::make_callback(this, &NativeConfigurator::Ok));
+            dialog_->AddCancelHandler(NXOpen::make_callback(this, &NativeConfigurator::Cancel));
+        }
+
+        ~NativeConfigurator()
+        {
+            if (renumberTimer_ != 0)
+            {
+                KillTimer(nullptr, renumberTimer_);
+                renumberTimer_ = 0;
+            }
+            if (refreshTimer_ != 0)
+            {
+                KillTimer(nullptr, refreshTimer_);
+                refreshTimer_ = 0;
+            }
+            if (pendingRenumberOwner_ == this)
+            {
+                pendingRenumberOwner_ = nullptr;
+            }
+            if (pendingRefreshOwner_ == this)
+            {
+                pendingRefreshOwner_ = nullptr;
+            }
+            delete dialog_;
+            dialog_ = nullptr;
+        }
+
+        bool Launch(std::string& error)
+        {
+            error.clear();
+            try
+            {
+                const NXOpen::BlockStyler::BlockDialog::DialogResponse response = dialog_->Launch();
+                if (response == NXOpen::BlockStyler::BlockDialog::DialogResponseCancel)
+                {
+                    confirmed_ = false;
+                }
+                error = lastError_;
+                return confirmed_;
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                error = ex.Message();
+                LogBodyScan("NativeConfigurator Launch NXException: " + error);
+            }
+            catch (const std::exception& ex)
+            {
+                error = ex.what();
+                LogBodyScan("NativeConfigurator Launch exception: " + error);
+            }
+            catch (...)
+            {
+                error = "UG 原生明细表对话框发生未知错误。";
+                LogBodyScan("NativeConfigurator Launch unknown exception");
+            }
+            return false;
+        }
+
+    private:
+        static constexpr int kConfigHeaderColumn = 0;
+        static constexpr int kConfigAttributeColumn = 1;
+        static constexpr int kPreviewSequenceColumn = 0;
+        static constexpr const char* kEmpty = "<空>";
+
+        const std::vector<BodyRecord>& bodies_;
+        std::vector<ColumnDef>& outputColumns_;
+        std::vector<std::string>& outputBodyNames_;
+        std::map<std::string, std::vector<std::string>>& outputManualRows_;
+        TableOptions& outputOptions_;
+        NXOpen::BlockStyler::BlockDialog* dialog_ = nullptr;
+        NXOpen::BlockStyler::UIBlock* headerLocationBlock_ = nullptr;
+        NXOpen::BlockStyler::UIBlock* textHeightBlock_ = nullptr;
+        NXOpen::BlockStyler::UIBlock* deleteRowsBlock_ = nullptr;
+        NXOpen::BlockStyler::UIBlock* restoreRowsBlock_ = nullptr;
+        NXOpen::BlockStyler::Tree* columnsTree_ = nullptr;
+        NXOpen::BlockStyler::Tree* previewTree_ = nullptr;
+        std::vector<std::string> attributes_;
+        std::vector<std::string> selectedColumns_;
+        std::vector<std::string> headerTitles_;
+        std::vector<bool> dedupKeys_;
+        TableOptions workingOptions_;
+        std::map<NXOpen::BlockStyler::Node*, size_t> configNodeIndexes_;
+        std::map<NXOpen::BlockStyler::Node*, std::string> previewNodeBodyNames_;
+        std::map<NXOpen::BlockStyler::Node*, std::vector<std::string>> previewNodeBodyGroups_;
+        NXOpen::BlockStyler::Node* previewHeaderNode_ = nullptr;
+        NXOpen::BlockStyler::Node* previewConfigNode_ = nullptr;
+        NXOpen::BlockStyler::Node* previewDedupNode_ = nullptr;
+        std::map<std::string, std::vector<std::string>> manualValues_;
+        std::set<std::string> deletedBodyNames_;
+        bool shown_ = false;
+        bool changingUi_ = false;
+        bool confirmed_ = false;
+        std::string lastError_;
+        UINT_PTR renumberTimer_ = 0;
+        UINT_PTR refreshTimer_ = 0;
+        inline static NativeConfigurator* pendingRenumberOwner_ = nullptr;
+        inline static NativeConfigurator* pendingRefreshOwner_ = nullptr;
+
+        void ReportCallbackError(const char* context, const std::string& message)
+        {
+            lastError_ = message;
+            LogBodyScan(std::string("NativeConfigurator ") + (context == nullptr ? "callback" : context) + ": " + message);
+        }
+
+        void Initialize()
+        {
+            try
+            {
+                NXOpen::BlockStyler::CompositeBlock* top = dialog_->TopBlock();
+                headerLocationBlock_ = top->FindBlock("header_location");
+                textHeightBlock_ = top->FindBlock("text_height");
+                deleteRowsBlock_ = top->FindBlock("button_delete_rows");
+                restoreRowsBlock_ = top->FindBlock("button_restore_rows");
+                columnsTree_ = dynamic_cast<NXOpen::BlockStyler::Tree*>(top->FindBlock("tree_columns"));
+                previewTree_ = dynamic_cast<NXOpen::BlockStyler::Tree*>(top->FindBlock("tree_preview"));
+                if (headerLocationBlock_ == nullptr || textHeightBlock_ == nullptr ||
+                    deleteRowsBlock_ == nullptr || restoreRowsBlock_ == nullptr ||
+                    columnsTree_ == nullptr || previewTree_ == nullptr)
+                {
+                    throw std::runtime_error("MinXiBiao.dlx 缺少必需控件。");
+                }
+
+                columnsTree_->SetOnBeginLabelEditHandler(NXOpen::make_callback(this, &NativeConfigurator::BeginLabelEdit));
+                columnsTree_->SetOnEndLabelEditHandler(NXOpen::make_callback(this, &NativeConfigurator::EndLabelEdit));
+                columnsTree_->SetAskEditControlHandler(NXOpen::make_callback(this, &NativeConfigurator::AskEditControl));
+                columnsTree_->SetOnEditOptionSelectedHandler(NXOpen::make_callback(this, &NativeConfigurator::EditOptionSelected));
+                previewTree_->SetOnBeginLabelEditHandler(NXOpen::make_callback(this, &NativeConfigurator::BeginLabelEdit));
+                previewTree_->SetOnEndLabelEditHandler(NXOpen::make_callback(this, &NativeConfigurator::EndLabelEdit));
+                previewTree_->SetAskEditControlHandler(NXOpen::make_callback(this, &NativeConfigurator::AskEditControl));
+                previewTree_->SetOnEditOptionSelectedHandler(NXOpen::make_callback(this, &NativeConfigurator::EditOptionSelected));
+                previewTree_->SetColumnSortHandler(NXOpen::make_callback(this, &NativeConfigurator::CompareNodes));
+                previewTree_->SetIsDragAllowedHandler(NXOpen::make_callback(this, &NativeConfigurator::IsDragAllowed));
+                previewTree_->SetIsDropAllowedHandler(NXOpen::make_callback(this, &NativeConfigurator::IsDropAllowed));
+                previewTree_->SetOnDropHandler(NXOpen::make_callback(this, &NativeConfigurator::OnDrop));
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                ReportCallbackError("Initialize", ex.Message());
+            }
+            catch (const std::exception& ex)
+            {
+                ReportCallbackError("Initialize", ex.what());
+            }
+            catch (...)
+            {
+                ReportCallbackError("Initialize", "unknown exception");
+            }
+        }
+
+        void DialogShown()
+        {
+            try
+            {
+                if (lastError_.empty())
+                {
+                    changingUi_ = true;
+                    try
+                    {
+                        SetOptionBlocks();
+                    }
+                    catch (const NXOpen::NXException& ex)
+                    {
+                        LogBodyScan(std::string("NativeConfigurator option initialization skipped: ") + ex.Message());
+                    }
+                    ConfigureTrees();
+                    PopulateColumnSettings();
+                    RefreshPreview();
+                    changingUi_ = false;
+                    shown_ = true;
+                    LogBodyScan("NativeConfigurator dialog shown bodies=" + std::to_string(bodies_.size()) +
+                                " attributes=" + std::to_string(attributes_.size()));
+                }
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                changingUi_ = false;
+                ReportCallbackError("DialogShown", ex.Message());
+            }
+            catch (const std::exception& ex)
+            {
+                changingUi_ = false;
+                ReportCallbackError("DialogShown", ex.what());
+            }
+            catch (...)
+            {
+                changingUi_ = false;
+                ReportCallbackError("DialogShown", "unknown exception");
+            }
+        }
+
+        void SetOptionBlocks()
+        {
+            std::unique_ptr<NXOpen::BlockStyler::PropertyList> headerProps(headerLocationBlock_->GetProperties());
+            headerProps->SetEnum("Value", workingOptions_.headerBelow ? 1 : 0);
+            std::unique_ptr<NXOpen::BlockStyler::PropertyList> heightProps(textHeightBlock_->GetProperties());
+            heightProps->SetDouble("Value", workingOptions_.textHeight);
+        }
+
+        void ReadOptionBlocks()
+        {
+            try
+            {
+                std::unique_ptr<NXOpen::BlockStyler::PropertyList> headerProps(headerLocationBlock_->GetProperties());
+                workingOptions_.headerBelow = headerProps->GetEnum("Value") == 1;
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                LogBodyScan(std::string("NativeConfigurator header location read skipped: ") + ex.Message());
+            }
+            std::unique_ptr<NXOpen::BlockStyler::PropertyList> heightProps(textHeightBlock_->GetProperties());
+            workingOptions_.textHeight = ClampDouble(heightProps->GetDouble("Value"), 1.0, 20.0);
+        }
+
+        void ConfigureTrees()
+        {
+            if (columnsTree_->NumberOfColumns() == 0)
+            {
+                columnsTree_->InsertColumn(kConfigHeaderColumn, "表头名称", 300);
+                columnsTree_->InsertColumn(kConfigAttributeColumn, "对应属性", 420);
+                columnsTree_->SetColumnSortable(kConfigHeaderColumn, false);
+                columnsTree_->SetColumnSortable(kConfigAttributeColumn, false);
+                columnsTree_->SetColumnResizePolicy(kConfigHeaderColumn, NXOpen::BlockStyler::Tree::ColumnResizePolicyResizeWithTree);
+                columnsTree_->SetColumnResizePolicy(kConfigAttributeColumn, NXOpen::BlockStyler::Tree::ColumnResizePolicyResizeWithTree);
+            }
+            if (previewTree_->NumberOfColumns() == 0)
+            {
+                previewTree_->InsertColumn(kPreviewSequenceColumn, "", 64);
+                previewTree_->SetColumnResizePolicy(kPreviewSequenceColumn, NXOpen::BlockStyler::Tree::ColumnResizePolicyConstantWidth);
+                previewTree_->SetColumnSortable(kPreviewSequenceColumn, false);
+                for (size_t i = 0; i < kAttributeColumnCount; ++i)
+                {
+                    const int columnId = static_cast<int>(i + 1);
+                    previewTree_->InsertColumn(columnId, "列" + std::to_string(i + 1), 106);
+                    previewTree_->SetColumnResizePolicy(columnId, NXOpen::BlockStyler::Tree::ColumnResizePolicyResizeWithTree);
+                    previewTree_->SetColumnSortable(columnId, true);
+                    previewTree_->SetColumnSortOption(columnId, NXOpen::BlockStyler::Tree::ColumnSortOptionUnsorted);
+                }
+                previewTree_->SetSortRootNodes(true);
+            }
+            UpdatePreviewColumns();
+        }
+
+        void ClearTree(NXOpen::BlockStyler::Tree* tree)
+        {
+            NXOpen::BlockStyler::Node* node = tree->RootNode();
+            while (node != nullptr)
+            {
+                NXOpen::BlockStyler::Node* next = node->NextSiblingNode();
+                tree->DeleteNode(node);
+                node = next;
+            }
+        }
+
+        void PopulateColumnSettings()
+        {
+            columnsTree_->Redraw(false);
+            configNodeIndexes_.clear();
+            ClearTree(columnsTree_);
+            NXOpen::BlockStyler::Node* previous = nullptr;
+            for (size_t i = 0; i < kAttributeColumnCount; ++i)
+            {
+                const std::string header = Trim(headerTitles_[i]).empty() ? kEmpty : headerTitles_[i];
+                NXOpen::BlockStyler::Node* node = columnsTree_->CreateNode(Utf8NxString(header));
+                columnsTree_->InsertNode(node, nullptr, previous, NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
+                node->SetColumnDisplayText(kConfigAttributeColumn,
+                    Utf8NxString(Trim(selectedColumns_[i]).empty() ? kEmpty : selectedColumns_[i]));
+                configNodeIndexes_[node] = i;
+                previous = node;
+            }
+            columnsTree_->Redraw(true);
+        }
+
+        void UpdatePreviewColumns()
+        {
+            if (previewTree_ == nullptr || previewTree_->NumberOfColumns() == 0)
+            {
+                return;
+            }
+            for (size_t i = 0; i < kAttributeColumnCount; ++i)
+            {
+                const int columnId = static_cast<int>(i + 1);
+                previewTree_->SetColumnTitle(columnId, Utf8NxString("列" + std::to_string(i + 1)));
+                previewTree_->SetColumnVisible(columnId, true);
+            }
+        }
+
+        std::vector<std::string>& ManualValuesFor(const std::string& bodyName)
+        {
+            std::vector<std::string>& values = manualValues_[bodyName];
+            values.resize(kAttributeColumnCount);
+            return values;
+        }
+
+        void RefreshPreview()
+        {
+            if (previewTree_ == nullptr || !shown_ && previewTree_->NumberOfColumns() == 0)
+            {
+                return;
+            }
+            changingUi_ = true;
+            previewTree_->Redraw(false);
+            previewNodeBodyNames_.clear();
+            previewNodeBodyGroups_.clear();
+            previewHeaderNode_ = nullptr;
+            previewConfigNode_ = nullptr;
+            previewDedupNode_ = nullptr;
+            ClearTree(previewTree_);
+            UpdatePreviewColumns();
+
+            previewHeaderNode_ = previewTree_->CreateNode(Utf8NxString("表头"));
+            previewTree_->InsertNode(previewHeaderNode_, nullptr, nullptr,
+                                     NXOpen::BlockStyler::Tree::NodeInsertOptionFirst);
+            for (size_t c = 0; c < kAttributeColumnCount; ++c)
+            {
+                previewHeaderNode_->SetColumnDisplayText(static_cast<int>(c + 1), Utf8NxString(headerTitles_[c]));
+            }
+
+            previewConfigNode_ = previewTree_->CreateNode(Utf8NxString("属性"));
+            previewTree_->InsertNode(previewConfigNode_, nullptr, previewHeaderNode_,
+                                     NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
+            for (size_t c = 0; c < kAttributeColumnCount; ++c)
+            {
+                previewConfigNode_->SetColumnDisplayText(static_cast<int>(c + 1),
+                    Utf8NxString(Trim(selectedColumns_[c]).empty() ? kEmpty : selectedColumns_[c]));
+            }
+
+            previewDedupNode_ = previewTree_->CreateNode(Utf8NxString("去重键"));
+            previewTree_->InsertNode(previewDedupNode_, nullptr, previewConfigNode_,
+                                     NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
+            for (size_t c = 0; c < kAttributeColumnCount; ++c)
+            {
+                previewDedupNode_->SetColumnDisplayText(static_cast<int>(c + 1),
+                    Utf8NxString(dedupKeys_[c] ? "参与" : "不参与"));
+            }
+
+            bool dedupEnabled = false;
+            for (size_t c = 0; c < kAttributeColumnCount; ++c)
+            {
+                dedupEnabled = dedupEnabled || (dedupKeys_[c] && !Trim(headerTitles_[c]).empty());
+            }
+            std::map<std::string, NXOpen::BlockStyler::Node*> dedupNodes;
+            NXOpen::BlockStyler::Node* previous = previewDedupNode_;
+            size_t sequence = 1;
+            for (size_t bodyIndex = 0; bodyIndex < bodies_.size(); ++bodyIndex)
+            {
+                const BodyRecord& body = bodies_[bodyIndex];
+                const std::string bodyName = MakeBodyRecordName(bodyIndex);
+                if (deletedBodyNames_.find(bodyName) != deletedBodyNames_.end())
+                {
+                    continue;
+                }
+
+                bool keep = body.fromAssemblyComponent;
+                std::vector<std::string> values(kAttributeColumnCount);
+                for (size_t c = 0; c < kAttributeColumnCount; ++c)
+                {
+                    if (Trim(headerTitles_[c]).empty())
+                    {
+                        continue;
+                    }
+                    if (Trim(selectedColumns_[c]).empty())
+                    {
+                        keep = true;
+                        values[c] = ManualValuesFor(bodyName)[c];
+                    }
+                    else
+                    {
+                        std::string value;
+                        if (TryReadAttribute(body, bodyIndex, selectedColumns_[c], value))
+                        {
+                            values[c] = value;
+                            keep = true;
+                        }
+                    }
+                }
+                if (!keep)
+                {
+                    continue;
+                }
+
+                std::string dedupKey;
+                bool hasDedupValue = false;
+                if (dedupEnabled)
+                {
+                    for (size_t c = 0; c < kAttributeColumnCount; ++c)
+                    {
+                        if (!dedupKeys_[c] || Trim(headerTitles_[c]).empty())
+                        {
+                            continue;
+                        }
+                        const std::string normalized = ToLowerAscii(Trim(FormatDecimalTextIfNeeded(values[c])));
+                        hasDedupValue = hasDedupValue || !normalized.empty();
+                        dedupKey += std::to_string(normalized.size()) + ":" + normalized + "|";
+                    }
+                }
+                if (dedupEnabled && hasDedupValue)
+                {
+                    const auto duplicate = dedupNodes.find(dedupKey);
+                    if (duplicate != dedupNodes.end())
+                    {
+                        previewNodeBodyGroups_[duplicate->second].push_back(bodyName);
+                        continue;
+                    }
+                }
+
+                const std::string sequenceText = std::to_string(sequence);
+                NXOpen::BlockStyler::Node* node = previewTree_->CreateNode(sequenceText.c_str());
+                previewTree_->InsertNode(node, nullptr, previous, NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
+                for (size_t c = 0; c < kAttributeColumnCount; ++c)
+                {
+                    node->SetColumnDisplayText(static_cast<int>(c + 1), Utf8NxString(values[c]));
+                }
+                previewNodeBodyNames_[node] = bodyName;
+                previewNodeBodyGroups_[node] = {bodyName};
+                if (dedupEnabled && hasDedupValue)
+                {
+                    dedupNodes[dedupKey] = node;
+                }
+                previous = node;
+                ++sequence;
+            }
+            previewTree_->Redraw(true);
+            changingUi_ = false;
+        }
+
+        void RenumberPreview()
+        {
+            int sequence = 1;
+            for (NXOpen::BlockStyler::Node* node = previewTree_->RootNode(); node != nullptr; node = node->NextSiblingNode())
+            {
+                if (node == previewHeaderNode_ || node == previewConfigNode_ || node == previewDedupNode_)
+                {
+                    continue;
+                }
+                const std::string sequenceText = std::to_string(sequence++);
+                node->SetDisplayText(sequenceText.c_str());
+            }
+        }
+
+        static void CALLBACK RenumberTimerProc(HWND, UINT, UINT_PTR timerId, DWORD)
+        {
+            KillTimer(nullptr, timerId);
+            NativeConfigurator* owner = pendingRenumberOwner_;
+            pendingRenumberOwner_ = nullptr;
+            if (owner == nullptr)
+            {
+                return;
+            }
+            owner->renumberTimer_ = 0;
+            try
+            {
+                owner->RenumberPreview();
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                owner->ReportCallbackError("RenumberAfterSort", ex.Message());
+            }
+            catch (...)
+            {
+                owner->ReportCallbackError("RenumberAfterSort", "unknown exception");
+            }
+        }
+
+        void ScheduleRenumberAfterSort()
+        {
+            if (renumberTimer_ != 0)
+            {
+                return;
+            }
+            pendingRenumberOwner_ = this;
+            renumberTimer_ = SetTimer(nullptr, 0, 10, &NativeConfigurator::RenumberTimerProc);
+            if (renumberTimer_ == 0)
+            {
+                pendingRenumberOwner_ = nullptr;
+                LogBodyScan("NativeConfigurator failed to schedule sequence renumber");
+            }
+        }
+
+        static void CALLBACK RefreshTimerProc(HWND, UINT, UINT_PTR timerId, DWORD)
+        {
+            KillTimer(nullptr, timerId);
+            NativeConfigurator* owner = pendingRefreshOwner_;
+            pendingRefreshOwner_ = nullptr;
+            if (owner == nullptr)
+            {
+                return;
+            }
+            owner->refreshTimer_ = 0;
+            try
+            {
+                owner->RefreshPreview();
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                owner->ReportCallbackError("RefreshAfterEdit", ex.Message());
+            }
+            catch (...)
+            {
+                owner->ReportCallbackError("RefreshAfterEdit", "unknown exception");
+            }
+        }
+
+        void ScheduleRefreshAfterEdit()
+        {
+            if (refreshTimer_ != 0)
+            {
+                return;
+            }
+            pendingRefreshOwner_ = this;
+            refreshTimer_ = SetTimer(nullptr, 0, 10, &NativeConfigurator::RefreshTimerProc);
+            if (refreshTimer_ == 0)
+            {
+                pendingRefreshOwner_ = nullptr;
+                LogBodyScan("NativeConfigurator failed to schedule preview refresh");
+            }
+        }
+
+        void RefreshPreviewColumn(size_t columnIndex)
+        {
+            if (columnIndex >= kAttributeColumnCount)
+            {
+                return;
+            }
+            size_t resolvedCount = 0;
+            for (const auto& entry : previewNodeBodyNames_)
+            {
+                size_t bodyIndex = bodies_.size();
+                for (size_t i = 0; i < bodies_.size(); ++i)
+                {
+                    if (MakeBodyRecordName(i) == entry.second)
+                    {
+                        bodyIndex = i;
+                        break;
+                    }
+                }
+                if (bodyIndex >= bodies_.size())
+                {
+                    continue;
+                }
+                std::string value;
+                if (Trim(selectedColumns_[columnIndex]).empty())
+                {
+                    value = ManualValuesFor(entry.second)[columnIndex];
+                }
+                else
+                {
+                    if (TryReadAttribute(bodies_[bodyIndex], bodyIndex, selectedColumns_[columnIndex], value))
+                    {
+                        ++resolvedCount;
+                    }
+                }
+                entry.first->SetColumnDisplayText(static_cast<int>(columnIndex + 1), Utf8NxString(value));
+            }
+            LogBodyScan("NativeConfigurator refresh column=" + std::to_string(columnIndex + 1) +
+                        " attribute=" + selectedColumns_[columnIndex] +
+                        " resolved=" + std::to_string(resolvedCount) +
+                        "/" + std::to_string(previewNodeBodyNames_.size()));
+        }
+
+        void DeleteSelectedRows()
+        {
+            const std::vector<NXOpen::BlockStyler::Node*> selected = previewTree_->GetSelectedNodes();
+            for (NXOpen::BlockStyler::Node* node : selected)
+            {
+                if (node == previewHeaderNode_ || node == previewConfigNode_ || node == previewDedupNode_)
+                {
+                    continue;
+                }
+                const auto found = previewNodeBodyNames_.find(node);
+                if (found != previewNodeBodyNames_.end())
+                {
+                    const auto group = previewNodeBodyGroups_.find(node);
+                    if (group != previewNodeBodyGroups_.end())
+                    {
+                        deletedBodyNames_.insert(group->second.begin(), group->second.end());
+                        previewNodeBodyGroups_.erase(group);
+                    }
+                    else
+                    {
+                        deletedBodyNames_.insert(found->second);
+                    }
+                    previewNodeBodyNames_.erase(found);
+                }
+                previewTree_->DeleteNode(node);
+            }
+            RenumberPreview();
+        }
+
+        int Update(NXOpen::BlockStyler::UIBlock* block)
+        {
+            try
+            {
+                if (!changingUi_)
+                {
+                    if (block == headerLocationBlock_ || block == textHeightBlock_)
+                    {
+                        ReadOptionBlocks();
+                    }
+                    else if (block == deleteRowsBlock_)
+                    {
+                        DeleteSelectedRows();
+                    }
+                    else if (block == restoreRowsBlock_)
+                    {
+                        deletedBodyNames_.clear();
+                        RefreshPreview();
+                    }
+                }
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                ReportCallbackError("Update", ex.Message());
+                return 1;
+            }
+            catch (const std::exception& ex)
+            {
+                ReportCallbackError("Update", ex.what());
+                return 1;
+            }
+            catch (...)
+            {
+                ReportCallbackError("Update", "unknown exception");
+                return 1;
+            }
+            return 0;
+        }
+
+        NXOpen::BlockStyler::Tree::BeginLabelEditState BeginLabelEdit(
+            NXOpen::BlockStyler::Tree* tree, NXOpen::BlockStyler::Node* node, int columnId)
+        {
+            try
+            {
+                if (tree == columnsTree_ && columnId == kConfigHeaderColumn)
+                {
+                    return NXOpen::BlockStyler::Tree::BeginLabelEditStateAllow;
+                }
+                if (tree == previewTree_ && node == previewHeaderNode_ && columnId > 0)
+                {
+                    return NXOpen::BlockStyler::Tree::BeginLabelEditStateAllow;
+                }
+                if (tree == previewTree_ && node == previewConfigNode_ && columnId > 0)
+                {
+                    return NXOpen::BlockStyler::Tree::BeginLabelEditStateAllow;
+                }
+                if (tree == previewTree_ && node != previewConfigNode_ && node != previewDedupNode_ && columnId > 0)
+                {
+                    const size_t index = static_cast<size_t>(columnId - 1);
+                    if (index < selectedColumns_.size() && Trim(selectedColumns_[index]).empty() &&
+                        !Trim(headerTitles_[index]).empty())
+                    {
+                        return NXOpen::BlockStyler::Tree::BeginLabelEditStateAllow;
+                    }
+                }
+            }
+            catch (...)
+            {
+                ReportCallbackError("BeginLabelEdit", "unknown exception");
+            }
+            return NXOpen::BlockStyler::Tree::BeginLabelEditStateDisallow;
+        }
+
+        NXOpen::BlockStyler::Tree::EndLabelEditState EndLabelEdit(
+            NXOpen::BlockStyler::Tree* tree, NXOpen::BlockStyler::Node* node, int columnId, NXOpen::NXString editedText)
+        {
+            try
+            {
+                const std::string value = NormalizeCellText(ToUtf8(editedText));
+                if (tree == columnsTree_ && columnId == kConfigHeaderColumn)
+                {
+                    const auto found = configNodeIndexes_.find(node);
+                    if (found == configNodeIndexes_.end())
+                    {
+                        return NXOpen::BlockStyler::Tree::EndLabelEditStateRejectText;
+                    }
+                    headerTitles_[found->second] = value == kEmpty ? std::string() : value;
+                    node->SetDisplayText(Utf8NxString(headerTitles_[found->second].empty() ? kEmpty : headerTitles_[found->second]));
+                    RefreshPreview();
+                    return NXOpen::BlockStyler::Tree::EndLabelEditStateAcceptText;
+                }
+                if (tree == previewTree_ && node == previewHeaderNode_ && columnId > 0)
+                {
+                    const size_t index = static_cast<size_t>(columnId - 1);
+                    if (index >= kAttributeColumnCount)
+                    {
+                        return NXOpen::BlockStyler::Tree::EndLabelEditStateRejectText;
+                    }
+                    headerTitles_[index] = value;
+                    UpdatePreviewColumns();
+                    return NXOpen::BlockStyler::Tree::EndLabelEditStateAcceptText;
+                }
+                if (tree == previewTree_ && node != previewHeaderNode_ && node != previewConfigNode_ &&
+                    node != previewDedupNode_ && columnId > 0)
+                {
+                    const auto found = previewNodeBodyNames_.find(node);
+                    const size_t index = static_cast<size_t>(columnId - 1);
+                    if (found != previewNodeBodyNames_.end() && index < kAttributeColumnCount &&
+                        Trim(selectedColumns_[index]).empty())
+                    {
+                        ManualValuesFor(found->second)[index] = value;
+                        if (dedupKeys_[index])
+                        {
+                            ScheduleRefreshAfterEdit();
+                        }
+                        return NXOpen::BlockStyler::Tree::EndLabelEditStateAcceptText;
+                    }
+                }
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                ReportCallbackError("EndLabelEdit", ex.Message());
+            }
+            catch (const std::exception& ex)
+            {
+                ReportCallbackError("EndLabelEdit", ex.what());
+            }
+            catch (...)
+            {
+                ReportCallbackError("EndLabelEdit", "unknown exception");
+            }
+            return NXOpen::BlockStyler::Tree::EndLabelEditStateRejectText;
+        }
+
+        NXOpen::BlockStyler::Tree::ControlType AskEditControl(
+            NXOpen::BlockStyler::Tree* tree, NXOpen::BlockStyler::Node* node, int columnId)
+        {
+            try
+            {
+                const bool isHiddenColumnEditor = tree == columnsTree_ && columnId == kConfigAttributeColumn;
+                const bool isVisibleColumnEditor = tree == previewTree_ && node == previewConfigNode_ && columnId > 0;
+                const bool isDedupEditor = tree == previewTree_ && node == previewDedupNode_ && columnId > 0;
+                if (isDedupEditor)
+                {
+                    const size_t index = static_cast<size_t>(columnId - 1);
+                    if (index < dedupKeys_.size())
+                    {
+                        std::vector<NXOpen::NXString> options;
+                        options.push_back(Utf8NxString("不参与"));
+                        options.push_back(Utf8NxString("参与"));
+                        tree->SetEditOptions(options, dedupKeys_[index] ? 1 : 0);
+                        return NXOpen::BlockStyler::Tree::ControlTypeComboBox;
+                    }
+                }
+                if (isHiddenColumnEditor || isVisibleColumnEditor)
+                {
+                    std::vector<NXOpen::NXString> options;
+                    options.push_back(Utf8NxString(kEmpty));
+                    for (const std::string& attribute : attributes_)
+                    {
+                        options.push_back(Utf8NxString(attribute));
+                    }
+                    const int valueColumn = isVisibleColumnEditor ? columnId : kConfigAttributeColumn;
+                    const std::string current = ToUtf8(node->GetColumnDisplayText(valueColumn));
+                    int selectedIndex = 0;
+                    for (size_t i = 0; i < attributes_.size(); ++i)
+                    {
+                        if (attributes_[i] == current)
+                        {
+                            selectedIndex = static_cast<int>(i + 1);
+                            break;
+                        }
+                    }
+                    tree->SetEditOptions(options, selectedIndex);
+                    return NXOpen::BlockStyler::Tree::ControlTypeComboBox;
+                }
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                ReportCallbackError("AskEditControl", ex.Message());
+            }
+            catch (...)
+            {
+                ReportCallbackError("AskEditControl", "unknown exception");
+            }
+            return NXOpen::BlockStyler::Tree::ControlTypeNone;
+        }
+
+        NXOpen::BlockStyler::Tree::EditControlOption EditOptionSelected(
+            NXOpen::BlockStyler::Tree* tree, NXOpen::BlockStyler::Node* node, int columnId,
+            int selectedIndex, NXOpen::NXString, NXOpen::BlockStyler::Tree::ControlType)
+        {
+            try
+            {
+                if (tree == previewTree_ && node == previewDedupNode_ && columnId > 0)
+                {
+                    const size_t index = static_cast<size_t>(columnId - 1);
+                    if (index >= dedupKeys_.size())
+                    {
+                        return NXOpen::BlockStyler::Tree::EditControlOptionReject;
+                    }
+                    dedupKeys_[index] = selectedIndex == 1;
+                    node->SetColumnDisplayText(columnId, Utf8NxString(dedupKeys_[index] ? "参与" : "不参与"));
+                    ScheduleRefreshAfterEdit();
+                    return NXOpen::BlockStyler::Tree::EditControlOptionAccept;
+                }
+                size_t selectedColumnIndex = kAttributeColumnCount;
+                if (tree == columnsTree_ && columnId == kConfigAttributeColumn)
+                {
+                    const auto found = configNodeIndexes_.find(node);
+                    if (found != configNodeIndexes_.end()) selectedColumnIndex = found->second;
+                }
+                else if (tree == previewTree_ && node == previewConfigNode_ && columnId > 0)
+                {
+                    selectedColumnIndex = static_cast<size_t>(columnId - 1);
+                }
+                if (selectedColumnIndex >= kAttributeColumnCount)
+                {
+                    return NXOpen::BlockStyler::Tree::EditControlOptionReject;
+                }
+                std::string chosen;
+                if (selectedIndex > 0 && static_cast<size_t>(selectedIndex - 1) < attributes_.size())
+                {
+                    chosen = attributes_[static_cast<size_t>(selectedIndex - 1)];
+                }
+                selectedColumns_[selectedColumnIndex] = chosen;
+                node->SetColumnDisplayText(columnId,
+                    Utf8NxString(selectedColumns_[selectedColumnIndex].empty() ? kEmpty : selectedColumns_[selectedColumnIndex]));
+                if (tree == previewTree_)
+                {
+                    if (dedupKeys_[selectedColumnIndex])
+                    {
+                        ScheduleRefreshAfterEdit();
+                    }
+                    else
+                    {
+                        RefreshPreviewColumn(selectedColumnIndex);
+                    }
+                }
+                else
+                {
+                    RefreshPreview();
+                }
+                return NXOpen::BlockStyler::Tree::EditControlOptionAccept;
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                ReportCallbackError("EditOptionSelected", ex.Message());
+            }
+            catch (const std::exception& ex)
+            {
+                ReportCallbackError("EditOptionSelected", ex.what());
+            }
+            catch (...)
+            {
+                ReportCallbackError("EditOptionSelected", "unknown exception");
+            }
+            return NXOpen::BlockStyler::Tree::EditControlOptionReject;
+        }
+
+        int CompareNodes(NXOpen::BlockStyler::Tree* tree, int columnId,
+                         NXOpen::BlockStyler::Node* first, NXOpen::BlockStyler::Node* second)
+        {
+            try
+            {
+                ScheduleRenumberAfterSort();
+                const auto fixedRank = [this](NXOpen::BlockStyler::Node* node) -> int
+                {
+                    if (node == previewHeaderNode_) return 0;
+                    if (node == previewConfigNode_) return 1;
+                    if (node == previewDedupNode_) return 2;
+                    return 3;
+                };
+                const int firstRank = fixedRank(first);
+                const int secondRank = fixedRank(second);
+                if (firstRank != secondRank)
+                {
+                    int result = firstRank < secondRank ? -1 : 1;
+                    // NX reverses the comparison result for a descending column.
+                    // Compensate only for the two configuration rows so they stay fixed.
+                    if (tree->GetColumnSortOption(columnId) ==
+                        NXOpen::BlockStyler::Tree::ColumnSortOptionDescending)
+                    {
+                        result = -result;
+                    }
+                    return result;
+                }
+                if (firstRank < 3)
+                {
+                    return 0;
+                }
+
+                const std::string left = ToUtf8(first->GetColumnDisplayText(columnId));
+                const std::string right = ToUtf8(second->GetColumnDisplayText(columnId));
+                if (columnId == kPreviewSequenceColumn)
+                {
+                    const int leftValue = std::atoi(left.c_str());
+                    const int rightValue = std::atoi(right.c_str());
+                    return leftValue < rightValue ? -1 : (leftValue > rightValue ? 1 : 0);
+                }
+                char* leftEnd = nullptr;
+                char* rightEnd = nullptr;
+                const double leftNumber = std::strtod(left.c_str(), &leftEnd);
+                const double rightNumber = std::strtod(right.c_str(), &rightEnd);
+                const bool leftNumeric = leftEnd != left.c_str() && leftEnd != nullptr && *leftEnd == '\0';
+                const bool rightNumeric = rightEnd != right.c_str() && rightEnd != nullptr && *rightEnd == '\0';
+                if (leftNumeric && rightNumeric)
+                {
+                    return leftNumber < rightNumber ? -1 : (leftNumber > rightNumber ? 1 : 0);
+                }
+                return left < right ? -1 : (left > right ? 1 : 0);
+            }
+            catch (...)
+            {
+                return 0;
+            }
+        }
+
+        NXOpen::BlockStyler::Node::DragType IsDragAllowed(
+            NXOpen::BlockStyler::Tree* tree, NXOpen::BlockStyler::Node* node, int)
+        {
+            return tree == previewTree_ && node != previewHeaderNode_ && node != previewConfigNode_ &&
+                   node != previewDedupNode_
+                ? NXOpen::BlockStyler::Node::DragTypeAll
+                : NXOpen::BlockStyler::Node::DragTypeNone;
+        }
+
+        NXOpen::BlockStyler::Node::DropType IsDropAllowed(
+            NXOpen::BlockStyler::Tree* tree, NXOpen::BlockStyler::Node* node, int,
+            NXOpen::BlockStyler::Node* target, int)
+        {
+            return tree == previewTree_ && node != nullptr && target != nullptr &&
+                   node != previewHeaderNode_ && target != previewHeaderNode_ &&
+                   node != previewConfigNode_ && target != previewConfigNode_ &&
+                   node != previewDedupNode_ && target != previewDedupNode_ && node != target
+                ? NXOpen::BlockStyler::Node::DropTypeBeforeAndAfter
+                : NXOpen::BlockStyler::Node::DropTypeNone;
+        }
+
+        bool OnDrop(NXOpen::BlockStyler::Tree* tree, std::vector<NXOpen::BlockStyler::Node*> nodes,
+                    int, NXOpen::BlockStyler::Node* target, int,
+                    NXOpen::BlockStyler::Node::DropType dropType, int)
+        {
+            try
+            {
+                if (tree != previewTree_ || nodes.size() != 1 || target == nullptr || nodes[0] == target)
+                {
+                    return false;
+                }
+                NXOpen::BlockStyler::Node* source = nodes[0];
+                const auto sourceData = previewNodeBodyNames_.find(source);
+                if (sourceData == previewNodeBodyNames_.end())
+                {
+                    return false;
+                }
+                std::vector<std::string> texts(kAttributeColumnCount + 1);
+                for (size_t c = 0; c < texts.size(); ++c)
+                {
+                    texts[c] = ToUtf8(source->GetColumnDisplayText(static_cast<int>(c)));
+                }
+                NXOpen::BlockStyler::Node* copy = tree->CopyNode(source);
+                NXOpen::BlockStyler::Node* after = nullptr;
+                NXOpen::BlockStyler::Tree::NodeInsertOption option = NXOpen::BlockStyler::Tree::NodeInsertOptionFirst;
+                if (dropType == NXOpen::BlockStyler::Node::DropTypeAfter)
+                {
+                    after = target;
+                    option = NXOpen::BlockStyler::Tree::NodeInsertOptionLast;
+                }
+                else
+                {
+                    after = target->PreviousSiblingNode();
+                    option = after == nullptr
+                        ? NXOpen::BlockStyler::Tree::NodeInsertOptionFirst
+                        : NXOpen::BlockStyler::Tree::NodeInsertOptionLast;
+                }
+                tree->InsertNode(copy, nullptr, after, option);
+                for (size_t c = 0; c < texts.size(); ++c)
+                {
+                    copy->SetColumnDisplayText(static_cast<int>(c), Utf8NxString(texts[c]));
+                }
+                const std::string bodyName = sourceData->second;
+                const auto sourceGroup = previewNodeBodyGroups_.find(source);
+                std::vector<std::string> bodyGroup = sourceGroup == previewNodeBodyGroups_.end()
+                    ? std::vector<std::string>{bodyName}
+                    : sourceGroup->second;
+                previewNodeBodyNames_.erase(sourceData);
+                previewNodeBodyGroups_.erase(source);
+                previewNodeBodyNames_[copy] = bodyName;
+                previewNodeBodyGroups_[copy] = std::move(bodyGroup);
+                tree->DeleteNode(source);
+                RenumberPreview();
+                return true;
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                ReportCallbackError("OnDrop", ex.Message());
+            }
+            catch (const std::exception& ex)
+            {
+                ReportCallbackError("OnDrop", ex.what());
+            }
+            catch (...)
+            {
+                ReportCallbackError("OnDrop", "unknown exception");
+            }
+            return false;
+        }
+
+        bool CaptureResult()
+        {
+            ReadOptionBlocks();
+            outputColumns_.clear();
+            outputBodyNames_.clear();
+            outputManualRows_.clear();
+            std::vector<size_t> activeIndexes;
+            for (size_t i = 0; i < kAttributeColumnCount; ++i)
+            {
+                if (!Trim(headerTitles_[i]).empty())
+                {
+                    outputColumns_.push_back({selectedColumns_[i], headerTitles_[i]});
+                    activeIndexes.push_back(i);
+                }
+            }
+            if (outputColumns_.empty())
+            {
+                lastError_ = "请至少设置一个表头列。";
+                return false;
+            }
+
+            for (NXOpen::BlockStyler::Node* node = previewTree_->RootNode(); node != nullptr; node = node->NextSiblingNode())
+            {
+                if (node == previewHeaderNode_ || node == previewConfigNode_ || node == previewDedupNode_)
+                {
+                    continue;
+                }
+                const auto found = previewNodeBodyNames_.find(node);
+                if (found == previewNodeBodyNames_.end())
+                {
+                    continue;
+                }
+                outputBodyNames_.push_back(found->second);
+                std::vector<std::string> values;
+                values.reserve(activeIndexes.size());
+                for (size_t index : activeIndexes)
+                {
+                    values.push_back(ToUtf8(node->GetColumnDisplayText(static_cast<int>(index + 1))));
+                }
+                outputManualRows_[found->second] = std::move(values);
+            }
+            if (outputBodyNames_.empty())
+            {
+                lastError_ = "明细预览中没有可生成的数据行。";
+                return false;
+            }
+            outputOptions_ = workingOptions_;
+            SaveNativeSettings(selectedColumns_, headerTitles_, dedupKeys_, workingOptions_);
+            return true;
+        }
+
+        int Ok()
+        {
+            try
+            {
+                if (!lastError_.empty())
+                {
+                    ShowNxMessage(lastError_);
+                    return 1;
+                }
+                if (!CaptureResult())
+                {
+                    ShowNxMessage(lastError_);
+                    return 1;
+                }
+                confirmed_ = true;
+                LogBodyScan("NativeConfigurator confirmed columns=" + std::to_string(outputColumns_.size()) +
+                            " rows=" + std::to_string(outputBodyNames_.size()));
+                return 0;
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                ReportCallbackError("Ok", ex.Message());
+            }
+            catch (const std::exception& ex)
+            {
+                ReportCallbackError("Ok", ex.what());
+            }
+            catch (...)
+            {
+                ReportCallbackError("Ok", "unknown exception");
+            }
+            ShowNxMessage(lastError_);
+            return 1;
+        }
+
+        int Cancel()
+        {
+            confirmed_ = false;
+            return 0;
+        }
+    };
+
+    bool LaunchNativeConfigurator(const std::vector<BodyRecord>& bodies,
+                                  std::vector<ColumnDef>& columns,
+                                  std::vector<std::string>& includedBodyNames,
+                                  std::map<std::string, std::vector<std::string>>& manualRows,
+                                  TableOptions& options,
+                                  std::string& error)
+    {
+        try
+        {
+            NativeConfigurator configurator(bodies, columns, includedBodyNames, manualRows, options);
+            return configurator.Launch(error);
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            error = ex.Message();
+        }
+        catch (const std::exception& ex)
+        {
+            error = ex.what();
+        }
+        catch (...)
+        {
+            error = "无法启动 UG 原生明细表对话框。";
+        }
+        LogBodyScan("LaunchNativeConfigurator error: " + error);
+        return false;
     }
 
     bool AskTableOrigin(double origin[3], std::string& error)
@@ -1741,40 +3043,153 @@ namespace
         return widths;
     }
 
-    bool ApplyCellText(tag_t cell, const std::string& text, double textHeight)
+    int LoadTableTextFont()
+    {
+        NXOpen::Session* session = NXOpen::Session::GetSession();
+        NXOpen::Part* part = session != nullptr && session->Parts() != nullptr
+            ? session->Parts()->Work()
+            : nullptr;
+        if (part == nullptr || part->Fonts() == nullptr)
+        {
+            LogBodyScan("LoadTableTextFont failed: work part/font collection unavailable");
+            return 0;
+        }
+
+        const char* candidates[] = {
+            "Microsoft YaHei",
+            "SimSun",
+            "NSimSun",
+            "Arial Unicode MS",
+            "Arial"};
+        for (const char* fontName : candidates)
+        {
+            try
+            {
+                const int fontIndex = part->Fonts()->AddFont(fontName, NXOpen::FontCollection::TypeStandard);
+                if (fontIndex > 0 && part->Fonts()->DoesFontExist(fontIndex))
+                {
+                    LogBodyScan(std::string("LoadTableTextFont selected name=") + fontName +
+                                " index=" + std::to_string(fontIndex));
+                    return fontIndex;
+                }
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                LogBodyScan(std::string("LoadTableTextFont skipped name=") + fontName +
+                            " error=" + ex.Message());
+            }
+            catch (...)
+            {
+                LogBodyScan(std::string("LoadTableTextFont skipped name=") + fontName +
+                            " error=<unknown>");
+            }
+        }
+
+        LogBodyScan("LoadTableTextFont failed: no usable standard font");
+        return 0;
+    }
+
+    bool ApplyCellText(tag_t cell, const std::string& text, double textHeight, int textFont, const char* context)
     {
         if (textHeight > 0.0)
         {
             UF_TABNOT_cell_prefs_t prefs;
-            if (UF_TABNOT_ask_cell_prefs(cell, &prefs) == 0)
+            const int askPrefsStatus = UF_TABNOT_ask_cell_prefs(cell, &prefs);
+            if (askPrefsStatus != 0)
             {
+                LogBodyScan(std::string("UF_TABNOT_ask_cell_prefs failed context=") +
+                            (context == nullptr ? "cell" : context) +
+                            " cell=" + std::to_string(cell) +
+                            " status=" + std::to_string(askPrefsStatus));
+                return false;
+            }
+            else
+            {
+                // Do not inherit formula or hidden-cell defaults from the current
+                // drafting customer defaults.  An unevaluated formula or a cell
+                // with no usable fit method is displayed by NX as ########.
+                prefs.format = UF_TABNOT_format_text;
+                prefs.is_a_formula = FALSE;
+                prefs.is_hidden = FALSE;
+                prefs.text_font = textFont;
                 prefs.text_height = textHeight;
-                prefs.nm_fit_methods = 1;
+                prefs.nm_fit_methods = 3;
                 prefs.fit_methods[0] = UF_TABNOT_fit_method_auto_size_col;
-                UF_TABNOT_set_cell_prefs(cell, &prefs);
+                prefs.fit_methods[1] = UF_TABNOT_fit_method_auto_size_text;
+                prefs.fit_methods[2] = UF_TABNOT_fit_method_overwrite_border;
+                const int setPrefsStatus = UF_TABNOT_set_cell_prefs(cell, &prefs);
+                if (setPrefsStatus != 0)
+                {
+                    LogBodyScan(std::string("UF_TABNOT_set_cell_prefs failed context=") +
+                                (context == nullptr ? "cell" : context) +
+                                " cell=" + std::to_string(cell) +
+                                " status=" + std::to_string(setPrefsStatus));
+                    return false;
+                }
             }
         }
 
         const std::string systemText = Utf8ToSystem(NormalizeCellText(text));
-        return UF_TABNOT_set_cell_text(cell, systemText.c_str()) == 0;
+        const int status = UF_TABNOT_set_cell_text(cell, systemText.c_str());
+        if (status != 0)
+        {
+            LogBodyScan(std::string("UF_TABNOT_set_cell_text failed context=") +
+                        (context == nullptr ? "cell" : context) +
+                        " cell=" + std::to_string(cell) +
+                        " status=" + std::to_string(status));
+            return false;
+        }
+        return true;
     }
 
-    bool ApplyAssociativeCellText(tag_t cell, const std::string& text, double textHeight)
+    bool ApplyAssociativeCellText(tag_t cell, const std::string& text, double textHeight, int textFont, const char* context)
     {
         if (textHeight > 0.0)
         {
             UF_TABNOT_cell_prefs_t prefs;
-            if (UF_TABNOT_ask_cell_prefs(cell, &prefs) == 0)
+            const int askPrefsStatus = UF_TABNOT_ask_cell_prefs(cell, &prefs);
+            if (askPrefsStatus != 0)
             {
+                LogBodyScan(std::string("UF_TABNOT_ask_cell_prefs failed context=") +
+                            (context == nullptr ? "associative-cell" : context) +
+                            " cell=" + std::to_string(cell) +
+                            " status=" + std::to_string(askPrefsStatus));
+                return false;
+            }
+            else
+            {
+                prefs.format = UF_TABNOT_format_text;
+                prefs.is_a_formula = FALSE;
+                prefs.is_hidden = FALSE;
+                prefs.text_font = textFont;
                 prefs.text_height = textHeight;
-                prefs.nm_fit_methods = 1;
+                prefs.nm_fit_methods = 3;
                 prefs.fit_methods[0] = UF_TABNOT_fit_method_auto_size_col;
-                UF_TABNOT_set_cell_prefs(cell, &prefs);
+                prefs.fit_methods[1] = UF_TABNOT_fit_method_auto_size_text;
+                prefs.fit_methods[2] = UF_TABNOT_fit_method_overwrite_border;
+                const int setPrefsStatus = UF_TABNOT_set_cell_prefs(cell, &prefs);
+                if (setPrefsStatus != 0)
+                {
+                    LogBodyScan(std::string("UF_TABNOT_set_cell_prefs failed context=") +
+                                (context == nullptr ? "associative-cell" : context) +
+                                " cell=" + std::to_string(cell) +
+                                " status=" + std::to_string(setPrefsStatus));
+                    return false;
+                }
             }
         }
 
         const std::string systemText = Utf8ToSystem(text);
-        return UF_TABNOT_set_cell_text(cell, systemText.c_str()) == 0;
+        const int status = UF_TABNOT_set_cell_text(cell, systemText.c_str());
+        if (status != 0)
+        {
+            LogBodyScan(std::string("UF_TABNOT_set_cell_text failed context=") +
+                        (context == nullptr ? "associative-cell" : context) +
+                        " cell=" + std::to_string(cell) +
+                        " status=" + std::to_string(status));
+            return false;
+        }
+        return true;
     }
 
     bool TryMakeAssociativeAttributeText(tag_t bodyTag, const std::string& attributeName, std::string& text)
@@ -1860,6 +3275,12 @@ namespace
         UF_TABNOT_ask_default_section_prefs(&sectionPrefs);
         UF_TABNOT_ask_default_cell_prefs(&cellPrefs);
         const double textHeight = ClampDouble(options.textHeight, 1.0, 20.0);
+        const int textFont = LoadTableTextFont();
+        if (textFont <= 0)
+        {
+            error = "未找到可用的表格字体。";
+            return false;
+        }
         sectionPrefs.header_location = options.headerBelow ? UF_TABNOT_header_location_below : UF_TABNOT_header_location_above;
         sectionPrefs.attach_point = UF_TABNOT_attach_point_top_left;
         sectionPrefs.max_height = 1000.0;
@@ -1931,7 +3352,11 @@ namespace
                 return false;
             }
             const std::string text = (col == 0) ? "序号" : MakeColumnHeaderText(columns[static_cast<size_t>(col - 1)], static_cast<size_t>(col - 1));
-            ApplyCellText(cell, text, textHeight);
+            if (!ApplyCellText(cell, text, textHeight, textFont, "header"))
+            {
+                error = "设置表头单元格失败。";
+                return false;
+            }
         }
 
         for (size_t r = 0; r < rows.size(); ++r)
@@ -1944,7 +3369,11 @@ namespace
                 return false;
             }
             const std::string seqText = std::to_string(r + 1);
-            ApplyCellText(seqCell, seqText, textHeight);
+            if (!ApplyCellText(seqCell, seqText, textHeight, textFont, "sequence"))
+            {
+                error = "设置序号单元格失败。";
+                return false;
+            }
 
             for (size_t c = 0; c < columns.size(); ++c)
             {
@@ -1959,34 +3388,53 @@ namespace
                 if (!Trim(columns[c].attributeName).empty() &&
                     TryMakeAssociativeAttributeText(rows[r].bodyTag, columns[c].attributeName, associativeText))
                 {
-                    ApplyAssociativeCellText(cell, associativeText, textHeight);
+                    if (!ApplyAssociativeCellText(cell, associativeText, textHeight, textFont, "attribute-associative"))
+                    {
+                        error = "设置关联属性单元格失败。";
+                        return false;
+                    }
                 }
                 else
                 {
-                    ApplyCellText(cell, text, textHeight);
+                    if (!ApplyCellText(cell, text, textHeight, textFont, "attribute-text"))
+                    {
+                        error = "设置属性单元格失败。";
+                        return false;
+                    }
                 }
             }
         }
 
+        const int updateStatus = UF_TABNOT_update(tabnote);
+        if (updateStatus != 0)
+        {
+            LogBodyScan("UF_TABNOT_update failed tabnote=" + std::to_string(tabnote) +
+                        " status=" + std::to_string(updateStatus));
+            error = "更新工程图表格失败。";
+            return false;
+        }
+        LogBodyScan("CreateTabularNoteAtPoint updated tabnote=" + std::to_string(tabnote) +
+                    " rows=" + std::to_string(totalRows) +
+                    " columns=" + std::to_string(totalColumns));
         return true;
     }
 }
 
 namespace MinXiBiao
 {
-    bool RunWpfWorkflow()
+    bool RunNativeWorkflow()
     {
-        LogBodyScan("RunWpfWorkflow begin");
+        LogBodyScan("RunNativeWorkflow begin");
         const tag_t displayPartTag = UF_PART_ask_display_part();
         const tag_t workPartTag = UF_ASSEM_ask_work_part();
         if (displayPartTag == NULL_TAG && workPartTag == NULL_TAG)
         {
-            LogBodyScan("RunWpfWorkflow no part");
+            LogBodyScan("RunNativeWorkflow no part");
             return true;
         }
 
-        std::vector<BodyRecord> bodies = FilterEligibleBodies(CollectWorkPartBodies(), "RunWpfWorkflow eligible bodies");
-        LogBodyScan("RunWpfWorkflow bodies=" + std::to_string(bodies.size()));
+        std::vector<BodyRecord> bodies = FilterEligibleBodies(CollectWorkPartBodies(), "RunNativeWorkflow eligible bodies");
+        LogBodyScan("RunNativeWorkflow bodies=" + std::to_string(bodies.size()));
         if (bodies.empty())
         {
             return true;
@@ -1997,19 +3445,19 @@ namespace MinXiBiao
         std::map<std::string, std::vector<std::string>> manualRows;
         TableOptions tableOptions;
         std::string error;
-        LogBodyScan("RunWpfWorkflow launch WPF");
-        if (!LaunchWpfConfigurator(bodies, columns, includedBodyNames, manualRows, tableOptions, error))
+        LogBodyScan("RunNativeWorkflow launch Block Styler");
+        if (!LaunchNativeConfigurator(bodies, columns, includedBodyNames, manualRows, tableOptions, error))
         {
             if (!error.empty())
             {
-                LogBodyScan("LaunchWpfConfigurator error: " + error);
+                LogBodyScan("LaunchNativeConfigurator error: " + error);
                 ShowNxMessage(error);
                 return true;
             }
-            LogBodyScan("LaunchWpfConfigurator canceled/no output");
+            LogBodyScan("LaunchNativeConfigurator canceled/no output");
             return true;
         }
-        LogBodyScan("RunWpfWorkflow WPF columns=" + std::to_string(columns.size()));
+        LogBodyScan("RunNativeWorkflow native columns=" + std::to_string(columns.size()));
 
         bool hasColumn = false;
         for (const auto& column : columns)
@@ -2026,14 +3474,14 @@ namespace MinXiBiao
         }
 
         const std::vector<BodyValueRow> rows = BuildRows(bodies, &includedBodyNames, manualRows, columns);
-        LogBodyScan("RunWpfWorkflow rows=" + std::to_string(rows.size()));
+        LogBodyScan("RunNativeWorkflow rows=" + std::to_string(rows.size()));
         if (rows.empty())
         {
             return true;
         }
 
         double origin[3] = {0.0, 0.0, 0.0};
-        LogBodyScan("RunWpfWorkflow ask origin");
+        LogBodyScan("RunNativeWorkflow ask origin");
         if (!AskTableOrigin(origin, error))
         {
             if (!error.empty())
@@ -2044,13 +3492,13 @@ namespace MinXiBiao
             return true;
         }
 
-        LogBodyScan("RunWpfWorkflow create tabular note");
+        LogBodyScan("RunNativeWorkflow create tabular note");
         if (!CreateTabularNoteAtPoint(columns, rows, tableOptions, origin, error))
         {
             LogBodyScan("CreateTabularNoteAtPoint error: " + error);
             ShowNxMessage(error);
         }
-        LogBodyScan("RunWpfWorkflow end");
+        LogBodyScan("RunNativeWorkflow end");
         return true;
     }
 }
@@ -2164,7 +3612,7 @@ extern "C" DllExport void ufusr(char*, int*, int)
 
     try
     {
-        MinXiBiao::RunWpfWorkflow();
+        MinXiBiao::RunNativeWorkflow();
     }
     catch (const std::exception& ex)
     {
