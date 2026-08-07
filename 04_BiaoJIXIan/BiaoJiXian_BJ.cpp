@@ -1959,12 +1959,14 @@ PreparedCurveSet RemoveStraightEdgesWithoutRoundedCorners(const std::vector<tag_
 PreparedCurveSet TrimCurvesBySamplePolylines(
     const std::vector<tag_t>& curveTags,
     const std::vector<std::vector<std::array<double, 3> > >& obstacleSamplePolylines,
-    double clearanceDistance)
+    double clearanceDistance,
+    tag_t containmentFaceTag = NULL_TAG)
 {
     PreparedCurveSet result;
     result.curves = curveTags;
 
-    if (curveTags.empty() || obstacleSamplePolylines.empty() || clearanceDistance <= 0.0)
+    if (curveTags.empty() || clearanceDistance <= 0.0 ||
+        (obstacleSamplePolylines.empty() && containmentFaceTag == NULL_TAG))
     {
         return result;
     }
@@ -1998,53 +2000,75 @@ PreparedCurveSet TrimCurvesBySamplePolylines(
                 continue;
             }
 
-            const std::array<double, 3> samplePoint = {point[0], point[1], point[2]};
-            safeSamples[static_cast<std::size_t>(sampleIndex)] =
-                AskMinDistanceToSamplePolylines(samplePoint, obstacleSamplePolylines) >= (clearanceDistance - 0.02);
-        }
-
-        int firstSafeSample = -1;
-        int lastSafeSample = -1;
-        for (int sampleIndex = 0; sampleIndex <= sampleCount; ++sampleIndex)
-        {
-            if (safeSamples[static_cast<std::size_t>(sampleIndex)])
+            bool isInsideFace = true;
+            if (containmentFaceTag != NULL_TAG)
             {
-                if (firstSafeSample < 0)
-                {
-                    firstSafeSample = sampleIndex;
-                }
-                lastSafeSample = sampleIndex;
+                int containmentStatus = 0;
+                isInsideFace =
+                    UF_MODL_ask_point_containment(point, containmentFaceTag, &containmentStatus) == 0 &&
+                    containmentStatus != 2;
             }
+
+            const std::array<double, 3> samplePoint = {point[0], point[1], point[2]};
+            const bool hasBoundaryClearance =
+                obstacleSamplePolylines.empty() ||
+                AskMinDistanceToSamplePolylines(samplePoint, obstacleSamplePolylines) >= (clearanceDistance - 0.02);
+            safeSamples[static_cast<std::size_t>(sampleIndex)] = isInsideFace && hasBoundaryClearance;
         }
 
-        if (firstSafeSample < 0 || lastSafeSample < firstSafeSample)
+        if (std::find(safeSamples.begin(), safeSamples.end(), true) == safeSamples.end())
         {
             result.retiredCurves.push_back(curveTag);
             continue;
         }
 
-        if (firstSafeSample == 0 && lastSafeSample == sampleCount)
+        if (std::find(safeSamples.begin(), safeSamples.end(), false) == safeSamples.end())
         {
             result.curves.push_back(curveTag);
             continue;
         }
 
-        double startDistance = step * static_cast<double>(firstSafeSample);
-        double endDistance = step * static_cast<double>(lastSafeSample);
-
-        tag_t replacementCurve = NULL_TAG;
-        if (endDistance - startDistance > kCurveLengthTolerance)
+        bool createdReplacement = false;
+        int sampleIndex = 0;
+        while (sampleIndex <= sampleCount)
         {
-            replacementCurve = CreateCurveSegmentByDistances(curveTag, startDistance, endDistance);
+            while (sampleIndex <= sampleCount && !safeSamples[static_cast<std::size_t>(sampleIndex)])
+            {
+                ++sampleIndex;
+            }
+            if (sampleIndex > sampleCount)
+            {
+                break;
+            }
+
+            const int firstSafeSample = sampleIndex;
+            while (sampleIndex <= sampleCount && safeSamples[static_cast<std::size_t>(sampleIndex)])
+            {
+                ++sampleIndex;
+            }
+            const int lastSafeSample = sampleIndex - 1;
+            const double startDistance = step * static_cast<double>(firstSafeSample);
+            const double endDistance = step * static_cast<double>(lastSafeSample);
+            if (endDistance - startDistance <= kCurveLengthTolerance)
+            {
+                continue;
+            }
+
+            const tag_t replacementCurve =
+                CreateCurveSegmentByDistances(curveTag, startDistance, endDistance);
+            if (replacementCurve != NULL_TAG)
+            {
+                result.curves.push_back(replacementCurve);
+                createdReplacement = true;
+            }
         }
 
-        if (replacementCurve == NULL_TAG)
+        if (!createdReplacement)
         {
             result.retiredCurves.push_back(curveTag);
             continue;
         }
 
-        result.curves.push_back(replacementCurve);
         result.retiredCurves.push_back(curveTag);
     }
 
@@ -2064,7 +2088,7 @@ PreparedCurveSet TrimCurvesNearFaceBoundary(
         return result;
     }
 
-    const std::vector<tag_t> boundaryEdges = AskPeripheralLoopEdges(targetFaceTag);
+    const std::vector<tag_t> boundaryEdges = AskFaceEdges(targetFaceTag);
     if (boundaryEdges.empty())
     {
         return result;
@@ -2085,7 +2109,11 @@ PreparedCurveSet TrimCurvesNearFaceBoundary(
         return result;
     }
 
-    return TrimCurvesBySamplePolylines(curveTags, boundarySamplePolylines, clearanceDistance);
+    return TrimCurvesBySamplePolylines(
+        curveTags,
+        boundarySamplePolylines,
+        clearanceDistance,
+        targetFaceTag);
 }
 
 std::vector<std::vector<std::array<double, 3> > > BuildFaceBoundarySamplePolylines(tag_t targetFaceTag)
@@ -2096,7 +2124,7 @@ std::vector<std::vector<std::array<double, 3> > > BuildFaceBoundarySamplePolylin
         return boundarySamplePolylines;
     }
 
-    const std::vector<tag_t> boundaryEdges = AskPeripheralLoopEdges(targetFaceTag);
+    const std::vector<tag_t> boundaryEdges = AskFaceEdges(targetFaceTag);
     if (boundaryEdges.empty())
     {
         return boundarySamplePolylines;
@@ -2276,14 +2304,12 @@ PreparedCurveSet TrimCurveGroupsByCombinedSafety(
                 groupSamples[otherGroupIndex].end());
         }
 
-        if (obstacleSamples.empty())
-        {
-            result.curves.insert(result.curves.end(), groups[groupIndex].begin(), groups[groupIndex].end());
-            continue;
-        }
-
         PreparedCurveSet trimmedGroup =
-            TrimCurvesBySamplePolylines(groups[groupIndex], obstacleSamples, clearanceDistance);
+            TrimCurvesBySamplePolylines(
+                groups[groupIndex],
+                obstacleSamples,
+                clearanceDistance,
+                targetFaceTag);
         result.curves.insert(result.curves.end(), trimmedGroup.curves.begin(), trimmedGroup.curves.end());
         result.retiredCurves.insert(
             result.retiredCurves.end(),
@@ -2335,14 +2361,11 @@ PreparedCurveGroupSet TrimCurveGroupsByCombinedSafetyPreserveGroups(
         }
 
         PreparedCurveSet trimmedGroup;
-        if (obstacleSamples.empty())
-        {
-            trimmedGroup.curves = groups[groupIndex];
-        }
-        else
-        {
-            trimmedGroup = TrimCurvesBySamplePolylines(groups[groupIndex], obstacleSamples, clearanceDistance);
-        }
+        trimmedGroup = TrimCurvesBySamplePolylines(
+            groups[groupIndex],
+            obstacleSamples,
+            clearanceDistance,
+            targetFaceTag);
 
         result.groups.push_back(trimmedGroup.curves);
         result.curves.insert(result.curves.end(), trimmedGroup.curves.begin(), trimmedGroup.curves.end());
