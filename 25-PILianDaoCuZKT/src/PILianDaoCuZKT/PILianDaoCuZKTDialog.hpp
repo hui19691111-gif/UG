@@ -71,6 +71,14 @@ private:
     NXOpen::BlockStyler::Toggle* category_layout;// Block type: Toggle
     NXOpen::BlockStyler::Toggle* annotate_max_dimension;// Block type: Toggle
     NXOpen::BlockStyler::Toggle* show_bend_lines;// Block type: Toggle
+    NXOpen::BlockStyler::Toggle* break_bend_lines;// Block type: Toggle
+    NXOpen::BlockStyler::DoubleBlock* bend_line_edge_distance;// Block type: Double
+    NXOpen::BlockStyler::DoubleBlock* bend_up_keep_length;// Block type: Double
+    NXOpen::BlockStyler::DoubleBlock* bend_down_keep_length;// Block type: Double
+    NXOpen::BlockStyler::Toggle* large_arc_marker_lines;// Block type: Toggle
+    NXOpen::BlockStyler::DoubleBlock* large_arc_radius_ratio;// Block type: Double
+    NXOpen::BlockStyler::DoubleBlock* large_arc_marker_edge_distance;// Block type: Double
+    NXOpen::BlockStyler::DoubleBlock* large_arc_marker_keep_length;// Block type: Double
     NXOpen::BlockStyler::Group* group1;// Block type: Group
     NXOpen::BlockStyler::DoubleBlock* sheet_height;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* sheet_width;// Block type: Double

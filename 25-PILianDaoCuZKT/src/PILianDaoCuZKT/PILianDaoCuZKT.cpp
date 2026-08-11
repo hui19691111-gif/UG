@@ -26,6 +26,7 @@
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/Builder.hxx>
 #include <NXOpen/ColorManager.hxx>
+#include <NXOpen/Curve.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
 #include <NXOpen/DisplayableObject.hxx>
@@ -83,6 +84,7 @@
 #include <NXOpen/UnitCollection.hxx>
 #include <NXOpen/View.hxx>
 #include <NXOpen/ViewCollection.hxx>
+#include <NXOpen/ViewDependentDisplayManager.hxx>
 
 #include <uf.h>
 #include <uf_curve.h>
@@ -108,6 +110,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <unordered_set>
 
 #include "../../../../common/ZhihuiEmbeddedDialog.hpp"
 #include "../../../../common/ZhihuiDialogMemory.hpp"
@@ -152,6 +155,14 @@ struct CommandOptions
     bool categoryLayout;
     bool annotateMaxDimension;
     bool showBendLines;
+    bool breakBendLines;
+    double bendLineEdgeDistance;
+    double bendUpKeepLength;
+    double bendDownKeepLength;
+    bool largeArcMarkerLines;
+    double largeArcRadiusRatio;
+    double largeArcMarkerEdgeDistance;
+    double largeArcMarkerKeepLength;
     double sheetHeight;
     double sheetWidth;
     double viewSpacing;
@@ -313,10 +324,81 @@ static double GetDoubleValue(DoubleBlock* block, double fallback)
     return value;
 }
 
+static void UpdateBendLineDialogState(
+    NXOpen::BlockStyler::UIBlock* changedBlock,
+    Toggle* showBendLines,
+    Toggle* breakBendLines,
+    DoubleBlock* bendLineEdgeDistance,
+    DoubleBlock* bendUpKeepLength,
+    DoubleBlock* bendDownKeepLength)
+{
+    if (showBendLines == NULL || breakBendLines == NULL)
+    {
+        return;
+    }
+
+    bool showEnabled = GetToggleValue(showBendLines, false);
+    bool breakEnabled = GetToggleValue(breakBendLines, false);
+    if (changedBlock == showBendLines && !showEnabled)
+    {
+        breakBendLines->SetValue(false);
+        breakEnabled = false;
+    }
+    else if (breakEnabled && !showEnabled)
+    {
+        showBendLines->SetValue(true);
+        showEnabled = true;
+    }
+
+    breakBendLines->SetEnable(showEnabled);
+    const bool parametersEnabled = showEnabled && breakEnabled;
+    if (bendLineEdgeDistance != NULL)
+    {
+        bendLineEdgeDistance->SetEnable(parametersEnabled);
+    }
+    if (bendUpKeepLength != NULL)
+    {
+        bendUpKeepLength->SetEnable(parametersEnabled);
+    }
+    if (bendDownKeepLength != NULL)
+    {
+        bendDownKeepLength->SetEnable(parametersEnabled);
+    }
+}
+
+static void UpdateLargeArcMarkerDialogState(
+    Toggle* largeArcMarkerLines,
+    DoubleBlock* largeArcRadiusRatio,
+    DoubleBlock* largeArcMarkerEdgeDistance,
+    DoubleBlock* largeArcMarkerKeepLength)
+{
+    const bool enabled = GetToggleValue(largeArcMarkerLines, false);
+    if (largeArcRadiusRatio != NULL)
+    {
+        largeArcRadiusRatio->SetEnable(enabled);
+    }
+    if (largeArcMarkerEdgeDistance != NULL)
+    {
+        largeArcMarkerEdgeDistance->SetEnable(enabled);
+    }
+    if (largeArcMarkerKeepLength != NULL)
+    {
+        largeArcMarkerKeepLength->SetEnable(enabled);
+    }
+}
+
 static void LoadPILianDaoCuZKTDialogMemory(
     Toggle* categoryLayout,
     Toggle* annotateMaxDimension,
     Toggle* showBendLines,
+    Toggle* breakBendLines,
+    DoubleBlock* bendLineEdgeDistance,
+    DoubleBlock* bendUpKeepLength,
+    DoubleBlock* bendDownKeepLength,
+    Toggle* largeArcMarkerLines,
+    DoubleBlock* largeArcRadiusRatio,
+    DoubleBlock* largeArcMarkerEdgeDistance,
+    DoubleBlock* largeArcMarkerKeepLength,
     DoubleBlock* sheetHeight,
     DoubleBlock* sheetWidth,
     DoubleBlock* viewSpacing,
@@ -328,6 +410,14 @@ static void LoadPILianDaoCuZKTDialogMemory(
     zhihui_dialog_memory::LoadLogical(fileName, L"categoryLayout", categoryLayout);
     zhihui_dialog_memory::LoadLogical(fileName, L"annotateMaxDimension", annotateMaxDimension);
     zhihui_dialog_memory::LoadLogical(fileName, L"showBendLines", showBendLines);
+    zhihui_dialog_memory::LoadLogical(fileName, L"breakBendLines", breakBendLines);
+    zhihui_dialog_memory::LoadDouble(fileName, L"bendLineEdgeDistance", bendLineEdgeDistance);
+    zhihui_dialog_memory::LoadDouble(fileName, L"bendUpKeepLength", bendUpKeepLength);
+    zhihui_dialog_memory::LoadDouble(fileName, L"bendDownKeepLength", bendDownKeepLength);
+    zhihui_dialog_memory::LoadLogical(fileName, L"largeArcMarkerLines", largeArcMarkerLines);
+    zhihui_dialog_memory::LoadDouble(fileName, L"largeArcRadiusRatio", largeArcRadiusRatio);
+    zhihui_dialog_memory::LoadDouble(fileName, L"largeArcMarkerEdgeDistance", largeArcMarkerEdgeDistance);
+    zhihui_dialog_memory::LoadDouble(fileName, L"largeArcMarkerKeepLength", largeArcMarkerKeepLength);
     zhihui_dialog_memory::LoadDouble(fileName, L"sheetHeight", sheetHeight);
     zhihui_dialog_memory::LoadDouble(fileName, L"sheetWidth", sheetWidth);
     zhihui_dialog_memory::LoadDouble(fileName, L"viewSpacing", viewSpacing);
@@ -340,6 +430,14 @@ static void SavePILianDaoCuZKTDialogMemory(
     Toggle* categoryLayout,
     Toggle* annotateMaxDimension,
     Toggle* showBendLines,
+    Toggle* breakBendLines,
+    DoubleBlock* bendLineEdgeDistance,
+    DoubleBlock* bendUpKeepLength,
+    DoubleBlock* bendDownKeepLength,
+    Toggle* largeArcMarkerLines,
+    DoubleBlock* largeArcRadiusRatio,
+    DoubleBlock* largeArcMarkerEdgeDistance,
+    DoubleBlock* largeArcMarkerKeepLength,
     DoubleBlock* sheetHeight,
     DoubleBlock* sheetWidth,
     DoubleBlock* viewSpacing,
@@ -351,6 +449,14 @@ static void SavePILianDaoCuZKTDialogMemory(
     zhihui_dialog_memory::SaveLogical(fileName, L"categoryLayout", categoryLayout);
     zhihui_dialog_memory::SaveLogical(fileName, L"annotateMaxDimension", annotateMaxDimension);
     zhihui_dialog_memory::SaveLogical(fileName, L"showBendLines", showBendLines);
+    zhihui_dialog_memory::SaveLogical(fileName, L"breakBendLines", breakBendLines);
+    zhihui_dialog_memory::SaveDouble(fileName, L"bendLineEdgeDistance", bendLineEdgeDistance);
+    zhihui_dialog_memory::SaveDouble(fileName, L"bendUpKeepLength", bendUpKeepLength);
+    zhihui_dialog_memory::SaveDouble(fileName, L"bendDownKeepLength", bendDownKeepLength);
+    zhihui_dialog_memory::SaveLogical(fileName, L"largeArcMarkerLines", largeArcMarkerLines);
+    zhihui_dialog_memory::SaveDouble(fileName, L"largeArcRadiusRatio", largeArcRadiusRatio);
+    zhihui_dialog_memory::SaveDouble(fileName, L"largeArcMarkerEdgeDistance", largeArcMarkerEdgeDistance);
+    zhihui_dialog_memory::SaveDouble(fileName, L"largeArcMarkerKeepLength", largeArcMarkerKeepLength);
     zhihui_dialog_memory::SaveDouble(fileName, L"sheetHeight", sheetHeight);
     zhihui_dialog_memory::SaveDouble(fileName, L"sheetWidth", sheetWidth);
     zhihui_dialog_memory::SaveDouble(fileName, L"viewSpacing", viewSpacing);
@@ -2853,12 +2959,14 @@ static bool ExpandRectWithCurveInDrawing(NXOpen::Drawings::BaseView* view, NXOpe
     return expanded;
 }
 
-static bool RectFromMappedVisibleCurves(NXOpen::Drawings::BaseView* view, DraftRect& rect)
+static bool RectFromMappedVisibleCurves(
+    NXOpen::Drawings::BaseView* view,
+    const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+    DraftRect& rect)
 {
     const std::chrono::steady_clock::time_point totalStart = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point stepStart = totalStart;
-    std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(view);
-    const long long collectMs = ElapsedMilliseconds(stepStart);
+    const long long collectMs = 0;
     stepStart = std::chrono::steady_clock::now();
     bool initialized = false;
     size_t visibleCurveCount = 0;
@@ -3847,6 +3955,556 @@ static void ApplyFlatPatternBendCurveVisibility(
     }
 }
 
+static bool DraftingCurveReferencesFlatObject(NXOpen::Drawings::DraftingCurve* curve, tag_t objectTag)
+{
+    if (curve == NULL || objectTag == NULL_TAG)
+    {
+        return false;
+    }
+    try
+    {
+        const std::vector<NXOpen::NXObject*> parents = curve->GetDraftingCurveInfo()->GetParents();
+        for (size_t i = 0; i < parents.size(); ++i)
+        {
+            NXOpen::NXObject* parent = parents[i];
+            if (parent == NULL)
+            {
+                continue;
+            }
+            if (parent->Tag() == objectTag)
+            {
+                return true;
+            }
+            try
+            {
+                NXOpen::NXObject* prototype = dynamic_cast<NXOpen::NXObject*>(parent->Prototype());
+                if (prototype != NULL && prototype->Tag() == objectTag)
+                {
+                    return true;
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+
+    int parentCount = 0;
+    tag_t* parentTags = NULL;
+    if (UF_DRAW_ask_drafting_curve_parents(curve->Tag(), &parentCount, &parentTags) != 0 || parentTags == NULL)
+    {
+        return false;
+    }
+    bool matched = false;
+    for (int i = 0; i < parentCount; ++i)
+    {
+        if (parentTags[i] == objectTag)
+        {
+            matched = true;
+            break;
+        }
+    }
+    UF_free(parentTags);
+    return matched;
+}
+
+static NXOpen::Drawings::DraftingCurve* FindDraftingCurveForFlatObject(
+    const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+    NXOpen::Curve* flatObject)
+{
+    if (flatObject == NULL)
+    {
+        return NULL;
+    }
+    for (size_t i = 0; i < curves.size(); ++i)
+    {
+        if (DraftingCurveReferencesFlatObject(curves[i], flatObject->Tag()))
+        {
+            return curves[i];
+        }
+    }
+    return NULL;
+}
+
+static std::map<tag_t, NXOpen::Drawings::DraftingCurve*> BuildDraftingCurveParentIndex(
+    const std::vector<NXOpen::Drawings::DraftingCurve*>& curves)
+{
+    std::map<tag_t, NXOpen::Drawings::DraftingCurve*> result;
+    for (size_t i = 0; i < curves.size(); ++i)
+    {
+        NXOpen::Drawings::DraftingCurve* curve = curves[i];
+        if (curve == NULL)
+        {
+            continue;
+        }
+        try
+        {
+            const std::vector<NXOpen::NXObject*> parents = curve->GetDraftingCurveInfo()->GetParents();
+            for (size_t parentIndex = 0; parentIndex < parents.size(); ++parentIndex)
+            {
+                NXOpen::NXObject* parent = parents[parentIndex];
+                if (parent == NULL)
+                {
+                    continue;
+                }
+                result.insert(std::make_pair(parent->Tag(), curve));
+                try
+                {
+                    NXOpen::NXObject* prototype = dynamic_cast<NXOpen::NXObject*>(parent->Prototype());
+                    if (prototype != NULL)
+                    {
+                        result.insert(std::make_pair(prototype->Tag(), curve));
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        int parentCount = 0;
+        tag_t* parentTags = NULL;
+        if (UF_DRAW_ask_drafting_curve_parents(curve->Tag(), &parentCount, &parentTags) == 0 && parentTags != NULL)
+        {
+            for (int parentIndex = 0; parentIndex < parentCount; ++parentIndex)
+            {
+                if (parentTags[parentIndex] != NULL_TAG)
+                {
+                    result.insert(std::make_pair(parentTags[parentIndex], curve));
+                }
+            }
+            UF_free(parentTags);
+        }
+    }
+    return result;
+}
+
+static bool BreakBendObjects(
+    NXOpen::Drawings::BaseView* view,
+    const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+    const std::map<tag_t, NXOpen::Drawings::DraftingCurve*>& parentIndex,
+    const std::vector<NXOpen::Features::FlatPattern::ObjectDataFace>& objects,
+    double edgeDistance,
+    double keepLength,
+    const char* direction,
+    std::unordered_set<tag_t>& usedFlatObjectTags)
+{
+    bool edited = false;
+    for (size_t i = 0; i < objects.size(); ++i)
+    {
+        NXOpen::Curve* flatCurve = objects[i].FlatPatternObject;
+        if (flatCurve == NULL || !usedFlatObjectTags.insert(flatCurve->Tag()).second)
+        {
+            continue;
+        }
+        NXOpen::Drawings::DraftingCurve* curve = NULL;
+        const std::map<tag_t, NXOpen::Drawings::DraftingCurve*>::const_iterator found = parentIndex.find(flatCurve->Tag());
+        if (found != parentIndex.end())
+        {
+            curve = found->second;
+        }
+        else
+        {
+            curve = FindDraftingCurveForFlatObject(curves, flatCurve);
+        }
+        if (curve == NULL)
+        {
+            continue;
+        }
+        try
+        {
+            const double length = curve->GetLength();
+            const double endVisibleStart = length - edgeDistance - keepLength;
+            if (length <= 2.0 * (edgeDistance + keepLength) + 1.0e-6)
+            {
+                LogLine(std::string("[BendLineBreak] short curve skipped direction=") + direction
+                    + " tag=" + std::to_string(static_cast<unsigned long long>(curve->Tag())));
+                continue;
+            }
+            std::vector<double> starts;
+            std::vector<double> ends;
+            if (edgeDistance > 1.0e-6)
+            {
+                starts.push_back(0.0);
+                ends.push_back(edgeDistance / length);
+            }
+            starts.push_back((edgeDistance + keepLength) / length);
+            ends.push_back(endVisibleStart / length);
+            if (edgeDistance > 1.0e-6)
+            {
+                starts.push_back((length - edgeDistance) / length);
+                ends.push_back(1.0);
+            }
+            view->DependentDisplay()->ApplySegmentEdit(
+                curve,
+                NXOpen::ViewDependentDisplayManager::FontInvisible,
+                NXOpen::ViewDependentDisplayManager::WidthObject,
+                starts,
+                ends);
+            edited = true;
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogLine(std::string("[BendLineBreak] edit failed direction=") + direction + " error=" + ex.Message());
+        }
+    }
+    return edited;
+}
+
+static bool BreakFlatPatternBendLines(
+    NXOpen::Drawings::BaseView* view,
+    NXOpen::Features::FlatPattern* flatPattern,
+    const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+    double edgeDistance,
+    double upKeepLength,
+    double downKeepLength)
+{
+    if (view == NULL || flatPattern == NULL)
+    {
+        return false;
+    }
+    const std::map<tag_t, NXOpen::Drawings::DraftingCurve*> parentIndex = BuildDraftingCurveParentIndex(curves);
+    std::unordered_set<tag_t> used;
+    bool edited = false;
+    try
+    {
+        std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> objects;
+        flatPattern->GetBendUpCenterLines(objects);
+        edited = BreakBendObjects(view, curves, parentIndex, objects, std::max(0.0, edgeDistance),
+            std::max(0.1, upKeepLength), "up", used) || edited;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine(std::string("[BendLineBreak] get up lines failed: ") + ex.Message());
+    }
+    try
+    {
+        std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> objects;
+        flatPattern->GetBendDownCenterLines(objects);
+        edited = BreakBendObjects(view, curves, parentIndex, objects, std::max(0.0, edgeDistance),
+            std::max(0.1, downKeepLength), "down", used) || edited;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine(std::string("[BendLineBreak] get down lines failed: ") + ex.Message());
+    }
+    return edited;
+}
+
+static NXOpen::Drawings::DraftingCurve* FindDraftingCurveByParentTag(
+    const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+    const std::map<tag_t, NXOpen::Drawings::DraftingCurve*>& parentIndex,
+    tag_t objectTag)
+{
+    if (objectTag == NULL_TAG)
+    {
+        return NULL;
+    }
+    const std::map<tag_t, NXOpen::Drawings::DraftingCurve*>::const_iterator found = parentIndex.find(objectTag);
+    if (found != parentIndex.end())
+    {
+        return found->second;
+    }
+    for (size_t i = 0; i < curves.size(); ++i)
+    {
+        if (DraftingCurveReferencesFlatObject(curves[i], objectTag))
+        {
+            return curves[i];
+        }
+    }
+    return NULL;
+}
+
+static bool TryGetDraftingLineDrawingPoints(
+    NXOpen::Drawings::BaseView* view,
+    NXOpen::Drawings::DraftingCurve* curve,
+    double start[2],
+    double end[2])
+{
+    if (view == NULL || curve == NULL || start == NULL || end == NULL)
+    {
+        return false;
+    }
+    UF_CURVE_line_t lineData;
+    if (UF_CURVE_ask_line_data(curve->Tag(), &lineData) != 0)
+    {
+        return false;
+    }
+    return UF_VIEW_map_model_to_drawing(view->Tag(), lineData.start_point, start) == 0 &&
+        UF_VIEW_map_model_to_drawing(view->Tag(), lineData.end_point, end) == 0;
+}
+
+static bool TrimLargeArcMarkerCurve(
+    NXOpen::Drawings::BaseView* view,
+    NXOpen::Drawings::DraftingCurve* curve,
+    double edgeDistance,
+    double keepLength)
+{
+    if (view == NULL || curve == NULL)
+    {
+        return false;
+    }
+    try
+    {
+        const double length = curve->GetLength();
+        if (length <= 2.0 * (edgeDistance + keepLength) + 1.0e-6)
+        {
+            LogLine("[LargeArcMarker] short marker kept full curveTag="
+                + std::to_string(static_cast<unsigned long long>(curve->Tag()))
+                + " length=" + FormatReal(length));
+            return true;
+        }
+
+        std::vector<double> starts;
+        std::vector<double> ends;
+        if (edgeDistance > 1.0e-6)
+        {
+            starts.push_back(0.0);
+            ends.push_back(edgeDistance / length);
+        }
+        starts.push_back((edgeDistance + keepLength) / length);
+        ends.push_back((length - edgeDistance - keepLength) / length);
+        if (edgeDistance > 1.0e-6)
+        {
+            starts.push_back((length - edgeDistance) / length);
+            ends.push_back(1.0);
+        }
+        view->DependentDisplay()->ApplySegmentEdit(
+            curve,
+            NXOpen::ViewDependentDisplayManager::FontInvisible,
+            NXOpen::ViewDependentDisplayManager::WidthObject,
+            starts,
+            ends);
+        return true;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine(std::string("[LargeArcMarker] marker trim failed: ") + ex.Message());
+    }
+    return false;
+}
+
+static bool CreateFlatPatternLargeArcMarkerLines(
+    NXOpen::Drawings::BaseView* view,
+    NXOpen::Features::FlatPattern* flatPattern,
+    const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+    double radiusThreshold,
+    double edgeDistance,
+    double keepLength)
+{
+    if (view == NULL || flatPattern == NULL)
+    {
+        return false;
+    }
+
+    std::vector<NXOpen::Features::FlatPattern::ObjectDataEdge> tangentObjects;
+    std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> bendObjects;
+    try
+    {
+        flatPattern->GetBendTangentLines(tangentObjects);
+        std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> upObjects;
+        std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> downObjects;
+        flatPattern->GetBendUpCenterLines(upObjects);
+        flatPattern->GetBendDownCenterLines(downObjects);
+        bendObjects.insert(bendObjects.end(), upObjects.begin(), upObjects.end());
+        bendObjects.insert(bendObjects.end(), downObjects.begin(), downObjects.end());
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine(std::string("[LargeArcMarker] get flat-pattern bend objects failed: ") + ex.Message());
+        return false;
+    }
+
+    const std::map<tag_t, NXOpen::Drawings::DraftingCurve*> parentIndex =
+        BuildDraftingCurveParentIndex(curves);
+    struct TangentCandidate
+    {
+        NXOpen::Drawings::DraftingCurve* curve;
+        double start[2];
+        double end[2];
+    };
+    std::vector<TangentCandidate> candidates;
+    for (size_t i = 0; i < tangentObjects.size(); ++i)
+    {
+        NXOpen::Drawings::DraftingCurve* curve = NULL;
+        if (tangentObjects[i].FlatPatternObject != NULL)
+        {
+            curve = FindDraftingCurveByParentTag(
+                curves, parentIndex, tangentObjects[i].FlatPatternObject->Tag());
+        }
+        if (curve == NULL && tangentObjects[i].FlatSolidObject != NULL)
+        {
+            curve = FindDraftingCurveByParentTag(
+                curves, parentIndex, tangentObjects[i].FlatSolidObject->Tag());
+        }
+        TangentCandidate candidate = {};
+        candidate.curve = curve;
+        if (curve != NULL && TryGetDraftingLineDrawingPoints(view, curve, candidate.start, candidate.end))
+        {
+            candidates.push_back(candidate);
+        }
+    }
+
+    std::vector<NXOpen::Drawings::DraftingCurve*> markerCurves;
+    std::unordered_set<tag_t> markerTags;
+    size_t largeBendCount = 0;
+    for (size_t bendIndex = 0; bendIndex < bendObjects.size(); ++bendIndex)
+    {
+        NXOpen::Face* face = bendObjects[bendIndex].FormedBodyObject;
+        if (face == NULL || bendObjects[bendIndex].FlatPatternObject == NULL)
+        {
+            continue;
+        }
+
+        int faceType = 0;
+        double facePoint[3] = {};
+        double faceDirection[3] = {};
+        double faceBox[6] = {};
+        double faceRadius = 0.0;
+        double radialData = 0.0;
+        int normalDirection = 0;
+        if (UF_MODL_ask_face_data(
+            face->Tag(),
+            &faceType,
+            facePoint,
+            faceDirection,
+            faceBox,
+            &faceRadius,
+            &radialData,
+            &normalDirection) != 0 ||
+            faceRadius + 1.0e-9 < radiusThreshold)
+        {
+            continue;
+        }
+
+        NXOpen::Drawings::DraftingCurve* centerCurve = FindDraftingCurveByParentTag(
+            curves, parentIndex, bendObjects[bendIndex].FlatPatternObject->Tag());
+        double centerStart[2] = {};
+        double centerEnd[2] = {};
+        if (centerCurve == NULL ||
+            !TryGetDraftingLineDrawingPoints(view, centerCurve, centerStart, centerEnd))
+        {
+            continue;
+        }
+
+        double directionX = centerEnd[0] - centerStart[0];
+        double directionY = centerEnd[1] - centerStart[1];
+        const double centerLength = std::sqrt(directionX * directionX + directionY * directionY);
+        if (centerLength <= 1.0e-6)
+        {
+            continue;
+        }
+        directionX /= centerLength;
+        directionY /= centerLength;
+        const double normalX = -directionY;
+        const double normalY = directionX;
+        const double centerMidX = (centerStart[0] + centerEnd[0]) * 0.5;
+        const double centerMidY = (centerStart[1] + centerEnd[1]) * 0.5;
+        const double centerOffset = centerMidX * normalX + centerMidY * normalY;
+        const double centerProjection0 = centerStart[0] * directionX + centerStart[1] * directionY;
+        const double centerProjection1 = centerEnd[0] * directionX + centerEnd[1] * directionY;
+        const double centerMinProjection = std::min(centerProjection0, centerProjection1);
+        const double centerMaxProjection = std::max(centerProjection0, centerProjection1);
+
+        NXOpen::Drawings::DraftingCurve* negativeCurve = NULL;
+        NXOpen::Drawings::DraftingCurve* positiveCurve = NULL;
+        double negativeDistance = 1.0e99;
+        double positiveDistance = 1.0e99;
+        for (size_t candidateIndex = 0; candidateIndex < candidates.size(); ++candidateIndex)
+        {
+            const TangentCandidate& candidate = candidates[candidateIndex];
+            double candidateX = candidate.end[0] - candidate.start[0];
+            double candidateY = candidate.end[1] - candidate.start[1];
+            const double candidateLength = std::sqrt(candidateX * candidateX + candidateY * candidateY);
+            if (candidateLength <= 1.0e-6)
+            {
+                continue;
+            }
+            candidateX /= candidateLength;
+            candidateY /= candidateLength;
+            if (std::fabs(candidateX * directionX + candidateY * directionY) < 0.999)
+            {
+                continue;
+            }
+            const double projection0 = candidate.start[0] * directionX + candidate.start[1] * directionY;
+            const double projection1 = candidate.end[0] * directionX + candidate.end[1] * directionY;
+            if (std::max(projection0, projection1) < centerMinProjection - 0.5 ||
+                std::min(projection0, projection1) > centerMaxProjection + 0.5)
+            {
+                continue;
+            }
+            const double candidateMidX = (candidate.start[0] + candidate.end[0]) * 0.5;
+            const double candidateMidY = (candidate.start[1] + candidate.end[1]) * 0.5;
+            const double signedDistance = candidateMidX * normalX + candidateMidY * normalY - centerOffset;
+            if (signedDistance < -1.0e-4 && -signedDistance < negativeDistance)
+            {
+                negativeDistance = -signedDistance;
+                negativeCurve = candidate.curve;
+            }
+            else if (signedDistance > 1.0e-4 && signedDistance < positiveDistance)
+            {
+                positiveDistance = signedDistance;
+                positiveCurve = candidate.curve;
+            }
+        }
+
+        if (negativeCurve != NULL && positiveCurve != NULL)
+        {
+            ++largeBendCount;
+            if (markerTags.insert(negativeCurve->Tag()).second)
+            {
+                markerCurves.push_back(negativeCurve);
+            }
+            if (markerTags.insert(positiveCurve->Tag()).second)
+            {
+                markerCurves.push_back(positiveCurve);
+            }
+            LogLine("[LargeArcMarker] selected radius=" + FormatReal(faceRadius)
+                + " threshold=" + FormatReal(radiusThreshold)
+                + " centerCurveTag=" + std::to_string(static_cast<unsigned long long>(centerCurve->Tag()))
+                + " negativeTag=" + std::to_string(static_cast<unsigned long long>(negativeCurve->Tag()))
+                + " positiveTag=" + std::to_string(static_cast<unsigned long long>(positiveCurve->Tag())));
+        }
+    }
+
+    try
+    {
+        if (!markerCurves.empty())
+        {
+            std::vector<NXOpen::DisplayableObject*> objects(markerCurves.begin(), markerCurves.end());
+            view->DependentDisplay()->RemoveErasureOnObjectAndSubobjects(objects, true);
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine(std::string("[LargeArcMarker] restore selected tangent curves failed: ") + ex.Message());
+    }
+
+    bool edited = false;
+    for (size_t i = 0; i < markerCurves.size(); ++i)
+    {
+        edited = TrimLargeArcMarkerCurve(
+            view,
+            markerCurves[i],
+            std::max(0.0, edgeDistance),
+            std::max(0.1, keepLength)) || edited;
+    }
+    LogLine("[LargeArcMarker] viewTag=" + std::to_string(static_cast<unsigned long long>(view->Tag()))
+        + " bendObjects=" + std::to_string(bendObjects.size())
+        + " largeBends=" + std::to_string(largeBendCount)
+        + " tangentObjects=" + std::to_string(tangentObjects.size())
+        + " candidates=" + std::to_string(candidates.size())
+        + " markers=" + std::to_string(markerCurves.size())
+        + " edited=" + std::to_string(edited ? 1 : 0));
+    return edited;
+}
+
 struct CurveAssocCandidate
 {
     NXOpen::Drawings::DraftingCurve* curve;
@@ -4284,12 +4942,18 @@ static bool FindOverallDimensionCurvePairFallback(
     return firstFound && secondFound;
 }
 
-static bool CreateOverallDimension(NXOpen::Part* workPart, NXOpen::Drawings::BaseView* view, const DraftRect& rect, bool horizontal, double dimensionGap, double dimensionScale)
+static bool CreateOverallDimension(
+    NXOpen::Part* workPart,
+    NXOpen::Drawings::BaseView* view,
+    const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+    const DraftRect& rect,
+    bool horizontal,
+    double dimensionGap,
+    double dimensionScale)
 {
     const std::chrono::steady_clock::time_point totalStart = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point stepStart = totalStart;
-    std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(view);
-    const long long collectMs = ElapsedMilliseconds(stepStart);
+    const long long collectMs = 0;
     if (workPart == NULL || view == NULL || curves.empty())
     {
         LogLine(std::string("[CreateOverallDimension] skipped empty inputs direction=")
@@ -4538,15 +5202,14 @@ public:
             oldDelayViewUpdate_ = drafting_->DelayViewUpdate();
             oldDelayUpdateOnCreation_ = drafting_->DelayUpdateOnCreation();
             oldUpdateViewWithoutLwData_ = drafting_->UpdateViewWithoutLwData();
-            drafting_->SetDelayViewUpdate(false);
+            drafting_->SetDelayViewUpdate(true);
             drafting_->SetDelayUpdateOnCreation(true);
-            drafting_->SetUpdateViewWithoutLwData(NXOpen::Preferences::PartDrafting::UpdateViewWithoutLwDataOptionGenerate);
             active_ = true;
             LogLine("[DraftingDelayUpdateGuard] enabled oldDelayViewUpdate="
                 + std::to_string(oldDelayViewUpdate_ ? 1 : 0)
                 + " oldDelayUpdateOnCreation=" + std::to_string(oldDelayUpdateOnCreation_ ? 1 : 0)
                 + " oldUpdateViewWithoutLwData=" + std::to_string(static_cast<int>(oldUpdateViewWithoutLwData_))
-                + " newDelayViewUpdate=0 newDelayUpdateOnCreation=1 newUpdateViewWithoutLwData=Generate");
+                + " newDelayViewUpdate=1 newDelayUpdateOnCreation=1");
         }
         catch (const NXOpen::NXException& ex)
         {
@@ -4573,13 +5236,13 @@ public:
 
         try
         {
-            LogLine("[DraftingDelayUpdateGuard] final preferences left unchanged by request"
-                + std::string(" delayViewUpdate=") + std::to_string(drafting_->DelayViewUpdate() ? 1 : 0)
-                + " delayUpdateOnCreation=" + std::to_string(drafting_->DelayUpdateOnCreation() ? 1 : 0)
-                + " updateViewWithoutLwData=" + std::to_string(static_cast<int>(drafting_->UpdateViewWithoutLwData()))
-                + " oldDelayViewUpdate=" + std::to_string(oldDelayViewUpdate_ ? 1 : 0)
-                + " oldDelayUpdateOnCreation=" + std::to_string(oldDelayUpdateOnCreation_ ? 1 : 0)
-                + " oldUpdateViewWithoutLwData=" + std::to_string(static_cast<int>(oldUpdateViewWithoutLwData_)));
+            drafting_->SetDelayViewUpdate(oldDelayViewUpdate_);
+            drafting_->SetDelayUpdateOnCreation(oldDelayUpdateOnCreation_);
+            drafting_->SetUpdateViewWithoutLwData(oldUpdateViewWithoutLwData_);
+            LogLine("[DraftingDelayUpdateGuard] restored delayViewUpdate="
+                + std::to_string(oldDelayViewUpdate_ ? 1 : 0)
+                + " delayUpdateOnCreation=" + std::to_string(oldDelayUpdateOnCreation_ ? 1 : 0)
+                + " updateViewWithoutLwData=" + std::to_string(static_cast<int>(oldUpdateViewWithoutLwData_)));
         }
         catch (...)
         {
@@ -4689,7 +5352,28 @@ struct LayoutBatchResult
     bool placedAny;
 };
 
-static LayoutBatchResult LayoutAndAnnotateViews(NXOpen::Part* workPart, const std::vector<FlatPatternItem>& items, const CommandOptions& options, double startY)
+struct CreatedView
+{
+    FlatPatternItem item;
+    NXOpen::Drawings::BaseView* view;
+    NXOpen::Drawings::DraftingDrawingSheet* sheet;
+    DraftRect rect;
+    double width;
+    double height;
+    std::string material;
+    std::string thickness;
+    std::string layoutKey;
+    bool valid;
+    bool placed;
+};
+
+static LayoutBatchResult LayoutAndAnnotateViews(
+    NXOpen::Part* workPart,
+    NXOpen::Drawings::DraftingDrawingSheet* sheet,
+    const std::vector<FlatPatternItem>& items,
+    const CommandOptions& options,
+    double startY,
+    std::vector<CreatedView>& allCreatedViews)
 {
     LayoutBatchResult result;
     result.nextY = startY;
@@ -4697,20 +5381,6 @@ static LayoutBatchResult LayoutAndAnnotateViews(NXOpen::Part* workPart, const st
     result.placedAny = false;
     LogLine("[LayoutAndAnnotateViews] begin itemCount=" + std::to_string(items.size())
         + " startY=" + FormatReal(startY));
-    struct CreatedView
-    {
-        FlatPatternItem item;
-        NXOpen::Drawings::BaseView* view;
-        DraftRect rect;
-        double width;
-        double height;
-        std::string material;
-        std::string thickness;
-        std::string layoutKey;
-        bool valid;
-        bool placed;
-    };
-
     const double margin = kSheetMargin;
     const double dimensionScale = ClampPositive(options.viewScaleDenominator, 1.0);
     const double dimensionGap = options.annotateMaxDimension ? kDimensionPlacementGap * dimensionScale : 0.0;
@@ -4898,8 +5568,6 @@ static LayoutBatchResult LayoutAndAnnotateViews(NXOpen::Part* workPart, const st
     }
     result.nextY = y;
 
-    std::vector<CreatedView> createdViews;
-    createdViews.reserve(items.size());
     LogLine("[LayoutAndAnnotateViews] phase3 create placed views directly at final positions");
     for (size_t i = 0; i < plannedViews.size(); ++i)
     {
@@ -4943,6 +5611,7 @@ static LayoutBatchResult LayoutAndAnnotateViews(NXOpen::Part* workPart, const st
         CreatedView created;
         created.item = plannedViews[i].item;
         created.view = view;
+        created.sheet = sheet;
         created.width = plannedViews[i].width;
         created.height = plannedViews[i].height;
         created.material = plannedViews[i].item.material;
@@ -4954,94 +5623,235 @@ static LayoutBatchResult LayoutAndAnnotateViews(NXOpen::Part* workPart, const st
         created.rect.maxX = plannedViews[i].center.X + plannedViews[i].width * 0.5;
         created.rect.minY = plannedViews[i].center.Y - plannedViews[i].height * 0.5;
         created.rect.maxY = plannedViews[i].center.Y + plannedViews[i].height * 0.5;
-        createdViews.push_back(created);
+
+        allCreatedViews.push_back(created);
         ++result.createdCount;
     }
 
-    if (createdViews.empty())
-    {
-        LogLine("[LayoutAndAnnotateViews] no views created on this sheet");
-        return result;
-    }
-
-    LogLine("[LayoutAndAnnotateViews] phase3a measure directly created view rectangles");
-    for (size_t i = 0; i < createdViews.size(); ++i)
-    {
-        DraftRect rect;
-        const bool hasRect = RectForLayout(createdViews[i].view, rect);
-        if (hasRect)
-        {
-            createdViews[i].rect = rect;
-            createdViews[i].width = std::max(1.0, RectWidth(rect));
-            createdViews[i].height = std::max(1.0, RectHeight(rect));
-        }
-        createdViews[i].valid = hasRect;
-        LogLine("[LayoutAndAnnotateViews] measured direct index=" + std::to_string(i)
-            + " valid=" + std::to_string(hasRect ? 1 : 0)
-            + " width=" + FormatReal(createdViews[i].width)
-            + " height=" + FormatReal(createdViews[i].height)
-            + " itemMinimumY=" + FormatReal(createdViews[i].item.flatHeight));
-    }
-
-    LogLine("[LayoutAndAnnotateViews] skip layout move/update; views created at final positions");
-
-    LogLine("[LayoutAndAnnotateViews] phase3b reapply bend line visibility after layout show="
-        + std::to_string(options.showBendLines ? 1 : 0));
-    LogLine("[LayoutAndAnnotateViews] phase3b skipped per-view bend line reapply; using drafting view defaults");
-
-    LogLine("[LayoutAndAnnotateViews] phase4 annotate and dimension after final layout");
-    for (size_t i = 0; i < createdViews.size(); ++i)
-    {
-        if (!createdViews[i].placed)
-        {
-            LogLine("[LayoutAndAnnotateViews] skip annotation for unplaced view index=" + std::to_string(i)
-                + " part=" + createdViews[i].item.partKey);
-            continue;
-        }
-
-        DraftRect rect;
-        if (!RectForLayout(createdViews[i].view, rect))
-        {
-            rect = createdViews[i].rect;
-            LogLine("[LayoutAndAnnotateViews] final rect fallback index=" + std::to_string(i));
-        }
-
-        DraftRect displayedRect = rect;
-        const bool hasDisplayedRect = RectFromMappedVisibleCurves(createdViews[i].view, displayedRect);
-        if (!hasDisplayedRect)
-        {
-            LogLine("[LayoutAndAnnotateViews] displayed curve rect fallback to view border index=" + std::to_string(i));
-        }
-
-        if (options.annotateMaxDimension)
-        {
-            LogLine("[LayoutAndAnnotateViews] create max dimensions index=" + std::to_string(i));
-            std::chrono::steady_clock::time_point dimensionStart = std::chrono::steady_clock::now();
-            CreateOverallDimension(workPart, createdViews[i].view, displayedRect, true, dimensionGap, dimensionScale);
-            const long long horizontalDimensionMs = ElapsedMilliseconds(dimensionStart);
-            dimensionStart = std::chrono::steady_clock::now();
-            CreateOverallDimension(workPart, createdViews[i].view, displayedRect, false, dimensionGap, dimensionScale);
-            const long long verticalDimensionMs = ElapsedMilliseconds(dimensionStart);
-            LogLine("[LayoutAndAnnotateViews] dimension timing index=" + std::to_string(i)
-                + " horizontalMs=" + std::to_string(horizontalDimensionMs)
-                + " verticalMs=" + std::to_string(verticalDimensionMs));
-        }
-
-        const double bodyNoteGap = dimensionGap + std::max(noteGap, options.noteTextSize * 2.0);
-        NXOpen::Point3d notePoint((displayedRect.minX + displayedRect.maxX) * 0.5, displayedRect.minY - bodyNoteGap, 0.0);
-        std::chrono::steady_clock::time_point noteStart = std::chrono::steady_clock::now();
-        CreateBodyNote(workPart, createdViews[i].item, createdViews[i].view, notePoint, options.noteTextSize);
-        LogLine("[LayoutAndAnnotateViews] note index=" + std::to_string(i)
-            + " point=(" + FormatReal(notePoint.X) + "," + FormatReal(notePoint.Y)
-            + ") displayedMinY=" + FormatReal(displayedRect.minY)
-            + " bodyNoteGap=" + FormatReal(bodyNoteGap)
-            + " noteMs=" + std::to_string(ElapsedMilliseconds(noteStart)));
-    }
-    LogLine("[LayoutAndAnnotateViews] skip annotation update; final update runs once after all pages");
+    LogLine("[LayoutAndAnnotateViews] creation phase complete; update and post-processing deferred");
     LogLine("[LayoutAndAnnotateViews] done overflowCount=" + std::to_string(result.overflowItems.size())
         + " nextY=" + FormatReal(result.nextY)
         + " placedAny=" + std::to_string(result.placedAny ? 1 : 0));
     return result;
+
+    LogLine("[LayoutAndAnnotateViews] done overflowCount=" + std::to_string(result.overflowItems.size())
+        + " nextY=" + FormatReal(result.nextY)
+        + " placedAny=" + std::to_string(result.placedAny ? 1 : 0));
+    return result;
+}
+
+static void UpdateAllCreatedViews(const std::vector<CreatedView>& createdViews)
+{
+    std::unordered_set<tag_t> updatedSheets;
+    for (size_t i = 0; i < createdViews.size(); ++i)
+    {
+        NXOpen::Drawings::DraftingDrawingSheet* sheet = createdViews[i].sheet;
+        if (sheet == NULL || !updatedSheets.insert(sheet->Tag()).second)
+        {
+            continue;
+        }
+
+        const std::chrono::steady_clock::time_point updateStart = std::chrono::steady_clock::now();
+        int status = -1;
+        try
+        {
+            sheet->Open();
+            status = UF_DRF_update_views(NULL, UF_DRF_UPDATE_ALL, NULL);
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogLine("[UpdateAllCreatedViews] NXException code=" + std::to_string(ex.ErrorCode())
+                + " message=" + std::string(ex.Message()));
+        }
+        catch (...)
+        {
+            LogLine("[UpdateAllCreatedViews] exception");
+        }
+        LogLine("[UpdateAllCreatedViews] sheetTag="
+            + std::to_string(static_cast<unsigned long long>(sheet->Tag()))
+            + " status=" + std::to_string(status)
+            + " ms=" + std::to_string(ElapsedMilliseconds(updateStart)));
+    }
+}
+
+static void FinalizeCreatedViews(
+    NXOpen::Part* workPart,
+    std::vector<CreatedView>& createdViews,
+    const CommandOptions& options)
+{
+    const double dimensionScale = ClampPositive(options.viewScaleDenominator, 1.0);
+    const double dimensionGap = options.annotateMaxDimension ? kDimensionPlacementGap * dimensionScale : 0.0;
+    const double noteGap = std::max(2.0, options.noteTextSize * 1.5);
+    NXOpen::Drawings::DraftingDrawingSheet* activeSheet = NULL;
+    LogLine("[FinalizeCreatedViews] begin count=" + std::to_string(createdViews.size()));
+
+    for (size_t i = 0; i < createdViews.size(); ++i)
+    {
+        CreatedView& created = createdViews[i];
+        if (created.sheet != NULL && created.sheet != activeSheet)
+        {
+            try
+            {
+                created.sheet->Open();
+                activeSheet = created.sheet;
+            }
+            catch (...)
+            {
+                LogLine("[FinalizeCreatedViews] sheet open failed index=" + std::to_string(i));
+            }
+        }
+
+        NXOpen::Features::FlatPattern* flatPattern =
+            dynamic_cast<NXOpen::Features::FlatPattern*>(created.item.feature);
+        const std::chrono::steady_clock::time_point collectStart = std::chrono::steady_clock::now();
+        const std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(created.view);
+        const long long collectMs = ElapsedMilliseconds(collectStart);
+        if (options.breakBendLines && flatPattern != NULL)
+        {
+            BreakFlatPatternBendLines(
+                created.view,
+                flatPattern,
+                curves,
+                options.bendLineEdgeDistance,
+                options.bendUpKeepLength,
+                options.bendDownKeepLength);
+        }
+
+        DraftRect displayedRect = created.rect;
+        if (RectFromMappedVisibleCurves(created.view, curves, displayedRect))
+        {
+            created.rect = displayedRect;
+            created.width = std::max(1.0, RectWidth(displayedRect));
+            created.height = std::max(1.0, RectHeight(displayedRect));
+            created.valid = true;
+        }
+        else
+        {
+            DraftRect borderRect;
+            if (RectForLayout(created.view, borderRect))
+            {
+                displayedRect = borderRect;
+                created.rect = borderRect;
+                created.width = std::max(1.0, RectWidth(borderRect));
+                created.height = std::max(1.0, RectHeight(borderRect));
+                created.valid = true;
+            }
+            else
+            {
+                created.valid = false;
+            }
+            LogLine("[FinalizeCreatedViews] displayed rect fallback index=" + std::to_string(i));
+        }
+
+        if (options.annotateMaxDimension)
+        {
+            CreateOverallDimension(workPart, created.view, curves, displayedRect, true, dimensionGap, dimensionScale);
+            CreateOverallDimension(workPart, created.view, curves, displayedRect, false, dimensionGap, dimensionScale);
+        }
+
+        const double bodyNoteGap = dimensionGap + std::max(noteGap, options.noteTextSize * 2.0);
+        NXOpen::Point3d notePoint(
+            (displayedRect.minX + displayedRect.maxX) * 0.5,
+            displayedRect.minY - bodyNoteGap,
+            0.0);
+        CreateBodyNote(workPart, created.item, created.view, notePoint, options.noteTextSize);
+        LogLine("[FinalizeCreatedViews] completed index=" + std::to_string(i)
+            + " curveCount=" + std::to_string(curves.size())
+            + " collectMs=" + std::to_string(collectMs));
+    }
+    LogLine("[FinalizeCreatedViews] done");
+}
+
+static double GetFlatPatternItemThickness(const FlatPatternItem& item)
+{
+    if (item.part != NULL && item.body != NULL)
+    {
+        try
+        {
+            const double value = item.part->Features()->SheetmetalManager()->GetBodyThickness(item.body);
+            if (value > 1.0e-6)
+            {
+                return value;
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+    const char* text = item.thickness.c_str();
+    char* end = NULL;
+    const double parsed = std::strtod(text, &end);
+    return end != text && parsed > 1.0e-6 ? parsed : 0.0;
+}
+
+static void ApplyLargeArcMarkerLinesAfterFinalUpdate(
+    std::vector<CreatedView>& createdViews,
+    const CommandOptions& options)
+{
+    if (!options.largeArcMarkerLines)
+    {
+        LogLine("[LargeArcMarker] skipped disabled");
+        return;
+    }
+
+    NXOpen::Drawings::DraftingDrawingSheet* activeSheet = NULL;
+    size_t editedViewCount = 0;
+    size_t skippedThicknessCount = 0;
+    const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    LogLine("[LargeArcMarker] final apply begin count=" + std::to_string(createdViews.size())
+        + " radiusThicknessRatio=" + FormatReal(options.largeArcRadiusRatio));
+    for (size_t i = 0; i < createdViews.size(); ++i)
+    {
+        CreatedView& created = createdViews[i];
+        if (created.sheet != NULL && created.sheet != activeSheet)
+        {
+            try
+            {
+                created.sheet->Open();
+                activeSheet = created.sheet;
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                LogLine(std::string("[LargeArcMarker] sheet open failed: ") + ex.Message());
+            }
+        }
+
+        NXOpen::Features::FlatPattern* flatPattern =
+            dynamic_cast<NXOpen::Features::FlatPattern*>(created.item.feature);
+        if (created.view == NULL || flatPattern == NULL)
+        {
+            continue;
+        }
+        const double thickness = GetFlatPatternItemThickness(created.item);
+        if (thickness <= 1.0e-6)
+        {
+            ++skippedThicknessCount;
+            LogLine("[LargeArcMarker] skip missing thickness index=" + std::to_string(i));
+            continue;
+        }
+        const double radiusThreshold = thickness * options.largeArcRadiusRatio;
+        const std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(created.view);
+        if (CreateFlatPatternLargeArcMarkerLines(
+            created.view,
+            flatPattern,
+            curves,
+            radiusThreshold,
+            options.largeArcMarkerEdgeDistance,
+            options.largeArcMarkerKeepLength))
+        {
+            ++editedViewCount;
+        }
+    }
+    try
+    {
+        NXOpen::Session::GetSession()->CleanUpFacetedFacesAndEdges();
+    }
+    catch (...)
+    {
+    }
+    LogLine("[LargeArcMarker] final apply done editedViews=" + std::to_string(editedViewCount)
+        + " skippedThickness=" + std::to_string(skippedThicknessCount)
+        + " ms=" + std::to_string(ElapsedMilliseconds(start)));
 }
 
 static DrawingRunSummary RunBatchFlatPatternDrawing(const CommandOptions& options)
@@ -5093,8 +5903,12 @@ static DrawingRunSummary RunBatchFlatPatternDrawing(const CommandOptions& option
     summary.totalCount = items.size();
     SortFlatPatternItemsForClassBatches(items);
     DeleteExistingPluginSheets(workPart);
-    ApplyFlatPatternDefaultBendCurveVisibility(workPart, options.showBendLines);
+    const bool needBendCurves = options.showBendLines || options.breakBendLines;
+    ApplyFlatPatternDefaultBendCurveVisibility(workPart, needBendCurves);
     DraftingDelayUpdateGuard draftingDelayGuard(workPart);
+    UfSuppressViewUpdateGuard suppressViewUpdateGuard;
+    std::vector<CreatedView> allCreatedViews;
+    allCreatedViews.reserve(items.size());
 
     size_t nextItemIndex = 0;
     size_t pageIndex = 0;
@@ -5104,6 +5918,7 @@ static DrawingRunSummary RunBatchFlatPatternDrawing(const CommandOptions& option
     double pageCursorY = options.sheetHeight - margin;
     bool sheetActive = false;
     std::string currentSheetName;
+    NXOpen::Drawings::DraftingDrawingSheet* currentSheet = NULL;
     size_t sheetPlacedCount = 0;
     while (nextItemIndex < items.size() || !carryItems.empty())
     {
@@ -5136,7 +5951,7 @@ static DrawingRunSummary RunBatchFlatPatternDrawing(const CommandOptions& option
                 + " sheet=" + currentSheetName
                 + " carryCount=" + std::to_string(carryItems.size())
                 + " nextItemIndex=" + std::to_string(nextItemIndex));
-            CreateCustomSheet(workPart, options, currentSheetName);
+            currentSheet = CreateCustomSheet(workPart, options, currentSheetName);
             ++pageIndex;
             summary.sheetCount = pageIndex;
             pageCursorY = options.sheetHeight - margin;
@@ -5176,7 +5991,13 @@ static DrawingRunSummary RunBatchFlatPatternDrawing(const CommandOptions& option
             + " carryCount=" + std::to_string(carryCount)
             + " cursorY=" + FormatReal(pageCursorY)
             + " nextItemIndex=" + std::to_string(nextItemIndex));
-        LayoutBatchResult layoutResult = LayoutAndAnnotateViews(workPart, batchItems, options, pageCursorY);
+        LayoutBatchResult layoutResult = LayoutAndAnnotateViews(
+            workPart,
+            currentSheet,
+            batchItems,
+            options,
+            pageCursorY,
+            allCreatedViews);
         std::vector<FlatPatternItem>().swap(batchItems);
 
         const size_t batchPlacedCount = layoutResult.createdCount;
@@ -5224,9 +6045,15 @@ static DrawingRunSummary RunBatchFlatPatternDrawing(const CommandOptions& option
             + " nextItemIndex=" + std::to_string(nextItemIndex)
             + " carryCount=" + std::to_string(carryItems.size()));
     }
+    LogLine("[RunBatchFlatPatternDrawing] all base views created count="
+        + std::to_string(allCreatedViews.size()));
+    draftingDelayGuard.Restore();
+    UpdateAllCreatedViews(allCreatedViews);
+    suppressViewUpdateGuard.Restore();
+    FinalizeCreatedViews(workPart, allCreatedViews, options);
+    DoUpdateNow("PILianDaoCuZKT final annotation update");
+    ApplyLargeArcMarkerLinesAfterFinalUpdate(allCreatedViews, options);
     LogLine("[RunBatchFlatPatternDrawing] layout complete");
-
-    DoUpdateNow("PILianDaoCuZKT final update after all pages");
     try
     {
         session->Parts()->SetWork(workPart);
@@ -5375,6 +6202,14 @@ void PILianDaoCuZKTDialog::initialize_cb()
         category_layout = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("category_layout"));
         annotate_max_dimension = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("annotate_max_dimension"));
         show_bend_lines = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("show_bend_lines"));
+        break_bend_lines = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("break_bend_lines"));
+        bend_line_edge_distance = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("bend_line_edge_distance"));
+        bend_up_keep_length = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("bend_up_keep_length"));
+        bend_down_keep_length = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("bend_down_keep_length"));
+        large_arc_marker_lines = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("large_arc_marker_lines"));
+        large_arc_radius_ratio = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("large_arc_radius_ratio"));
+        large_arc_marker_edge_distance = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("large_arc_marker_edge_distance"));
+        large_arc_marker_keep_length = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("large_arc_marker_keep_length"));
         group1 = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("group1"));
         sheet_height = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("sheet_height"));
         sheet_width = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("sheet_width"));
@@ -5387,12 +6222,32 @@ void PILianDaoCuZKTDialog::initialize_cb()
             category_layout,
             annotate_max_dimension,
             show_bend_lines,
+            break_bend_lines,
+            bend_line_edge_distance,
+            bend_up_keep_length,
+            bend_down_keep_length,
+            large_arc_marker_lines,
+            large_arc_radius_ratio,
+            large_arc_marker_edge_distance,
+            large_arc_marker_keep_length,
             sheet_height,
             sheet_width,
             view_spacing,
             row_spacing,
             note_text_size,
             dimension_global_scale);
+        UpdateBendLineDialogState(
+            NULL,
+            show_bend_lines,
+            break_bend_lines,
+            bend_line_edge_distance,
+            bend_up_keep_length,
+            bend_down_keep_length);
+        UpdateLargeArcMarkerDialogState(
+            large_arc_marker_lines,
+            large_arc_radius_ratio,
+            large_arc_marker_edge_distance,
+            large_arc_marker_keep_length);
         LogLine("[initialize_cb] done");
     }
     catch (const std::exception& ex)
@@ -5403,12 +6258,43 @@ void PILianDaoCuZKTDialog::initialize_cb()
 
 void PILianDaoCuZKTDialog::dialogShown_cb()
 {
+    UpdateBendLineDialogState(
+        NULL,
+        show_bend_lines,
+        break_bend_lines,
+        bend_line_edge_distance,
+        bend_up_keep_length,
+        bend_down_keep_length);
+    UpdateLargeArcMarkerDialogState(
+        large_arc_marker_lines,
+        large_arc_radius_ratio,
+        large_arc_marker_edge_distance,
+        large_arc_marker_keep_length);
     LogLine("[dialogShown_cb] shown");
 }
 
 int PILianDaoCuZKTDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
-    LogLine("[update_cb] block update");
+    if (block == show_bend_lines || block == break_bend_lines)
+    {
+        UpdateBendLineDialogState(
+            block,
+            show_bend_lines,
+            break_bend_lines,
+            bend_line_edge_distance,
+            bend_up_keep_length,
+            bend_down_keep_length);
+        LogLine("[update_cb] bend line controls linked");
+    }
+    else if (block == large_arc_marker_lines)
+    {
+        UpdateLargeArcMarkerDialogState(
+            large_arc_marker_lines,
+            large_arc_radius_ratio,
+            large_arc_marker_edge_distance,
+            large_arc_marker_keep_length);
+        LogLine("[update_cb] large arc marker controls linked");
+    }
     return 0;
 }
 
@@ -5421,6 +6307,14 @@ int PILianDaoCuZKTDialog::ok_cb()
             category_layout,
             annotate_max_dimension,
             show_bend_lines,
+            break_bend_lines,
+            bend_line_edge_distance,
+            bend_up_keep_length,
+            bend_down_keep_length,
+            large_arc_marker_lines,
+            large_arc_radius_ratio,
+            large_arc_marker_edge_distance,
+            large_arc_marker_keep_length,
             sheet_height,
             sheet_width,
             view_spacing,
@@ -5431,6 +6325,14 @@ int PILianDaoCuZKTDialog::ok_cb()
         options.categoryLayout = GetToggleValue(category_layout, true);
         options.annotateMaxDimension = GetToggleValue(annotate_max_dimension, true);
         options.showBendLines = GetToggleValue(show_bend_lines, false);
+        options.breakBendLines = options.showBendLines && GetToggleValue(break_bend_lines, true);
+        options.bendLineEdgeDistance = std::max(0.0, GetDoubleValue(bend_line_edge_distance, 3.0));
+        options.bendUpKeepLength = ClampPositive(GetDoubleValue(bend_up_keep_length, 5.0), 5.0);
+        options.bendDownKeepLength = ClampPositive(GetDoubleValue(bend_down_keep_length, 5.0), 5.0);
+        options.largeArcMarkerLines = GetToggleValue(large_arc_marker_lines, false);
+        options.largeArcRadiusRatio = ClampPositive(GetDoubleValue(large_arc_radius_ratio, 3.0), 3.0);
+        options.largeArcMarkerEdgeDistance = std::max(0.0, GetDoubleValue(large_arc_marker_edge_distance, 3.0));
+        options.largeArcMarkerKeepLength = ClampPositive(GetDoubleValue(large_arc_marker_keep_length, 5.0), 5.0);
         options.sheetHeight = ClampPositive(GetDoubleValue(sheet_height, 210.0), 210.0);
         options.sheetWidth = ClampPositive(GetDoubleValue(sheet_width, 297.0), 297.0);
         options.viewSpacing = ClampPositive(GetDoubleValue(view_spacing, 15.0), 15.0);
@@ -5440,6 +6342,11 @@ int PILianDaoCuZKTDialog::ok_cb()
         LogLine("[ok_cb] options categoryLayout=" + std::to_string(options.categoryLayout ? 1 : 0)
             + " annotateMaxDimension=" + std::to_string(options.annotateMaxDimension ? 1 : 0)
             + " showBendLines=" + std::to_string(options.showBendLines ? 1 : 0)
+            + " breakBendLines=" + std::to_string(options.breakBendLines ? 1 : 0)
+            + " bendBreak=" + FormatReal(options.bendLineEdgeDistance) + "/" + FormatReal(options.bendUpKeepLength) + "/" + FormatReal(options.bendDownKeepLength)
+            + " largeArcMarker=" + std::to_string(options.largeArcMarkerLines ? 1 : 0)
+            + " largeArcRatio=" + FormatReal(options.largeArcRadiusRatio)
+            + " largeArcMarkerTrim=" + FormatReal(options.largeArcMarkerEdgeDistance) + "/" + FormatReal(options.largeArcMarkerKeepLength)
             + " sheetWidth=" + FormatReal(options.sheetWidth)
             + " sheetHeight=" + FormatReal(options.sheetHeight)
             + " viewSpacing=" + FormatReal(options.viewSpacing)
