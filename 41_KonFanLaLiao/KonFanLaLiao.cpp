@@ -588,7 +588,9 @@ void KonFanLaLiaoDialog::initialize_cb()
             << config.slotLongThicknessFactor << "t+r。";
     NXOpen::BlockStyler::PropertyList* formulaProperties =
         formulaSummary_->GetProperties();
-    formulaProperties->SetString("Label", formula.str().c_str());
+    formulaProperties->SetString(
+        NXOpen::NXString("Label", NXOpen::NXString::UTF8),
+        NXOpen::NXString(formula.str(), NXOpen::NXString::UTF8));
     delete formulaProperties;
     {
         NXOpen::BlockStyler::PropertyList* mode =
@@ -732,11 +734,11 @@ void KonFanLaLiaoDialog::SetStatus(const std::string& text) const
         {
             line.pop_back();
         }
-        lines.emplace_back(line.c_str());
+        lines.emplace_back(line, NXOpen::NXString::UTF8);
     }
     if (lines.empty())
     {
-        lines.emplace_back("");
+        lines.emplace_back("", NXOpen::NXString::UTF8);
     }
     properties->SetStrings("Value", lines);
     delete properties;
@@ -3252,7 +3254,7 @@ void KonFanLaLiaoDialog::RunAnalysis(bool showErrors)
 void KonFanLaLiaoDialog::ShowError(const std::string& message) const
 {
     ui_->NXMessageBox()->Show(
-        "孔防拉料检查",
+        NXOpen::NXString("孔防拉料检查", NXOpen::NXString::UTF8),
         NXOpen::NXMessageBox::DialogTypeError,
-        message.c_str());
+        NXOpen::NXString(message, NXOpen::NXString::UTF8));
 }
