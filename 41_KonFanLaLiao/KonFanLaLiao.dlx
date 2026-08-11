@@ -114,17 +114,16 @@
               </PropertyList>
             </item>
           </Property>
-          <Property id="result_status" mask="256" name="result_status" type="uicomp" class="UICOMP_multiline_string" hierarchy="UGS::UICOMP_group" presentation="Multi-line String">
-            <item id="result_status" icon="styler_browser_multilinetext.bmp" name="result_status" type="uicomp" class="UICOMP_multiline_string" notes="" Expanded="1" hierarchy="UGS::UICOMP_multiline_string" presentation="Multi-line String">
+          <Property id="result_status" mask="256" name="result_status" type="uicomp" class="UICOMP_label" hierarchy="UGS::UICOMP_group" presentation="Label">
+            <item id="result_status" icon="styler_label.bmp" name="result_status" type="uicomp" class="UICOMP_label" notes="" Expanded="1" hierarchy="" presentation="Label">
               <PropertyList id="id" mode="0">
-                <Property id="API Name" mask="16400" name="API Name" type="string" group="General::" sname="BlockID" value="result_status" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_multiline_string"/>
-                <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="检测报告" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_multiline_string"/>
-                <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_multiline_string"/>
-                <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_multiline_string"/>
-                <Property id="Height" mask="0" name="Height" type="integer" group="Block Specific::" sname="Height" value="6" source="1" ClassID="UGS::UICOMP_multiline_string" hierarchy="UGS::UICOMP_multiline_string"/>
-                <Property id="MinimumHeight" mask="0" name="MinimumHeight" type="integer" group="Block Specific::" sname="MinimumHeight" value="4" source="1" ClassID="UGS::UICOMP_multiline_string" hierarchy="UGS::UICOMP_multiline_string"/>
-                <Property id="ResizeHeightWithDialog" mask="0" name="ResizeHeightWithDialog" type="logical" group="Block Specific::" sname="ResizeHeightWithDialog" value="True" source="1" ClassID="UGS::UICOMP_multiline_string" hierarchy="UGS::UICOMP_multiline_string"/>
-                <Property id="Value_1" mask="0" name="Value_1" type="utfstrings" group="Block Specific::" sname="Value" source="4" ClassID="UGS::UICOMP_multiline_string" hierarchy="UGS::UICOMP_multiline_string"><Strings value="等待检测。"/></Property>
+                <Property id="API Name" mask="16400" name="API Name" type="string" group="General::" sname="BlockID" value="result_status" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label"/>
+                <Property id="Group" mask="16384" name="Group" type="logical" group="General::" sname="Group" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label"/>
+                <Property id="Expanded" mask="4" name="Expanded" type="logical" group="General::" sname="Expanded" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label"/>
+                <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="等待检测。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label"/>
+                <Property id="DisplayBitmapLabel" mask="0" name="DisplayBitmapLabel" type="logical" group="Block Specific::" sname="DisplayBitmapLabel" value="True" source="1" ClassID="UGS::UICOMP_label" hierarchy="UGS::UICOMP_label"/>
+                <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label"/>
+                <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label"/>
                 <Property id="Top" loc="1" mask="16384" name="Top" type="attachment" group="Other::Attachments::" sname="Top" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/><Property id="Left" loc="2" mask="16384" name="Left" type="attachment" group="Other::Attachments::" sname="Left" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/><Property id="Right" loc="3" mask="16384" name="Right" type="attachment" group="Other::Attachments::" sname="Right" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/><Property id="Bottom" loc="4" mask="16384" name="Bottom" type="attachment" group="Other::Attachments::" sname="Bottom" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
               </PropertyList>
             </item>

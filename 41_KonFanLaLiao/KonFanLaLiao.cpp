@@ -675,8 +675,8 @@ int KonFanLaLiaoDialog::apply_cb()
             slotsCreated_ = created > 0;
             RestoreDisplay();
             std::ostringstream message;
-            message << "检查实体：" << result.bodyCount << " 个\n"
-                    << "风险孔：" << result.riskHoleCount << " 个";
+            message << "检查实体：" << result.bodyCount
+                    << " 个；风险孔：" << result.riskHoleCount << " 个";
             SetStatus(message.str());
         }
         catch (const NXOpen::NXException& ex)
@@ -726,22 +726,9 @@ void KonFanLaLiaoDialog::SetDoubleValue(
 void KonFanLaLiaoDialog::SetStatus(const std::string& text) const
 {
     NXOpen::BlockStyler::PropertyList* properties = status_->GetProperties();
-    std::vector<NXOpen::NXString> lines;
-    std::istringstream stream(text);
-    std::string line;
-    while (std::getline(stream, line))
-    {
-        if (!line.empty() && line.back() == '\r')
-        {
-            line.pop_back();
-        }
-        lines.emplace_back(line, NXOpen::NXString::UTF8);
-    }
-    if (lines.empty())
-    {
-        lines.emplace_back("", NXOpen::NXString::UTF8);
-    }
-    properties->SetStrings("Value", lines);
+    properties->SetString(
+        NXOpen::NXString("Label", NXOpen::NXString::UTF8),
+        NXOpen::NXString(text, NXOpen::NXString::UTF8));
     delete properties;
 }
 
@@ -3198,8 +3185,8 @@ void KonFanLaLiaoDialog::RunAnalysis(bool showErrors)
         const AnalysisResult result = Analyze();
         RefreshDisplay(result);
         std::ostringstream message;
-        message << "检查实体：" << result.bodyCount << " 个\n"
-                << "风险孔：" << result.riskHoleCount << " 个";
+        message << "检查实体：" << result.bodyCount
+                << " 个；风险孔：" << result.riskHoleCount << " 个";
         SetStatus(message.str());
     }
     catch (const NXOpen::NXException& ex)
