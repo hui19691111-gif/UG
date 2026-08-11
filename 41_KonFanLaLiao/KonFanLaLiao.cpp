@@ -2217,7 +2217,7 @@ int KonFanLaLiaoDialog::CreateReliefSlotsForBody(
             if (featureClass == nullptr)
             {
                 throw std::runtime_error(
-                    "“防拉孔开槽”自定义特征未注册，请重启 NX。");
+                    "“孔防拉槽”自定义特征未注册，请重启 NX。");
             }
             NXOpen::Features::CustomAttributeCollection* attributes =
                 workPart->Features()->CustomAttributeCollection();
@@ -2246,7 +2246,7 @@ int KonFanLaLiaoDialog::CreateReliefSlotsForBody(
             }
             if (internalObjects.empty())
             {
-                throw std::runtime_error("无法收集防拉孔开槽内部特征。");
+                throw std::runtime_error("无法收集孔防拉槽内部特征。");
             }
             internalAttribute->SetValues(internalObjects);
             NXOpen::Features::CustomFeatureBuilder* customBuilder =
@@ -2257,7 +2257,7 @@ int KonFanLaLiaoDialog::CreateReliefSlotsForBody(
             customBuilder->Destroy();
             if (customFeature == nullptr)
             {
-                throw std::runtime_error("创建“防拉孔开槽”自定义特征失败。");
+                throw std::runtime_error("创建“孔防拉槽”自定义特征失败。");
             }
             customFeature->SetName(
                 zhihui_konfan_laliao::kFeatureDisplayName);
@@ -2267,7 +2267,7 @@ int KonFanLaLiaoDialog::CreateReliefSlotsForBody(
                 << " members=" << createdFeatures.size()
                 << " internal_objects=" << internalObjects.size()
                 << " custom_feature=" << customFeature->Tag()
-                << " name=防拉孔开槽";
+                << " name=孔防拉槽";
             AppendAnalysisLog(groupLog.str());
         }
         AppendAnalysisLog(

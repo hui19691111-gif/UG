@@ -46,9 +46,9 @@
         IsWithoutBody="true"/>
     <CustomFeature
         FeatureClass="NXOpen::CustomFeature::KonFanLaLiao"
-        FeatureName="&#x9632;&#x62C9;&#x5B54;&#x5F00;&#x69FD;"
+        FeatureName="&#x5B54;&#x9632;&#x62C9;&#x69FD;"
         FeatureIcon="KonFanLaLiao"
-        FeatureLibrary="KonFanLaLiaoCoreFix3"
+        FeatureLibrary="KonFanLaLiaoCoreFix4"
         FeatureUILibrary="KonFanLaLiao"
         IsWithoutBody="true"/>
 </CustomFeatureLib>

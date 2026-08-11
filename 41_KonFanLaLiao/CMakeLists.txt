@@ -19,7 +19,7 @@ add_library(KonFanLaLiao SHARED
 add_library(KonFanLaLiaoCore SHARED
     KonFanLaLiaoCore.cpp)
 set_target_properties(KonFanLaLiaoCore PROPERTIES
-    OUTPUT_NAME "KonFanLaLiaoCoreFix3")
+    OUTPUT_NAME "KonFanLaLiaoCoreFix4")
 
 target_include_directories(KonFanLaLiao PRIVATE
     "${NX_INSTALL_ROOT}/UGOPEN"

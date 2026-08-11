@@ -135,7 +135,7 @@ int InformationCallback(
     if (event != nullptr)
     {
         event->SetInformation(
-            "防拉孔开槽：双击可重新打开孔防拉料检查对话框。");
+            "孔防拉槽：双击可重新打开孔防拉料检查对话框。");
     }
     return 0;
 }
