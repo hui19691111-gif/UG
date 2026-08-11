@@ -675,7 +675,8 @@ int KonFanLaLiaoDialog::apply_cb()
             slotsCreated_ = created > 0;
             RestoreDisplay();
             std::ostringstream message;
-            message << "已创建防拉槽 " << created << " 个。";
+            message << "检查实体：" << result.bodyCount << " 个\n"
+                    << "风险孔：" << result.riskHoleCount << " 个";
             SetStatus(message.str());
         }
         catch (const NXOpen::NXException& ex)
@@ -3196,38 +3197,9 @@ void KonFanLaLiaoDialog::RunAnalysis(bool showErrors)
     {
         const AnalysisResult result = Analyze();
         RefreshDisplay(result);
-        NXOpen::BlockStyler::PropertyList* safetyMode =
-            safetyDistanceMode_->GetProperties();
-        const bool manualSafety = safetyMode->GetEnum("Value") == 1;
-        delete safetyMode;
-        NXOpen::BlockStyler::PropertyList* lengthMode =
-            reliefLengthMode_->GetProperties();
-        const bool manualLength = lengthMode->GetEnum("Value") == 1;
-        delete lengthMode;
         std::ostringstream message;
-        message << "检测实体：" << result.bodyCount << " 个\n"
-                << "普通折弯圆柱面：" << result.bendCount
-                << " 个；排除大圆弧面："
-                << result.largeArcExcludedCount << " 个\n"
-                << "内环孔：" << result.holeCount
-                << " 个；风险孔：" << result.riskHoleCount
-                << " 个；风险面：" << result.riskFaces.size() << " 个\n"
-                << "安全距离：";
-        if (manualSafety)
-            message << "手动 " << DoubleValue(riskDistance_) << " mm";
-        else
-            message << "公式自动识别";
-        message << "\n防拉槽长度：";
-        if (manualLength)
-            message << "手动 " << DoubleValue(reliefLength_) << " mm";
-        else
-            message << "两交点距离+两端各1 mm";
-        message << "；槽宽：" << DoubleValue(slotWidth_)
-                << " mm\n处理方式：伸直折弯、沿折弯中心线贯穿开槽、重新折弯。";
-        if (result.bendCount == 0)
-        {
-            message << " 未识别到带直母线边的圆柱折弯面。";
-        }
+        message << "检查实体：" << result.bodyCount << " 个\n"
+                << "风险孔：" << result.riskHoleCount << " 个";
         SetStatus(message.str());
     }
     catch (const NXOpen::NXException& ex)
