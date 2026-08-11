@@ -5243,25 +5243,37 @@ private:
                                        const SameBodyFrame3& referenceFrame,
                                        const SameBodyFrame3& candidateFrame) const
     {
+        SameBodyFrame3 alignedCandidateFrame = candidateFrame;
+        if (SameBodyDotPoint(referenceFrame.xAxis, alignedCandidateFrame.xAxis) < 0.0)
+        {
+            alignedCandidateFrame.xAxis = SameBodyScalePoint(alignedCandidateFrame.xAxis, -1.0);
+            alignedCandidateFrame.yAxis = SameBodyScalePoint(alignedCandidateFrame.yAxis, -1.0);
+        }
         const SameBodyPoint3 localPoint = TransformSameBodyWorldPointToLocal(referenceFrame, SameBodyPointFromNx(referenceOrigin));
-        return SameBodyPointToNx(TransformSameBodyLocalPointToWorld(candidateFrame, localPoint));
+        return SameBodyPointToNx(TransformSameBodyLocalPointToWorld(alignedCandidateFrame, localPoint));
     }
 
     Matrix3x3 TransferSameBodyTextMatrix(const Matrix3x3& referenceMatrix,
                                          const SameBodyFrame3& referenceFrame,
                                          const SameBodyFrame3& candidateFrame) const
     {
+        SameBodyFrame3 alignedCandidateFrame = candidateFrame;
+        if (SameBodyDotPoint(referenceFrame.xAxis, alignedCandidateFrame.xAxis) < 0.0)
+        {
+            alignedCandidateFrame.xAxis = SameBodyScalePoint(alignedCandidateFrame.xAxis, -1.0);
+            alignedCandidateFrame.yAxis = SameBodyScalePoint(alignedCandidateFrame.yAxis, -1.0);
+        }
         const SameBodyPoint3 refX = SameBodyPointFromVector(Vector3d(referenceMatrix.Xx, referenceMatrix.Xy, referenceMatrix.Xz));
         const SameBodyPoint3 refY = SameBodyPointFromVector(Vector3d(referenceMatrix.Yx, referenceMatrix.Yy, referenceMatrix.Yz));
         const SameBodyPoint3 refZ = SameBodyPointFromVector(Vector3d(referenceMatrix.Zx, referenceMatrix.Zy, referenceMatrix.Zz));
 
-        Vector3d x = SameBodyVectorToNx(TransformSameBodyLocalVectorToWorld(candidateFrame, TransformSameBodyWorldVectorToLocal(referenceFrame, refX)));
-        Vector3d y = SameBodyVectorToNx(TransformSameBodyLocalVectorToWorld(candidateFrame, TransformSameBodyWorldVectorToLocal(referenceFrame, refY)));
-        Vector3d z = SameBodyVectorToNx(TransformSameBodyLocalVectorToWorld(candidateFrame, TransformSameBodyWorldVectorToLocal(referenceFrame, refZ)));
+        Vector3d x = SameBodyVectorToNx(TransformSameBodyLocalVectorToWorld(alignedCandidateFrame, TransformSameBodyWorldVectorToLocal(referenceFrame, refX)));
+        Vector3d y = SameBodyVectorToNx(TransformSameBodyLocalVectorToWorld(alignedCandidateFrame, TransformSameBodyWorldVectorToLocal(referenceFrame, refY)));
+        Vector3d z = SameBodyVectorToNx(TransformSameBodyLocalVectorToWorld(alignedCandidateFrame, TransformSameBodyWorldVectorToLocal(referenceFrame, refZ)));
 
-        z = Normalize(z, SameBodyVectorToNx(candidateFrame.zAxis));
-        x = Normalize(ProjectToPlane(x, z), SameBodyVectorToNx(candidateFrame.xAxis));
-        y = Normalize(Cross(z, x), SameBodyVectorToNx(candidateFrame.yAxis));
+        z = Normalize(z, SameBodyVectorToNx(alignedCandidateFrame.zAxis));
+        x = Normalize(ProjectToPlane(x, z), SameBodyVectorToNx(alignedCandidateFrame.xAxis));
+        y = Normalize(Cross(z, x), SameBodyVectorToNx(alignedCandidateFrame.yAxis));
         x = Normalize(Cross(y, z), x);
         return MakeMatrix(x, y, z);
     }
@@ -5442,10 +5454,9 @@ private:
         }
 
         const double height = std::max(0.1, settings.height);
-        const double estimatedNaturalWidth = std::max(
-            height,
-            height * 0.65 * static_cast<double>(std::max<std::size_t>(1, Utf8CharacterCount(text))) * settings.widthScale / 100.0);
-        const double textWidth = settings.textLength > 0.0 ? settings.textLength : estimatedNaturalWidth;
+        const double textWidth = height *
+            static_cast<double>(std::max<std::size_t>(1, Utf8CharacterCount(text))) *
+            settings.widthScale / 100.0;
         const double clearance = std::max(0.5, height * 0.2);
         const double halfLong = 0.5 * textWidth + clearance;
         const double halfShort = 0.5 * height + clearance;
