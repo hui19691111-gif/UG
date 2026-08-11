@@ -121,6 +121,12 @@ bool BreakFlatPatternBendLines(
 	double edgeDistance,
 	double upKeepLength,
 	double downKeepLength);
+bool CreateFlatPatternLargeArcMarkerLines(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Features::FlatPattern* flatPattern,
+	double radiusThreshold,
+	double edgeDistance,
+	double keepLength);
 bool CreateFlatPatternBendLineNotches(
 	NXOpen::Drawings::BaseView* baseView,
 	NXOpen::Features::FlatPattern* flatPattern,

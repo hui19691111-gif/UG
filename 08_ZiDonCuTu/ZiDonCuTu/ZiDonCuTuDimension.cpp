@@ -5786,6 +5786,66 @@ bool BreakFlatPatternBendLinesForObjects(
 	return editedAny;
 }
 
+bool TrimLargeArcMarkerCurve(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingCurve* curve,
+	double edgeDistance,
+	double keepLength)
+{
+	if (baseView == NULL || curve == NULL)
+	{
+		return false;
+	}
+	double curveLength = 0.0;
+	try
+	{
+		curveLength = curve->GetLength();
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[LargeArcMarker] get curve length failed: ") + ex.Message());
+		return false;
+	}
+	if (curveLength <= (edgeDistance + keepLength) * 2.0 + 1.0e-6)
+	{
+		std::ostringstream log;
+		log << "[LargeArcMarker] keep full short curve tag=" << curve->Tag()
+			<< " length=" << curveLength;
+		BendNoteDebugLog(log.str());
+		return true;
+	}
+
+	std::vector<double> hiddenStart;
+	std::vector<double> hiddenEnd;
+	if (edgeDistance > 1.0e-6)
+	{
+		hiddenStart.push_back(0.0);
+		hiddenEnd.push_back(edgeDistance / curveLength);
+	}
+	hiddenStart.push_back((edgeDistance + keepLength) / curveLength);
+	hiddenEnd.push_back((curveLength - edgeDistance - keepLength) / curveLength);
+	if (edgeDistance > 1.0e-6)
+	{
+		hiddenStart.push_back((curveLength - edgeDistance) / curveLength);
+		hiddenEnd.push_back(1.0);
+	}
+	try
+	{
+		baseView->DependentDisplay()->ApplySegmentEdit(
+			curve,
+			NXOpen::ViewDependentDisplayManager::FontInvisible,
+			NXOpen::ViewDependentDisplayManager::WidthObject,
+			hiddenStart,
+			hiddenEnd);
+		return true;
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[LargeArcMarker] segment edit failed: ") + ex.Message());
+	}
+	return false;
+}
+
 struct BendLineNotchEndpoint
 {
 	double x;
@@ -7210,6 +7270,253 @@ bool BreakFlatPatternBendLines(
 	}
 
 	BendNoteDebugLog(std::string("[BendLineBreak] editedAny=") + (editedAny ? "true" : "false"));
+	return editedAny;
+}
+
+bool CreateFlatPatternLargeArcMarkerLines(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Features::FlatPattern* flatPattern,
+	double radiusThreshold,
+	double edgeDistance,
+	double keepLength)
+{
+	if (baseView == NULL || flatPattern == NULL || workPart == NULL)
+	{
+		BendNoteDebugLog("[LargeArcMarker] baseView, flatPattern, or workPart is null");
+		return false;
+	}
+
+	const std::vector<NXOpen::Drawings::DraftingCurve*> viewCurves = CollectDraftingCurves(baseView);
+	std::vector<NXOpen::Features::FlatPattern::ObjectDataEdge> tangentObjects;
+	std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> bendObjects;
+	try
+	{
+		flatPattern->GetBendTangentLines(tangentObjects);
+		std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> upObjects;
+		std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> downObjects;
+		flatPattern->GetBendUpCenterLines(upObjects);
+		flatPattern->GetBendDownCenterLines(downObjects);
+		bendObjects.insert(bendObjects.end(), upObjects.begin(), upObjects.end());
+		bendObjects.insert(bendObjects.end(), downObjects.begin(), downObjects.end());
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[LargeArcMarker] get bend tangent lines failed: ") + ex.Message());
+		return false;
+	}
+
+	struct TangentCandidate
+	{
+		NXOpen::Drawings::DraftingCurve* curve;
+		double start[2];
+		double end[2];
+	};
+	std::vector<TangentCandidate> tangentCandidates;
+	for (size_t tangentIndex = 0; tangentIndex < tangentObjects.size(); ++tangentIndex)
+	{
+		NXOpen::Drawings::DraftingCurve* markerCurve = FindDraftingCurveForFlatPatternCurve(
+			viewCurves,
+			tangentObjects[tangentIndex].FlatPatternObject);
+		if (markerCurve == NULL && tangentObjects[tangentIndex].FlatSolidObject != NULL)
+		{
+			for (size_t curveIndex = 0; curveIndex < viewCurves.size(); ++curveIndex)
+			{
+				if (DraftingCurveReferencesObject(
+					viewCurves[curveIndex],
+					tangentObjects[tangentIndex].FlatSolidObject->Tag()))
+				{
+					markerCurve = viewCurves[curveIndex];
+					break;
+				}
+			}
+		}
+		if (markerCurve != NULL)
+		{
+			UF_CURVE_line_t lineData;
+			double start[2] = { 0.0, 0.0 };
+			double end[2] = { 0.0, 0.0 };
+			if (TryGetLineCurveData(baseView, markerCurve, lineData, start, end))
+			{
+				TangentCandidate candidate{};
+				candidate.curve = markerCurve;
+				candidate.start[0] = start[0];
+				candidate.start[1] = start[1];
+				candidate.end[0] = end[0];
+				candidate.end[1] = end[1];
+				tangentCandidates.push_back(candidate);
+			}
+		}
+	}
+
+	std::vector<NXOpen::Drawings::DraftingCurve*> markerCurves;
+	std::unordered_set<tag_t> markerCurveTags;
+	size_t largeBendCount = 0;
+	for (size_t bendIndex = 0; bendIndex < bendObjects.size(); ++bendIndex)
+	{
+		NXOpen::Face* formedFace = bendObjects[bendIndex].FormedBodyObject;
+		double faceRadius = 0.0;
+		if (formedFace == NULL)
+		{
+			continue;
+		}
+		int faceType = 0;
+		double facePoint[3] = { 0.0, 0.0, 0.0 };
+		double faceDirection[3] = { 0.0, 0.0, 0.0 };
+		double faceBox[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+		double radialData = 0.0;
+		int normalDirection = 0;
+		if (UF_MODL_ask_face_data(
+			formedFace->Tag(),
+			&faceType,
+			facePoint,
+			faceDirection,
+			faceBox,
+			&faceRadius,
+			&radialData,
+			&normalDirection) != 0 ||
+			faceRadius <= radiusThreshold + 1.0e-9)
+		{
+			continue;
+		}
+
+		NXOpen::Drawings::DraftingCurve* centerCurve = FindDraftingCurveForFlatPatternCurve(
+			viewCurves,
+			bendObjects[bendIndex].FlatPatternObject);
+		UF_CURVE_line_t centerLineData;
+		double centerStart[2] = { 0.0, 0.0 };
+		double centerEnd[2] = { 0.0, 0.0 };
+		if (centerCurve == NULL ||
+			!TryGetLineCurveData(baseView, centerCurve, centerLineData, centerStart, centerEnd))
+		{
+			continue;
+		}
+
+		double directionX = centerEnd[0] - centerStart[0];
+		double directionY = centerEnd[1] - centerStart[1];
+		const double centerLength = std::sqrt(directionX * directionX + directionY * directionY);
+		if (centerLength <= 1.0e-6)
+		{
+			continue;
+		}
+		directionX /= centerLength;
+		directionY /= centerLength;
+		const double normalX = -directionY;
+		const double normalY = directionX;
+		const double centerMidX = (centerStart[0] + centerEnd[0]) * 0.5;
+		const double centerMidY = (centerStart[1] + centerEnd[1]) * 0.5;
+		const double centerOffset = centerMidX * normalX + centerMidY * normalY;
+		const double centerProjection0 = centerStart[0] * directionX + centerStart[1] * directionY;
+		const double centerProjection1 = centerEnd[0] * directionX + centerEnd[1] * directionY;
+		const double centerMinProjection = std::min(centerProjection0, centerProjection1);
+		const double centerMaxProjection = std::max(centerProjection0, centerProjection1);
+
+		NXOpen::Drawings::DraftingCurve* negativeCurve = NULL;
+		NXOpen::Drawings::DraftingCurve* positiveCurve = NULL;
+		double negativeDistance = DBL_MAX;
+		double positiveDistance = DBL_MAX;
+		for (size_t candidateIndex = 0; candidateIndex < tangentCandidates.size(); ++candidateIndex)
+		{
+			const TangentCandidate& candidate = tangentCandidates[candidateIndex];
+			double candidateX = candidate.end[0] - candidate.start[0];
+			double candidateY = candidate.end[1] - candidate.start[1];
+			const double candidateLength = std::sqrt(candidateX * candidateX + candidateY * candidateY);
+			if (candidateLength <= 1.0e-6)
+			{
+				continue;
+			}
+			candidateX /= candidateLength;
+			candidateY /= candidateLength;
+			if (std::fabs(candidateX * directionX + candidateY * directionY) < 0.999)
+			{
+				continue;
+			}
+			const double candidateProjection0 = candidate.start[0] * directionX + candidate.start[1] * directionY;
+			const double candidateProjection1 = candidate.end[0] * directionX + candidate.end[1] * directionY;
+			const double candidateMinProjection = std::min(candidateProjection0, candidateProjection1);
+			const double candidateMaxProjection = std::max(candidateProjection0, candidateProjection1);
+			if (candidateMaxProjection < centerMinProjection - 0.5 ||
+				candidateMinProjection > centerMaxProjection + 0.5)
+			{
+				continue;
+			}
+			const double candidateMidX = (candidate.start[0] + candidate.end[0]) * 0.5;
+			const double candidateMidY = (candidate.start[1] + candidate.end[1]) * 0.5;
+			const double signedDistance = candidateMidX * normalX + candidateMidY * normalY - centerOffset;
+			if (signedDistance < -1.0e-4 && -signedDistance < negativeDistance)
+			{
+				negativeDistance = -signedDistance;
+				negativeCurve = candidate.curve;
+			}
+			else if (signedDistance > 1.0e-4 && signedDistance < positiveDistance)
+			{
+				positiveDistance = signedDistance;
+				positiveCurve = candidate.curve;
+			}
+		}
+
+		if (negativeCurve != NULL && positiveCurve != NULL)
+		{
+			++largeBendCount;
+			if (markerCurveTags.insert(negativeCurve->Tag()).second)
+			{
+				markerCurves.push_back(negativeCurve);
+			}
+			if (markerCurveTags.insert(positiveCurve->Tag()).second)
+			{
+				markerCurves.push_back(positiveCurve);
+			}
+			std::ostringstream selectionLog;
+			selectionLog << "[LargeArcMarker] selected radius=" << faceRadius
+				<< " threshold=" << radiusThreshold
+				<< " centerCurveTag=" << centerCurve->Tag()
+				<< " negativeTag=" << negativeCurve->Tag()
+				<< " positiveTag=" << positiveCurve->Tag();
+			BendNoteDebugLog(selectionLog.str());
+		}
+	}
+	try
+	{
+		if (!markerCurves.empty())
+		{
+			std::vector<NXOpen::DisplayableObject*> markerObjects(markerCurves.begin(), markerCurves.end());
+			baseView->DependentDisplay()->RemoveErasureOnObjectAndSubobjects(markerObjects, true);
+		}
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[LargeArcMarker] delete selected drafting-curve erasures failed: ") + ex.Message());
+	}
+
+	bool editedAny = false;
+	for (size_t i = 0; i < markerCurves.size(); ++i)
+	{
+		editedAny = TrimLargeArcMarkerCurve(
+			baseView,
+			markerCurves[i],
+			std::max(0.0, edgeDistance),
+			std::max(0.1, keepLength)) || editedAny;
+	}
+	try
+	{
+		// This is part of the journaled View Dependent Edit workflow and makes
+		// the restored erasures/segment edits take effect in the displayed view.
+		NXOpen::Session::GetSession()->CleanUpFacetedFacesAndEdges();
+	}
+	catch (...)
+	{
+	}
+
+	std::ostringstream log;
+	log << "[LargeArcMarker] bendObjects=" << bendObjects.size()
+		<< " largeBends=" << largeBendCount
+		<< " radiusThreshold=" << radiusThreshold
+		<< " tangentObjects=" << tangentObjects.size()
+		<< " viewCurves=" << viewCurves.size()
+		<< " markers=" << markerCurves.size()
+		<< " edgeDistance=" << edgeDistance
+		<< " keepLength=" << keepLength
+		<< " edited=" << (editedAny ? "true" : "false");
+	BendNoteDebugLog(log.str());
 	return editedAny;
 }
 

@@ -268,6 +268,9 @@ private:
     NXOpen::BlockStyler::DoubleBlock* doubleBendNoteTextHeight;// Block type: Double
     NXOpen::BlockStyler::Toggle* toggleBreakBendLine;// Block type: Toggle
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineEdgeDistance;// Block type: Double
+    NXOpen::BlockStyler::Toggle* toggleLargeArcMarkerLine;// Block type: Toggle
+    NXOpen::BlockStyler::DoubleBlock* doubleLargeArcMarkerEdgeDistance;// Block type: Double
+    NXOpen::BlockStyler::DoubleBlock* doubleLargeArcMarkerKeepLength;// Block type: Double
     NXOpen::BlockStyler::Toggle* toggleBendLineUpNotch;// Block type: Toggle
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineUpNotchDiameter;// Block type: Double
     NXOpen::BlockStyler::Toggle* toggleBendLineDownNotch;// Block type: Toggle

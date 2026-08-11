@@ -352,8 +352,18 @@ struct FlatPatternDraftingInfo
 	NXString flatPatternViewName;
 };
 
+struct PendingLargeArcMarkerEdit
+{
+	NXOpen::Drawings::BaseView* baseView;
+	NXOpen::Features::FlatPattern* flatPattern;
+	double radiusThreshold;
+	double edgeDistance;
+	double keepLength;
+};
+
 static bool g_deferPageRefit = false;
 static std::vector<PendingScaleRefit> g_pendingScaleRefits;
+static std::vector<PendingLargeArcMarkerEdit> g_pendingLargeArcMarkerEdits;
 static tag_t g_flatPatternDraftingInfoPartTag = NULL_TAG;
 static size_t g_flatPatternDraftingInfoFeatureCount = 0;
 static std::vector<FlatPatternDraftingInfo> g_flatPatternDraftingInfos;
@@ -368,6 +378,14 @@ static const double kViewHorizontalGap = 20.0;
 static const double kViewVerticalGap = 20.0;
 static const double kBodyGroupHorizontalGap = 20.0;
 static const double kBodyGroupVerticalGap = 20.0;
+
+static void QueueLargeArcMarkerEdit(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Features::FlatPattern* flatPattern,
+	double radiusThreshold,
+	double edgeDistance,
+	double keepLength);
+static void ApplyPendingLargeArcMarkerEdits(bool clearAfterApply);
 
 static void ApplyDraftingDimensionStartupPreferences(NXOpen::Part* part)
 {
@@ -1391,6 +1409,9 @@ static void SaveZiDonCuTuDialogState(
 	NXOpen::BlockStyler::DoubleBlock* bendNoteTextHeightBlock,
 	NXOpen::BlockStyler::Toggle* breakBendLineToggleBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineEdgeDistanceBlock,
+	NXOpen::BlockStyler::Toggle* largeArcMarkerLineToggleBlock,
+	NXOpen::BlockStyler::DoubleBlock* largeArcMarkerEdgeDistanceBlock,
+	NXOpen::BlockStyler::DoubleBlock* largeArcMarkerKeepLengthBlock,
 	NXOpen::BlockStyler::Toggle* bendLineUpNotchToggleBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineUpNotchDiameterBlock,
 	NXOpen::BlockStyler::Toggle* bendLineDownNotchToggleBlock,
@@ -1428,6 +1449,9 @@ static void SaveZiDonCuTuDialogState(
 		file << "bend_note_text_height=" << GetDoubleBlockValue(bendNoteTextHeightBlock, 2.0) << "\r\n";
 		file << "break_bend_line=" << (GetToggleBlockValue(breakBendLineToggleBlock, false) ? 1 : 0) << "\r\n";
 		file << "bend_line_edge_distance=" << GetDoubleBlockValue(bendLineEdgeDistanceBlock, 0.0) << "\r\n";
+		file << "large_arc_marker_line=" << (GetToggleBlockValue(largeArcMarkerLineToggleBlock, false) ? 1 : 0) << "\r\n";
+		file << "large_arc_marker_edge_distance=" << GetDoubleBlockValue(largeArcMarkerEdgeDistanceBlock, 3.0) << "\r\n";
+		file << "large_arc_marker_keep_length=" << GetDoubleBlockValue(largeArcMarkerKeepLengthBlock, 5.0) << "\r\n";
 		file << "bend_line_up_notch=" << (GetToggleBlockValue(bendLineUpNotchToggleBlock, false) ? 1 : 0) << "\r\n";
 		file << "bend_line_up_notch_diameter=" << GetDoubleBlockValue(bendLineUpNotchDiameterBlock, 1.0) << "\r\n";
 		file << "bend_line_down_notch=" << (GetToggleBlockValue(bendLineDownNotchToggleBlock, false) ? 1 : 0) << "\r\n";
@@ -1459,6 +1483,9 @@ static void RestoreZiDonCuTuDialogState(
 	NXOpen::BlockStyler::DoubleBlock* bendNoteTextHeightBlock,
 	NXOpen::BlockStyler::Toggle* breakBendLineToggleBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineEdgeDistanceBlock,
+	NXOpen::BlockStyler::Toggle* largeArcMarkerLineToggleBlock,
+	NXOpen::BlockStyler::DoubleBlock* largeArcMarkerEdgeDistanceBlock,
+	NXOpen::BlockStyler::DoubleBlock* largeArcMarkerKeepLengthBlock,
 	NXOpen::BlockStyler::Toggle* bendLineUpNotchToggleBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineUpNotchDiameterBlock,
 	NXOpen::BlockStyler::Toggle* bendLineDownNotchToggleBlock,
@@ -1513,6 +1540,18 @@ static void RestoreZiDonCuTuDialogState(
 		if (bendLineEdgeDistanceBlock != NULL)
 		{
 			bendLineEdgeDistanceBlock->SetValue(std::max(0.0, ConfigReadDouble(path, "bend_line_edge_distance", bendLineEdgeDistanceBlock->Value())));
+		}
+		if (largeArcMarkerLineToggleBlock != NULL)
+		{
+			largeArcMarkerLineToggleBlock->SetValue(ConfigReadBool(path, "large_arc_marker_line", GetToggleBlockValue(largeArcMarkerLineToggleBlock, false)));
+		}
+		if (largeArcMarkerEdgeDistanceBlock != NULL)
+		{
+			largeArcMarkerEdgeDistanceBlock->SetValue(std::max(0.0, ConfigReadDouble(path, "large_arc_marker_edge_distance", largeArcMarkerEdgeDistanceBlock->Value())));
+		}
+		if (largeArcMarkerKeepLengthBlock != NULL)
+		{
+			largeArcMarkerKeepLengthBlock->SetValue(std::max(0.1, ConfigReadDouble(path, "large_arc_marker_keep_length", largeArcMarkerKeepLengthBlock->Value())));
 		}
 		if (bendLineUpNotchToggleBlock != NULL)
 		{
@@ -1624,11 +1663,85 @@ static void UpdateBreakBendLineControls(
 	}
 }
 
+static void UpdateLargeArcMarkerLineControls(
+	NXOpen::BlockStyler::Toggle* markerLineToggle,
+	NXOpen::BlockStyler::DoubleBlock* edgeDistanceBlock,
+	NXOpen::BlockStyler::DoubleBlock* keepLengthBlock)
+{
+	const bool showMarkerSettings = GetToggleBlockValue(markerLineToggle, false);
+	if (edgeDistanceBlock != NULL)
+	{
+		edgeDistanceBlock->SetShow(showMarkerSettings);
+		edgeDistanceBlock->SetEnable(showMarkerSettings);
+	}
+	if (keepLengthBlock != NULL)
+	{
+		keepLengthBlock->SetShow(showMarkerSettings);
+		keepLengthBlock->SetEnable(showMarkerSettings);
+	}
+}
+
 static void HoleNoteInvokeDebugLog(const std::string& message)
 {
 	CreateDirectoryA("D:\\UG智辉钣金插件\\logs", NULL);
 	std::ofstream stream("D:\\UG智辉钣金插件\\logs\\hole_note_debug.log", std::ios::out | std::ios::app);
 	stream << message << "\n";
+}
+
+static void QueueLargeArcMarkerEdit(
+	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Features::FlatPattern* flatPattern,
+	double radiusThreshold,
+	double edgeDistance,
+	double keepLength)
+{
+	if (baseView == NULL || flatPattern == NULL)
+	{
+		return;
+	}
+	for (size_t i = 0; i < g_pendingLargeArcMarkerEdits.size(); ++i)
+	{
+		if (g_pendingLargeArcMarkerEdits[i].baseView != NULL &&
+			g_pendingLargeArcMarkerEdits[i].baseView->Tag() == baseView->Tag())
+		{
+			g_pendingLargeArcMarkerEdits[i] = { baseView, flatPattern, radiusThreshold, edgeDistance, keepLength };
+			return;
+		}
+	}
+	g_pendingLargeArcMarkerEdits.push_back({ baseView, flatPattern, radiusThreshold, edgeDistance, keepLength });
+}
+
+static void ApplyPendingLargeArcMarkerEdits(bool clearAfterApply)
+{
+	for (size_t i = 0; i < g_pendingLargeArcMarkerEdits.size(); ++i)
+	{
+		const PendingLargeArcMarkerEdit& pending = g_pendingLargeArcMarkerEdits[i];
+		if (pending.baseView == NULL || pending.flatPattern == NULL)
+		{
+			continue;
+		}
+		try
+		{
+			CreateFlatPatternLargeArcMarkerLines(
+				pending.baseView,
+				pending.flatPattern,
+				pending.radiusThreshold,
+				pending.edgeDistance,
+				pending.keepLength);
+		}
+		catch (const NXOpen::NXException& ex)
+		{
+			HoleNoteInvokeDebugLog(std::string("[LargeArcMarker] final reapply failed: ") + ex.Message());
+		}
+		catch (const std::exception& ex)
+		{
+			HoleNoteInvokeDebugLog(std::string("[LargeArcMarker] final reapply failed: ") + ex.what());
+		}
+	}
+	if (clearAfterApply)
+	{
+		g_pendingLargeArcMarkerEdits.clear();
+	}
 }
 
 static NXString GetEnumBlockValue(NXOpen::BlockStyler::Enumeration* enumBlock, const char* fallback)
@@ -5567,6 +5680,8 @@ struct AssemblyDraftPickerState
 	HFONT dialogFont;
 	HBRUSH backgroundBrush;
 	COLORREF backgroundColor;
+	int lastCheckRow;
+	bool suppressCheckNotifications;
 	bool accepted;
 };
 
@@ -5678,6 +5793,7 @@ static void PopulateAssemblyDraftListView(AssemblyDraftPickerState* state)
 
 	HWND listView = state->listView;
 	const std::vector<AssemblyDraftCandidate>& candidates = *state->candidates;
+	state->suppressCheckNotifications = true;
 	ListView_DeleteAllItems(listView);
 	state->visibleCandidateIndices.clear();
 
@@ -5724,6 +5840,8 @@ fillRows:
 		SetListViewText(listView, row, 5, Utf8ToWideText(candidates[i].category));
 		SetListViewText(listView, row, 6, std::to_wstring(candidates[i].drawingSheetCount));
 	}
+	state->suppressCheckNotifications = false;
+	state->lastCheckRow = -1;
 }
 
 static int AssemblyDraftListCandidateIndex(HWND listView, int row)
@@ -5742,6 +5860,94 @@ static int AssemblyDraftListCandidateIndex(HWND listView, int row)
 	}
 
 	return static_cast<int>(item.lParam);
+}
+
+static void SetAssemblyDraftCheckRange(
+	AssemblyDraftPickerState* state,
+	int firstRow,
+	int lastRow,
+	bool checked)
+{
+	if (state == NULL || state->listView == NULL)
+	{
+		return;
+	}
+
+	const int rowCount = ListView_GetItemCount(state->listView);
+	firstRow = std::max(0, firstRow);
+	lastRow = std::min(lastRow, rowCount - 1);
+	if (firstRow > lastRow)
+	{
+		return;
+	}
+
+	state->suppressCheckNotifications = true;
+	for (int row = firstRow; row <= lastRow; ++row)
+	{
+		ListView_SetCheckState(state->listView, row, checked ? TRUE : FALSE);
+		const int candidateIndex = AssemblyDraftListCandidateIndex(state->listView, row);
+		if (candidateIndex >= 0 && static_cast<size_t>(candidateIndex) < state->checkedCandidates.size())
+		{
+			state->checkedCandidates[static_cast<size_t>(candidateIndex)] = checked;
+		}
+	}
+	state->suppressCheckNotifications = false;
+}
+
+static LRESULT CALLBACK AssemblyDraftListSubclassProc(
+	HWND hwnd,
+	UINT message,
+	WPARAM wParam,
+	LPARAM lParam,
+	UINT_PTR subclassId,
+	DWORD_PTR referenceData)
+{
+	AssemblyDraftPickerState* state = reinterpret_cast<AssemblyDraftPickerState*>(referenceData);
+	if (message == WM_LBUTTONDOWN && state != NULL && !state->suppressCheckNotifications)
+	{
+		LVHITTESTINFO hit = {};
+		hit.pt.x = static_cast<short>(LOWORD(lParam));
+		hit.pt.y = static_cast<short>(HIWORD(lParam));
+		const int clickedRow = ListView_SubItemHitTest(hwnd, &hit);
+		const int rowCount = ListView_GetItemCount(hwnd);
+		const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+		if (clickedRow >= 0 && shiftPressed && state->lastCheckRow >= 0 && state->lastCheckRow < rowCount)
+		{
+			const bool checked = ListView_GetCheckState(hwnd, state->lastCheckRow) ? true : false;
+			SetAssemblyDraftCheckRange(
+				state,
+				std::min(state->lastCheckRow, clickedRow),
+				std::max(state->lastCheckRow, clickedRow),
+				checked);
+			state->lastCheckRow = clickedRow;
+			SetFocus(hwnd);
+			ListView_SetItemState(
+				hwnd,
+				clickedRow,
+				LVIS_SELECTED | LVIS_FOCUSED,
+				LVIS_SELECTED | LVIS_FOCUSED);
+			return 0;
+		}
+		if (clickedRow >= 0)
+		{
+			const bool checked = !ListView_GetCheckState(hwnd, clickedRow);
+			SetAssemblyDraftCheckRange(state, clickedRow, clickedRow, checked);
+			state->lastCheckRow = clickedRow;
+			SetFocus(hwnd);
+			ListView_SetItemState(
+				hwnd,
+				clickedRow,
+				LVIS_SELECTED | LVIS_FOCUSED,
+				LVIS_SELECTED | LVIS_FOCUSED);
+			return 0;
+		}
+	}
+	else if (message == WM_NCDESTROY)
+	{
+		RemoveWindowSubclass(hwnd, AssemblyDraftListSubclassProc, subclassId);
+	}
+
+	return DefSubclassProc(hwnd, message, wParam, lParam);
 }
 
 static void SyncAssemblyDraftVisibleChecksToModel(AssemblyDraftPickerState* state)
@@ -5791,7 +5997,7 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 		}
 
 		HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
-		AddPickerControl(state, CreateWindowW(L"STATIC", L"选择要自动出图的叶子部件：", WS_CHILD | WS_VISIBLE, 14, 12, 300, 22, hwnd, NULL, instance, NULL));
+		AddPickerControl(state, CreateWindowW(L"STATIC", L"单击行勾选，Shift+单击行可连续勾选或取消：", WS_CHILD | WS_VISIBLE, 14, 12, 500, 22, hwnd, NULL, instance, NULL));
 		if (state != NULL)
 		{
 			state->noDrawingFilterCheck = CreateWindowW(L"BUTTON", L"无工程图", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 590, 12, 96, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdNoDrawingFilter)), instance, NULL);
@@ -5811,6 +6017,11 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 			instance,
 			NULL);
 		AddPickerControl(state, state->listView);
+		SetWindowSubclass(
+			state->listView,
+			AssemblyDraftListSubclassProc,
+			1,
+			reinterpret_cast<DWORD_PTR>(state));
 		ApplyNxLikeListViewStyle(state->listView);
 		if (state->candidates != NULL)
 		{
@@ -5849,6 +6060,7 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 		{
 			const BOOL checked = commandId == kIdSelectAll ? TRUE : FALSE;
 			const int count = ListView_GetItemCount(state->listView);
+			state->suppressCheckNotifications = true;
 			for (int i = 0; i < count; ++i)
 			{
 				ListView_SetCheckState(state->listView, i, checked);
@@ -5858,6 +6070,8 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 					state->checkedCandidates[static_cast<size_t>(candidateIndex)] = checked ? true : false;
 				}
 			}
+			state->suppressCheckNotifications = false;
+			state->lastCheckRow = -1;
 			return 0;
 		}
 		if (commandId == kIdOk)
@@ -5882,6 +6096,66 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 			return 0;
 		}
 		break;
+	}
+	case WM_NOTIFY:
+	{
+		if (state == NULL || state->listView == NULL || state->suppressCheckNotifications)
+		{
+			break;
+		}
+
+		NMHDR* header = reinterpret_cast<NMHDR*>(lParam);
+		if (header == NULL || header->hwndFrom != state->listView || header->code != LVN_ITEMCHANGED)
+		{
+			break;
+		}
+
+		NMLISTVIEW* changed = reinterpret_cast<NMLISTVIEW*>(lParam);
+		if (changed->iItem < 0 || (changed->uChanged & LVIF_STATE) == 0)
+		{
+			break;
+		}
+
+		const UINT oldStateImage = changed->uOldState & LVIS_STATEIMAGEMASK;
+		const UINT newStateImage = changed->uNewState & LVIS_STATEIMAGEMASK;
+		if (oldStateImage == newStateImage || newStateImage == 0)
+		{
+			break;
+		}
+
+		const int clickedRow = changed->iItem;
+		const bool checked = newStateImage == INDEXTOSTATEIMAGEMASK(2);
+		const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+		const int rowCount = ListView_GetItemCount(state->listView);
+		const int anchorRow = state->lastCheckRow;
+		state->suppressCheckNotifications = true;
+
+		if (shiftPressed && anchorRow >= 0 && anchorRow < rowCount)
+		{
+			const int firstRow = std::min(anchorRow, clickedRow);
+			const int lastRow = std::max(anchorRow, clickedRow);
+			for (int row = firstRow; row <= lastRow; ++row)
+			{
+				ListView_SetCheckState(state->listView, row, checked ? TRUE : FALSE);
+				const int candidateIndex = AssemblyDraftListCandidateIndex(state->listView, row);
+				if (candidateIndex >= 0 && static_cast<size_t>(candidateIndex) < state->checkedCandidates.size())
+				{
+					state->checkedCandidates[static_cast<size_t>(candidateIndex)] = checked;
+				}
+			}
+		}
+		else
+		{
+			const int candidateIndex = AssemblyDraftListCandidateIndex(state->listView, clickedRow);
+			if (candidateIndex >= 0 && static_cast<size_t>(candidateIndex) < state->checkedCandidates.size())
+			{
+				state->checkedCandidates[static_cast<size_t>(candidateIndex)] = checked;
+			}
+		}
+
+		state->suppressCheckNotifications = false;
+		state->lastCheckRow = clickedRow;
+		return 0;
 	}
 	case WM_CLOSE:
 		if (state != NULL)
@@ -5955,6 +6229,8 @@ static bool ShowAssemblyDraftPicker(
 	state.dialogFont = NULL;
 	state.backgroundBrush = NULL;
 	state.backgroundColor = RGB(236, 236, 236);
+	state.lastCheckRow = -1;
+	state.suppressCheckNotifications = false;
 	state.accepted = false;
 
 	HWND parent = reinterpret_cast<HWND>(UF_UI_get_default_parent());
@@ -10644,6 +10920,9 @@ void ZiDonCuTu::initialize_cb()
 		doubleBendNoteTextHeight = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendNoteTextHeight"));
 		toggleBreakBendLine = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBreakBendLine1"));
 		doubleBendLineEdgeDistance = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineEdgeDistance"));
+		toggleLargeArcMarkerLine = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleLargeArcMarkerLine"));
+		doubleLargeArcMarkerEdgeDistance = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleLargeArcMarkerEdgeDistance"));
+		doubleLargeArcMarkerKeepLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleLargeArcMarkerKeepLength"));
 		toggleBendLineUpNotch = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendLineUpNotch"));
 		doubleBendLineUpNotchDiameter = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineUpNotchDiameter"));
 		toggleBendLineDownNotch = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendLineDownNotch"));
@@ -10743,6 +11022,14 @@ void ZiDonCuTu::dialogShown_cb()
 		{
 			doubleBendLineEdgeDistance->SetValue(0.0);
 		}
+		if (doubleLargeArcMarkerEdgeDistance != NULL && doubleLargeArcMarkerEdgeDistance->Value() < 0.0)
+		{
+			doubleLargeArcMarkerEdgeDistance->SetValue(3.0);
+		}
+		if (doubleLargeArcMarkerKeepLength != NULL && doubleLargeArcMarkerKeepLength->Value() <= 0.0)
+		{
+			doubleLargeArcMarkerKeepLength->SetValue(5.0);
+		}
 		if (doubleBendLineUpNotchDiameter != NULL && doubleBendLineUpNotchDiameter->Value() <= 0.0)
 		{
 			doubleBendLineUpNotchDiameter->SetValue(1.0);
@@ -10768,6 +11055,9 @@ void ZiDonCuTu::dialogShown_cb()
 			doubleBendNoteTextHeight,
 			toggleBreakBendLine,
 			doubleBendLineEdgeDistance,
+			toggleLargeArcMarkerLine,
+			doubleLargeArcMarkerEdgeDistance,
+			doubleLargeArcMarkerKeepLength,
 			toggleBendLineUpNotch,
 			doubleBendLineUpNotchDiameter,
 			toggleBendLineDownNotch,
@@ -10813,6 +11103,7 @@ void ZiDonCuTu::dialogShown_cb()
 		UpdateHoleMarkerControls(toggleHoleAttribute, stringHoleMarker);
 		UpdateBendNoteControls(toggleBendNote, doubleBendNoteTextHeight);
 		UpdateBreakBendLineControls(toggleBreakBendLine, doubleBendLineEdgeDistance, doubleBendLineUpKeepLength, doubleBendLineDownKeepLength);
+		UpdateLargeArcMarkerLineControls(toggleLargeArcMarkerLine, doubleLargeArcMarkerEdgeDistance, doubleLargeArcMarkerKeepLength);
 		UpdateBendLineNotchControls(toggleBendLineUpNotch, doubleBendLineUpNotchDiameter);
 		UpdateBendLineNotchControls(toggleBendLineDownNotch, doubleBendLineDownNotchDiameter);
 		UpdateManualTemplateControls(toggleManualTemplate, stringManualTemplatePath, buttonBrowseTemplate);
@@ -10858,6 +11149,9 @@ int ZiDonCuTu::apply_cb()
 			doubleBendNoteTextHeight,
 			toggleBreakBendLine,
 			doubleBendLineEdgeDistance,
+			toggleLargeArcMarkerLine,
+			doubleLargeArcMarkerEdgeDistance,
+			doubleLargeArcMarkerKeepLength,
 			toggleBendLineUpNotch,
 			doubleBendLineUpNotchDiameter,
 			toggleBendLineDownNotch,
@@ -11133,6 +11427,8 @@ int ZiDonCuTu::apply_cb()
 			}
 			RestoreLayerStates(drawingLayerSnapshot);
 			EnsureAllLayersOpen();
+			HoleNoteInvokeDebugLog("[LargeArcMarker] reapplying after automatic final drafting-view update");
+			ApplyPendingLargeArcMarkerEdits(true);
 			g_pendingScaleRefits.clear();
 			g_sheetIsoAlreadyCreated = false;
 
@@ -11488,6 +11784,7 @@ static void ResetZiDonCuTuRuntimeState(bool clearDialogPointer)
 		g_assemblyDraftSelectionCancelled = false;
 		g_deferPageRefit = false;
 		g_pendingScaleRefits.clear();
+		g_pendingLargeArcMarkerEdits.clear();
 		g_flatPatternDraftingInfoPartTag = NULL_TAG;
 		g_flatPatternDraftingInfoFeatureCount = 0;
 		g_flatPatternDraftingInfos.clear();
@@ -12509,6 +12806,30 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				doubleBendLineEdgeDistance->SetValue(0.0);
 			}
 		}
+		else if (block == toggleLargeArcMarkerLine)
+		{
+			blockName = "toggleLargeArcMarkerLine";
+			phase = "toggleLargeArcMarkerLine";
+			UpdateLargeArcMarkerLineControls(toggleLargeArcMarkerLine, doubleLargeArcMarkerEdgeDistance, doubleLargeArcMarkerKeepLength);
+		}
+		else if (block == doubleLargeArcMarkerEdgeDistance)
+		{
+			blockName = "doubleLargeArcMarkerEdgeDistance";
+			phase = "doubleLargeArcMarkerEdgeDistance";
+			if (doubleLargeArcMarkerEdgeDistance != NULL && doubleLargeArcMarkerEdgeDistance->Value() < 0.0)
+			{
+				doubleLargeArcMarkerEdgeDistance->SetValue(0.0);
+			}
+		}
+		else if (block == doubleLargeArcMarkerKeepLength)
+		{
+			blockName = "doubleLargeArcMarkerKeepLength";
+			phase = "doubleLargeArcMarkerKeepLength";
+			if (doubleLargeArcMarkerKeepLength != NULL && doubleLargeArcMarkerKeepLength->Value() <= 0.0)
+			{
+				doubleLargeArcMarkerKeepLength->SetValue(5.0);
+			}
+		}
 		else if (block == toggleBendLineUpNotch)
 		{
 			blockName = "toggleBendLineUpNotch";
@@ -12665,6 +12986,8 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 						throw;
 					}
 					RestoreLayerStates(layerSnapshot);
+					HoleNoteInvokeDebugLog("[LargeArcMarker] reapplying after manual final layout");
+					ApplyPendingLargeArcMarkerEdits(true);
 					g_pendingScaleRefits.clear();
 					g_sheetIsoAlreadyCreated = false;
 					g_hasAutoPlacementOverride = false;
@@ -15913,6 +16236,7 @@ int ZiDonCuTu::aaaa_cb()
 		ZiDonCuTu::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, message.c_str());
 	}
 	FlushAaaaWorkViewRegenerate(workPart);
+	ApplyPendingLargeArcMarkerEdits(false);
 	aaaaPerfCheckpoint("flush_regenerate");
 	return errorCode;
 }
@@ -15920,6 +16244,11 @@ int ZiDonCuTu::aaaa_cb()
 int ZiDonCuTu::aabb_cb()
 {
 	int errorCode = 0;
+	NXOpen::Drawings::BaseView* deferredLargeArcMarkerView = NULL;
+	NXOpen::Features::FlatPattern* deferredLargeArcMarkerFlatPattern = NULL;
+	double deferredLargeArcMarkerRadiusThreshold = 0.0;
+	double deferredLargeArcMarkerEdgeDistance = 0.0;
+	double deferredLargeArcMarkerKeepLength = 0.0;
 	try
 	{
 		UF_initialize();
@@ -16170,6 +16499,10 @@ int ZiDonCuTu::aabb_cb()
 				const double bendLineEdgeDistance = std::max(0.0, GetDoubleBlockValue(doubleBendLineEdgeDistance, 0.0));
 				const double bendLineUpKeepLength = std::max(0.1, GetDoubleBlockValue(doubleBendLineUpKeepLength, 5.0));
 				const double bendLineDownKeepLength = std::max(0.1, GetDoubleBlockValue(doubleBendLineDownKeepLength, 5.0));
+				const bool largeArcMarkerLineEnabled = GetToggleBlockValue(toggleLargeArcMarkerLine, false);
+				const double largeArcRadiusThreshold = std::max(0.0, GetDoubleBlockValue(doubleRInnerThreshold, 0.5));
+				const double largeArcMarkerEdgeDistance = std::max(0.0, GetDoubleBlockValue(doubleLargeArcMarkerEdgeDistance, 3.0));
+				const double largeArcMarkerKeepLength = std::max(0.1, GetDoubleBlockValue(doubleLargeArcMarkerKeepLength, 5.0));
 				const bool bendLineUpNotchEnabled = GetToggleBlockValue(toggleBendLineUpNotch, false);
 				const double bendLineUpNotchDiameter = std::max(0.1, GetDoubleBlockValue(doubleBendLineUpNotchDiameter, 1.0));
 				const bool bendLineDownNotchEnabled = GetToggleBlockValue(toggleBendLineDownNotch, false);
@@ -16186,6 +16519,9 @@ int ZiDonCuTu::aabb_cb()
 						<< " bendLineEdgeDistance=" << bendLineEdgeDistance
 						<< " bendLineUpKeepLength=" << bendLineUpKeepLength
 						<< " bendLineDownKeepLength=" << bendLineDownKeepLength
+						<< " largeArcMarkerLineEnabled=" << (largeArcMarkerLineEnabled ? "true" : "false")
+						<< " largeArcMarkerEdgeDistance=" << largeArcMarkerEdgeDistance
+						<< " largeArcMarkerKeepLength=" << largeArcMarkerKeepLength
 						<< " bendLineUpNotchEnabled=" << (bendLineUpNotchEnabled ? "true" : "false")
 						<< " bendLineUpNotchDiameter=" << bendLineUpNotchDiameter
 						<< " bendLineDownNotchEnabled=" << (bendLineDownNotchEnabled ? "true" : "false")
@@ -16210,7 +16546,7 @@ int ZiDonCuTu::aabb_cb()
 					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped hole attribute dimensions");
 				}
 				NXOpen::Features::FlatPattern* matchedFlatPattern = NULL;
-				if (bendNoteEnabled || breakBendLineEnabled || bendLineUpNotchEnabled || bendLineDownNotchEnabled)
+				if (bendNoteEnabled || breakBendLineEnabled || largeArcMarkerLineEnabled || bendLineUpNotchEnabled || bendLineDownNotchEnabled)
 				{
 					NXOpen::Part* flatPatternPart = g_independentDrawingPartActive
 						? DrawingModelPart()
@@ -16264,6 +16600,28 @@ int ZiDonCuTu::aabb_cb()
 				else
 				{
 					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped bend line break");
+				}
+				if (largeArcMarkerLineEnabled && matchedFlatPattern != NULL)
+				{
+					// View-dependent erasure edits are discarded by the final drawing
+					// regeneration below.  Keep the inputs and apply this edit only after
+					// that regeneration has completed.
+					deferredLargeArcMarkerView = baseView3C;
+					deferredLargeArcMarkerFlatPattern = matchedFlatPattern;
+					deferredLargeArcMarkerRadiusThreshold = largeArcRadiusThreshold;
+					deferredLargeArcMarkerEdgeDistance = largeArcMarkerEdgeDistance;
+					deferredLargeArcMarkerKeepLength = largeArcMarkerKeepLength;
+					QueueLargeArcMarkerEdit(
+						baseView3C,
+						matchedFlatPattern,
+						largeArcRadiusThreshold,
+						largeArcMarkerEdgeDistance,
+						largeArcMarkerKeepLength);
+					HoleNoteInvokeDebugLog("[LargeArcMarker] deferred until after final drawing regeneration");
+				}
+				else if (largeArcMarkerLineEnabled)
+				{
+					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped large arc marker line: no matching flat pattern");
 				}
 				if ((bendLineUpNotchEnabled || bendLineDownNotchEnabled) && matchedFlatPattern != NULL)
 				{
@@ -16714,6 +17072,27 @@ int ZiDonCuTu::aabb_cb()
 		ZiDonCuTu::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
 	}
 	FlushAaaaWorkViewRegenerate(workPart);
+	if (deferredLargeArcMarkerView != NULL && deferredLargeArcMarkerFlatPattern != NULL)
+	{
+		try
+		{
+			HoleNoteInvokeDebugLog("[LargeArcMarker] applying after final drawing regeneration");
+			CreateFlatPatternLargeArcMarkerLines(
+				deferredLargeArcMarkerView,
+				deferredLargeArcMarkerFlatPattern,
+				deferredLargeArcMarkerRadiusThreshold,
+				deferredLargeArcMarkerEdgeDistance,
+				deferredLargeArcMarkerKeepLength);
+		}
+		catch (const NXOpen::NXException& ex)
+		{
+			HoleNoteInvokeDebugLog(std::string("[LargeArcMarker] deferred apply failed: ") + ex.Message());
+		}
+		catch (const std::exception& ex)
+		{
+			HoleNoteInvokeDebugLog(std::string("[LargeArcMarker] deferred apply failed: ") + ex.what());
+		}
+	}
 	return errorCode;
 }
 
