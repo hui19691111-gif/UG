@@ -2,9 +2,11 @@
 #include <stdexcept>
 #include <NXOpen/BlockStyler_Button.hxx>
 #include <NXOpen/BlockStyler_CompositeBlock.hxx>
+#include <NXOpen/BlockStyler_Enumeration.hxx>
 #include <NXOpen/BlockStyler_Node.hxx>
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_SelectObject.hxx>
+#include <NXOpen/BlockStyler_StringBlock.hxx>
 #include <NXOpen/BlockStyler_Tree.hxx>
 #include <NXOpen/BlockStyler_UIBlock.hxx>
 #include <NXOpen/Assemblies_AssemblyManager.hxx>
@@ -89,7 +91,12 @@ const char* kBodySelectionBlockId = "bodySelection";
 const char* kOutputFolderBlockId = "nativeFolderBrowser0";
 const char* kColorMatchedBodiesToggleBlockId = "colorMatchedBodiesToggle";
 const char* kFindSameBodiesButtonBlockId = "findSameBodiesButton";
-const char* kNameConfigButtonBlockId = "nameConfigButton";
+const char* kNameModeBlockId = "nameMode";
+const char* kNameCustomTextBlockId = "nameCustomText";
+const char* kNameAttributeBlockId = "nameAttribute";
+const char* kNameFormatBlockId = "nameFormat";
+const char* kNamePlaceholderBlockId = "namePlaceholder";
+const char* kAddPlaceholderButtonBlockId = "addPlaceholderButton";
 const char* kAssemblyListBlockId = "assemblyList";
 const double kLengthTolerance = 0.05;
 const double kMassTolerance = 0.05;
@@ -118,6 +125,24 @@ const char* kDefaultComponentNamePrefix = "SameBody";
 const char* kDefaultNameFormat = "\x7B\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x7D\x5F\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D";
 const char* kDefaultBodyNameAttribute = "DB_PART_NAME";
 const char* kNameConfigFileName = "DuoSiTiZuanZuanPei_name_config.ini";
+const char* kSerialToken = "\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D";
+const char* kCustomToken = "\x7B\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x7D";
+const char* kWorkPartToken = "\x7B\xE5\xB7\xA5\xE4\xBD\x9C\xE9\x83\xA8\xE4\xBB\xB6\xE5\x90\x8D\x7D";
+const char* kBodyNameToken = "\x7B\xE4\xBD\x93\xE5\x90\x8D\x7D";
+const char* kBodyAttributeToken = "\x7B\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7\x7D";
+const char* kWorkPartSerialNameFormat =
+    "\x7B\xE5\xB7\xA5\xE4\xBD\x9C\xE9\x83\xA8\xE4\xBB\xB6\xE5\x90\x8D\x7D\x5F"
+    "\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D";
+
+enum NamingMode
+{
+    NamingModeCustomSerial = 0,
+    NamingModeWorkPartSerial = 1,
+    NamingModeBodyName = 2,
+    NamingModeBodyAttribute = 3,
+    NamingModeAdvanced = 4
+};
+
 std::string gSelectedOutputDirectory;
 bool gColorMatchedBodies = true;
 
@@ -415,6 +440,7 @@ struct AssemblyPreviewRow
     std::vector<tag_t> tags;
     std::string componentName;
     std::string parentName;
+    bool manuallyNamed;
 };
 
 struct AssemblyConversionResult
@@ -1702,6 +1728,34 @@ void EnsureNameConfigFileExists()
     config << Utf8Text("\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7\xE5\x90\x8D\x3D") << attributeName << std::endl;
 }
 
+void WriteNameConfigValues(
+    const std::string& nameFormat,
+    const std::string& customName,
+    const std::string& attributeName)
+{
+    std::ofstream config(GetNameConfigPath().c_str(), std::ios::out | std::ios::trunc);
+    if (!config.is_open())
+    {
+        return;
+    }
+
+    config << Utf8Text(
+        "\x23\x20\xE5\x8F\xAF\xE7\x94\xA8\xE5\x8D\xA0\xE4\xBD\x8D\xE7\xAC\xA6\xEF\xBC\x9A"
+        "\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D\xE3\x80\x81"
+        "\x7B\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x7D\xE3\x80\x81"
+        "\x7B\xE5\xB7\xA5\xE4\xBD\x9C\xE9\x83\xA8\xE4\xBB\xB6\xE5\x90\x8D\x7D\xE3\x80\x81"
+        "\x7B\xE4\xBD\x93\xE5\x90\x8D\x7D\xE3\x80\x81"
+        "\x7B\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7\x7D")
+           << std::endl;
+    config << Utf8Text("\x5B\xE5\x91\xBD\xE5\x90\x8D\xE8\xA7\x84\xE5\x88\x99\x5D") << std::endl;
+    config << Utf8Text("\xE5\x90\x8D\xE7\xA7\xB0\xE6\xA0\xBC\xE5\xBC\x8F\x3D")
+           << (nameFormat.empty() ? kDefaultNameFormat : nameFormat) << std::endl;
+    config << Utf8Text("\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x3D")
+           << (customName.empty() ? kDefaultComponentNamePrefix : customName) << std::endl;
+    config << Utf8Text("\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7\xE5\x90\x8D\x3D")
+           << (attributeName.empty() ? kDefaultBodyNameAttribute : attributeName) << std::endl;
+}
+
 std::string ReadNameConfigValue(
     const char* section,
     const char* key,
@@ -1997,17 +2051,22 @@ std::string BuildSerialComponentName(const std::string& stem, int groupNumber)
     return name.str();
 }
 
-std::string BuildComponentNameForRule(
+std::string BuildComponentNameFromFormat(
     NXOpen::Session* session,
     const MatchedBodyGroup& group,
-    int groupNumber)
+    int groupNumber,
+    const std::string& requestedFormat,
+    const std::string& requestedCustomText,
+    const std::string& requestedAttributeName)
 {
     const tag_t referenceTag = group.instances.empty()
         ? NULL_TAG
         : group.instances[0].bodyTag;
     std::string bodyAttributeName = AskBodyAttributeAsName(
         referenceTag,
-        ReadConfiguredBodyNameAttribute());
+        requestedAttributeName.empty()
+            ? kDefaultBodyNameAttribute
+            : requestedAttributeName);
     if (bodyAttributeName.empty())
     {
         bodyAttributeName = BuildDefaultComponentName(groupNumber);
@@ -2025,30 +2084,48 @@ std::string BuildComponentNameForRule(
         workPartName = kDefaultComponentNamePrefix;
     }
 
-    std::string name = ReadConfiguredNameFormat();
+    std::string name = requestedFormat.empty()
+        ? kDefaultNameFormat
+        : requestedFormat;
     name = ReplaceAllText(
         name,
-        Utf8Text("\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D"),
+        kSerialToken,
         FormatPaddedNumber(groupNumber, 3));
     name = ReplaceAllText(
         name,
-        Utf8Text("\x7B\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x7D"),
-        ReadConfiguredComponentPrefix());
+        kCustomToken,
+        requestedCustomText.empty()
+            ? kDefaultComponentNamePrefix
+            : requestedCustomText);
     name = ReplaceAllText(
         name,
-        Utf8Text("\x7B\xE5\xB7\xA5\xE4\xBD\x9C\xE9\x83\xA8\xE4\xBB\xB6\xE5\x90\x8D\x7D"),
+        kWorkPartToken,
         workPartName);
     name = ReplaceAllText(
         name,
-        Utf8Text("\x7B\xE4\xBD\x93\xE5\x90\x8D\x7D"),
+        kBodyNameToken,
         bodyName);
     name = ReplaceAllText(
         name,
-        Utf8Text("\x7B\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7\x7D"),
+        kBodyAttributeToken,
         bodyAttributeName);
 
     name = SanitizeFileStem(name);
     return name.empty() ? BuildDefaultComponentName(groupNumber) : name;
+}
+
+std::string BuildComponentNameForRule(
+    NXOpen::Session* session,
+    const MatchedBodyGroup& group,
+    int groupNumber)
+{
+    return BuildComponentNameFromFormat(
+        session,
+        group,
+        groupNumber,
+        ReadConfiguredNameFormat(),
+        ReadConfiguredComponentPrefix(),
+        ReadConfiguredBodyNameAttribute());
 }
 
 std::string BuildComponentInstanceName(
@@ -2271,6 +2348,8 @@ void CreateReferenceComponentWithRecordedBuilder(
         WritePreviewDebugLog("CreateNewComponentBuilder set name=" + instanceName);
         builder->SetNewComponentName(
             NXOpen::NXString(instanceName, NXOpen::NXString::UTF8));
+        builder->SetComponentOrigin(
+            NXOpen::Assemblies::CreateNewComponentBuilder::ComponentOriginTypeAbsolute);
         WritePreviewDebugLog("CreateNewComponentBuilder set refset");
         builder->SetReferenceSetName("MODEL");
         WritePreviewDebugLog("CreateNewComponentBuilder add body");
@@ -4465,9 +4544,15 @@ public:
           outputFolder(NULL),
           colorMatchedBodiesToggle(NULL),
           findSameBodiesButton(NULL),
-          nameConfigButton(NULL),
+          nameMode(NULL),
+          nameCustomText(NULL),
+          nameAttribute(NULL),
+          nameFormat(NULL),
+          namePlaceholder(NULL),
+          addPlaceholderButton(NULL),
           assemblyList(NULL),
           assemblyListReady(false),
+          namingControlsInitializing(false),
           suppressBodySelectionUpdate(false),
           previewRowHighlightActive(false),
           cachedSearchDataValid(false)
@@ -4510,9 +4595,15 @@ private:
     NXOpen::BlockStyler::UIBlock* outputFolder;
     NXOpen::BlockStyler::UIBlock* colorMatchedBodiesToggle;
     NXOpen::BlockStyler::Button* findSameBodiesButton;
-    NXOpen::BlockStyler::Button* nameConfigButton;
+    NXOpen::BlockStyler::Enumeration* nameMode;
+    NXOpen::BlockStyler::StringBlock* nameCustomText;
+    NXOpen::BlockStyler::Enumeration* nameAttribute;
+    NXOpen::BlockStyler::StringBlock* nameFormat;
+    NXOpen::BlockStyler::Enumeration* namePlaceholder;
+    NXOpen::BlockStyler::Button* addPlaceholderButton;
     NXOpen::BlockStyler::Tree* assemblyList;
     bool assemblyListReady;
+    bool namingControlsInitializing;
     std::vector<AssemblyPreviewRow> previewRows;
     std::vector<NXOpen::BlockStyler::Node*> previewNodes;
     std::vector<tag_t> previewSelectionTags;
@@ -4528,6 +4619,7 @@ private:
         WritePreviewDebugLog("Initialize begin");
         EnsureNameConfigFileExists();
         RefreshBlockPointers();
+        InitializeNamingControls();
         ConfigureBodySelectionFilter();
         InitializeOutputFolder();
         UpdateColorMatchedBodiesOption();
@@ -4574,11 +4666,22 @@ private:
                 WritePreviewDebugLog("Update routed to BuildAssemblyPreviewFromSelection");
                 BuildAssemblyPreviewFromSelection();
             }
-            else if (block == nameConfigButton || blockName == kNameConfigButtonBlockId)
+            else if (
+                block == nameMode ||
+                block == nameCustomText ||
+                block == nameAttribute ||
+                block == nameFormat ||
+                block == namePlaceholder ||
+                block == addPlaceholderButton ||
+                blockName == kNameModeBlockId ||
+                blockName == kNameCustomTextBlockId ||
+                blockName == kNameAttributeBlockId ||
+                blockName == kNameFormatBlockId ||
+                blockName == kNamePlaceholderBlockId ||
+                blockName == kAddPlaceholderButtonBlockId)
             {
-                nameConfigButton = dynamic_cast<NXOpen::BlockStyler::Button*>(block);
-                WritePreviewDebugLog("Update routed to EditNameConfig");
-                EditNameConfig();
+                WritePreviewDebugLog("Update routed to naming controls");
+                HandleNamingControlUpdate(blockName);
             }
             else if (block == outputFolder || blockName == kOutputFolderBlockId)
             {
@@ -4603,6 +4706,12 @@ private:
                 previewRowHighlightActive = false;
                 InitializeAssemblyList();
                 std::vector<NXOpen::Body*> selectedBodies = GetSelectedBodies();
+                RefreshBodyAttributeMembers(selectedBodies);
+                if (GetNamingMode() == NamingModeBodyAttribute ||
+                    GetNamingMode() == NamingModeAdvanced)
+                {
+                    SaveNamingControls();
+                }
                 StoreSearchSelectionFromBodySelection();
                 std::ostringstream line;
                 line << "Update bodySelection selectedBodies=" << selectedBodies.size();
@@ -4693,10 +4802,35 @@ private:
             findSameBodiesButton = dynamic_cast<NXOpen::BlockStyler::Button*>(
                 FindBlockRecursive(topBlock, kFindSameBodiesButtonBlockId));
         }
-        if (nameConfigButton == NULL)
+        if (nameMode == NULL)
         {
-            nameConfigButton = dynamic_cast<NXOpen::BlockStyler::Button*>(
-                FindBlockRecursive(topBlock, kNameConfigButtonBlockId));
+            nameMode = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(
+                FindBlockRecursive(topBlock, kNameModeBlockId));
+        }
+        if (nameCustomText == NULL)
+        {
+            nameCustomText = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(
+                FindBlockRecursive(topBlock, kNameCustomTextBlockId));
+        }
+        if (nameAttribute == NULL)
+        {
+            nameAttribute = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(
+                FindBlockRecursive(topBlock, kNameAttributeBlockId));
+        }
+        if (nameFormat == NULL)
+        {
+            nameFormat = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(
+                FindBlockRecursive(topBlock, kNameFormatBlockId));
+        }
+        if (namePlaceholder == NULL)
+        {
+            namePlaceholder = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(
+                FindBlockRecursive(topBlock, kNamePlaceholderBlockId));
+        }
+        if (addPlaceholderButton == NULL)
+        {
+            addPlaceholderButton = dynamic_cast<NXOpen::BlockStyler::Button*>(
+                FindBlockRecursive(topBlock, kAddPlaceholderButtonBlockId));
         }
         if (assemblyList == NULL)
         {
@@ -4709,9 +4843,444 @@ private:
              << ", outputFolder=" << PointerText(outputFolder)
              << ", colorToggle=" << PointerText(colorMatchedBodiesToggle)
              << ", button=" << PointerText(findSameBodiesButton)
-             << ", configButton=" << PointerText(nameConfigButton)
+             << ", nameMode=" << PointerText(nameMode)
+             << ", nameCustomText=" << PointerText(nameCustomText)
+             << ", nameAttribute=" << PointerText(nameAttribute)
+             << ", nameFormat=" << PointerText(nameFormat)
+             << ", namePlaceholder=" << PointerText(namePlaceholder)
+             << ", addPlaceholderButton=" << PointerText(addPlaceholderButton)
              << ", tree=" << PointerText(assemblyList);
         WritePreviewDebugLog(line.str());
+    }
+
+    static std::vector<NXOpen::NXString> MakeEnumMembers(
+        const std::vector<std::string>& values)
+    {
+        std::vector<NXOpen::NXString> members;
+        members.reserve(values.size());
+        for (std::size_t index = 0; index < values.size(); ++index)
+        {
+            members.push_back(NXOpen::NXString(values[index], NXOpen::NXString::UTF8));
+        }
+        return members;
+    }
+
+    static std::string GetEnumerationValue(
+        NXOpen::BlockStyler::Enumeration* block,
+        const std::string& fallback)
+    {
+        if (block == NULL)
+        {
+            return fallback;
+        }
+
+        try
+        {
+            const std::string value = NxStringToUtf8(block->ValueAsString());
+            return value.empty() ? fallback : value;
+        }
+        catch (...)
+        {
+            return fallback;
+        }
+    }
+
+    static void SetEnumerationValue(
+        NXOpen::BlockStyler::Enumeration* block,
+        const std::string& value)
+    {
+        if (block == NULL || value.empty())
+        {
+            return;
+        }
+
+        block->SetValueAsString(
+            NXOpen::NXString(value, NXOpen::NXString::UTF8));
+    }
+
+    static std::string GetStringBlockValue(
+        NXOpen::BlockStyler::StringBlock* block,
+        const std::string& fallback)
+    {
+        if (block == NULL)
+        {
+            return fallback;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties = block->GetProperties();
+        const std::string value = NxStringToUtf8(properties->GetString("Value"));
+        delete properties;
+        return value.empty() ? fallback : value;
+    }
+
+    static void SetStringBlockValue(
+        NXOpen::BlockStyler::StringBlock* block,
+        const std::string& value)
+    {
+        if (block == NULL)
+        {
+            return;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties = block->GetProperties();
+        properties->SetString(
+            "Value",
+            NXOpen::NXString(value, NXOpen::NXString::UTF8));
+        delete properties;
+    }
+
+    int GetNamingMode() const
+    {
+        if (nameMode == NULL)
+        {
+            return NamingModeCustomSerial;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties = nameMode->GetProperties();
+        const int value = properties->GetEnum("Value");
+        delete properties;
+        return value >= NamingModeCustomSerial && value <= NamingModeAdvanced
+            ? value
+            : NamingModeCustomSerial;
+    }
+
+    void SetNamingMode(int value)
+    {
+        if (nameMode == NULL)
+        {
+            return;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties = nameMode->GetProperties();
+        properties->SetEnum("Value", value);
+        delete properties;
+    }
+
+    std::string GetCurrentNameFormat() const
+    {
+        switch (GetNamingMode())
+        {
+        case NamingModeWorkPartSerial:
+            return kWorkPartSerialNameFormat;
+        case NamingModeBodyName:
+            return kBodyNameToken;
+        case NamingModeBodyAttribute:
+            return kBodyAttributeToken;
+        case NamingModeAdvanced:
+            return GetStringBlockValue(nameFormat, kDefaultNameFormat);
+        case NamingModeCustomSerial:
+        default:
+            return kDefaultNameFormat;
+        }
+    }
+
+    std::string GetCurrentCustomText() const
+    {
+        return GetStringBlockValue(nameCustomText, kDefaultComponentNamePrefix);
+    }
+
+    std::string GetCurrentAttributeName() const
+    {
+        return GetEnumerationValue(nameAttribute, kDefaultBodyNameAttribute);
+    }
+
+    void RefreshBodyAttributeMembers(
+        const std::vector<NXOpen::Body*>& selectedBodies)
+    {
+        if (nameAttribute == NULL)
+        {
+            return;
+        }
+
+        const bool wasInitializing = namingControlsInitializing;
+        namingControlsInitializing = true;
+        try
+        {
+        const std::string configuredAttribute =
+            ReadConfiguredBodyNameAttribute();
+        const std::string previousAttribute =
+            GetEnumerationValue(nameAttribute, configuredAttribute);
+        std::set<std::string> uniqueNames;
+        for (std::size_t bodyIndex = 0;
+             bodyIndex < selectedBodies.size();
+             ++bodyIndex)
+        {
+            NXOpen::Body* body = selectedBodies[bodyIndex];
+            if (body == NULL)
+            {
+                continue;
+            }
+
+            try
+            {
+                const std::vector<NXOpen::NXObject::AttributeInformation> attributes =
+                    body->GetUserAttributes();
+                for (std::size_t attributeIndex = 0;
+                     attributeIndex < attributes.size();
+                     ++attributeIndex)
+                {
+                    if (attributes[attributeIndex].Unset)
+                    {
+                        continue;
+                    }
+
+                    const std::string title =
+                        NxStringToUtf8(attributes[attributeIndex].Title);
+                    if (!title.empty())
+                    {
+                        uniqueNames.insert(title);
+                    }
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        std::vector<std::string> names(
+            uniqueNames.begin(),
+            uniqueNames.end());
+        if (names.empty())
+        {
+            names.push_back(
+                configuredAttribute.empty()
+                    ? kDefaultBodyNameAttribute
+                    : configuredAttribute);
+        }
+
+        std::vector<NXOpen::NXString> members = MakeEnumMembers(names);
+        nameAttribute->SetEnumMembers(members);
+
+        if (std::find(
+                names.begin(),
+                names.end(),
+                previousAttribute) != names.end())
+        {
+            SetEnumerationValue(nameAttribute, previousAttribute);
+        }
+        else if (std::find(
+                     names.begin(),
+                     names.end(),
+                     configuredAttribute) != names.end())
+        {
+            SetEnumerationValue(nameAttribute, configuredAttribute);
+        }
+        else
+        {
+            SetEnumerationValue(nameAttribute, names.front());
+        }
+
+        std::ostringstream line;
+        line << "RefreshBodyAttributeMembers selectedBodies="
+             << selectedBodies.size()
+             << ", attributes="
+             << names.size()
+             << ", selected="
+             << GetCurrentAttributeName();
+        WritePreviewDebugLog(line.str());
+        }
+        catch (...)
+        {
+            namingControlsInitializing = wasInitializing;
+            throw;
+        }
+        namingControlsInitializing = wasInitializing;
+    }
+
+    std::string BuildComponentNameForCurrentRule(
+        const MatchedBodyGroup& group,
+        int groupNumber) const
+    {
+        return BuildComponentNameFromFormat(
+            session,
+            group,
+            groupNumber,
+            GetCurrentNameFormat(),
+            GetCurrentCustomText(),
+            GetCurrentAttributeName());
+    }
+
+    void UpdateNamingControlVisibility()
+    {
+        const int mode = GetNamingMode();
+        const bool showCustomText =
+            mode == NamingModeCustomSerial || mode == NamingModeAdvanced;
+        const bool showAttribute =
+            mode == NamingModeBodyAttribute || mode == NamingModeAdvanced;
+        const bool showAdvanced = mode == NamingModeAdvanced;
+
+        if (nameCustomText != NULL)
+        {
+            nameCustomText->SetShow(showCustomText);
+        }
+        if (nameAttribute != NULL)
+        {
+            nameAttribute->SetShow(showAttribute);
+        }
+        if (nameFormat != NULL)
+        {
+            nameFormat->SetShow(showAdvanced);
+        }
+        if (namePlaceholder != NULL)
+        {
+            namePlaceholder->SetShow(showAdvanced);
+        }
+        if (addPlaceholderButton != NULL)
+        {
+            addPlaceholderButton->SetShow(showAdvanced);
+        }
+    }
+
+    void InitializeNamingControls()
+    {
+        RefreshBlockPointers();
+        if (nameMode == NULL)
+        {
+            WritePreviewDebugLog("InitializeNamingControls skipped: nameMode is null");
+            return;
+        }
+
+        namingControlsInitializing = true;
+        try
+        {
+            const std::vector<std::string> modeValues = {
+                Utf8Text("\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\xE5\x89\x8D\xE7\xBC\x80\x20\x2B\x20\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7"),
+                Utf8Text("\xE5\xB7\xA5\xE4\xBD\x9C\xE9\x83\xA8\xE4\xBB\xB6\xE5\x90\x8D\x20\x2B\x20\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7"),
+                Utf8Text("\xE4\xBD\xBF\xE7\x94\xA8\xE4\xBD\x93\xE5\x90\x8D\xE7\xA7\xB0"),
+                Utf8Text("\xE4\xBD\xBF\xE7\x94\xA8\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7"),
+                Utf8Text("\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\xE7\xBB\x84\xE5\x90\x88\xEF\xBC\x88\xE9\xAB\x98\xE7\xBA\xA7\xEF\xBC\x89")
+            };
+            std::vector<NXOpen::NXString> modeMembers =
+                MakeEnumMembers(modeValues);
+            nameMode->SetEnumMembers(modeMembers);
+
+            const std::vector<std::string> placeholderValues = {
+                kSerialToken,
+                kCustomToken,
+                kWorkPartToken,
+                kBodyNameToken,
+                kBodyAttributeToken
+            };
+            if (namePlaceholder != NULL)
+            {
+                std::vector<NXOpen::NXString> placeholderMembers =
+                    MakeEnumMembers(placeholderValues);
+                namePlaceholder->SetEnumMembers(placeholderMembers);
+            }
+
+            const std::string configuredFormat = ReadConfiguredNameFormat();
+            int configuredMode = NamingModeAdvanced;
+            if (configuredFormat == kDefaultNameFormat)
+            {
+                configuredMode = NamingModeCustomSerial;
+            }
+            else if (configuredFormat == kWorkPartSerialNameFormat)
+            {
+                configuredMode = NamingModeWorkPartSerial;
+            }
+            else if (configuredFormat == kBodyNameToken)
+            {
+                configuredMode = NamingModeBodyName;
+            }
+            else if (configuredFormat == kBodyAttributeToken)
+            {
+                configuredMode = NamingModeBodyAttribute;
+            }
+
+            SetStringBlockValue(nameCustomText, ReadConfiguredComponentPrefix());
+            if (nameAttribute != NULL)
+            {
+                const std::vector<std::string> attributeValues = {
+                    ReadConfiguredBodyNameAttribute()
+                };
+                std::vector<NXOpen::NXString> attributeMembers =
+                    MakeEnumMembers(attributeValues);
+                nameAttribute->SetEnumMembers(attributeMembers);
+                SetEnumerationValue(nameAttribute, attributeValues.front());
+            }
+            SetStringBlockValue(nameFormat, configuredFormat);
+            SetNamingMode(configuredMode);
+            UpdateNamingControlVisibility();
+        }
+        catch (...)
+        {
+            namingControlsInitializing = false;
+            throw;
+        }
+        namingControlsInitializing = false;
+        WritePreviewDebugLog("InitializeNamingControls end");
+    }
+
+    void AppendSelectedPlaceholder()
+    {
+        if (namePlaceholder == NULL || nameFormat == NULL)
+        {
+            return;
+        }
+
+        std::string placeholderText;
+        try
+        {
+            placeholderText = NxStringToUtf8(namePlaceholder->ValueAsString());
+        }
+        catch (...)
+        {
+            placeholderText = kSerialToken;
+        }
+        if (placeholderText.empty())
+        {
+            placeholderText = kSerialToken;
+        }
+
+        std::string formatText = GetStringBlockValue(nameFormat, std::string());
+        formatText += placeholderText;
+        SetStringBlockValue(nameFormat, formatText);
+    }
+
+    void SaveNamingControls()
+    {
+        WriteNameConfigValues(
+            GetCurrentNameFormat(),
+            GetCurrentCustomText(),
+            GetCurrentAttributeName());
+    }
+
+    void HandleNamingControlUpdate(const std::string& blockName)
+    {
+        if (namingControlsInitializing)
+        {
+            return;
+        }
+
+        RefreshBlockPointers();
+        if (blockName == kNamePlaceholderBlockId)
+        {
+            return;
+        }
+
+        namingControlsInitializing = true;
+        try
+        {
+            if (blockName == kAddPlaceholderButtonBlockId)
+            {
+                AppendSelectedPlaceholder();
+            }
+            UpdateNamingControlVisibility();
+            if (blockName == kNameModeBlockId &&
+                (GetNamingMode() == NamingModeBodyAttribute ||
+                 GetNamingMode() == NamingModeAdvanced))
+            {
+                RefreshBodyAttributeMembers(GetSelectedBodies());
+            }
+            SaveNamingControls();
+            RefreshPreviewNamesFromNamingRule();
+        }
+        catch (...)
+        {
+            namingControlsInitializing = false;
+            throw;
+        }
+        namingControlsInitializing = false;
     }
 
     std::string GetWorkPartDirectory() const
@@ -4785,7 +5354,7 @@ private:
 
         assemblyList->InsertColumn(
             kAssemblyNameColumnId,
-            NXOpen::NXString(Utf8Text("\xE5\x90\x8D\xE7\xA7\xB0"), NXOpen::NXString::UTF8),
+            NXOpen::NXString(Utf8Text("\xE9\x83\xA8\xE4\xBB\xB6\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D"), NXOpen::NXString::UTF8),
             210);
         assemblyList->InsertColumn(
             kAssemblyParentColumnId,
@@ -4812,7 +5381,7 @@ private:
         WritePreviewDebugLog("InitializeAssemblyList end");
     }
 
-    void RefreshPreviewNamesFromConfig()
+    void RefreshPreviewNamesFromNamingRule()
     {
         if (previewRows.empty())
         {
@@ -4821,21 +5390,15 @@ private:
 
         for (std::size_t index = 0; index < previewRows.size(); ++index)
         {
-            previewRows[index].componentName = BuildComponentNameForRule(
-                session,
+            if (previewRows[index].manuallyNamed)
+            {
+                continue;
+            }
+            previewRows[index].componentName = BuildComponentNameForCurrentRule(
                 previewRows[index].group,
                 static_cast<int>(index + 1));
         }
         PopulateAssemblyList(previewRows);
-    }
-
-    void EditNameConfig()
-    {
-        const bool waited = OpenNameConfigFileAndWait();
-        if (waited)
-        {
-            RefreshPreviewNamesFromConfig();
-        }
     }
 
     NXOpen::BlockStyler::Tree::BeginLabelEditState OnBeginAssemblyNameEdit(
@@ -4880,6 +5443,7 @@ private:
             if (previewNodes[index] == node && index < previewRows.size())
             {
                 previewRows[index].componentName = name;
+                previewRows[index].manuallyNamed = true;
                 node->SetColumnDisplayText(
                     kAssemblyNameColumnId,
                     NXOpen::NXString(name, NXOpen::NXString::UTF8));
@@ -5066,6 +5630,20 @@ private:
         return std::string();
     }
 
+    const AssemblyPreviewRow* FindExistingPreviewRow(
+        const std::vector<tag_t>& tags) const
+    {
+        const std::string key = BuildGroupKey(tags);
+        for (std::size_t index = 0; index < previewRows.size(); ++index)
+        {
+            if (BuildGroupKey(previewRows[index].tags) == key)
+            {
+                return &previewRows[index];
+            }
+        }
+        return NULL;
+    }
+
     std::string GetParentAssemblyDisplayName() const
     {
         if (session == NULL || session->Parts() == NULL)
@@ -5179,11 +5757,17 @@ private:
             AssemblyPreviewRow row = {};
             row.group = assemblyGroups[index];
             row.tags = ExtractGroupTags(assemblyGroups[index]);
-            row.componentName = FindExistingPreviewName(row.tags);
+            row.manuallyNamed = false;
+            const AssemblyPreviewRow* existingRow =
+                FindExistingPreviewRow(row.tags);
+            if (existingRow != NULL)
+            {
+                row.componentName = existingRow->componentName;
+                row.manuallyNamed = existingRow->manuallyNamed;
+            }
             if (row.componentName.empty())
             {
-                row.componentName = BuildComponentNameForRule(
-                    session,
+                row.componentName = BuildComponentNameForCurrentRule(
                     row.group,
                     static_cast<int>(index + 1));
             }
@@ -5382,8 +5966,7 @@ private:
             std::string name = FindExistingPreviewName(tags);
             if (name.empty())
             {
-                name = BuildComponentNameForRule(
-                    session,
+                name = BuildComponentNameForCurrentRule(
                     assemblyGroups[index],
                     static_cast<int>(index + 1));
             }
