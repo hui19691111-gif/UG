@@ -252,6 +252,83 @@ namespace
         return locale != nullptr ? locale : std::string();
     }
 
+    std::string EditedNxStringToUtf8(const NXOpen::NXString& value)
+    {
+        // Block Styler's free-text edit callback is locale encoded in NX 2412,
+        // even though GetUTF8Text() returns a non-empty buffer.  Treating that
+        // buffer as UTF-8 turns text such as “编号” into “缂栧彿”.
+        const char* locale = value.GetLocaleText();
+        if (locale != nullptr && locale[0] != '\0')
+        {
+            return SystemToUtf8(locale);
+        }
+        const char* utf8 = value.GetUTF8Text();
+        return utf8 != nullptr ? std::string(utf8) : std::string();
+    }
+
+    std::string RepairLocaleDecodedUtf8(const std::string& text)
+    {
+        if (text.empty())
+        {
+            return text;
+        }
+
+        const int wideSize = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                                  text.data(), static_cast<int>(text.size()),
+                                                  nullptr, 0);
+        if (wideSize <= 0)
+        {
+            return text;
+        }
+        std::wstring wide(static_cast<size_t>(wideSize), L'\0');
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                text.data(), static_cast<int>(text.size()),
+                                wide.data(), wideSize) <= 0)
+        {
+            return text;
+        }
+
+        BOOL usedDefault = FALSE;
+        const int rawSize = WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS,
+                                                wide.data(), wideSize, nullptr, 0,
+                                                nullptr, &usedDefault);
+        if (rawSize <= 0 || usedDefault)
+        {
+            return text;
+        }
+        std::string raw(static_cast<size_t>(rawSize), '\0');
+        usedDefault = FALSE;
+        if (WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS,
+                                wide.data(), wideSize, raw.data(), rawSize,
+                                nullptr, &usedDefault) <= 0 || usedDefault || !IsValidUtf8(raw))
+        {
+            return text;
+        }
+
+        const int repairedWideSize = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                                          raw.data(), static_cast<int>(raw.size()),
+                                                          nullptr, 0);
+        if (repairedWideSize <= 0)
+        {
+            return text;
+        }
+        std::wstring repairedWide(static_cast<size_t>(repairedWideSize), L'\0');
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                            raw.data(), static_cast<int>(raw.size()),
+                            repairedWide.data(), repairedWideSize);
+        const int repairedSize = WideCharToMultiByte(CP_UTF8, 0,
+                                                      repairedWide.data(), repairedWideSize,
+                                                      nullptr, 0, nullptr, nullptr);
+        if (repairedSize <= 0)
+        {
+            return text;
+        }
+        std::string repaired(static_cast<size_t>(repairedSize), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, repairedWide.data(), repairedWideSize,
+                            repaired.data(), repairedSize, nullptr, nullptr);
+        return repaired;
+    }
+
     NXOpen::NXString Utf8NxString(const std::string& text)
     {
         return NXOpen::NXString(text.c_str(), NXOpen::NXString::UTF8);
@@ -1668,7 +1745,12 @@ namespace
         {
             for (size_t i = 0; i < savedTitles.size() && i < headerTitles.size(); ++i)
             {
-                headerTitles[i] = savedTitles[i];
+                headerTitles[i] = RepairLocaleDecodedUtf8(savedTitles[i]);
+                if (headerTitles[i] != savedTitles[i])
+                {
+                    LogBodyScan("LoadNativeSettings repaired mojibake header column=" +
+                                std::to_string(i + 1));
+                }
             }
         }
         std::vector<std::string> savedDedupKeys;
@@ -2442,7 +2524,7 @@ namespace
         {
             try
             {
-                const std::string value = NormalizeCellText(ToUtf8(editedText));
+                const std::string value = NormalizeCellText(EditedNxStringToUtf8(editedText));
                 if (tree == columnsTree_ && columnId == kConfigHeaderColumn)
                 {
                     const auto found = configNodeIndexes_.find(node);
@@ -3043,7 +3125,7 @@ namespace
         return widths;
     }
 
-    int LoadTableTextFont()
+    int LoadTableTextFont(int preferredFont)
     {
         NXOpen::Session* session = NXOpen::Session::GetSession();
         NXOpen::Part* part = session != nullptr && session->Parts() != nullptr
@@ -3054,6 +3136,23 @@ namespace
             LogBodyScan("LoadTableTextFont failed: work part/font collection unavailable");
             return 0;
         }
+
+        try
+        {
+            if (preferredFont > 0 && part->Fonts()->DoesFontExist(preferredFont))
+            {
+                LogBodyScan("LoadTableTextFont inherited template font index=" +
+                            std::to_string(preferredFont));
+                return preferredFont;
+            }
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogBodyScan("LoadTableTextFont template font check failed index=" +
+                        std::to_string(preferredFont) + " error=" + ex.Message());
+        }
+        LogBodyScan("LoadTableTextFont template font unavailable index=" +
+                    std::to_string(preferredFont) + "; using fallback");
 
         const char* candidates[] = {
             "Microsoft YaHei",
@@ -3275,7 +3374,7 @@ namespace
         UF_TABNOT_ask_default_section_prefs(&sectionPrefs);
         UF_TABNOT_ask_default_cell_prefs(&cellPrefs);
         const double textHeight = ClampDouble(options.textHeight, 1.0, 20.0);
-        const int textFont = LoadTableTextFont();
+        const int textFont = LoadTableTextFont(cellPrefs.text_font);
         if (textFont <= 0)
         {
             error = "未找到可用的表格字体。";
