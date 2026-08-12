@@ -35,6 +35,7 @@ private:
             NXOpen::Body* body = nullptr;
             NXOpen::Face* bendFace = nullptr;
             NXOpen::Face* referenceFace = nullptr;
+            NXOpen::Face* representativeFace = nullptr;
             NXOpen::Edge* tangentEdge = nullptr;
             NXOpen::Point3d startPoint;
             NXOpen::Point3d bendPoint;
@@ -43,6 +44,7 @@ private:
             bool hasSlotPosition = false;
             double automaticSlotLength = 0.0;
             NXOpen::Vector3d carrierNormal;
+            std::vector<NXOpen::Face*> riskFaces;
         };
         int bodyCount = 0;
         int bendCount = 0;
@@ -57,6 +59,8 @@ private:
     void initialize_cb();
     void dialogShown_cb();
     int update_cb(NXOpen::BlockStyler::UIBlock* block);
+    int filter_cb(NXOpen::BlockStyler::UIBlock* block,
+                  NXOpen::TaggedObject* selectedObject);
     int apply_cb();
     int ok_cb();
     int cancel_cb();
@@ -74,6 +78,8 @@ private:
                          NXOpen::Point3d* firstPoint = nullptr,
                          NXOpen::Point3d* secondPoint = nullptr) const;
     AnalysisResult Analyze() const;
+    AnalysisResult SelectedRiskHoles(const AnalysisResult& result) const;
+    void PopulateRiskSelection(const AnalysisResult& result);
     int CreateReliefSlots(const AnalysisResult& result);
     int CreateReliefSlotsForBody(
         const std::vector<const AnalysisResult::SlotCandidate*>& candidates,
@@ -103,10 +109,12 @@ private:
     NXOpen::BlockStyler::UIBlock* reliefLengthMode_;
     NXOpen::BlockStyler::UIBlock* reliefLength_;
     NXOpen::BlockStyler::UIBlock* slotWidth_;
+    NXOpen::BlockStyler::UIBlock* riskHoleSelect_;
     NXOpen::BlockStyler::UIBlock* status_;
     bool initialized_;
     bool refreshing_;
     bool slotsCreated_;
+    AnalysisResult currentAnalysis_;
     std::vector<std::pair<tag_t, int>> originalTranslucencies_;
     std::vector<std::pair<tag_t, int>> originalColors_;
     std::vector<tag_t> highlightedFaces_;

@@ -4,6 +4,7 @@
 #include "../../common/ZhihuiDialogMemory.hpp"
 
 #include <NXOpen/BlockStyler_PropertyList.hxx>
+#include <NXOpen/BlockStyler_SelectObject.hxx>
 #include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/DisplayManager.hxx>
@@ -508,6 +509,7 @@ KonFanLaLiaoDialog::KonFanLaLiaoDialog()
       reliefLengthMode_(nullptr),
       reliefLength_(nullptr),
       slotWidth_(nullptr),
+      riskHoleSelect_(nullptr),
       status_(nullptr),
       initialized_(false),
       refreshing_(false),
@@ -520,6 +522,8 @@ KonFanLaLiaoDialog::KonFanLaLiaoDialog()
         NXOpen::make_callback(this, &KonFanLaLiaoDialog::dialogShown_cb));
     dialog_->AddUpdateHandler(
         NXOpen::make_callback(this, &KonFanLaLiaoDialog::update_cb));
+    dialog_->AddFilterHandler(
+        NXOpen::make_callback(this, &KonFanLaLiaoDialog::filter_cb));
     dialog_->AddApplyHandler(
         NXOpen::make_callback(this, &KonFanLaLiaoDialog::apply_cb));
     dialog_->AddOkHandler(
@@ -554,24 +558,43 @@ void KonFanLaLiaoDialog::initialize_cb()
     reliefLengthMode_ = dialog_->TopBlock()->FindBlock("relief_length_mode");
     reliefLength_ = dialog_->TopBlock()->FindBlock("relief_length");
     slotWidth_ = dialog_->TopBlock()->FindBlock("slot_width");
+    NXOpen::BlockStyler::UIBlock* duplicateRiskSelect =
+        dialog_->TopBlock()->FindBlock("risk_hole_select");
+    riskHoleSelect_ = bodySelect_;
     status_ = dialog_->TopBlock()->FindBlock("result_status");
     if (bodySelect_ == nullptr || formulaSummary_ == nullptr ||
         configButton_ == nullptr || riskDistance_ == nullptr ||
         safetyDistanceMode_ == nullptr || reliefLengthMode_ == nullptr ||
-        reliefLength_ == nullptr || slotWidth_ == nullptr || status_ == nullptr)
+        reliefLength_ == nullptr || slotWidth_ == nullptr ||
+        riskHoleSelect_ == nullptr || duplicateRiskSelect == nullptr ||
+        status_ == nullptr)
     {
         throw std::runtime_error("KonFanLaLiao.dlx 缺少必要控件。");
     }
 
-    NXOpen::BlockStyler::PropertyList* properties = bodySelect_->GetProperties();
-    std::vector<NXOpen::Selection::MaskTriple> masks;
-    masks.emplace_back(UF_solid_type, UF_solid_body_subtype, 0);
-    properties->SetSelectionFilter(
-        "SelectionFilter",
+    duplicateRiskSelect->SetShow(false);
+
+    NXOpen::BlockStyler::SelectObject* riskSelection =
+        dynamic_cast<NXOpen::BlockStyler::SelectObject*>(riskHoleSelect_);
+    if (riskSelection == nullptr)
+    {
+        throw std::runtime_error("风险孔选择控件类型错误。");
+    }
+    std::vector<NXOpen::Selection::MaskTriple> faceMasks;
+    faceMasks.emplace_back(
+        UF_solid_type,
+        UF_all_subtype,
+        UF_UI_SEL_FEATURE_ANY_FACE);
+    riskSelection->SetSelectionFilter(
         NXOpen::Selection::SelectionActionClearAndEnableSpecific,
-        masks);
-    properties->SetEnum("StepStatus", 1);
-    delete properties;
+        faceMasks);
+    riskSelection->SetAutomaticProgression(false);
+    riskSelection->SetSelectModeAsString("Multiple");
+    riskSelection->SetStepStatusAsString("Optional");
+    NXOpen::BlockStyler::PropertyList* riskProperties =
+        riskHoleSelect_->GetProperties();
+    riskProperties->SetEnum("StepStatus", 1);
+    delete riskProperties;
 
     LoadState();
     const SafeDistanceConfig config = LoadSafeDistanceConfig();
@@ -618,6 +641,21 @@ void KonFanLaLiaoDialog::initialize_cb()
 void KonFanLaLiaoDialog::dialogShown_cb()
 {
     RunAnalysis(false);
+    try
+    {
+        if (riskHoleSelect_ != nullptr && !currentAnalysis_.riskFaces.empty())
+        {
+            riskHoleSelect_->Focus();
+            AppendAnalysisLog("RISK_FACE_SELECTION_FOCUS shown_done");
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        std::ostringstream log;
+        log << "RISK_FACE_SELECTION_FOCUS_FAIL nx_error=" << ex.ErrorCode()
+            << " message=" << (ex.Message() != nullptr ? ex.Message() : "");
+        AppendAnalysisLog(log.str());
+    }
 }
 
 int KonFanLaLiaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
@@ -653,13 +691,128 @@ int KonFanLaLiaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
         input->SetLogical("Enable", manual);
         delete input;
     }
-    if (block == bodySelect_ || block == safetyDistanceMode_ ||
-        block == riskDistance_ || block == reliefLengthMode_ ||
+    if (block == safetyDistanceMode_ || block == riskDistance_ ||
+        block == reliefLengthMode_ ||
         block == reliefLength_ || block == slotWidth_)
     {
         RunAnalysis(false);
     }
+    else if (block == riskHoleSelect_)
+    {
+        NXOpen::BlockStyler::SelectObject* selection =
+            dynamic_cast<NXOpen::BlockStyler::SelectObject*>(riskHoleSelect_);
+        if (selection == nullptr)
+        {
+            throw std::runtime_error("风险孔选择控件类型错误。");
+        }
+
+        // 控件中预选的是每个通孔的一个代表面，但用户看到并可能点击的是
+        // 该孔的任意内环面。Shift 点击非代表面时，NX 会把它作为新面加入；
+        // 在这里把该操作转换为取消整个通孔。
+        const bool shiftPressed = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        {
+            std::ostringstream callbackLog;
+            callbackLog << "RISK_EXCLUSION_UPDATE shift="
+                        << (shiftPressed ? 1 : 0)
+                        << " excluded_faces="
+                        << selection->GetSelectedObjects().size();
+            AppendAnalysisLog(callbackLog.str());
+        }
+        {
+            const std::vector<NXOpen::TaggedObject*> rawObjects =
+                selection->GetSelectedObjects();
+            std::set<tag_t> rawFaceTags;
+            for (NXOpen::TaggedObject* object : rawObjects)
+            {
+                NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(object);
+                if (face != nullptr)
+                {
+                    rawFaceTags.insert(face->Tag());
+                }
+            }
+
+            std::vector<NXOpen::TaggedObject*> normalizedObjects;
+            for (const AnalysisResult::SlotCandidate& candidate :
+                 currentAnalysis_.slotCandidates)
+            {
+                std::size_t aliveCount = 0;
+                std::size_t selectedCount = 0;
+                for (NXOpen::Face* face : candidate.riskFaces)
+                {
+                    if (face != nullptr && IsAlive(face->Tag()))
+                    {
+                        ++aliveCount;
+                        if (rawFaceTags.count(face->Tag()) != 0)
+                        {
+                            ++selectedCount;
+                        }
+                    }
+                }
+                if (aliveCount > 0 && selectedCount == aliveCount)
+                {
+                    for (NXOpen::Face* face : candidate.riskFaces)
+                    {
+                        if (face != nullptr && IsAlive(face->Tag()))
+                        {
+                            normalizedObjects.push_back(face);
+                        }
+                    }
+                }
+            }
+
+            if (normalizedObjects.size() != rawObjects.size())
+            {
+                refreshing_ = true;
+                selection->SetSelectedObjects(normalizedObjects);
+                refreshing_ = false;
+            }
+            std::ostringstream log;
+            log << "RISK_SELECTION_SHIFT_CANCEL remaining="
+                << normalizedObjects.size();
+            AppendAnalysisLog(log.str());
+        }
+
+        const AnalysisResult selected = SelectedRiskHoles(currentAnalysis_);
+        RefreshDisplay(selected);
+        std::ostringstream message;
+        message << "检查实体：" << currentAnalysis_.bodyCount
+                << " 个；风险孔：" << selected.riskHoleCount << " 个";
+        SetStatus(message.str());
+    }
     return 0;
+}
+
+int KonFanLaLiaoDialog::filter_cb(
+    NXOpen::BlockStyler::UIBlock* block,
+    NXOpen::TaggedObject* selectedObject)
+{
+    if (block != riskHoleSelect_)
+    {
+        return UF_UI_SEL_ACCEPT;
+    }
+    NXOpen::Face* selectedFace = dynamic_cast<NXOpen::Face*>(selectedObject);
+    if (selectedFace == nullptr)
+    {
+        return UF_UI_SEL_REJECT;
+    }
+    for (const AnalysisResult::SlotCandidate& candidate :
+         currentAnalysis_.slotCandidates)
+    {
+        for (NXOpen::Face* face : candidate.riskFaces)
+        {
+            if (face != nullptr && face->Tag() == selectedFace->Tag())
+            {
+                AppendAnalysisLog(
+                    "RISK_EXCLUSION_FILTER accept face=" +
+                    std::to_string(selectedFace->Tag()));
+                return UF_UI_SEL_ACCEPT;
+            }
+        }
+    }
+    AppendAnalysisLog(
+        "RISK_EXCLUSION_FILTER reject face=" +
+        std::to_string(selectedFace->Tag()));
+    return UF_UI_SEL_REJECT;
 }
 
 int KonFanLaLiaoDialog::apply_cb()
@@ -669,7 +822,7 @@ int KonFanLaLiaoDialog::apply_cb()
         refreshing_ = true;
         try
         {
-            const AnalysisResult result = Analyze();
+            const AnalysisResult result = SelectedRiskHoles(currentAnalysis_);
             RefreshDisplay(result);
             const int created = CreateReliefSlots(result);
             slotsCreated_ = created > 0;
@@ -821,26 +974,7 @@ std::vector<NXOpen::Body*> KonFanLaLiaoDialog::TargetBodies() const
             return false;
         }
     };
-    NXOpen::BlockStyler::PropertyList* properties = bodySelect_->GetProperties();
-    const std::vector<NXOpen::TaggedObject*> selected =
-        properties->GetTaggedObjectVector("SelectedObjects");
-    delete properties;
-
     std::set<tag_t> seen;
-    for (NXOpen::TaggedObject* object : selected)
-    {
-        NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(object);
-        if (isDisplayedSheetmetalBody(body) &&
-            seen.insert(body->Tag()).second)
-        {
-            result.push_back(body);
-        }
-    }
-    if (!result.empty())
-    {
-        return result;
-    }
-
     if (workPart == nullptr || workPart->Bodies() == nullptr)
     {
         return result;
@@ -1239,10 +1373,90 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
             UF_MODL_delete_loop_list(&loops);
         }
 
-        result.holeCount += static_cast<int>(holes.size());
+        auto isThroughHole = [&](const HoleRecord& record)
+        {
+            if (record.carrierFaces.size() < 2 || bodyThickness <= 0.0)
+            {
+                return false;
+            }
+
+            struct CarrierPlane
+            {
+                NXOpen::Point3d point;
+                NXOpen::Vector3d normal;
+            };
+            std::vector<CarrierPlane> carrierPlanes;
+            for (tag_t carrierTag : record.carrierFaces)
+            {
+                int faceType = 0;
+                double pointData[3] = {};
+                double normalData[3] = {};
+                double box[6] = {};
+                double radius = 0.0;
+                double radiusData = 0.0;
+                int normalDirection = 0;
+                if (UF_MODL_ask_face_data(
+                        carrierTag, &faceType, pointData, normalData, box,
+                        &radius, &radiusData, &normalDirection) != 0 ||
+                    faceType != UF_MODL_PLANAR_FACE)
+                {
+                    continue;
+                }
+                CarrierPlane plane;
+                plane.point = NXOpen::Point3d(
+                    pointData[0], pointData[1], pointData[2]);
+                plane.normal = Normalize(NXOpen::Vector3d(
+                    normalData[0], normalData[1], normalData[2]));
+                if (Magnitude(plane.normal) > 1.0e-9)
+                {
+                    carrierPlanes.push_back(plane);
+                }
+            }
+
+            const double thicknessTolerance =
+                (std::max)(1.0e-3, bodyThickness * 0.05);
+            for (std::size_t first = 0;
+                 first < carrierPlanes.size(); ++first)
+            {
+                for (std::size_t second = first + 1;
+                     second < carrierPlanes.size(); ++second)
+                {
+                    if (std::fabs(Dot(
+                            carrierPlanes[first].normal,
+                            carrierPlanes[second].normal)) < 0.999)
+                    {
+                        continue;
+                    }
+                    const double planeSpacing = std::fabs(Dot(
+                        Subtract(carrierPlanes[second].point,
+                                 carrierPlanes[first].point),
+                        carrierPlanes[first].normal));
+                    if (std::fabs(planeSpacing - bodyThickness) <=
+                        thicknessTolerance)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+
         for (auto& item : holes)
         {
             HoleRecord& record = item.second;
+            const bool throughHole = isThroughHole(record);
+            AppendAnalysisLog(
+                "THROUGH_HOLE_CHECK body=" +
+                std::to_string(body->Tag()) + " hole=" + item.first +
+                " carrier_faces=" +
+                std::to_string(record.carrierFaces.size()) +
+                " thickness=" + std::to_string(bodyThickness) +
+                " decision=" + (throughHole ? "KEEP" : "EXCLUDE"));
+            if (!throughHole)
+            {
+                continue;
+            }
+            ++result.holeCount;
 
             // Some slot profiles return only the straight wall faces from
             // the planar inner loop. Complete the closed wall chain through
@@ -1459,6 +1673,19 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
                                   0.5 * (loopMin[2] + loopMax[2]))
                             : candidate.startPoint;
                         candidate.carrierNormal = normal;
+                        for (const auto& riskFaceItem : record.innerFaces)
+                        {
+                            NXOpen::Face* riskFace = riskFaceItem.second.face;
+                            if (riskFace != nullptr &&
+                                IsAlive(riskFace->Tag()))
+                            {
+                                candidate.riskFaces.push_back(riskFace);
+                                if (candidate.representativeFace == nullptr)
+                                {
+                                    candidate.representativeFace = riskFace;
+                                }
+                            }
+                        }
 
                         double bendStartData[3] = {};
                         double bendEndData[3] = {};
@@ -3062,13 +3289,6 @@ bool KonFanLaLiaoDialog::CreateThroughSlot(
 
 void KonFanLaLiaoDialog::RestoreDisplay()
 {
-    for (tag_t faceTag : highlightedFaces_)
-    {
-        if (IsAlive(faceTag))
-        {
-            UF_DISP_set_highlight(faceTag, 0);
-        }
-    }
     highlightedFaces_.clear();
 
     for (const std::pair<tag_t, int>& state : originalColors_)
@@ -3155,7 +3375,6 @@ void KonFanLaLiaoDialog::RefreshDisplay(const AnalysisResult& result)
                 originalColors_.emplace_back(
                     face->Tag(), displayProperties.color);
             }
-            highlightedFaces_.push_back(face->Tag());
             riskObjects.push_back(face);
         }
     }
@@ -3169,20 +3388,108 @@ void KonFanLaLiaoDialog::RefreshDisplay(const AnalysisResult& result)
         modification->SetNewTranslucency(0);
         modification->Apply(riskObjects);
         delete modification;
-        for (NXOpen::DisplayableObject* object : riskObjects)
-        {
-            object->Highlight();
-        }
         session_->DisplayManager()->MakeUpToDate();
     }
+}
+
+KonFanLaLiaoDialog::AnalysisResult
+KonFanLaLiaoDialog::SelectedRiskHoles(const AnalysisResult& result) const
+{
+    AnalysisResult selected = result;
+    selected.riskFaces.clear();
+    selected.slotCandidates.clear();
+    selected.riskHoleCount = 0;
+
+    NXOpen::BlockStyler::SelectObject* selection =
+        dynamic_cast<NXOpen::BlockStyler::SelectObject*>(riskHoleSelect_);
+    if (selection == nullptr)
+    {
+        throw std::runtime_error("风险孔选择控件类型错误。");
+    }
+    const std::vector<NXOpen::TaggedObject*> selectedObjects =
+        selection->GetSelectedObjects();
+    std::set<tag_t> selectedFaceTags;
+    for (NXOpen::TaggedObject* object : selectedObjects)
+    {
+        NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(object);
+        if (face != nullptr)
+        {
+            selectedFaceTags.insert(face->Tag());
+        }
+    }
+
+    std::set<tag_t> riskFaceTags;
+    for (const AnalysisResult::SlotCandidate& candidate :
+         result.slotCandidates)
+    {
+        bool selectedHole = false;
+        for (NXOpen::Face* face : candidate.riskFaces)
+        {
+            if (face != nullptr && selectedFaceTags.count(face->Tag()) != 0)
+            {
+                selectedHole = true;
+                break;
+            }
+        }
+        if (!selectedHole)
+        {
+            continue;
+        }
+        selected.slotCandidates.push_back(candidate);
+        ++selected.riskHoleCount;
+        for (NXOpen::Face* face : candidate.riskFaces)
+        {
+            if (face != nullptr && riskFaceTags.insert(face->Tag()).second)
+            {
+                selected.riskFaces.push_back(face);
+            }
+        }
+    }
+    return selected;
+}
+
+void KonFanLaLiaoDialog::PopulateRiskSelection(
+    const AnalysisResult& result)
+{
+    std::vector<NXOpen::TaggedObject*> objects;
+    for (const AnalysisResult::SlotCandidate& candidate :
+         result.slotCandidates)
+    {
+        for (NXOpen::Face* face : candidate.riskFaces)
+        {
+            if (face != nullptr && IsAlive(face->Tag()))
+            {
+                objects.push_back(face);
+            }
+        }
+    }
+    std::ostringstream beginLog;
+    beginLog << "RISK_FACE_SELECTION_POPULATE selected_faces="
+             << objects.size() << " risk_holes=" << result.slotCandidates.size();
+    AppendAnalysisLog(beginLog.str());
+
+    NXOpen::BlockStyler::SelectObject* selection =
+        dynamic_cast<NXOpen::BlockStyler::SelectObject*>(riskHoleSelect_);
+    if (selection == nullptr)
+    {
+        throw std::runtime_error("风险孔选择控件类型错误。");
+    }
+    selection->SetSelectedObjects(objects);
+    AppendAnalysisLog("RISK_FACE_SELECTION_POPULATE done");
 }
 
 void KonFanLaLiaoDialog::RunAnalysis(bool showErrors)
 {
     refreshing_ = true;
+    const char* stage = "ANALYZE";
     try
     {
-        const AnalysisResult result = Analyze();
+        currentAnalysis_ = Analyze();
+        stage = "POPULATE_RISK_SELECTION";
+        PopulateRiskSelection(currentAnalysis_);
+        stage = "FILTER_SELECTED_RISK_HOLES";
+        const AnalysisResult result = SelectedRiskHoles(currentAnalysis_);
+        stage = "REFRESH_DISPLAY";
         RefreshDisplay(result);
         std::ostringstream message;
         message << "检查实体：" << result.bodyCount
@@ -3191,6 +3498,11 @@ void KonFanLaLiaoDialog::RunAnalysis(bool showErrors)
     }
     catch (const NXOpen::NXException& ex)
     {
+        std::ostringstream log;
+        log << "RUN_FAIL stage=" << stage
+            << " nx_error=" << ex.ErrorCode()
+            << " message=" << (ex.Message() != nullptr ? ex.Message() : "");
+        AppendAnalysisLog(log.str());
         RestoreDisplay();
         SetStatus("检测失败，请检查所选实体和参数。");
         if (showErrors)
@@ -3200,6 +3512,9 @@ void KonFanLaLiaoDialog::RunAnalysis(bool showErrors)
     }
     catch (const std::exception& ex)
     {
+        std::ostringstream log;
+        log << "RUN_FAIL stage=" << stage << " message=" << ex.what();
+        AppendAnalysisLog(log.str());
         RestoreDisplay();
         SetStatus(ex.what());
         if (showErrors)
