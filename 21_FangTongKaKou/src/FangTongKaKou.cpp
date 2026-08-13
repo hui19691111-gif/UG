@@ -15,6 +15,7 @@
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/Face.hxx>
 #include <NXOpen/ListingWindow.hxx>
+#include <NXOpen/Measurement.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXString.hxx>
@@ -1045,6 +1046,50 @@ bool AskPlanarFaceCenterAndEdgeNormal(tag_t faceTag, double center[3], double no
         AskFaceNormalFromDirectionCollection(faceTag, normal);
 }
 
+bool AskFaceArea(tag_t faceTag, double& area)
+{
+    area = 0.0;
+    NXOpen::Face* face =
+        dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(faceTag));
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    if (face == NULL || session == NULL || session->Measurement() == NULL)
+    {
+        return false;
+    }
+
+    try
+    {
+        std::vector<NXOpen::ISurface*> faces;
+        faces.push_back(face);
+        double perimeter = 0.0;
+        double radiusDiameter = 0.0;
+        NXOpen::Point3d centerOfGravity;
+        double minRadiusOfCurvature = 0.0;
+        double areaErrorEstimate = 0.0;
+        NXOpen::Point3d anchorPoint;
+        bool isApproximate = false;
+        session->Measurement()->GetFaceProperties(
+            faces,
+            0.999,
+            NXOpen::Measurement::AlternateFaceRadius,
+            true,
+            &area,
+            &perimeter,
+            &radiusDiameter,
+            &centerOfGravity,
+            &minRadiusOfCurvature,
+            &areaErrorEstimate,
+            &anchorPoint,
+            &isApproximate);
+    }
+    catch (...)
+    {
+        area = 0.0;
+        return false;
+    }
+    return area > 1.0e-6;
+}
+
 void AddScaledVector(const double origin[3], const double direction[3], double scale, double result[3])
 {
     result[0] = origin[0] + direction[0] * scale;
@@ -1152,6 +1197,8 @@ bool AskPlanarFacePlacement(NXOpen::Face* face, const double pickPoint[3], FaceP
 
     double bestOppositeDistance = DBL_MAX;
     double bestOppositeSignedDistance = 0.0;
+    double referenceFaceArea = 0.0;
+    const bool hasReferenceFaceArea = AskFaceArea(placement.faceTag, referenceFaceArea);
     uf_list_p_t orientationFaceList = NULL;
     ThrowUfError(UF_MODL_ask_body_faces(placement.bodyTag, &orientationFaceList), "UF_MODL_ask_body_faces");
     std::vector<tag_t> orientationFaces = UfListToTags(orientationFaceList);
@@ -1169,7 +1216,15 @@ bool AskPlanarFacePlacement(NXOpen::Face* face, const double pickPoint[3], FaceP
         {
             continue;
         }
-        if (std::fabs(Dot3(otherNormal, placement.normal)) < 0.95)
+        const double normalDot = Dot3(otherNormal, placement.normal);
+        if (normalDot > -0.98)
+        {
+            continue;
+        }
+        double otherFaceArea = 0.0;
+        if (!hasReferenceFaceArea ||
+            !AskFaceArea(orientationFaces[index], otherFaceArea) ||
+            otherFaceArea <= referenceFaceArea * 0.60)
         {
             continue;
         }
@@ -1333,44 +1388,27 @@ bool AskPlanarFacePlacement(NXOpen::Face* face, const double pickPoint[3], FaceP
     ThrowUfError(UF_MODL_ask_bounding_box(placement.bodyTag, bodyBox), "UF_MODL_ask_bounding_box");
 
     placement.wallThickness = bestOppositeDistance;
-    uf_list_p_t faceList = NULL;
-    ThrowUfError(UF_MODL_ask_body_faces(placement.bodyTag, &faceList), "UF_MODL_ask_body_faces");
-    std::vector<tag_t> bodyFaces = UfListToTags(faceList);
-    UF_MODL_delete_list(&faceList);
-    for (std::size_t index = 0; index < bodyFaces.size(); ++index)
-    {
-        if (bodyFaces[index] == placement.faceTag)
-        {
-            continue;
-        }
-
-        double otherCenter[3] = {0.0, 0.0, 0.0};
-        double otherNormal[3] = {0.0, 0.0, 0.0};
-        if (!AskPlanarFaceCenterAndEdgeNormal(bodyFaces[index], otherCenter, otherNormal) ||
-            std::fabs(Dot3(otherNormal, placement.normal)) < 0.95)
-        {
-            continue;
-        }
-
-        double delta[3] =
-        {
-            otherCenter[0] - placement.center[0],
-            otherCenter[1] - placement.center[1],
-            otherCenter[2] - placement.center[2]
-        };
-        const double distance = std::fabs(Dot3(delta, placement.normal));
-        if (distance > 0.05 && distance < placement.wallThickness)
-        {
-            placement.wallThickness = distance;
-        }
-    }
 
     if (placement.wallThickness == DBL_MAX)
     {
-        const double dx = bodyBox[3] - bodyBox[0];
-        const double dy = bodyBox[4] - bodyBox[1];
-        const double dz = bodyBox[5] - bodyBox[2];
-        placement.wallThickness = std::max(0.5, std::min(dx, std::min(dy, dz)) * 0.05);
+        std::ostringstream log;
+        log << "TubeWallThicknessRejected"
+            << " body=" << placement.bodyTag
+            << " referenceFace=" << placement.faceTag
+            << " referenceArea=" << FormatDouble(referenceFaceArea)
+            << " reason=no opposite-normal parallel face above 60 percent area";
+        AppendDebugLog(log.str());
+        return false;
+    }
+    {
+        std::ostringstream log;
+        log << "TubeWallThickness"
+            << " body=" << placement.bodyTag
+            << " referenceFace=" << placement.faceTag
+            << " referenceArea=" << FormatDouble(referenceFaceArea)
+            << " thickness=" << FormatDouble(placement.wallThickness)
+            << " rule=opposite normal, area above 60 percent, perpendicular distance";
+        AppendDebugLog(log.str());
     }
     placement.toolDepth = placement.wallThickness + 1.0;
     return true;
@@ -1893,7 +1931,7 @@ void CreateFemalePortAtPlacement(
     double width,
     double height,
     double femaleExtrudeDepth,
-    double clearance,
+    double sideClearance,
     std::vector<tag_t>* createdFaces)
 {
     if (targetBodyTag == NULL_TAG)
@@ -1901,8 +1939,8 @@ void CreateFemalePortAtPlacement(
         throw std::runtime_error("Female slot target body was not found.");
     }
 
-    const double clearanceWidth = width + 2.0 * clearance;
-    const double clearanceLength = height + 2.0 * clearance;
+    const double clearanceWidth = width + 2.0 * sideClearance;
+    const double clearanceLength = height;
     const double faceWidth = placement.widthMax - placement.widthMin;
     if (clearanceWidth <= 0.0 || clearanceLength <= 0.0 || clearanceWidth >= faceWidth + placement.wallThickness)
     {
@@ -1912,11 +1950,11 @@ void CreateFemalePortAtPlacement(
     const double widthCenter = (placement.widthMin + placement.widthMax) * 0.5;
     const double widthStart = widthCenter - clearanceWidth * 0.5;
     const double widthEnd = widthCenter + clearanceWidth * 0.5;
-    const double lengthStart = placement.endCoord + placement.inwardSign * clearance;
-    const double lengthEnd = placement.endCoord - placement.inwardSign * (height + clearance);
+    const double lengthStart = placement.endCoord;
+    const double lengthEnd = placement.endCoord - placement.inwardSign * height;
     const double tabThickness = femaleExtrudeDepth;
     const double thicknessStart = -femaleExtrudeDepth;
-    const double thicknessEnd = clearance;
+    const double thicknessEnd = 0.0;
 
     {
         std::ostringstream log;
@@ -1924,7 +1962,7 @@ void CreateFemalePortAtPlacement(
             << " W=" << FormatDouble(width)
             << " H=" << FormatDouble(height)
             << " femaleExtrudeDepth=" << FormatDouble(femaleExtrudeDepth)
-            << " C=" << FormatDouble(clearance)
+            << " sideClearance=" << FormatDouble(sideClearance)
             << " sourceBody=" << placement.bodyTag
             << " targetBody=" << targetBodyTag
             << " clearanceWidth=" << FormatDouble(clearanceWidth)
@@ -1968,7 +2006,7 @@ void CreateTaperFemalePortAtPlacement(
     double width,
     double height,
     double femaleExtrudeDepth,
-    double clearance,
+    double sideClearance,
     double angle,
     std::vector<tag_t>* createdFaces)
 {
@@ -1978,8 +2016,10 @@ void CreateTaperFemalePortAtPlacement(
     }
 
     const double maleTipWidth = ComputeTaperTipWidth(width, height, angle);
+    const double clearanceRootWidth = width + 2.0 * sideClearance;
+    const double clearanceTipWidth = maleTipWidth + 2.0 * sideClearance;
     const double faceWidth = placement.widthMax - placement.widthMin;
-    if (maleTipWidth <= 0.1)
+    if (maleTipWidth <= 0.1 || clearanceRootWidth <= 0.0 || clearanceTipWidth <= 0.1)
     {
         throw std::runtime_error("Taper female slot dimensions are invalid for the selected face.");
     }
@@ -1989,27 +2029,21 @@ void CreateTaperFemalePortAtPlacement(
     const double lengthEnd = placement.endCoord - placement.inwardSign * height;
     const double tabThickness = femaleExtrudeDepth;
     const double thicknessStart = -femaleExtrudeDepth;
-    const double thicknessEnd = clearance;
-    std::vector<FaceProfilePoint> maleProfile;
+    const double thicknessEnd = 0.0;
+    std::vector<FaceProfilePoint> clearanceProfile;
     FaceProfilePoint point = {};
     point.length = lengthStart;
-    point.width = widthCenter - width * 0.5;
-    maleProfile.push_back(point);
+    point.width = widthCenter - clearanceRootWidth * 0.5;
+    clearanceProfile.push_back(point);
     point.length = lengthStart;
-    point.width = widthCenter + width * 0.5;
-    maleProfile.push_back(point);
+    point.width = widthCenter + clearanceRootWidth * 0.5;
+    clearanceProfile.push_back(point);
     point.length = lengthEnd;
-    point.width = widthCenter + maleTipWidth * 0.5;
-    maleProfile.push_back(point);
+    point.width = widthCenter + clearanceTipWidth * 0.5;
+    clearanceProfile.push_back(point);
     point.length = lengthEnd;
-    point.width = widthCenter - maleTipWidth * 0.5;
-    maleProfile.push_back(point);
-
-    std::vector<FaceProfilePoint> clearanceProfile;
-    if (!OffsetFaceProfile(maleProfile, clearance, clearanceProfile))
-    {
-        throw std::runtime_error("Failed to offset taper female profile.");
-    }
+    point.width = widthCenter - clearanceTipWidth * 0.5;
+    clearanceProfile.push_back(point);
 
     double profileWidthMin = DBL_MAX;
     double profileWidthMax = -DBL_MAX;
@@ -2035,14 +2069,14 @@ void CreateTaperFemalePortAtPlacement(
             << " W=" << FormatDouble(width)
             << " H=" << FormatDouble(height)
             << " femaleExtrudeDepth=" << FormatDouble(femaleExtrudeDepth)
-            << " C=" << FormatDouble(clearance)
+            << " sideClearance=" << FormatDouble(sideClearance)
             << " angle=" << FormatDouble(angle)
             << " sourceBody=" << placement.bodyTag
             << " targetBody=" << targetBodyTag
             << " maleTipWidth=" << FormatDouble(maleTipWidth)
             << " clearanceWidth=" << FormatDouble(clearanceWidth)
             << " clearanceLength=" << FormatDouble(clearanceLength)
-            << " offsetProfile=1"
+            << " directionalClearanceProfile=1"
             << " wallThickness=" << FormatDouble(placement.wallThickness)
             << " tabThickness=" << FormatDouble(tabThickness)
             << " thicknessStart=" << FormatDouble(thicknessStart)
@@ -3492,6 +3526,42 @@ SquareTubeCandidate AnalyzeBodyCached(
     return candidate;
 }
 
+bool IsAcceptedTubeBody(
+    tag_t bodyTag,
+    std::map<tag_t, SquareTubeCandidate>* candidateCache,
+    SquareTubeCandidate* analyzedCandidate = NULL)
+{
+    SquareTubeCandidate candidate = {};
+    NXOpen::Body* body =
+        dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(bodyTag));
+    if (body == NULL)
+    {
+        candidate.reason = "null NXOpen body";
+        if (analyzedCandidate != NULL)
+        {
+            *analyzedCandidate = candidate;
+        }
+        return false;
+    }
+
+    try
+    {
+        candidate = AnalyzeBodyCached(body, candidateCache);
+    }
+    catch (...)
+    {
+        candidate.body = body;
+        candidate.accepted = false;
+        candidate.reason = "AnalyzeBody threw";
+    }
+
+    if (analyzedCandidate != NULL)
+    {
+        *analyzedCandidate = candidate;
+    }
+    return candidate.accepted;
+}
+
 std::vector<tag_t> AskSolidBodiesInDisplayPart()
 {
     std::vector<tag_t> bodies;
@@ -3786,46 +3856,46 @@ std::vector<tag_t> CollectTouchCandidateBodyTags(
 {
     std::vector<tag_t> candidateBodyTags;
     std::vector<tag_t> bodyTags = AskSolidBodiesInDisplayPart();
+    int excludedNonTubeCount = 0;
     int excludedPerpendicularTubeCount = 0;
     for (std::size_t bodyIndex = 0; bodyIndex < bodyTags.size(); ++bodyIndex)
     {
         bool excludeBody = false;
-        NXOpen::Body* body =
-            dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(bodyTags[bodyIndex]));
-        if (body != NULL)
+        SquareTubeCandidate candidate = {};
+        if (!IsAcceptedTubeBody(bodyTags[bodyIndex], candidateCache, &candidate))
         {
-            try
+            ++excludedNonTubeCount;
+            std::ostringstream detailLog;
+            detailLog << "TouchCandidateBodyExcluded"
+                      << " body=" << bodyTags[bodyIndex]
+                      << " reason=not accepted tube"
+                      << " analyzeReason=" << candidate.reason
+                      << " dims(L/W/H)=" << FormatDouble(candidate.length)
+                      << "/" << FormatDouble(candidate.width)
+                      << "/" << FormatDouble(candidate.height);
+            AppendDebugLog(detailLog.str());
+            continue;
+        }
+
+        double lengthAxis[3] = {0.0, 0.0, 0.0};
+        if (excludeLengthAxisAlignedWithFaceNormal &&
+            FindLengthAxisFromEdges(bodyTags[bodyIndex], candidate.length, lengthAxis))
+        {
+            const double lengthNormalDot = std::fabs(Dot3(lengthAxis, referencePlacement.normal));
+            if (lengthNormalDot > 0.85)
             {
-                SquareTubeCandidate candidate = AnalyzeBodyCached(body, candidateCache);
-                const bool hasTubeLikeDimensions =
-                    candidate.height > 1.0e-6 &&
-                    candidate.width > 1.0e-6 &&
-                    candidate.length > 1.0e-6;
-                double lengthAxis[3] = {0.0, 0.0, 0.0};
-                if (excludeLengthAxisAlignedWithFaceNormal &&
-                    hasTubeLikeDimensions &&
-                    FindLengthAxisFromEdges(bodyTags[bodyIndex], candidate.length, lengthAxis))
-                {
-                    const double lengthNormalDot = std::fabs(Dot3(lengthAxis, referencePlacement.normal));
-                    if (lengthNormalDot > 0.85)
-                    {
-                        excludeBody = true;
-                        ++excludedPerpendicularTubeCount;
-                        std::ostringstream detailLog;
-                        detailLog << "TouchCandidateBodyExcluded"
-                                  << " body=" << bodyTags[bodyIndex]
-                                  << " reason=length axis aligned with selected face normal"
-                                  << " dims(L/W/H)=" << FormatDouble(candidate.length)
-                                  << "/" << FormatDouble(candidate.width)
-                                  << "/" << FormatDouble(candidate.height)
-                                  << " lengthAxis=" << FormatVector3(lengthAxis)
-                                  << " lengthNormalDot=" << FormatDouble(lengthNormalDot);
-                        AppendDebugLog(detailLog.str());
-                    }
-                }
-            }
-            catch (...)
-            {
+                excludeBody = true;
+                ++excludedPerpendicularTubeCount;
+                std::ostringstream detailLog;
+                detailLog << "TouchCandidateBodyExcluded"
+                          << " body=" << bodyTags[bodyIndex]
+                          << " reason=length axis aligned with selected face normal"
+                          << " dims(L/W/H)=" << FormatDouble(candidate.length)
+                          << "/" << FormatDouble(candidate.width)
+                          << "/" << FormatDouble(candidate.height)
+                          << " lengthAxis=" << FormatVector3(lengthAxis)
+                          << " lengthNormalDot=" << FormatDouble(lengthNormalDot);
+                AppendDebugLog(detailLog.str());
             }
         }
 
@@ -3838,6 +3908,7 @@ std::vector<tag_t> CollectTouchCandidateBodyTags(
     std::ostringstream log;
     log << "TouchCandidateBodies count=" << candidateBodyTags.size()
         << " sourceBodies=" << bodyTags.size()
+        << " excludedNonTubes=" << excludedNonTubeCount
         << " excludedPerpendicularTubes=" << excludedPerpendicularTubeCount;
     AppendDebugLog(log.str());
     return candidateBodyTags;
@@ -4437,7 +4508,7 @@ public:
           widthValueBlock(NULL),
           heightValueBlock(NULL),
           femaleDepthValueBlock(NULL),
-          clearanceValueBlock(NULL),
+          sideClearanceValueBlock(NULL),
           angleValueBlock(NULL),
           selectionColorToggle(NULL),
           selectionColorPicker(NULL),
@@ -4488,7 +4559,7 @@ private:
     NXOpen::BlockStyler::DoubleBlock* widthValueBlock;
     NXOpen::BlockStyler::DoubleBlock* heightValueBlock;
     NXOpen::BlockStyler::DoubleBlock* femaleDepthValueBlock;
-    NXOpen::BlockStyler::DoubleBlock* clearanceValueBlock;
+    NXOpen::BlockStyler::DoubleBlock* sideClearanceValueBlock;
     NXOpen::BlockStyler::DoubleBlock* angleValueBlock;
     NXOpen::BlockStyler::Toggle* selectionColorToggle;
     NXOpen::BlockStyler::ObjectColorPicker* selectionColorPicker;
@@ -4906,7 +4977,12 @@ private:
         SetDoubleValue(
             femaleDepthValueBlock,
             ReadStateDouble(values, "femaleDepth", femaleDepthValueBlock != NULL ? femaleDepthValueBlock->Value() : 1.0));
-        SetDoubleValue(clearanceValueBlock, ReadStateDouble(values, "clearance", clearanceValueBlock != NULL ? clearanceValueBlock->Value() : 0.2));
+        SetDoubleValue(
+            sideClearanceValueBlock,
+            ReadStateDouble(
+                values,
+                "sideClearance",
+                sideClearanceValueBlock != NULL ? sideClearanceValueBlock->Value() : 0.2));
         SetDoubleValue(angleValueBlock, ReadStateDouble(values, "angle", angleValueBlock != NULL ? angleValueBlock->Value() : 10.0));
         SetSelectionColorValue(ReadStateInt(values, "selectionColor", GetSelectionColorValue()));
 
@@ -4933,13 +5009,13 @@ private:
     void SaveDialogState()
     {
         std::ostringstream output;
-        output << "version=1\n";
+        output << "version=3\n";
         output << "createMode=" << GetCreateModeValue() << "\n";
         output << "portType=" << GetPortTypeValue() << "\n";
         output << "width=" << FormatDouble(widthValueBlock != NULL ? widthValueBlock->Value() : 0.0) << "\n";
         output << "height=" << FormatDouble(heightValueBlock != NULL ? heightValueBlock->Value() : 0.0) << "\n";
         output << "femaleDepth=" << FormatDouble(femaleDepthValueBlock != NULL ? femaleDepthValueBlock->Value() : 0.0) << "\n";
-        output << "clearance=" << FormatDouble(clearanceValueBlock != NULL ? clearanceValueBlock->Value() : 0.0) << "\n";
+        output << "sideClearance=" << FormatDouble(sideClearanceValueBlock != NULL ? sideClearanceValueBlock->Value() : 0.0) << "\n";
         output << "angle=" << FormatDouble(angleValueBlock != NULL ? angleValueBlock->Value() : 0.0) << "\n";
         output << "autoRecognizeTubeR=" << (autoRecognizeTubeRToggle != NULL && autoRecognizeTubeRToggle->Value() ? 1 : 0) << "\n";
         output << "mistakeProof=" << (mistakeProofToggle != NULL && mistakeProofToggle->Value() ? 1 : 0) << "\n";
@@ -5181,8 +5257,8 @@ private:
             dialog->TopBlock()->FindBlock("heightValue"));
         femaleDepthValueBlock = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(
             dialog->TopBlock()->FindBlock("femaleDepthValue"));
-        clearanceValueBlock = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(
-            dialog->TopBlock()->FindBlock("clearanceValue"));
+        sideClearanceValueBlock = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(
+            dialog->TopBlock()->FindBlock("sideClearanceValue"));
         angleValueBlock = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(
             dialog->TopBlock()->FindBlock("angleValue"));
         selectionColorToggle = dynamic_cast<NXOpen::BlockStyler::Toggle*>(
@@ -5312,7 +5388,8 @@ private:
             const double height = heightValueBlock != NULL ? heightValueBlock->Value() : 0.0;
             const double femaleDepth =
                 femaleDepthValueBlock != NULL ? femaleDepthValueBlock->Value() : height;
-            const double clearance = clearanceValueBlock != NULL ? clearanceValueBlock->Value() : 0.0;
+            const double sideClearance =
+                sideClearanceValueBlock != NULL ? sideClearanceValueBlock->Value() : 0.0;
             const double angle = angleValueBlock != NULL ? angleValueBlock->Value() : 0.0;
             const bool autoRecognizeTubeR =
                 autoRecognizeTubeRToggle != NULL && autoRecognizeTubeRToggle->Value();
@@ -5322,12 +5399,12 @@ private:
             if (width <= 0.0 || (!autoRecognizeTubeR && height <= 0.0) ||
                 (autoRecognizeTubeR && height < 0.0) ||
                 (!autoRecognizeTubeR && femaleDepth <= 0.0) ||
-                (autoRecognizeTubeR && femaleDepth < 0.0) || clearance < 0.0)
+                (autoRecognizeTubeR && femaleDepth < 0.0) || sideClearance < 0.0)
             {
                 ui->NXMessageBox()->Show(
                     "FangTongKaKou",
                     NXOpen::NXMessageBox::DialogTypeInformation,
-                    "Please input valid W, H, female depth and C values.");
+                    "Please input valid W, H, female depth and side clearance values.");
                 return 1;
             }
             if (portType == 1 && (angle <= 0.0 || angle >= 89.0))
@@ -5358,6 +5435,21 @@ private:
                         return 1;
                     }
 
+                    SquareTubeCandidate maleCandidate = {};
+                    if (!IsAcceptedTubeBody(
+                            malePlacement.bodyTag,
+                            &tubeCandidateCache,
+                            &maleCandidate))
+                    {
+                        std::ostringstream log;
+                        log << "ManualMaleBodyExcluded"
+                            << " body=" << malePlacement.bodyTag
+                            << " reason=not accepted tube"
+                            << " analyzeReason=" << maleCandidate.reason;
+                        AppendDebugLog(log.str());
+                        continue;
+                    }
+
                     tag_t femaleBodyTag = NULL_TAG;
                     std::vector<tag_t> touchingCandidateBodyTags =
                         CollectTouchCandidateBodyTags(malePlacement, &tubeCandidateCache, false);
@@ -5381,6 +5473,25 @@ private:
                         "FangTongKaKou",
                         NXOpen::NXMessageBox::DialogTypeInformation,
                         "The selected face must be a planar face.");
+                    return 1;
+                }
+
+                SquareTubeCandidate selectedMaleCandidate = {};
+                if (!IsAcceptedTubeBody(
+                        malePlacement.bodyTag,
+                        &tubeCandidateCache,
+                        &selectedMaleCandidate))
+                {
+                    std::ostringstream log;
+                    log << "AutoMaleBodyExcluded"
+                        << " body=" << malePlacement.bodyTag
+                        << " reason=not accepted tube"
+                        << " analyzeReason=" << selectedMaleCandidate.reason;
+                    AppendDebugLog(log.str());
+                    ui->NXMessageBox()->Show(
+                        "FangTongKaKou",
+                        NXOpen::NXMessageBox::DialogTypeInformation,
+                        "The selected body is not recognized as a square or rectangular tube.");
                     return 1;
                 }
 
@@ -5509,7 +5620,7 @@ private:
                             resolvedWidths[index],
                             resolvedMaleHeights[index],
                             resolvedFemaleDepths[index],
-                            clearance,
+                            sideClearance,
                             angle,
                             &femaleCreatedFaces[index]);
                     }
@@ -5521,7 +5632,7 @@ private:
                             resolvedWidths[index],
                             resolvedMaleHeights[index],
                             resolvedFemaleDepths[index],
-                            clearance,
+                            sideClearance,
                             &femaleCreatedFaces[index]);
                     }
                     femaleSucceeded[index] = 1;
