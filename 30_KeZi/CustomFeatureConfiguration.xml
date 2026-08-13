@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CustomFeatureLib
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="CustomFeatureConfiguration_schema.xsd">
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::KeZiSingleLine"
+        FeatureName="&#x5355;&#x7EBF;&#x523B;&#x5B57;"
+        FeatureIcon="KeZi"
+        FeatureLibrary="KeZiCore"
+        FeatureUILibrary="KeZi"
+        IsWithoutBody="true"/>
+</CustomFeatureLib>

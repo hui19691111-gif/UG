@@ -1,11 +1,15 @@
 ﻿#include <NXOpen/BasePart.hxx>
 #include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
+#include <NXOpen/Arc.hxx>
 #include <NXOpen/Builder.hxx>
 #include <NXOpen/Callback.hxx>
 #include <NXOpen/ColorManager.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
+#include <NXOpen/Curve.hxx>
+#include <NXOpen/CurveCollection.hxx>
+#include <NXOpen/IBaseCurve.hxx>
 #include <NXOpen/DisplayManager.hxx>
 #include <NXOpen/DisplayModification.hxx>
 #include <NXOpen/DisplayableObject.hxx>
@@ -13,25 +17,62 @@
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/Face.hxx>
 #include <NXOpen/FaceDumbRule.hxx>
+#include <NXOpen/FontCollection.hxx>
 #include <NXOpen/Features_TextBuilder.hxx>
+#include <NXOpen/Features_ExtrudeBuilder.hxx>
+#include <NXOpen/Features_BooleanBuilder.hxx>
+#include <NXOpen/Features_ConstructionFeatureData.hxx>
+#include <NXOpen/Features_CustomAttribute.hxx>
+#include <NXOpen/Features_CustomAttributeCollection.hxx>
+#include <NXOpen/Features_CustomDoubleAttribute.hxx>
+#include <NXOpen/Features_CustomFeature.hxx>
+#include <NXOpen/Features_CustomFeatureBuilder.hxx>
+#include <NXOpen/Features_CustomFeatureClass.hxx>
+#include <NXOpen/Features_CustomFeatureClassManager.hxx>
+#include <NXOpen/Features_CustomFeatureData.hxx>
+#include <NXOpen/Features_CustomFeatureDataCollection.hxx>
+#include <NXOpen/Features_CustomFeaturePreUpdateEvent.hxx>
+#include <NXOpen/Features_CustomIntegerAttribute.hxx>
+#include <NXOpen/Features_CustomStringAttribute.hxx>
+#include <NXOpen/Features_CustomTagAttribute.hxx>
+#include <NXOpen/Features_EditWithRollbackManager.hxx>
+#include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_Text.hxx>
+#include <NXOpen/GeometricUtilities_BooleanOperation.hxx>
+#include <NXOpen/GeometricUtilities_Extend.hxx>
+#include <NXOpen/GeometricUtilities_FeatureOffset.hxx>
+#include <NXOpen/GeometricUtilities_FeatureOptions.hxx>
+#include <NXOpen/GeometricUtilities_Limits.hxx>
+#include <NXOpen/GeometricUtilities_MultiDraft.hxx>
+#include <NXOpen/GeometricUtilities_RectangularFrameBuilder.hxx>
+#include <NXOpen/GeometricUtilities_SimpleDraft.hxx>
+#include <NXOpen/GeometricUtilities_SmartVolumeProfileBuilder.hxx>
 #include <NXOpen/NXColor.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/ListingWindow.hxx>
 #include <NXOpen/Measurement.hxx>
+#include <NXOpen/Line.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObject.hxx>
 #include <NXOpen/NXObjectManager.hxx>
 #include <NXOpen/NXString.hxx>
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
+#include <NXOpen/Point.hxx>
+#include <NXOpen/PointCollection.hxx>
 #include <NXOpen/SmartObject.hxx>
 #include <NXOpen/ScCollector.hxx>
+#include <NXOpen/ScCollectorCollection.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
+#include <NXOpen/Section.hxx>
+#include <NXOpen/SectionCollection.hxx>
 #include <NXOpen/Selection.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/SelectionIntentRuleOptions.hxx>
 #include <NXOpen/Session.hxx>
 #include <NXOpen/TaggedObject.hxx>
+#include <NXOpen/CurveDumbRule.hxx>
+#include <NXOpen/BodyDumbRule.hxx>
 #include <NXOpen/Tooling_InsertTextBuilder.hxx>
 #include <NXOpen/Tooling_MoldwizardManager.hxx>
 #include <NXOpen/Tooling_ToolingManager.hxx>
@@ -70,9 +111,12 @@
 #include <uf_assem.h>
 #include <uf_eval.h>
 #include <uf_disp.h>
+#include <uf_drf.h>
 #include <uf_modl.h>
 #include <uf_modl_types.h>
 #include <uf_obj.h>
+#include <uf_error_bases.h>
+#include <uf_ugfont.h>
 #include <uf_object_types.h>
 #include <uf_part.h>
 #include <uf_ui_types.h>
@@ -86,6 +130,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <random>
 #include <sstream>
@@ -95,6 +140,7 @@
 
 #include "../../../common/ZhihuiEmbeddedDialog.hpp"
 #include "../../../protection/native/ZhihuiLicenseGuard.hpp"
+#include "KeZiCustomFeatureShared.hpp"
 #include "../resource.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -104,6 +150,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <commdlg.h>
+
+#pragma comment(lib, "Comdlg32.lib")
 
 #ifdef CreateDialog
 #undef CreateDialog
@@ -133,6 +182,74 @@ struct SameBodyPoint3
     double y;
     double z;
 };
+
+struct RenderedFontSegment
+{
+    Point3d start;
+    Point3d end;
+};
+
+struct RenderedFontArc
+{
+    Point3d center;
+    double radius;
+    double startAngle;
+    double endAngle;
+};
+
+struct NxFontRenderData
+{
+    std::vector<RenderedFontSegment> segments;
+    std::vector<RenderedFontArc> arcs;
+};
+
+UF_DRF_render_text_status_t FontBeginLine(void*) { return UF_DRF_RENDER_OK; }
+UF_DRF_render_text_status_t FontEndLine(void*) { return UF_DRF_RENDER_OK; }
+UF_DRF_render_text_status_t FontSetPosition(double inPoint[3], void*, double outPoint[3], logical* outStatus)
+{
+    std::copy(inPoint, inPoint + 3, outPoint);
+    *outStatus = false;
+    return UF_DRF_RENDER_OK;
+}
+UF_DRF_render_text_status_t FontDrawPosition(double inPoint[3], double lastPoint[3], logical, void* client,
+                                              double outPoint[3], logical* outStatus)
+{
+    auto* data = static_cast<NxFontRenderData*>(client);
+    data->segments.push_back({Point3d(lastPoint[0], lastPoint[1], lastPoint[2]),
+                              Point3d(inPoint[0], inPoint[1], inPoint[2])});
+    std::copy(inPoint, inPoint + 3, outPoint);
+    *outStatus = true;
+    return UF_DRF_RENDER_OK;
+}
+UF_DRF_render_text_status_t FontDrawArc(double center[3], double radius, double startAngle,
+                                         double endAngle, void* client)
+{
+    static_cast<NxFontRenderData*>(client)->arcs.push_back(
+        {Point3d(center[0], center[1], center[2]), radius, startAngle, endAngle});
+    return UF_DRF_RENDER_OK;
+}
+UF_DRF_render_text_status_t FontDrawChar(double[3], unsigned char, void*)
+{
+    return UF_DRF_RENDER_CANNOT_RENDER_CHAR;
+}
+UF_DRF_render_text_status_t FontDrawStandard(const char*, const double[3], int, double, double, double,
+                                               double, logical, logical, logical, logical, void*)
+{
+    return UF_DRF_RENDER_NOT_DRAWN;
+}
+UF_DRF_render_text_status_t FontDrawSymbol(char*, double[3], void*, void*)
+{
+    return UF_DRF_RENDER_CANNOT_RENDER_SYMBOL;
+}
+UF_DRF_render_text_status_t FontSetCfw(UF_DRF_cfw_p_t, void*) { return UF_DRF_RENDER_OK; }
+UF_DRF_render_text_status_t FontPushOrientation(double[9], void*) { return UF_DRF_RENDER_OK; }
+UF_DRF_render_text_status_t FontPopOrientation(void*) { return UF_DRF_RENDER_OK; }
+UF_DRF_render_text_status_t FontFillRegion(int, double*, double, double lastPoint[3], logical* drawn, void*)
+{
+    lastPoint[0] = lastPoint[1] = lastPoint[2] = 0.0;
+    *drawn = false;
+    return UF_DRF_RENDER_NOT_DRAWN;
+}
 
 struct SameBodyLengthBucket
 {
@@ -232,6 +349,7 @@ const char* kDefaultConfigText =
     "文本层=254\r\n"
     "凸起文本=0\r\n"
     "V形文本=0\r\n"
+    "V形刻字宽度=0.002\r\n"
     "编号设为部件名=0\r\n"
     "刻相同=0\r\n"
     "相同随机色=0\r\n"
@@ -242,6 +360,9 @@ const char* kDefaultConfigText =
     "短向居中=0\r\n"
     "X长边=0\r\n"
     "X短边=0\r\n";
+
+const char* kVShapeFontName = "Modern";
+const char* kVShapeNxCurveFontName = "blockmod1";
 
 struct KeZiConfig
 {
@@ -267,6 +388,7 @@ struct KeZiConfig
     int layer = 254;
     bool embossed = false;
     bool vShape = false;
+    double vShapeWidth = 0.002;
     bool renameComponentToText = false;
     bool engraveSameBodies = false;
     bool sameRandomColor = false;
@@ -560,24 +682,53 @@ void ShowError(const char* title, const std::string& message)
 
 void Log(Session* session, const std::string& message)
 {
-#ifdef KEZI_ENABLE_DEBUG_LISTING
+    static std::mutex logMutex;
     try
     {
-        if (session == nullptr || session->ListingWindow() == nullptr)
+        std::lock_guard<std::mutex> lock(logMutex);
+        SYSTEMTIME now = {};
+        GetLocalTime(&now);
+        std::ostringstream line;
+        line << std::setfill('0')
+             << '[' << std::setw(4) << now.wYear << '-'
+             << std::setw(2) << now.wMonth << '-'
+             << std::setw(2) << now.wDay << ' '
+             << std::setw(2) << now.wHour << ':'
+             << std::setw(2) << now.wMinute << ':'
+             << std::setw(2) << now.wSecond << '.'
+             << std::setw(3) << now.wMilliseconds << ']'
+             << " [T" << GetCurrentThreadId() << "] KeZi: " << message;
+        const std::string formatted = line.str();
+
+        wchar_t tempPath[MAX_PATH] = {};
+        if (GetTempPathW(MAX_PATH, tempPath) > 0)
         {
-            return;
+            std::ofstream file(std::filesystem::path(tempPath) / L"KeZi_debug.log", std::ios::app | std::ios::binary);
+            if (file)
+            {
+                file << formatted << "\r\n";
+                file.flush();
+            }
         }
-        ListingWindow* listing = session->ListingWindow();
-        listing->Open();
-        listing->WriteLine((std::string("KeZi: ") + message).c_str());
+        std::vector<char> syslogText(formatted.begin(), formatted.end());
+        syslogText.push_back('\n');
+        syslogText.push_back('\0');
+        UF_print_syslog(syslogText.data(), false);
+
+#ifdef KEZI_ENABLE_DEBUG_LISTING
+        if (session != nullptr && session->ListingWindow() != nullptr)
+        {
+            ListingWindow* listing = session->ListingWindow();
+            listing->Open();
+            listing->WriteLine(formatted.c_str());
+        }
+#else
+        (void)session;
+#endif
     }
     catch (...)
     {
     }
-#else
-    (void)session;
-    (void)message;
-#endif
 }
 
 std::filesystem::path PluginDirectory()
@@ -737,6 +888,7 @@ KeZiConfig LoadConfig()
     config.layer = ToInt(ValueOr(values, {"文本层", "layer"}, std::to_string(config.layer)), config.layer);
     config.embossed = ToBool(ValueOr(values, {"凸起文本", "embossed"}, config.embossed ? "1" : "0"), config.embossed);
     config.vShape = ToBool(ValueOr(values, {"V形文本", "vShape"}, config.vShape ? "1" : "0"), config.vShape);
+    config.vShapeWidth = ToDouble(ValueOr(values, {"V形刻字宽度", "vShapeWidth", "engravingWidth"}, FormatNumber(config.vShapeWidth)), config.vShapeWidth);
     config.renameComponentToText = ToBool(ValueOr(values, {"编号设为部件名", "renameComponentToText"}, config.renameComponentToText ? "1" : "0"), config.renameComponentToText);
     config.engraveSameBodies = ToBool(ValueOr(values, {"刻相同", "engraveSameBodies"}, config.engraveSameBodies ? "1" : "0"), config.engraveSameBodies);
     config.sameRandomColor = ToBool(ValueOr(values, {"相同随机色", "sameRandomColor"}, config.sameRandomColor ? "1" : "0"), config.sameRandomColor);
@@ -932,6 +1084,50 @@ std::wstring WideFromUtf8(const std::string& text)
     std::wstring wide(static_cast<std::size_t>(needed - 1), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wide.data(), needed);
     return wide;
+}
+
+std::string Utf8FromWide(const std::wstring& text)
+{
+    if (text.empty())
+    {
+        return std::string();
+    }
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (needed <= 1)
+    {
+        return std::string();
+    }
+    std::string utf8(static_cast<std::size_t>(needed - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, utf8.data(), needed, nullptr, nullptr);
+    return utf8;
+}
+
+bool AskSystemFontName(const std::string& initialFont, std::string* selectedFont)
+{
+    if (selectedFont == nullptr)
+    {
+        return false;
+    }
+
+    LOGFONTW logFont = {};
+    const std::wstring initial = WideFromUtf8(initialFont);
+    if (!initial.empty())
+    {
+        wcsncpy_s(logFont.lfFaceName, initial.c_str(), _TRUNCATE);
+    }
+
+    CHOOSEFONTW chooseFont = {};
+    chooseFont.lStructSize = sizeof(chooseFont);
+    chooseFont.hwndOwner = GetActiveWindow();
+    chooseFont.lpLogFont = &logFont;
+    chooseFont.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_NOVERTFONTS;
+    if (ChooseFontW(&chooseFont) == FALSE)
+    {
+        return false;
+    }
+
+    *selectedFont = Utf8FromWide(logFont.lfFaceName);
+    return !selectedFont->empty();
 }
 
 struct MenuDialogState
@@ -2237,11 +2433,24 @@ std::vector<Body*> FindMatchingVisibleBodies(Part* part, Body* referenceBody)
         return matches;
     }
 
+    const int referenceEdgeCount = static_cast<int>(referenceBody->GetEdges().size());
+    const int referenceFaceCount = static_cast<int>(referenceBody->GetFaces().size());
+    const SameBodyCoarseSignature referenceCoarse = BuildSameBodyCoarseSignature(referenceBody);
     bool referenceFingerprintReady = false;
     SameBodyFingerprint referenceFingerprint = {};
     for (Body* candidate : CollectVisibleBodies(part))
     {
         if (candidate == nullptr || candidate == referenceBody)
+        {
+            continue;
+        }
+        if (static_cast<int>(candidate->GetEdges().size()) != referenceEdgeCount ||
+            static_cast<int>(candidate->GetFaces().size()) != referenceFaceCount)
+        {
+            continue;
+        }
+        const SameBodyCoarseSignature candidateCoarse = BuildSameBodyCoarseSignature(candidate);
+        if (!SameBodyCoarseSignaturesMatch(referenceCoarse, candidateCoarse))
         {
             continue;
         }
@@ -2625,6 +2834,7 @@ struct TextSettings
     bool lockAspect = true;
     bool embossed = false;
     bool vShape = false;
+    double vShapeWidth = 0.002;
     bool renameComponentToText = false;
     bool engraveSameBodies = false;
     bool sameRandomColor = false;
@@ -3637,6 +3847,58 @@ std::string ExpandTextTemplate(const std::string& textTemplate,
 }
 }
 
+class KeZiDialog;
+KeZiDialog* gActiveKeZiDialog = nullptr;
+KeZiDialog* gDeferredKeZiDialog = nullptr;
+
+Features::CustomTagAttribute* CreateKeZiTagAttribute(
+    Features::CustomAttributeCollection* attributes,
+    const char* name,
+    TaggedObject* value,
+    const bool mandatory,
+    const bool targetBody)
+{
+    std::vector<Features::CustomAttribute::Property> properties;
+    if (mandatory) { properties.push_back(Features::CustomAttribute::PropertyMandatoryInput); }
+    if (targetBody) { properties.push_back(Features::CustomAttribute::PropertyIsReferencingTargetBody); }
+    Features::CustomTagAttribute* attribute = attributes->CreateCustomTagAttribute(name, properties);
+    attribute->SetValue(value);
+    return attribute;
+}
+
+Features::CustomDoubleAttribute* CreateKeZiDoubleAttribute(
+    Features::CustomAttributeCollection* attributes,
+    const char* name,
+    const double value)
+{
+    Features::CustomDoubleAttribute* attribute = attributes->CreateCustomDoubleAttribute(
+        name, std::vector<Features::CustomAttribute::Property>());
+    attribute->SetValue(value);
+    return attribute;
+}
+
+Features::CustomIntegerAttribute* CreateKeZiIntegerAttribute(
+    Features::CustomAttributeCollection* attributes,
+    const char* name,
+    const int value)
+{
+    Features::CustomIntegerAttribute* attribute = attributes->CreateCustomIntegerAttribute(
+        name, std::vector<Features::CustomAttribute::Property>());
+    attribute->SetValue(value);
+    return attribute;
+}
+
+Features::CustomStringAttribute* CreateKeZiStringAttribute(
+    Features::CustomAttributeCollection* attributes,
+    const char* name,
+    const std::string& value)
+{
+    Features::CustomStringAttribute* attribute = attributes->CreateCustomStringAttribute(
+        name, std::vector<Features::CustomAttribute::Property>());
+    attribute->SetValue(NXString(value.c_str(), NXString::UTF8));
+    return attribute;
+}
+
 class KeZiDialog
 {
 public:
@@ -3644,6 +3906,10 @@ public:
     {
         session_ = Session::GetSession();
         ui_ = UI::GetUI();
+        customFeatureManager_ = session_->CustomFeatureClassManager();
+        editedFeature_ = customFeatureManager_ == nullptr
+            ? nullptr
+            : customFeatureManager_->GetEditedCustomFeature();
         const std::string dlxPath =
             zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_KEZI_DLX);
         if (dlxPath.empty())
@@ -3658,26 +3924,153 @@ public:
         dialog_->AddUpdateHandler(make_callback(this, &KeZiDialog::UpdateCb));
         dialog_->AddInitializeHandler(make_callback(this, &KeZiDialog::InitializeCb));
         dialog_->AddDialogShownHandler(make_callback(this, &KeZiDialog::DialogShownCb));
+        gActiveKeZiDialog = this;
     }
 
     ~KeZiDialog()
     {
         Log(session_, "KeZiDialog析构开始");
         ClearPreviewBuilder();
+        if (editRollbackManager_ != nullptr)
+        {
+            try { FinishEditedFeatureRollback(true); } catch (...) {}
+        }
         Log(session_, "KeZiDialog析构: 跳过delete dialog，避免NX已释放后重复释放DialogCreator");
         dialog_ = nullptr;
+        if (gActiveKeZiDialog == this) { gActiveKeZiDialog = nullptr; }
         Log(session_, "KeZiDialog析构完成");
+    }
+
+    int BuildModernCustomFeatureConstruction(Features::CustomFeaturePreUpdateEvent* event)
+    {
+        if (event == nullptr) { return 1; }
+        const std::vector<Features::ConstructionFeatureData*> existing = event->GetConstructionFeatures();
+        Log(session_, std::string("单线刻字PreUpdate: existing=") +
+                          std::to_string(existing.size()) +
+                          ", pending=" + std::to_string(modernConstructionFeatureTags_.size()) +
+                          ", building=" + (buildingModernCustomFeature_ ? "1" : "0"));
+        if (modernConstructionFeatureTags_.empty() && !existing.empty())
+        {
+            event->SetConstructionFeatures(existing);
+            Log(session_, "单线刻字PreUpdate: 没有待替换特征，保留当前内部链");
+            return 0;
+        }
+        if (modernConstructionFeatureTags_.empty())
+        {
+            return 1;
+        }
+        std::vector<Features::ConstructionFeatureData*> construction;
+        for (tag_t featureTag : modernConstructionFeatureTags_)
+        {
+            if (featureTag == NULL_TAG || UF_OBJ_ask_status(featureTag) != UF_OBJ_ALIVE) { continue; }
+            Features::Feature* feature = dynamic_cast<Features::Feature*>(NXObjectManager::Get(featureTag));
+            if (feature == nullptr || feature->IsInternal()) { continue; }
+            Features::ConstructionFeatureData* item = event->CreateConstructionFeatureData(feature);
+            item->SetShowInGraphicView(true);
+            construction.push_back(item);
+        }
+        if (construction.empty()) { return 1; }
+        event->SetConstructionFeatures(construction);
+        Log(session_, std::string("单线刻字自定义特征已登记内部节点，数量=") +
+                          std::to_string(construction.size()) +
+                          ", 替换旧数量=" + std::to_string(existing.size()));
+        modernConstructionFeatureTags_.clear();
+        return 0;
     }
 
     int Show()
     {
         Log(session_, "对话框Launch开始");
-        const int result = static_cast<int>(dialog_->Launch());
+        const int result = static_cast<int>(dialog_->LaunchInDialogMode(
+            editedFeature_ != nullptr
+                ? BlockDialog::DialogModeEdit
+                : BlockDialog::DialogModeCreate));
         Log(session_, std::string("对话框Launch结束 result=") + std::to_string(result));
+        if (deferredEditedReplacement_)
+        {
+            if (gDeferredKeZiDialog != nullptr && gDeferredKeZiDialog != this)
+            {
+                throw std::runtime_error("Another deferred engraving edit is still pending.");
+            }
+            gDeferredKeZiDialog = this;
+            deferredTimerId_ = SetTimer(nullptr, 0, 50, &KeZiDialog::DeferredReplacementTimerProc);
+            if (deferredTimerId_ == 0)
+            {
+                gDeferredKeZiDialog = nullptr;
+                RestoreDisplayAfterDeferredReplacement();
+                throw std::runtime_error("Could not schedule the deferred engraving replacement.");
+            }
+            Log(session_, "编辑单线刻字: 已排队到NX命令返回后的主线程消息回调");
+        }
         return result;
     }
 
+    bool HasScheduledReplacement() const
+    {
+        return deferredTimerId_ != 0;
+    }
+
 private:
+    static void CALLBACK DeferredReplacementTimerProc(HWND, UINT, UINT_PTR timerId, DWORD)
+    {
+        KeZiDialog* dialog = gDeferredKeZiDialog;
+        if (timerId != 0) { KillTimer(nullptr, timerId); }
+        gDeferredKeZiDialog = nullptr;
+        if (dialog == nullptr) { return; }
+        dialog->deferredTimerId_ = 0;
+        const int initializeResult = UF_initialize();
+        try
+        {
+            Log(dialog->session_, "编辑单线刻字: NX命令已返回，开始主线程延时替换");
+            dialog->deferredEditedReplacement_ = false;
+            dialog->executingDeferredEditedReplacement_ = true;
+            const int result = dialog->ApplyCb();
+            dialog->executingDeferredEditedReplacement_ = false;
+            Log(dialog->session_, result == 0
+                                      ? "编辑单线刻字: 主线程延时替换完成"
+                                      : "编辑单线刻字: 主线程延时替换失败");
+        }
+        catch (...)
+        {
+            dialog->executingDeferredEditedReplacement_ = false;
+            Log(dialog->session_, "编辑单线刻字: 主线程延时替换未知异常");
+        }
+        dialog->RestoreDisplayAfterDeferredReplacement();
+        if (initializeResult == 0) { UF_terminate(); }
+        delete dialog;
+    }
+
+    void SuppressDisplayForDeferredReplacement()
+    {
+        if (deferredDisplaySuppressed_)
+        {
+            return;
+        }
+        int displayState = UF_DISP_UNSUPPRESS_DISPLAY;
+        if (UF_DISP_ask_display(&displayState) != 0 ||
+            displayState != UF_DISP_SUPPRESS_DISPLAY)
+        {
+            if (UF_DISP_set_display(UF_DISP_SUPPRESS_DISPLAY) == 0)
+            {
+                deferredDisplaySuppressed_ = true;
+                Log(session_, "编辑单线刻字: 已暂停模型显示刷新");
+            }
+        }
+    }
+
+    void RestoreDisplayAfterDeferredReplacement()
+    {
+        if (!deferredDisplaySuppressed_)
+        {
+            return;
+        }
+        deferredDisplaySuppressed_ = false;
+        UF_DISP_set_display(UF_DISP_UNSUPPRESS_DISPLAY);
+        UF_DISP_regenerate_display();
+        UF_DISP_make_display_up_to_date();
+        Log(session_, "编辑单线刻字: 已恢复模型显示并一次性刷新");
+    }
+
     void InitializeCb()
     {
         try
@@ -3743,6 +4136,7 @@ private:
         textLayer_ = dynamic_cast<IntegerBlock*>(top->FindBlock("textLayer"));
         embossedText_ = dynamic_cast<Toggle*>(top->FindBlock("embossedText"));
         verticalText_ = dynamic_cast<Toggle*>(top->FindBlock("verticalText"));
+        vShapeWidth_ = dynamic_cast<DoubleBlock*>(top->FindBlock("vShapeWidth"));
         renameComponentToText_ = dynamic_cast<Toggle*>(top->FindBlock("renameComponentToText"));
         engraveSameBodies_ = dynamic_cast<Toggle*>(top->FindBlock("engraveSameBodies"));
         sameRandomColor_ = dynamic_cast<Toggle*>(top->FindBlock("sameRandomColor"));
@@ -3795,6 +4189,14 @@ private:
         {
             orientation_->SetVisibleManipulatorHandles(0x47);
         }
+        LoadEditedModernCustomFeatureData();
+        if (editedFeature_ != nullptr)
+        {
+            BeginEditedFeatureRollback();
+            // Topology references are resolved again after NX has rolled the
+            // model to immediately before the existing engraving node.
+            LoadEditedModernCustomFeatureData();
+        }
         if (textValue_ != nullptr)
         {
             if (!config_.text.empty())
@@ -3810,7 +4212,11 @@ private:
         }
         Log(session_, "初始化对话框: UpdateRuleInputValue开始");
         UpdateRuleInputValue();
-        if (!afterReplace)
+        if (editedFeature_ != nullptr)
+        {
+            Log(session_, "初始化对话框: 编辑单线刻字节点，保留节点文字和定位手柄");
+        }
+        else if (!afterReplace)
         {
             Log(session_, "初始化对话框: UpdateResolvedTextFromRule开始");
             UpdateResolvedTextFromRule();
@@ -3831,6 +4237,8 @@ private:
         if (fontName_ != nullptr)
         {
             fontName_->SetValue(config_.fontName.c_str());
+            lastValidFontName_ = config_.fontName;
+            normalFontName_ = config_.fontName;
         }
         if (textHeight_ != nullptr)
         {
@@ -3874,6 +4282,15 @@ private:
         {
             verticalText_->SetValue(config_.vShape);
         }
+        if (config_.vShape && fontName_ != nullptr)
+        {
+            fontName_->SetValue(kVShapeFontName);
+            lastValidFontName_ = kVShapeFontName;
+        }
+        if (vShapeWidth_ != nullptr)
+        {
+            vShapeWidth_->SetValue(config_.vShapeWidth);
+        }
         if (renameComponentToText_ != nullptr)
         {
             renameComponentToText_->SetValue(config_.renameComponentToText && isAssemblyContext_);
@@ -3912,6 +4329,188 @@ private:
         }
     }
 
+    void LoadEditedModernCustomFeatureData()
+    {
+        if (editedFeature_ == nullptr) { return; }
+        loadingEditedFeature_ = true;
+        try
+        {
+            Features::CustomFeatureData* data = editedFeature_->FeatureData();
+            const std::string text = ToString(data->CustomStringAttributeByName(
+                zhihui_kezi_custom_feature::kAttrText)->Value());
+            const Point3d origin(
+                data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrOriginX)->Value(),
+                data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrOriginY)->Value(),
+                data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrOriginZ)->Value());
+            double matrixValues[9] = {};
+            for (int index = 0; index < 9; ++index)
+            {
+                const std::string name = std::string(zhihui_kezi_custom_feature::kAttrMatrixPrefix) +
+                                         std::to_string(index);
+                matrixValues[index] = data->CustomDoubleAttributeByName(name.c_str())->Value();
+            }
+            config_.text = text;
+            config_.textTemplate = text;
+            ruleText_ = text;
+            config_.height = data->CustomDoubleAttributeByName(
+                zhihui_kezi_custom_feature::kAttrHeight)->Value();
+            config_.depth = data->CustomDoubleAttributeByName(
+                zhihui_kezi_custom_feature::kAttrDepth)->Value();
+            config_.vShapeWidth = data->CustomDoubleAttributeByName(
+                zhihui_kezi_custom_feature::kAttrWidth)->Value();
+            config_.widthScale = data->CustomDoubleAttributeByName(
+                zhihui_kezi_custom_feature::kAttrWidthScale)->Value();
+            config_.shear = data->CustomDoubleAttributeByName(
+                zhihui_kezi_custom_feature::kAttrShear)->Value();
+            config_.vShape = true;
+            config_.autoEngraveVisibleTubes = false;
+            // Editing one CustomFeature must never inherit the global batch
+            // switches.  Otherwise a double-click edit can also engrave the
+            // matching bodies and leave those extra features outside the node.
+            config_.engraveSameBodies = false;
+            config_.sameRandomColor = false;
+            config_.renameComponentToText = false;
+            config_.hideEngravedText = false;
+            config_.centerLongSide = false;
+            config_.centerShortSide = false;
+            ApplyConfigToDialog();
+            if (ruleValue_ != nullptr) { ruleValue_->SetValue(text.c_str()); }
+            if (textValue_ != nullptr) { textValue_->SetValue(text.c_str()); }
+            if (orientation_ != nullptr)
+            {
+                orientation_->SetOriginSpecified(true);
+                orientation_->SetOrigin(origin);
+                orientation_->SetXAxis(Vector3d(matrixValues[0], matrixValues[1], matrixValues[2]));
+                orientation_->SetYAxis(Vector3d(matrixValues[3], matrixValues[4], matrixValues[5]));
+                orientation_->SetVisibleManipulatorHandles(0x47);
+            }
+            bool restoredFace = false;
+            try
+            {
+                TaggedObject* storedFace = data->CustomTagAttributeByName(
+                    zhihui_kezi_custom_feature::kAttrFace)->Value();
+                if (storedFace != nullptr && manualFace_ != nullptr)
+                {
+                    manualFace_->SetSelectedObjects(std::vector<TaggedObject*>{storedFace});
+                    restoredFace = true;
+                }
+            }
+            catch (...)
+            {
+            }
+            if (!restoredFace && manualFace_ != nullptr)
+            {
+                Body* targetBody = dynamic_cast<Body*>(data->CustomTagAttributeByName(
+                    zhihui_kezi_custom_feature::kAttrTargetBody)->Value());
+                const Vector3d storedNormal = Normalize(
+                    Vector3d(matrixValues[6], matrixValues[7], matrixValues[8]),
+                    Vector3d(0.0, 0.0, 1.0));
+                if (targetBody != nullptr)
+                {
+                    for (Face* candidate : targetBody->GetFaces())
+                    {
+                        Point3d candidatePoint;
+                        Vector3d candidateNormal;
+                        if (!AskPlanarFaceData(candidate, &origin, &candidatePoint, &candidateNormal) ||
+                            std::fabs(Dot(Normalize(candidateNormal, storedNormal), storedNormal)) < 0.999)
+                        {
+                            continue;
+                        }
+                        const Vector3d delta(origin.X - candidatePoint.X,
+                                             origin.Y - candidatePoint.Y,
+                                             origin.Z - candidatePoint.Z);
+                        if (std::fabs(Dot(delta, Normalize(candidateNormal, storedNormal))) > 0.01)
+                        {
+                            continue;
+                        }
+                        double point[3] = {origin.X, origin.Y, origin.Z};
+                        int containment = 0;
+                        if (UF_MODL_ask_point_containment(point, candidate->Tag(), &containment) == 0 &&
+                            containment == 1)
+                        {
+                            manualFace_->SetSelectedObjects(std::vector<TaggedObject*>{candidate});
+                            restoredFace = true;
+                            Log(session_, std::string("编辑单线刻字: 已在回滚实体上重新定位刻字平面，tag=") +
+                                              std::to_string(candidate->Tag()));
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!restoredFace)
+            {
+                Log(session_, "编辑单线刻字: 未能恢复刻字平面");
+            }
+            Log(session_, std::string("编辑单线刻字: 手柄已关联文字中心 (") +
+                              FormatNumber(origin.X) + "," + FormatNumber(origin.Y) + "," +
+                              FormatNumber(origin.Z) + ")");
+        }
+        catch (...)
+        {
+            loadingEditedFeature_ = false;
+            throw;
+        }
+        loadingEditedFeature_ = false;
+    }
+
+    void BeginEditedFeatureRollback()
+    {
+        if (editedFeature_ == nullptr || editRollbackManager_ != nullptr) { return; }
+        Part* workPart = session_->Parts()->Work();
+        if (workPart == nullptr)
+        {
+            throw std::runtime_error("No work part is active for single-line engraving edit.");
+        }
+        editRollbackMark_ = session_->SetUndoMark(
+            Session::MarkVisibilityVisible, "KeZi Single-Line Edit With Rollback");
+        try
+        {
+            editRollbackManager_ = workPart->Features()->StartEditWithRollbackManager(
+                editedFeature_, editRollbackMark_);
+            if (editRollbackManager_ == nullptr)
+            {
+                throw std::runtime_error("NX did not start edit-with-rollback for the engraving node.");
+            }
+            Log(session_, "编辑单线刻字: 已回滚到原节点之前，旧刻字暂时移除");
+        }
+        catch (...)
+        {
+            if (editRollbackMark_ != static_cast<Session::UndoMarkId>(0))
+            {
+                try { session_->DeleteUndoMark(editRollbackMark_, "KeZi Single-Line Edit With Rollback"); } catch (...) {}
+                editRollbackMark_ = static_cast<Session::UndoMarkId>(0);
+            }
+            throw;
+        }
+    }
+
+    void FinishEditedFeatureRollback(const bool errorDuringEdit)
+    {
+        if (editRollbackManager_ == nullptr) { return; }
+        Features::EditWithRollbackManager* manager = editRollbackManager_;
+        editRollbackManager_ = nullptr;
+        try
+        {
+            manager->UpdateFeature(errorDuringEdit);
+            manager->Stop();
+            manager->Destroy();
+            Log(session_, errorDuringEdit
+                              ? "编辑单线刻字: 已取消编辑并恢复原刻字"
+                              : "编辑单线刻字: 已接受新刻字并滚动恢复后续模型");
+        }
+        catch (...)
+        {
+            try { manager->Stop(); } catch (...) {}
+            try { manager->Destroy(); } catch (...) {}
+            throw;
+        }
+        if (editRollbackMark_ != static_cast<Session::UndoMarkId>(0))
+        {
+            try { session_->DeleteUndoMark(editRollbackMark_, "KeZi Single-Line Edit With Rollback"); } catch (...) {}
+            editRollbackMark_ = static_cast<Session::UndoMarkId>(0);
+        }
+    }
+
     void DialogShownCb()
     {
         Log(session_, "对话框显示，读取当前控件值");
@@ -3923,7 +4522,10 @@ private:
         {
             orientation_->SetVisibleManipulatorHandles(0x47);
         }
-        ApplyAxisModeToCurrentOrientation();
+        if (editedFeature_ == nullptr)
+        {
+            ApplyAxisModeToCurrentOrientation();
+        }
         if (!suppressPreviewUntilSelection_)
         {
             RefreshPreview();
@@ -3936,7 +4538,7 @@ private:
         {
             UpdateTextRuleLabel();
             UpdateRuleInputValue();
-            if (!suppressPreviewUntilSelection_)
+            if (!suppressPreviewUntilSelection_ && editedFeature_ == nullptr)
             {
                 UpdateResolvedTextFromRule();
             }
@@ -3968,6 +4570,7 @@ private:
     int CancelCb()
     {
         Log(session_, "取消/关闭对话框");
+        deferredEditedReplacement_ = false;
         if (!suppressPreviewUntilSelection_)
         {
             SaveCurrentRule();
@@ -3977,12 +4580,16 @@ private:
             Log(session_, "取消/关闭对话框: Apply后重启状态，不保存旧控件模板");
         }
         ClearPreviewBuilder();
+        if (editRollbackManager_ != nullptr)
+        {
+            FinishEditedFeatureRollback(true);
+        }
         return 0;
     }
 
     int UpdateCb(UIBlock* block)
     {
-        if (applying_)
+        if (applying_ || loadingEditedFeature_)
         {
             return 0;
         }
@@ -4040,14 +4647,46 @@ private:
             RotateOrientationNinetyDegrees();
             RefreshPreview();
         }
-        else if (block == mode_ || block == boundary_)
+        else if (block == mode_ || block == boundary_ || block == verticalText_)
         {
+            if (block == verticalText_)
+            {
+                ApplyVShapeFontSelection();
+            }
             UpdateUiState();
             RefreshPreview();
         }
         else if (block == lockAspect_)
         {
             UpdateUiState();
+            RefreshPreview();
+        }
+        else if (block == fontName_)
+        {
+            if (!selectingSystemFont_ && Trim(ReadString(fontName_)) == "More...")
+            {
+                selectingSystemFont_ = true;
+                std::string selectedFont;
+                const std::string fallback = lastValidFontName_.empty() ? std::string("Arial") : lastValidFontName_;
+                if (AskSystemFontName(fallback, &selectedFont))
+                {
+                    lastValidFontName_ = selectedFont;
+                    fontName_->SetValue(selectedFont.c_str());
+                }
+                else
+                {
+                    fontName_->SetValue(fallback.c_str());
+                }
+                selectingSystemFont_ = false;
+            }
+            else if (!selectingSystemFont_)
+            {
+                const std::string selectedFont = Trim(ReadString(fontName_));
+                if (!selectedFont.empty())
+                {
+                    lastValidFontName_ = selectedFont;
+                }
+            }
             RefreshPreview();
         }
         else if (block == autoEngraveVisibleTubes_)
@@ -4077,10 +4716,10 @@ private:
             ApplyAxisModeToCurrentOrientation();
             RefreshPreview();
         }
-        else if (block == manualFace_ || block == orientation_ || block == textValue_ || block == fontName_ ||
+        else if (block == manualFace_ || block == orientation_ || block == textValue_ ||
                  block == textHeight_ || block == depth_ || block == textColor_ || block == boundaryDepth_ ||
                  block == boundaryColor_ || block == margin_ || block == wScale_ || block == lockAspect_ ||
-                 block == shear_ || block == textLayer_ || block == embossedText_ || block == verticalText_ ||
+                 block == shear_ || block == textLayer_ || block == embossedText_ || block == vShapeWidth_ ||
                  block == centerLongSide_ || block == centerShortSide_ || block == xLongSide_ || block == xShortSide_)
         {
             if (block == orientation_ || block == centerLongSide_ || block == centerShortSide_)
@@ -4095,21 +4734,71 @@ private:
     int ApplyCb()
     {
         Log(session_, "ApplyCb进入");
+        // NX's edit-mode Block Styler owns the edited CustomFeature until
+        // LaunchInDialogMode returns. Deleting that node inside Apply/OK makes
+        // NX dereference its stale pointer while closing the dialog. Apply in
+        // edit mode therefore records the request; OK performs it after exit.
+        if (editedFeature_ != nullptr && !executingDeferredEditedReplacement_)
+        {
+            deferredEditedReplacement_ = true;
+            Log(session_, "编辑单线刻字: 已记录替换请求，等待对话框退出后执行");
+            return 0;
+        }
         applying_ = true;
+        Session::UndoMarkId replacementMark = static_cast<Session::UndoMarkId>(0);
         try
         {
+            if (editedFeature_ != nullptr)
+            {
+                replacementMark = ReplaceEditedModernCustomFeatureBeforeCreate();
+            }
             ApplyEngraving();
+            if (editRollbackManager_ != nullptr)
+            {
+                FinishEditedFeatureRollback(false);
+            }
+            if (replacementMark != static_cast<Session::UndoMarkId>(0))
+            {
+                session_->SetUndoMarkName(replacementMark, "编辑单线刻字");
+                Log(session_, "编辑单线刻字: 旧节点已由新打包节点整体替换");
+            }
         }
         catch (const NXException& ex)
         {
+            if (editRollbackManager_ != nullptr)
+            {
+                try { FinishEditedFeatureRollback(true); } catch (...) {}
+            }
+            if (replacementMark != static_cast<Session::UndoMarkId>(0))
+            {
+                try { session_->UndoToMark(replacementMark, "编辑单线刻字"); } catch (...) {}
+                try { session_->DeleteUndoMark(replacementMark, "编辑单线刻字"); } catch (...) {}
+                Log(session_, "编辑单线刻字: 新节点生成失败，已撤销并恢复原节点");
+            }
             applying_ = false;
-            Log(session_, std::string("刻字失败: ") + ex.Message());
+            Log(session_, std::string("刻字失败: NXException code=") +
+                              std::to_string(ex.ErrorCode()) + ", message=" + ex.Message());
+            if (ex.ErrorCode() == 66 || ex.ErrorCode() == UF_err_operation_aborted)
+            {
+                Log(session_, "用户已取消刻字，ApplyCb立即返回");
+                return 1;
+            }
             ShowError("KeZi Engrave Text", std::string("Engraving failed: ") + ex.Message());
             Log(session_, "ApplyCb异常返回=1");
             return 1;
         }
         catch (const std::exception& ex)
         {
+            if (editRollbackManager_ != nullptr)
+            {
+                try { FinishEditedFeatureRollback(true); } catch (...) {}
+            }
+            if (replacementMark != static_cast<Session::UndoMarkId>(0))
+            {
+                try { session_->UndoToMark(replacementMark, "编辑单线刻字"); } catch (...) {}
+                try { session_->DeleteUndoMark(replacementMark, "编辑单线刻字"); } catch (...) {}
+                Log(session_, "编辑单线刻字: 新节点生成失败，已撤销并恢复原节点");
+            }
             applying_ = false;
             Log(session_, std::string("刻字失败: ") + ex.what());
             ShowError("KeZi Engrave Text", std::string("Engraving failed: ") + ex.what());
@@ -4118,6 +4807,16 @@ private:
         }
         catch (...)
         {
+            if (editRollbackManager_ != nullptr)
+            {
+                try { FinishEditedFeatureRollback(true); } catch (...) {}
+            }
+            if (replacementMark != static_cast<Session::UndoMarkId>(0))
+            {
+                try { session_->UndoToMark(replacementMark, "编辑单线刻字"); } catch (...) {}
+                try { session_->DeleteUndoMark(replacementMark, "编辑单线刻字"); } catch (...) {}
+                Log(session_, "编辑单线刻字: 新节点生成失败，已撤销并恢复原节点");
+            }
             applying_ = false;
             Log(session_, "刻字失败: 未知异常");
             ShowError("刻字", "刻字失败: 未知异常");
@@ -4132,7 +4831,205 @@ private:
     int OkCb()
     {
         Log(session_, "OkCb进入");
+        if (editedFeature_ != nullptr)
+        {
+            deferredReplacementSettings_ = ReadSettings();
+            if (orientation_ != nullptr && orientation_->IsOriginSpecified())
+            {
+                deferredReplacementOrigin_ = orientation_->Origin();
+                const Vector3d capturedX = Normalize(
+                    orientation_->XAxis(), Vector3d(1.0, 0.0, 0.0));
+                Vector3d capturedY = Normalize(
+                    orientation_->YAxis(), Vector3d(0.0, 1.0, 0.0));
+                const Vector3d capturedZ = Normalize(
+                    Cross(capturedX, capturedY), Vector3d(0.0, 0.0, 1.0));
+                capturedY = Normalize(Cross(capturedZ, capturedX), capturedY);
+                deferredReplacementMatrix_ = MakeMatrix(capturedX, capturedY, capturedZ);
+                deferredPlacementCaptured_ = true;
+                std::ostringstream placementLog;
+                placementLog << "编辑单线刻字: OK手柄快照 origin=("
+                             << deferredReplacementOrigin_.X << ","
+                             << deferredReplacementOrigin_.Y << ","
+                             << deferredReplacementOrigin_.Z << ")";
+                Log(session_, placementLog.str());
+            }
+            deferredReplacementText_ = textValue_ == nullptr
+                ? config_.text
+                : Trim(ReadString(textValue_));
+            deferredEditedReplacement_ = true;
+            // Suppress before deleting the preview and before NX closes edit
+            // mode. Otherwise the restored old node is painted for one frame
+            // while the delayed safe replacement is being scheduled.
+            SuppressDisplayForDeferredReplacement();
+            ClearPreviewBuilder();
+            Log(session_, "编辑单线刻字: OK已接收，节点将在对话框退出后替换");
+            return 0;
+        }
         return ApplyCb();
+    }
+
+    Session::UndoMarkId ReplaceEditedModernCustomFeatureBeforeCreate()
+    {
+        if (editedFeature_ == nullptr)
+        {
+            return static_cast<Session::UndoMarkId>(0);
+        }
+        Part* workPart = session_ == nullptr ? nullptr : session_->Parts()->Work();
+        if (workPart == nullptr)
+        {
+            throw std::runtime_error("No work part is active while replacing the engraving node.");
+        }
+
+        Features::CustomFeature* oldFeature = editedFeature_;
+        const tag_t oldFeatureTag = oldFeature->Tag();
+        const int oldFeatureTimestamp = oldFeature->Timestamp();
+        deferredReplacementAnchorTag_ = NULL_TAG;
+        int nextTimestamp = std::numeric_limits<int>::max();
+        for (Features::Feature* candidate : *workPart->Features())
+        {
+            if (candidate == nullptr || candidate->Tag() == oldFeatureTag)
+            {
+                continue;
+            }
+            const int candidateTimestamp = candidate->Timestamp();
+            if (candidateTimestamp > oldFeatureTimestamp && candidateTimestamp < nextTimestamp)
+            {
+                nextTimestamp = candidateTimestamp;
+                deferredReplacementAnchorTag_ = candidate->Tag();
+            }
+        }
+        Log(session_, std::string("编辑单线刻字: 记录原特征树位置 timestamp=") +
+                          std::to_string(oldFeatureTimestamp) +
+                          ", nextTag=" + std::to_string(deferredReplacementAnchorTag_));
+        Features::CustomFeatureData* oldData = oldFeature->FeatureData();
+        Body* targetBody = dynamic_cast<Body*>(oldData->CustomTagAttributeByName(
+            zhihui_kezi_custom_feature::kAttrTargetBody)->Value());
+        const tag_t targetBodyTag = targetBody == nullptr ? NULL_TAG : targetBody->Tag();
+        const Point3d origin(
+            oldData->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrOriginX)->Value(),
+            oldData->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrOriginY)->Value(),
+            oldData->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrOriginZ)->Value());
+        double matrixValues[9] = {};
+        for (int index = 0; index < 9; ++index)
+        {
+            const std::string name = std::string(zhihui_kezi_custom_feature::kAttrMatrixPrefix) +
+                                     std::to_string(index);
+            matrixValues[index] = oldData->CustomDoubleAttributeByName(name.c_str())->Value();
+        }
+        const Vector3d storedNormal = Normalize(
+            Vector3d(matrixValues[6], matrixValues[7], matrixValues[8]),
+            Vector3d(0.0, 0.0, 1.0));
+        const std::size_t oldConstructionCount = oldFeature->GetConstructionFeatures().size();
+
+        ClearPreviewBuilder();
+        // Restore the original feature first. Deleting a feature while its
+        // EditWithRollbackManager is active is unsupported by NX.
+        FinishEditedFeatureRollback(true);
+
+        const Session::UndoMarkId replacementMark = session_->SetUndoMark(
+            Session::MarkVisibilityVisible, "编辑单线刻字");
+        try
+        {
+            Update* update = session_->UpdateManager();
+            update->ClearDeleteList();
+            update->ClearErrorList();
+            update->AddObjectsToDeleteList(std::vector<TaggedObject*>{oldFeature});
+            const int deleteErrors = update->DoUpdate(replacementMark);
+            update->ClearDeleteList();
+            if (deleteErrors != 0 || UF_OBJ_ask_status(oldFeatureTag) == UF_OBJ_ALIVE)
+            {
+                throw std::runtime_error("NX did not delete the original single-line engraving node.");
+            }
+            Log(session_, std::string("编辑单线刻字: 已删除原节点 tag=") +
+                              std::to_string(oldFeatureTag) +
+                              ", 原内部特征数=" + std::to_string(oldConstructionCount));
+
+            Face* replacementFace = nullptr;
+            double bestPlaneDistance = std::numeric_limits<double>::max();
+            // Deleting the boolean/custom-feature chain can replace NX's C++
+            // wrapper for the target body even when its tag survives. Never
+            // dereference the pre-delete Body* after DoUpdate.
+            Body* restoredTargetBody = nullptr;
+            if (targetBodyTag != NULL_TAG && UF_OBJ_ask_status(targetBodyTag) == UF_OBJ_ALIVE)
+            {
+                restoredTargetBody = dynamic_cast<Body*>(NXObjectManager::Get(targetBodyTag));
+            }
+            if (restoredTargetBody != nullptr)
+            {
+                for (Face* candidate : restoredTargetBody->GetFaces())
+                {
+                    Point3d candidatePoint;
+                    Vector3d candidateNormal;
+                    if (!AskPlanarFaceData(candidate, &origin, &candidatePoint, &candidateNormal))
+                    {
+                        continue;
+                    }
+                    const Vector3d unitNormal = Normalize(candidateNormal, storedNormal);
+                    if (std::fabs(Dot(unitNormal, storedNormal)) < 0.999)
+                    {
+                        continue;
+                    }
+                    const Vector3d delta(origin.X - candidatePoint.X,
+                                         origin.Y - candidatePoint.Y,
+                                         origin.Z - candidatePoint.Z);
+                    const double planeDistance = std::fabs(Dot(delta, unitNormal));
+                    double point[3] = {origin.X, origin.Y, origin.Z};
+                    int containment = 0;
+                    const bool containsOrigin =
+                        UF_MODL_ask_point_containment(point, candidate->Tag(), &containment) == 0 &&
+                        containment == 1;
+                    if (containsOrigin)
+                    {
+                        replacementFace = candidate;
+                        break;
+                    }
+                    if (planeDistance < bestPlaneDistance)
+                    {
+                        bestPlaneDistance = planeDistance;
+                        replacementFace = candidate;
+                    }
+                }
+            }
+            if (replacementFace == nullptr)
+            {
+                throw std::runtime_error("Could not relocate the engraving face after deleting the old node.");
+            }
+
+            editedFeature_ = nullptr;
+            deferredReplacementFace_ = replacementFace;
+            // The stored placement belongs to the old node and is used above
+            // only to relocate its target face.  When the user moved/rotated
+            // the edit handle, OkCb already captured the new placement before
+            // Block Styler destroyed its controls; never overwrite it here.
+            if (!deferredPlacementCaptured_)
+            {
+                deferredReplacementOrigin_ = origin;
+                deferredReplacementMatrix_.Xx = matrixValues[0];
+                deferredReplacementMatrix_.Xy = matrixValues[1];
+                deferredReplacementMatrix_.Xz = matrixValues[2];
+                deferredReplacementMatrix_.Yx = matrixValues[3];
+                deferredReplacementMatrix_.Yy = matrixValues[4];
+                deferredReplacementMatrix_.Yz = matrixValues[5];
+                deferredReplacementMatrix_.Zx = matrixValues[6];
+                deferredReplacementMatrix_.Zy = matrixValues[7];
+                deferredReplacementMatrix_.Zz = matrixValues[8];
+                Log(session_, "编辑单线刻字: 未取得手柄快照，沿用原节点位置");
+            }
+            else
+            {
+                Log(session_, "编辑单线刻字: 使用确定时的新手柄位置和方向");
+            }
+            Log(session_, std::string("编辑单线刻字: 已重新定位刻字面 tag=") +
+                              std::to_string(replacementFace->Tag()) +
+                              ", 开始创建新打包节点");
+            return replacementMark;
+        }
+        catch (...)
+        {
+            try { session_->UndoToMark(replacementMark, "编辑单线刻字"); } catch (...) {}
+            try { session_->DeleteUndoMark(replacementMark, "编辑单线刻字"); } catch (...) {}
+            throw;
+        }
     }
 
     void AppendTextToken(const std::string& token)
@@ -4195,7 +5092,8 @@ private:
         const TextSettings settings = ReadSettings();
         WriteConfigValue("模式", std::to_string(settings.mode));
         WriteConfigValue("文本", settings.text);
-        WriteConfigValue("字体", settings.fontName);
+        const std::string savedFontName = settings.vShape && !normalFontName_.empty() ? normalFontName_ : settings.fontName;
+        WriteConfigValue("字体", savedFontName);
         WriteConfigValue("高度", FormatNumber(settings.height));
         WriteConfigValue("深度", FormatNumber(settings.depth));
         WriteConfigValue("颜色", std::to_string(ReadColorIndex(textColor_, config_.textColor)));
@@ -4209,6 +5107,7 @@ private:
         WriteConfigValue("文本层", std::to_string(settings.layer));
         WriteConfigValue("凸起文本", BoolText(settings.embossed));
         WriteConfigValue("V形文本", BoolText(settings.vShape));
+        WriteConfigValue("V形刻字宽度", FormatNumber(settings.vShapeWidth));
         WriteConfigValue("编号设为部件名", BoolText(settings.renameComponentToText));
         WriteConfigValue("刻相同", BoolText(settings.engraveSameBodies));
         WriteConfigValue("相同随机色", BoolText(settings.sameRandomColor));
@@ -4221,7 +5120,7 @@ private:
 
         config_.mode = settings.mode;
         config_.text = settings.text;
-        config_.fontName = settings.fontName;
+        config_.fontName = savedFontName;
         config_.height = settings.height;
         config_.depth = settings.depth;
         config_.textColor = ReadColorIndex(textColor_, config_.textColor);
@@ -4235,6 +5134,7 @@ private:
         config_.layer = settings.layer;
         config_.embossed = settings.embossed;
         config_.vShape = settings.vShape;
+        config_.vShapeWidth = settings.vShapeWidth;
         config_.renameComponentToText = settings.renameComponentToText;
         config_.engraveSameBodies = settings.engraveSameBodies;
         config_.sameRandomColor = settings.sameRandomColor;
@@ -4399,9 +5299,17 @@ private:
         }
         ensurePositive(textHeight_, 10.0);
         ensurePositive(depth_, 0.3);
+        ensurePositive(vShapeWidth_, 0.002);
         ensurePositive(boundaryDepth_, 0.3);
         ensurePositive(margin_, 100.0);
         ensurePositive(wScale_, 100.0);
+
+        const bool vShape = ReadToggle(verticalText_, false);
+        if (vShapeWidth_ != nullptr)
+        {
+            vShapeWidth_->SetShow(vShape);
+            vShapeWidth_->SetEnable(vShape);
+        }
 
         const int boundaryValue = ReadEnumValue(boundary_);
         if (boundaryDepth_ != nullptr)
@@ -4447,7 +5355,7 @@ private:
             }
         }
         const bool autoEngraveVisibleTubes = ReadToggle(autoEngraveVisibleTubes_, false);
-        if (manualFace_ != nullptr)
+        if (!executingDeferredEditedReplacement_ && manualFace_ != nullptr)
         {
             manualFace_->SetShow(!autoEngraveVisibleTubes);
             manualFace_->SetEnable(!autoEngraveVisibleTubes);
@@ -4500,6 +5408,11 @@ private:
         settings.layer = ReadInteger(textLayer_, 254);
         settings.embossed = ReadToggle(embossedText_, false);
         settings.vShape = ReadToggle(verticalText_, false);
+        settings.vShapeWidth = ReadDouble(vShapeWidth_, 1.0);
+        if (settings.vShapeWidth <= 0.0)
+        {
+            settings.vShapeWidth = 1.0;
+        }
         settings.renameComponentToText = isAssemblyContext_ && ReadToggle(renameComponentToText_, false);
         settings.engraveSameBodies = !isAssemblyContext_ && ReadToggle(engraveSameBodies_, false);
         settings.sameRandomColor = !isAssemblyContext_ && ReadToggle(sameRandomColor_, false);
@@ -4514,6 +5427,35 @@ private:
             settings.fontName = "Arial";
         }
         return settings;
+    }
+
+    void ApplyVShapeFontSelection()
+    {
+        if (fontName_ == nullptr)
+        {
+            return;
+        }
+
+        if (ReadToggle(verticalText_, false))
+        {
+            const std::string currentFont = Trim(ReadString(fontName_));
+            if (!currentFont.empty() && currentFont != kVShapeFontName && currentFont != "More...")
+            {
+                normalFontName_ = currentFont;
+            }
+            fontName_->SetValue(kVShapeFontName);
+            lastValidFontName_ = kVShapeFontName;
+            Log(session_, "V形文本已自动切换字体: Modern");
+            return;
+        }
+
+        if (normalFontName_.empty())
+        {
+            normalFontName_ = "Arial";
+        }
+        fontName_->SetValue(normalFontName_.c_str());
+        lastValidFontName_ = normalFontName_;
+        Log(session_, std::string("取消V形文本，恢复字体: ") + normalFontName_);
     }
 
     std::string EffectiveTextTemplate(const TextSettings& settings) const
@@ -4746,6 +5688,19 @@ private:
                 Log(session_, "ClearPreviewBuilder: Destroy预览Builder未知异常");
             }
         }
+        for (tag_t curveTag : modernPreviewCurveTags_)
+        {
+            if (curveTag != NULL_TAG)
+            {
+                try { UF_OBJ_delete_object(curveTag); } catch (...) {}
+            }
+        }
+        if (!modernPreviewCurveTags_.empty())
+        {
+            Log(session_, std::string("ClearPreviewBuilder: 已删除MODERN曲线预览，数量=") +
+                              std::to_string(modernPreviewCurveTags_.size()));
+            modernPreviewCurveTags_.clear();
+        }
         Log(session_, "ClearPreviewBuilder退出");
     }
 
@@ -4926,11 +5881,593 @@ private:
         Log(session_, "按居中开关调整方位原点");
     }
 
+    std::string ResolveEngravingText(NXObject* body,
+                                     Part* workPart,
+                                     const TextSettings& settings,
+                                     const std::string* overrideText)
+    {
+        const std::string textTemplate = EffectiveTextTemplate(settings);
+        const std::string textRule = overrideText != nullptr
+                                         ? *overrideText
+                                         : ExpandTextTemplate(textTemplate, settings.text, body, workPart, config_);
+        if (textRule.empty())
+        {
+            throw std::runtime_error("Engraving text is empty.");
+        }
+        lastTextTemplate_ = textTemplate;
+        lastResolvedText_ = textRule;
+        lastBody_ = body;
+        lastWorkPart_ = workPart;
+        return textRule;
+    }
+
+    Vector3d InwardExtrudeDirection(Body* targetBody,
+                                    const Point3d& facePoint,
+                                    const Vector3d& faceNormal,
+                                    const double depth) const
+    {
+        const Vector3d normal = Normalize(faceNormal, Vector3d(0.0, 0.0, 1.0));
+        const double probe = std::max(0.01, std::min(std::max(depth, 0.1) * 0.25, 1.0));
+        const auto contained = [targetBody](const Point3d& point) {
+            if (targetBody == nullptr)
+            {
+                return false;
+            }
+            double coordinates[3] = {point.X, point.Y, point.Z};
+            int status = 0;
+            return UF_MODL_ask_point_containment(coordinates, targetBody->Tag(), &status) == 0 &&
+                   (status == 1 || status == 3);
+        };
+        if (contained(OffsetPoint(facePoint, normal, probe)))
+        {
+            return normal;
+        }
+        return Vector3d(-normal.X, -normal.Y, -normal.Z);
+    }
+
+    void CreateModernCurveEngraving(Face* face,
+                                    const Point3d& textOrigin,
+                                    const Matrix3x3& textMatrix,
+                                    const std::string& text,
+                                    const TextSettings& settings,
+                                    Part* workPart,
+                                    Body* targetBody,
+                                    const bool commitGeometry)
+    {
+        if (face == nullptr || workPart == nullptr || targetBody == nullptr)
+        {
+            throw std::runtime_error("Modern curve engraving requires a face, work part, and target body.");
+        }
+        if (commitGeometry)
+        {
+            modernConstructionFeatureTags_.clear();
+        }
+        Log(session_, std::string("V形新逻辑: 入口 text=") + text +
+                          ", height=" + FormatNumber(settings.height) +
+                          ", depth=" + FormatNumber(settings.depth) +
+                          ", width=" + FormatNumber(settings.vShapeWidth) +
+                          ", faceTag=" + std::to_string(face->Tag()) +
+                          ", bodyTag=" + std::to_string(targetBody->Tag()));
+
+        Log(session_, "V形新逻辑: 开始加载NX单线字体 blockmod1");
+        const int modernFontIndex = workPart->Fonts()->AddFont(
+            kVShapeNxCurveFontName, FontCollection::TypeNx);
+        if (modernFontIndex <= 0 || !workPart->Fonts()->DoesFontExist(modernFontIndex))
+        {
+            throw std::runtime_error("Could not load the NX Modern single-line font (blockmod1.fnx).");
+        }
+        Log(session_, std::string("V形新逻辑: NX单线字体已加载，索引=") + std::to_string(modernFontIndex));
+
+        UF_DRF_draft_aid_text_info_t textInfo = {};
+        textInfo.text_type = UF_DRF_TEXT_APP_AT_CREATION;
+        textInfo.text_font = modernFontIndex;
+        textInfo.size = 1.0;
+        textInfo.height = 1.0;
+        textInfo.aspect_ratio = 1.0;
+        textInfo.gap = 1.0;
+        textInfo.line_spacing = 1.0;
+        textInfo.num_lines = 1;
+        std::vector<char> renderedText(text.begin(), text.end());
+        renderedText.push_back('\0');
+        char* textLines[1] = {renderedText.data()};
+        UF_DRF_draft_aid_text_t draftText = {};
+        const size_t textByteCount = renderedText.size() - 1;
+        draftText.num_chars = static_cast<int>(textByteCount);
+        draftText.num_ints = static_cast<int>(textByteCount);
+        draftText.full_num_chars = static_cast<int>(textByteCount);
+        draftText.full_string = renderedText.data();
+        strncpy_s(draftText.string, renderedText.data(), _TRUNCATE);
+        textInfo.text = &draftText;
+        NxFontRenderData renderData;
+        UF_DRF_render_table_t renderTable = {};
+        renderTable.begin_line = FontBeginLine;
+        renderTable.end_line = FontEndLine;
+        renderTable.set_to_position = FontSetPosition;
+        renderTable.draw_to_position = FontDrawPosition;
+        renderTable.draw_arc = FontDrawArc;
+        renderTable.draw_char = FontDrawChar;
+        renderTable.draw_standard_font_string = FontDrawStandard;
+        renderTable.draw_user_symbol = FontDrawSymbol;
+        renderTable.set_cfw = FontSetCfw;
+        renderTable.push_orientation = FontPushOrientation;
+        renderTable.pop_orientation = FontPopOrientation;
+        renderTable.fill_region = FontFillRegion;
+        renderTable.standardFontFunCharSize = 1.0;
+
+        // NX 2412 rejects NULL_TAG for UF_DRF_render_text's annotation argument
+        // even though the SDK header documents it as optional.  A temporary note
+        // supplies only the required annotation context; all font/stroke geometry
+        // still comes from blockmod1 and the render callbacks below.
+        tag_t renderContextNote = NULL_TAG;
+        double contextOrigin[3] = {0.0, 0.0, 0.0};
+        const int noteError = UF_DRF_create_note(1, textLines, contextOrigin, 0, &renderContextNote);
+        if (noteError != 0 || renderContextNote == NULL_TAG)
+        {
+            char errorMessage[133] = {};
+            UF_get_fail_message(noteError, errorMessage);
+            Log(session_, std::string("V形新逻辑: 创建临时渲染注释失败，错误=") +
+                              std::to_string(noteError) + ", message=" + errorMessage);
+            throw std::runtime_error("Could not create the temporary NX text rendering context.");
+        }
+        Log(session_, std::string("V形新逻辑: 临时渲染注释已创建，tag=") +
+                          std::to_string(renderContextNote));
+        Log(session_, "V形新逻辑: 开始调用 UF_DRF_render_text");
+        const int renderError = UF_DRF_render_text(
+            workPart->Tag(), renderContextNote, 1, textLines, &textInfo, &renderTable, &renderData);
+        char renderMessage[133] = {};
+        UF_get_fail_message(renderError, renderMessage);
+        Log(session_, std::string("V形新逻辑: UF_DRF_render_text 返回=") +
+                          std::to_string(renderError) + ", message=" + renderMessage);
+        const int deleteNoteError = UF_OBJ_delete_object(renderContextNote);
+        if (deleteNoteError != 0)
+        {
+            char deleteMessage[133] = {};
+            UF_get_fail_message(deleteNoteError, deleteMessage);
+            Log(session_, std::string("V形新逻辑: 删除临时渲染注释失败，错误=") +
+                              std::to_string(deleteNoteError) + ", message=" + deleteMessage);
+        }
+        else
+        {
+            Log(session_, "V形新逻辑: 临时渲染注释已删除");
+        }
+        if (renderError != 0 || (renderData.segments.empty() && renderData.arcs.empty()))
+        {
+            throw std::runtime_error("NX Modern font rendering returned no stroke curves.");
+        }
+        Log(session_, std::string("V形新逻辑: 笔画渲染完成，线段=") +
+                          std::to_string(renderData.segments.size()) +
+                          ", 圆弧=" + std::to_string(renderData.arcs.size()));
+
+        double minX = DBL_MAX, maxX = -DBL_MAX, minY = DBL_MAX, maxY = -DBL_MAX;
+        const auto includePoint = [&](const Point3d& p) {
+            minX = std::min(minX, p.X); maxX = std::max(maxX, p.X);
+            minY = std::min(minY, p.Y); maxY = std::max(maxY, p.Y);
+        };
+        for (const RenderedFontSegment& segment : renderData.segments)
+        {
+            includePoint(segment.start); includePoint(segment.end);
+        }
+        for (const RenderedFontArc& arc : renderData.arcs)
+        {
+            includePoint(Point3d(arc.center.X - arc.radius, arc.center.Y - arc.radius, 0.0));
+            includePoint(Point3d(arc.center.X + arc.radius, arc.center.Y + arc.radius, 0.0));
+        }
+        const double centerX = (minX + maxX) * 0.5;
+        const double centerY = (minY + maxY) * 0.5;
+        const double xScale = settings.height * settings.widthScale / 100.0;
+        const double yScale = settings.height;
+        const double shear = std::tan(settings.shear * 3.14159265358979323846 / 180.0);
+        const Vector3d xAxis(textMatrix.Xx, textMatrix.Xy, textMatrix.Xz);
+        const Vector3d yAxis(textMatrix.Yx, textMatrix.Yy, textMatrix.Yz);
+        const auto toWorld = [&](const Point3d& local) {
+            const double localY = (local.Y - centerY) * yScale;
+            const double localX = (local.X - centerX) * xScale + localY * shear;
+            return OffsetPoint(OffsetPoint(textOrigin, xAxis, localX), yAxis, localY);
+        };
+        std::vector<Curve*> curves;
+        for (const RenderedFontSegment& segment : renderData.segments)
+        {
+            const Point3d start = toWorld(segment.start);
+            const Point3d end = toWorld(segment.end);
+            if (Magnitude(SubtractPoints(end, start)) > kVectorTolerance)
+            {
+                curves.push_back(workPart->Curves()->CreateLine(start, end));
+            }
+        }
+        for (const RenderedFontArc& arc : renderData.arcs)
+        {
+            const Point3d center = toWorld(arc.center);
+            curves.push_back(workPart->Curves()->CreateArc(
+                center, xAxis, yAxis, arc.radius * xScale, arc.startAngle, arc.endAngle));
+        }
+        if (curves.empty())
+        {
+            throw std::runtime_error("Modern text feature returned no single-line curves.");
+        }
+        Log(session_, std::string("V形新逻辑: NX曲线已创建，数量=") + std::to_string(curves.size()));
+
+        if (!commitGeometry)
+        {
+            modernPreviewCurveTags_.clear();
+            modernPreviewCurveTags_.reserve(curves.size());
+            for (Curve* curve : curves)
+            {
+                if (curve != nullptr)
+                {
+                    modernPreviewCurveTags_.push_back(curve->Tag());
+                }
+            }
+            Log(session_, std::string("V形新逻辑: 仅显示MODERN单线曲线预览，数量=") +
+                              std::to_string(modernPreviewCurveTags_.size()));
+            return;
+        }
+
+        Point3d facePoint;
+        Vector3d faceNormal;
+        if (!AskPlanarFaceData(face, &textOrigin, &facePoint, &faceNormal))
+        {
+            throw std::runtime_error("Could not determine engraving face normal.");
+        }
+        const Vector3d inward = InwardExtrudeDirection(targetBody, facePoint, faceNormal, settings.depth);
+        const std::string depthFormula = FormatNumber(settings.depth);
+        const std::string halfWidthFormula = FormatNumber(settings.vShapeWidth * 0.5);
+
+        int successCount = 0;
+        int curveIndex = 0;
+        std::vector<Body*> cutterBodies;
+        const Session::UndoMarkId modernEngravingMark = session_->SetUndoMark(
+            Session::MarkVisibilityInvisible, "KeZi MODERN engraving");
+        try
+        {
+            Log(session_, std::string("V形新逻辑: 开始由原始曲线生成对称偏置刀具体，曲线数=") +
+                              std::to_string(curves.size()));
+            for (Curve* curve : curves)
+            {
+                ++curveIndex;
+
+                Features::ExtrudeBuilder* extrudeBuilder = workPart->Features()->CreateExtrudeBuilder(nullptr);
+                if (extrudeBuilder == nullptr)
+                {
+                    throw std::runtime_error("CreateExtrudeBuilder returned NULL.");
+                }
+                Section* section = workPart->Sections()->CreateSection(1.0e-5, 1.0e-5, 0.5);
+                if (section == nullptr)
+                {
+                    throw std::runtime_error("CreateSection returned NULL.");
+                }
+                extrudeBuilder->SetSection(section);
+                extrudeBuilder->SetDistanceTolerance(1.0e-5);
+                extrudeBuilder->BooleanOperation()->SetType(
+                    GeometricUtilities::BooleanOperation::BooleanTypeCreate);
+                extrudeBuilder->Limits()->SetSymmetricOption(false);
+                extrudeBuilder->Limits()->StartExtend()->Value()->SetFormula("0");
+                extrudeBuilder->Limits()->EndExtend()->Value()->SetFormula(depthFormula.c_str());
+                extrudeBuilder->Limits()->StartExtend()->SetTrimType(GeometricUtilities::Extend::ExtendTypeValue);
+                extrudeBuilder->Limits()->EndExtend()->SetTrimType(GeometricUtilities::Extend::ExtendTypeValue);
+                extrudeBuilder->Offset()->SetOption(GeometricUtilities::TypeSymmetricOffset);
+                extrudeBuilder->Offset()->StartOffset()->SetFormula(halfWidthFormula.c_str());
+                extrudeBuilder->Offset()->EndOffset()->SetFormula(halfWidthFormula.c_str());
+                extrudeBuilder->Draft()->SetDraftOption(GeometricUtilities::SimpleDraft::SimpleDraftTypeNoDraft);
+                extrudeBuilder->FeatureOptions()->SetBodyType(GeometricUtilities::FeatureOptions::BodyStyleSolid);
+                extrudeBuilder->SmartVolumeProfile()->SetOpenProfileSmartVolumeOption(false);
+                extrudeBuilder->SmartVolumeProfile()->SetCloseProfileRule(
+                    GeometricUtilities::SmartVolumeProfileBuilder::CloseProfileRuleTypeFci);
+
+                section->SetDistanceTolerance(1.0e-5);
+                section->SetChainingTolerance(1.0e-5);
+                section->SetAllowedEntityTypes(Section::AllowTypesOnlyCurves);
+                section->AllowSelfIntersection(true);
+                section->AllowDegenerateCurves(false);
+
+                SelectionIntentRuleOptions* ruleOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+                ruleOptions->SetSelectedFromInactive(false);
+                std::vector<IBaseCurve*> seedCurves(1, curve);
+                CurveDumbRule* curveRule = workPart->ScRuleFactory()->CreateRuleBaseCurveDumb(seedCurves, ruleOptions);
+                delete ruleOptions;
+                if (curveRule == nullptr)
+                {
+                    extrudeBuilder->Destroy();
+                    throw std::runtime_error("Could not create a rule for a Modern font curve.");
+                }
+                std::vector<SelectionIntentRule*> rules(1, curveRule);
+                section->AddToSection(rules, curve, nullptr, nullptr, textOrigin, Section::ModeCreate, false);
+                Direction* direction = workPart->Directions()->CreateDirection(
+                    textOrigin, inward, SmartObject::UpdateOptionWithinModeling);
+                if (direction == nullptr)
+                {
+                    extrudeBuilder->Destroy();
+                    throw std::runtime_error("CreateDirection returned NULL.");
+                }
+                extrudeBuilder->SetDirection(direction);
+                Features::Feature* cutterFeature = extrudeBuilder->CommitFeature();
+                extrudeBuilder->Destroy();
+                if (cutterFeature == nullptr || cutterFeature->GetBodies().empty())
+                {
+                    throw std::runtime_error("Symmetric curve extrusion did not create a cutter body.");
+                }
+                modernConstructionFeatureTags_.push_back(cutterFeature->Tag());
+                for (Body* cutterBody : cutterFeature->GetBodies())
+                {
+                    if (cutterBody != nullptr)
+                    {
+                        cutterBodies.push_back(cutterBody);
+                    }
+                }
+                if (curveIndex % 25 == 0 || curveIndex == static_cast<int>(curves.size()))
+                {
+                    Log(session_, std::string("V形新逻辑: 临时刀具体进度 ") +
+                                      std::to_string(curveIndex) + "/" +
+                                      std::to_string(curves.size()));
+                }
+            }
+
+            if (cutterBodies.empty())
+            {
+                throw std::runtime_error("No symmetric Modern curve cutter bodies were created.");
+            }
+
+            Log(session_, std::string("V形新逻辑: 开始一次性批量求差，刀具体数量=") +
+                              std::to_string(cutterBodies.size()));
+            Features::BooleanBuilder* subtract = workPart->Features()->CreateBooleanBuilderUsingCollector(nullptr);
+            subtract->SetOperation(Features::Feature::BooleanTypeSubtract);
+            subtract->SetRetainTarget(false);
+            subtract->SetRetainTool(false);
+
+            SelectionIntentRuleOptions* targetOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+            targetOptions->SetSelectedFromInactive(false);
+            BodyDumbRule* targetRule = workPart->ScRuleFactory()->CreateRuleBodyDumb(
+                std::vector<Body*>(1, targetBody), true, targetOptions);
+            delete targetOptions;
+            ScCollector* targetCollector = workPart->ScCollectors()->CreateCollector();
+            targetCollector->ReplaceRules(std::vector<SelectionIntentRule*>(1, targetRule), false);
+            subtract->SetTargetBodyCollector(targetCollector);
+
+            SelectionIntentRuleOptions* toolOptions = workPart->ScRuleFactory()->CreateRuleOptions();
+            toolOptions->SetSelectedFromInactive(false);
+            BodyDumbRule* toolRule = workPart->ScRuleFactory()->CreateRuleBodyDumb(
+                cutterBodies, true, toolOptions);
+            delete toolOptions;
+            ScCollector* toolCollector = workPart->ScCollectors()->CreateCollector();
+            toolCollector->ReplaceRules(std::vector<SelectionIntentRule*>(1, toolRule), false);
+            subtract->SetToolBodyCollector(toolCollector);
+            Features::Feature* subtractFeature = dynamic_cast<Features::Feature*>(subtract->Commit());
+            subtract->Destroy();
+            if (subtractFeature == nullptr)
+            {
+                throw std::runtime_error("Batch subtract returned no engraving feature.");
+            }
+            modernConstructionFeatureTags_.push_back(subtractFeature->Tag());
+            successCount = static_cast<int>(cutterBodies.size());
+            Log(session_, "V形新逻辑: 一次性批量求差成功");
+        }
+        catch (const NXException& ex)
+        {
+            Log(session_, std::string("V形新逻辑: 对称偏置批量刀具体异常 code=") +
+                              std::to_string(ex.ErrorCode()) + ", message=" + ex.Message());
+            try { session_->UndoToMark(modernEngravingMark, "KeZi MODERN engraving"); } catch (...) {}
+            try { session_->DeleteUndoMark(modernEngravingMark, "KeZi MODERN engraving"); } catch (...) {}
+            if (ex.ErrorCode() == 66 || ex.ErrorCode() == UF_err_operation_aborted)
+            {
+                Log(session_, "V形新逻辑: 收到用户停止信号，已回滚本次刻字");
+            }
+            throw;
+        }
+        catch (...)
+        {
+            try { session_->UndoToMark(modernEngravingMark, "KeZi MODERN engraving"); } catch (...) {}
+            try { session_->DeleteUndoMark(modernEngravingMark, "KeZi MODERN engraving"); } catch (...) {}
+            throw;
+        }
+        if (successCount == 0)
+        {
+            try { session_->DeleteUndoMark(modernEngravingMark, "KeZi MODERN engraving"); } catch (...) {}
+            throw std::runtime_error("All Modern single-line curve extrusions failed.");
+        }
+        for (Curve* curve : curves)
+        {
+            if (curve != nullptr) { UF_OBJ_set_blank_status(curve->Tag(), UF_OBJ_BLANKED); }
+        }
+        Log(session_, std::string("Modern原始曲线对称偏置批量刻字完成，刀具体数=") + std::to_string(successCount));
+
+        Features::CustomFeatureClassManager* classManager = session_->CustomFeatureClassManager();
+        Features::CustomFeatureClass* featureClass = classManager == nullptr
+            ? nullptr
+            : classManager->GetClassFromName(zhihui_kezi_custom_feature::kFeatureClassName);
+        if (featureClass == nullptr)
+        {
+            Log(session_, "单线刻字自定义特征类尚未加载，本次保留普通内部特征链");
+            try { session_->DeleteUndoMark(modernEngravingMark, "KeZi MODERN engraving"); } catch (...) {}
+            return;
+        }
+        Features::CustomFeatureBuilder* customBuilder = nullptr;
+        try
+        {
+            Features::CustomFeatureData* data = nullptr;
+            if (editedFeature_ == nullptr)
+            {
+                Features::CustomAttributeCollection* attributes = workPart->Features()->CustomAttributeCollection();
+                std::vector<Features::CustomAttribute*> values;
+                values.push_back(CreateKeZiTagAttribute(attributes,
+                    zhihui_kezi_custom_feature::kAttrTargetBody, targetBody, true, true));
+                values.push_back(attributes->CreateCustomTagAttribute(
+                    zhihui_kezi_custom_feature::kAttrFace,
+                    std::vector<Features::CustomAttribute::Property>()));
+                values.push_back(CreateKeZiStringAttribute(attributes,
+                    zhihui_kezi_custom_feature::kAttrText, text));
+                values.push_back(CreateKeZiDoubleAttribute(attributes,
+                    zhihui_kezi_custom_feature::kAttrHeight, settings.height));
+                values.push_back(CreateKeZiDoubleAttribute(attributes,
+                    zhihui_kezi_custom_feature::kAttrDepth, settings.depth));
+                values.push_back(CreateKeZiDoubleAttribute(attributes,
+                    zhihui_kezi_custom_feature::kAttrWidth, settings.vShapeWidth));
+                values.push_back(CreateKeZiDoubleAttribute(attributes,
+                    zhihui_kezi_custom_feature::kAttrWidthScale, settings.widthScale));
+                values.push_back(CreateKeZiDoubleAttribute(attributes,
+                    zhihui_kezi_custom_feature::kAttrShear, settings.shear));
+                values.push_back(CreateKeZiDoubleAttribute(attributes,
+                    zhihui_kezi_custom_feature::kAttrOriginX, textOrigin.X));
+                values.push_back(CreateKeZiDoubleAttribute(attributes,
+                    zhihui_kezi_custom_feature::kAttrOriginY, textOrigin.Y));
+                values.push_back(CreateKeZiDoubleAttribute(attributes,
+                    zhihui_kezi_custom_feature::kAttrOriginZ, textOrigin.Z));
+                const double initialMatrixValues[9] = {
+                    textMatrix.Xx, textMatrix.Xy, textMatrix.Xz,
+                    textMatrix.Yx, textMatrix.Yy, textMatrix.Yz,
+                    textMatrix.Zx, textMatrix.Zy, textMatrix.Zz};
+                for (int index = 0; index < 9; ++index)
+                {
+                    const std::string name = std::string(zhihui_kezi_custom_feature::kAttrMatrixPrefix) +
+                                             std::to_string(index);
+                    values.push_back(CreateKeZiDoubleAttribute(attributes, name.c_str(), initialMatrixValues[index]));
+                }
+                values.push_back(CreateKeZiIntegerAttribute(attributes,
+                    zhihui_kezi_custom_feature::kAttrSchemaVersion, 1));
+                data = workPart->Features()->CustomFeatureDataCollection()->CreateData(featureClass, values);
+            }
+            else
+            {
+                data = editedFeature_->FeatureData();
+            }
+            data->CustomTagAttributeByName(zhihui_kezi_custom_feature::kAttrTargetBody)->SetValue(targetBody);
+            if (face != nullptr && UF_OBJ_ask_status(face->Tag()) == UF_OBJ_ALIVE)
+            {
+                data->CustomTagAttributeByName(zhihui_kezi_custom_feature::kAttrFace)->SetValue(face);
+            }
+            data->CustomStringAttributeByName(zhihui_kezi_custom_feature::kAttrText)
+                ->SetValue(NXString(text.c_str(), NXString::UTF8));
+            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrHeight)->SetValue(settings.height);
+            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrDepth)->SetValue(settings.depth);
+            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrWidth)->SetValue(settings.vShapeWidth);
+            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrWidthScale)->SetValue(settings.widthScale);
+            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrShear)->SetValue(settings.shear);
+            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrOriginX)->SetValue(textOrigin.X);
+            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrOriginY)->SetValue(textOrigin.Y);
+            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrOriginZ)->SetValue(textOrigin.Z);
+            const double matrixValues[9] = {
+                textMatrix.Xx, textMatrix.Xy, textMatrix.Xz,
+                textMatrix.Yx, textMatrix.Yy, textMatrix.Yz,
+                textMatrix.Zx, textMatrix.Zy, textMatrix.Zz};
+            for (int index = 0; index < 9; ++index)
+            {
+                const std::string name = std::string(zhihui_kezi_custom_feature::kAttrMatrixPrefix) +
+                                         std::to_string(index);
+                data->CustomDoubleAttributeByName(name.c_str())->SetValue(matrixValues[index]);
+            }
+            const bool editingExistingFeature = editedFeature_ != nullptr;
+            customBuilder = workPart->Features()->CreateCustomFeatureBuilder(editedFeature_);
+            buildingModernCustomFeature_ = true;
+            customBuilder->SetFeatureData(data);
+            Features::Feature* committed = customBuilder->CommitFeature();
+
+            if (editingExistingFeature)
+            {
+                // NX can defer CustomFeature PreUpdate when CommitFeature is
+                // called under EditWithRollbackManager.  Keep the pending new
+                // extrude/subtract tags alive and force that scheduled pass
+                // before ending rollback, so PreUpdate can replace the old
+                // construction list instead of leaving the new chain loose.
+                Log(session_, "编辑单线刻字: 强制执行自定义特征内部链更新");
+                const int updateResult = UF_MODL_update();
+                if (updateResult != 0)
+                {
+                    throw NXException::Create(
+                        updateResult,
+                        "Failed to update the edited single-line engraving CustomFeature.");
+                }
+                Log(session_, "编辑单线刻字: 自定义特征内部链更新完成");
+            }
+            buildingModernCustomFeature_ = false;
+            customBuilder->Destroy();
+            customBuilder = nullptr;
+            Features::CustomFeature* customFeature = dynamic_cast<Features::CustomFeature*>(committed);
+            if (customFeature == nullptr)
+            {
+                throw std::runtime_error("NX did not return the single-line engraving CustomFeature.");
+            }
+            customFeature->SetName(zhihui_kezi_custom_feature::kFeatureDisplayName);
+            if (editedFeature_ != nullptr) { editedFeature_ = customFeature; }
+            Log(session_, std::string("单线刻字自定义特征节点创建成功，tag=") +
+                              std::to_string(customFeature->Tag()));
+            if (executingDeferredEditedReplacement_ &&
+                deferredReplacementAnchorTag_ != NULL_TAG &&
+                UF_OBJ_ask_status(deferredReplacementAnchorTag_) == UF_OBJ_ALIVE)
+            {
+                Features::Feature* anchor = dynamic_cast<Features::Feature*>(
+                    NXObjectManager::Get(deferredReplacementAnchorTag_));
+                if (anchor == nullptr)
+                {
+                    throw std::runtime_error("Could not resolve the original feature-tree anchor.");
+                }
+
+                // A CustomFeature's visible node and its construction members
+                // form one timestamp chain. Move the entire chain together;
+                // moving only the outer node can leave its boolean/extrude
+                // dependencies at the end of the model history.
+                std::vector<Features::Feature*> replacementChain;
+                for (Features::ConstructionFeatureData* construction :
+                     customFeature->GetConstructionFeatures())
+                {
+                    Features::Feature* member = construction == nullptr
+                        ? nullptr
+                        : construction->GetFeature();
+                    if (member != nullptr && member->Tag() != anchor->Tag())
+                    {
+                        replacementChain.push_back(member);
+                    }
+                }
+                replacementChain.push_back(customFeature);
+                std::sort(replacementChain.begin(), replacementChain.end(),
+                    [](Features::Feature* lhs, Features::Feature* rhs) {
+                        return lhs->Timestamp() < rhs->Timestamp();
+                    });
+
+                Features::FeatureCollection* features = workPart->Features();
+                bool modelDelaySuspended = false;
+                try
+                {
+                    features->SuspendModelDelayBeforeReorder();
+                    modelDelaySuspended = true;
+                    features->ReorderFeature(
+                        replacementChain,
+                        anchor,
+                        Features::FeatureCollection::ReorderTypeBefore);
+                    features->RestoreModelDelayAfterReorder();
+                    modelDelaySuspended = false;
+                    Log(session_, std::string("编辑单线刻字: 新节点及内部链已恢复原特征树位置，数量=") +
+                                      std::to_string(replacementChain.size()) +
+                                      ", anchorTag=" + std::to_string(anchor->Tag()));
+                }
+                catch (...)
+                {
+                    if (modelDelaySuspended)
+                    {
+                        try { features->RestoreModelDelayAfterReorder(); } catch (...) {}
+                    }
+                    throw;
+                }
+            }
+            else if (executingDeferredEditedReplacement_)
+            {
+                Log(session_, "编辑单线刻字: 原节点位于特征树末尾，无需重排");
+            }
+            try { session_->DeleteUndoMark(modernEngravingMark, "KeZi MODERN engraving"); } catch (...) {}
+        }
+        catch (...)
+        {
+            buildingModernCustomFeature_ = false;
+            if (customBuilder != nullptr) { try { customBuilder->Destroy(); } catch (...) {} }
+            try { session_->UndoToMark(modernEngravingMark, "KeZi MODERN engraving"); } catch (...) {}
+            try { session_->DeleteUndoMark(modernEngravingMark, "KeZi MODERN engraving"); } catch (...) {}
+            throw;
+        }
+    }
+
     Tooling::InsertTextBuilder* CreatePreparedBuilder(NXObject** textUdoOut,
                                                       Face* overrideSelectedFace = nullptr,
                                                       const Point3d* overrideOriginReference = nullptr,
                                                       const Matrix3x3* overrideMatrix = nullptr,
-                                                      const std::string* overrideText = nullptr)
+                                                      const std::string* overrideText = nullptr,
+                                                      const bool commitModernGeometry = false)
     {
         Log(session_, "开始准备注塑模向导刻字 Builder");
         if (textUdoOut != nullptr)
@@ -4938,13 +6475,20 @@ private:
             *textUdoOut = nullptr;
         }
 
-        TextSettings settings = ReadSettings();
-        if (settings.height <= 0.0 || settings.depth <= 0.0 || settings.widthScale <= 0.0)
+        TextSettings settings = executingDeferredEditedReplacement_
+            ? deferredReplacementSettings_
+            : ReadSettings();
+        if (settings.height <= 0.0 || settings.depth <= 0.0 || settings.widthScale <= 0.0 ||
+            (settings.vShape && settings.vShapeWidth <= 0.0))
         {
             throw std::runtime_error("Text height, depth, length, and width ratio must be greater than 0.");
         }
 
-        Face* selectedFace = overrideSelectedFace != nullptr ? overrideSelectedFace : SelectedFace();
+        Face* selectedFace = overrideSelectedFace != nullptr
+            ? overrideSelectedFace
+            : (executingDeferredEditedReplacement_ && deferredReplacementFace_ != nullptr
+                   ? deferredReplacementFace_
+                   : SelectedFace());
         if (selectedFace == nullptr)
         {
             throw std::runtime_error("Manual mode requires a selected engraving face.");
@@ -4971,7 +6515,7 @@ private:
         Vector3d faceNormal;
         Point3d pickedPoint(0.0, 0.0, 0.0);
         bool hasPickedPoint = false;
-        if (manualFace_ != nullptr)
+        if (!executingDeferredEditedReplacement_ && manualFace_ != nullptr)
         {
             pickedPoint = manualFace_->PickPoint();
             hasPickedPoint = std::isfinite(pickedPoint.X) &&
@@ -4987,8 +6531,11 @@ private:
             throw std::runtime_error("Selected face is not a valid planar engraving face.");
         }
 
-        Point3d originReference = overrideOriginReference != nullptr ? *overrideOriginReference : pickedPoint;
-        if (orientation_ != nullptr && orientation_->IsOriginSpecified())
+        Point3d originReference = overrideOriginReference != nullptr
+            ? *overrideOriginReference
+            : (executingDeferredEditedReplacement_ ? deferredReplacementOrigin_ : pickedPoint);
+        if (!executingDeferredEditedReplacement_ &&
+            orientation_ != nullptr && orientation_->IsOriginSpecified())
         {
             if (overrideOriginReference == nullptr)
             {
@@ -5016,6 +6563,40 @@ private:
         }
         Log(session_, std::string("已取得目标体: ") + ToString(body->Name()));
 
+        const std::string textRule = ResolveEngravingText(body, workPart, settings, overrideText);
+        Log(session_, std::string("解析刻字文本: ") + textRule);
+        const Point3d textOrigin = overrideOriginReference != nullptr
+                                       ? *overrideOriginReference
+                                       : (executingDeferredEditedReplacement_
+                                              ? deferredReplacementOrigin_
+                                              : ApplyCenterOptions(face, faceNormal, pickedOrigin, settings));
+        const Matrix3x3 textMatrix = overrideMatrix != nullptr
+                                         ? *overrideMatrix
+                                         : (executingDeferredEditedReplacement_
+                                                ? deferredReplacementMatrix_
+                                                : TextMatrixFromDialog(face, faceNormal, settings, selectedComponent));
+
+        // V mode never enters Moldwizard/InsertTextBuilder.  Preview displays
+        // the MODERN center-line curves; commit extrudes every curve with a
+        // symmetric user width and subtracts it from the selected body.
+        if (settings.vShape)
+        {
+            Log(session_, commitModernGeometry
+                              ? "V形正式提交: 进入MODERN曲线对称拉伸求差逻辑"
+                              : "V形预览: 进入MODERN单线曲线预览逻辑");
+            CreateModernCurveEngraving(
+                face,
+                textOrigin,
+                textMatrix,
+                textRule,
+                settings,
+                workPart,
+                dynamic_cast<Body*>(body),
+                commitModernGeometry);
+            workContext.Restore();
+            return nullptr;
+        }
+
         if (session_->ToolingSession() != nullptr)
         {
             session_->ToolingSession()->SetWizardType(1);
@@ -5029,22 +6610,6 @@ private:
 
         try
         {
-            const std::string textTemplate = EffectiveTextTemplate(settings);
-            const std::string textRule = overrideText != nullptr ? *overrideText : ExpandTextTemplate(textTemplate, settings.text, body, workPart, config_);
-            if (textRule.empty())
-            {
-                throw std::runtime_error("Engraving text is empty.");
-            }
-            lastTextTemplate_ = textTemplate;
-            lastResolvedText_ = textRule;
-            lastBody_ = body;
-            lastWorkPart_ = workPart;
-            Log(session_, std::string("解析刻字文本: ") + textRule);
-            const Point3d textOrigin = overrideOriginReference != nullptr
-                                           ? *overrideOriginReference
-                                           : ApplyCenterOptions(face, faceNormal, pickedOrigin, settings);
-            const Matrix3x3 textMatrix = overrideMatrix != nullptr ? *overrideMatrix : TextMatrixFromDialog(face, faceNormal, settings, selectedComponent);
-
             builder->SetInsertTextType(Tooling::InsertTextBuilder::InsertTypeThroughPoint);
             builder->SetLockAspectRatio(settings.lockAspect);
             builder->SetTextLayer(settings.layer);
@@ -5072,11 +6637,11 @@ private:
             }
             builder->TextShear()->SetFormula(FormatNumber(settings.shear).c_str());
             builder->SetTextRule(textRule.c_str());
-            builder->SetFontName(settings.fontName.c_str());
             builder->SetScript(Features::TextBuilder::ScriptOptionsWestern);
             builder->SetTextWScale(settings.widthScale);
             builder->SetCreateEmbossedText(settings.embossed);
-            builder->SetCreateVShapeText(settings.vShape);
+            builder->SetCreateVShapeText(false);
+            builder->SetFontName(settings.fontName.c_str());
             builder->SetBoundaryType(BoundaryTypeFromIndex(settings.boundary));
             builder->CleanUpRedundantData();
             builder->SetCsysOrigin(textOrigin);
@@ -5307,48 +6872,36 @@ private:
 
     void HideComponents(const std::vector<Assemblies::Component*>& components)
     {
-        if (components.empty() || session_ == nullptr || session_->Parts() == nullptr)
+        if (components.empty())
         {
             return;
         }
-
-        Part* assemblyPart = session_->Parts()->Work();
-        if (assemblyPart == nullptr || assemblyPart->AssemblyManager() == nullptr)
-        {
-            return;
-        }
-
-        std::vector<TaggedObject*> objects;
         for (Assemblies::Component* component : components)
         {
-            if (component != nullptr)
+            if (component == nullptr)
             {
-                objects.push_back(component);
+                continue;
             }
-        }
-        if (objects.empty())
-        {
-            return;
-        }
-
-        try
-        {
-            std::unique_ptr<Assemblies::HideComponentBuilder, void (*)(Assemblies::HideComponentBuilder*)> hideBuilder(
-                assemblyPart->AssemblyManager()->CreateHideComponentBuilder(),
-                [](Assemblies::HideComponentBuilder* value) {
-                    if (value != nullptr)
-                    {
-                        value->Destroy();
-                    }
-                });
-            if (hideBuilder != nullptr && hideBuilder->Components() != nullptr)
+            try
             {
-                hideBuilder->Components()->SetArray(objects);
-                hideBuilder->Commit();
+                // Use the occurrence's standard blank status. This is the
+                // same recoverable display state used by NX's normal
+                // Show/Hide commands and is visible in the Assembly Navigator.
+                // HideComponentBuilder stores a separate assembly display
+                // state which may not be recoverable with ordinary Show.
+                component->Blank();
+                Log(session_, std::string("已标准隐藏刻字组件，可用显示命令恢复: ") +
+                                  ToString(component->Name()) +
+                                  ", tag=" + std::to_string(component->Tag()));
             }
-        }
-        catch (...)
-        {
+            catch (const NXException& ex)
+            {
+                Log(session_, std::string("标准隐藏刻字组件失败: ") + ex.Message());
+            }
+            catch (...)
+            {
+                Log(session_, "标准隐藏刻字组件失败: 未知异常");
+            }
         }
     }
 
@@ -5963,7 +7516,7 @@ private:
                             }
                         });
                     NXObject* textUdo = nullptr;
-                    builder.reset(CreatePreparedBuilder(&textUdo, target.face, &target.origin, &target.matrix, &resolvedText));
+                    builder.reset(CreatePreparedBuilder(&textUdo, target.face, &target.origin, &target.matrix, &resolvedText, true));
                     CommitPreparedBuilder(builder.get(), textUdo);
                     builder.reset();
 
@@ -6069,10 +7622,16 @@ private:
                 }
         });
 
-        const std::string dialogTextAtApply = textValue_ == nullptr ? std::string() : Trim(ReadString(textValue_));
+        const std::string dialogTextAtApply = executingDeferredEditedReplacement_
+            ? deferredReplacementText_
+            : (textValue_ == nullptr ? std::string() : Trim(ReadString(textValue_)));
         ClearPreviewBuilder();
-        Face* selectedFace = SelectedFace();
-        const TextSettings settings = ReadSettings();
+        Face* selectedFace = executingDeferredEditedReplacement_
+            ? deferredReplacementFace_
+            : SelectedFace();
+        const TextSettings settings = executingDeferredEditedReplacement_
+            ? deferredReplacementSettings_
+            : ReadSettings();
         if (settings.autoEngraveVisibleTubes)
         {
             ApplyAutomaticVisibleTubeEngraving(settings);
@@ -6084,8 +7643,39 @@ private:
         const bool sameRandomColor = settings.sameRandomColor;
         const bool hideEngravedText = settings.hideEngravedText;
         WorkContextGuard workContext(session_, selectedFace);
+
+        // Resolve matching bodies before engraving changes the reference body's
+        // topology.  Reusing this list also avoids an expensive post-commit scan.
+        std::vector<Body*> preEngravingMatchingBodies;
+        Body* preEngravingReferenceBody = nullptr;
+        if ((engraveSameBodies || sameRandomColor) && selectedFace != nullptr)
+        {
+            Face* preEngravingFace = PrototypeFace(selectedFace);
+            preEngravingReferenceBody = dynamic_cast<Body*>(ResolveBodyFromFace(preEngravingFace));
+            Part* preEngravingWorkPart = workContext.WorkPart();
+            if (preEngravingReferenceBody != nullptr && preEngravingWorkPart != nullptr)
+            {
+                const auto sameBodyScanStartedAt = std::chrono::steady_clock::now();
+                preEngravingMatchingBodies = FindMatchingVisibleBodies(
+                    preEngravingWorkPart, preEngravingReferenceBody);
+                const long long sameBodyScanMilliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - sameBodyScanStartedAt).count();
+                Log(session_, std::string("刻字前相同体识别完成，匹配=") +
+                                  std::to_string(preEngravingMatchingBodies.size()) +
+                                  ", 耗时=" + std::to_string(sameBodyScanMilliseconds) + " ms");
+            }
+        }
         NXObject* textUdo = nullptr;
-        builder.reset(CreatePreparedBuilder(&textUdo));
+        const std::string* deferredTextOverride = executingDeferredEditedReplacement_
+            ? &deferredReplacementText_
+            : nullptr;
+        builder.reset(CreatePreparedBuilder(
+            &textUdo,
+            executingDeferredEditedReplacement_ ? deferredReplacementFace_ : nullptr,
+            executingDeferredEditedReplacement_ ? &deferredReplacementOrigin_ : nullptr,
+            executingDeferredEditedReplacement_ ? &deferredReplacementMatrix_ : nullptr,
+            deferredTextOverride,
+            true));
         NXObject* committedBody = lastBody_;
         Assemblies::Component* committedComponent = lastComponent_;
         Part* committedWorkPart = lastWorkPart_;
@@ -6096,7 +7686,8 @@ private:
         Point3d referenceOrigin;
         Matrix3x3 referenceMatrix;
         bool hasSameBodyReference = false;
-        if (committedPrototypeFace != nullptr && referenceBody != nullptr && committedWorkPart != nullptr)
+        if (!executingDeferredEditedReplacement_ &&
+            committedPrototypeFace != nullptr && referenceBody != nullptr && committedWorkPart != nullptr)
         {
             Point3d pickedPoint = manualFace_ != nullptr ? manualFace_->PickPoint() : Point3d(0.0, 0.0, 0.0);
             if (selectedFace != nullptr && selectedFace->IsOccurrence() && selectedFace->OwningComponent() != nullptr)
@@ -6118,11 +7709,7 @@ private:
         Log(session_, std::string("应用文本: 对话框=") + dialogTextAtApply + ", 解析=" + lastResolvedText_ + ", 使用=" + committedText);
 
         std::vector<SameBodyEngravingTarget> sameBodyTargets;
-        std::vector<Body*> matchingBodies;
-        if ((engraveSameBodies || sameRandomColor) && hasSameBodyReference && committedWorkPart != nullptr && referenceBody != nullptr)
-        {
-            matchingBodies = FindMatchingVisibleBodies(committedWorkPart, referenceBody);
-        }
+        std::vector<Body*> matchingBodies = preEngravingMatchingBodies;
         if (engraveSameBodies && !committedText.empty())
         {
             for (Body* sameBody : matchingBodies)
@@ -6168,6 +7755,17 @@ private:
         Log(session_, "提交Builder销毁开始");
         builder.reset();
         Log(session_, "提交Builder销毁完成");
+        if (executingDeferredEditedReplacement_)
+        {
+            // The replacement node and all construction members are already
+            // committed. Everything below is create-mode UI/config/assembly
+            // post-processing and may dereference Block Styler controls after
+            // the edit dialog has closed.
+            workContext.Restore();
+            Log(session_, "编辑单线刻字: 新打包节点已完成，跳过新建模式后处理");
+            Log(session_, "ApplyEngraving完成");
+            return;
+        }
         for (const SameBodyEngravingTarget& target : sameBodyTargets)
         {
             std::unique_ptr<Tooling::InsertTextBuilder, void (*)(Tooling::InsertTextBuilder*)> sameBuilder(
@@ -6179,7 +7777,7 @@ private:
                     }
                 });
             NXObject* sameTextUdo = nullptr;
-            sameBuilder.reset(CreatePreparedBuilder(&sameTextUdo, target.face, &target.origin, &target.matrix, &committedText));
+            sameBuilder.reset(CreatePreparedBuilder(&sameTextUdo, target.face, &target.origin, &target.matrix, &committedText, true));
             CommitPreparedBuilder(sameBuilder.get(), sameTextUdo);
             sameBuilder.reset();
             WriteStringAttribute(target.body, "bianhao", committedText);
@@ -6268,6 +7866,10 @@ private:
     Session* session_ = nullptr;
     UI* ui_ = nullptr;
     BlockDialog* dialog_ = nullptr;
+    Features::CustomFeatureClassManager* customFeatureManager_ = nullptr;
+    Features::CustomFeature* editedFeature_ = nullptr;
+    Features::EditWithRollbackManager* editRollbackManager_ = nullptr;
+    Session::UndoMarkId editRollbackMark_ = static_cast<Session::UndoMarkId>(0);
 
     Enumeration* mode_ = nullptr;
     BlockStyler::SelectObject* manualFace_ = nullptr;
@@ -6297,6 +7899,7 @@ private:
     IntegerBlock* textLayer_ = nullptr;
     Toggle* embossedText_ = nullptr;
     Toggle* verticalText_ = nullptr;
+    DoubleBlock* vShapeWidth_ = nullptr;
     Toggle* renameComponentToText_ = nullptr;
     Toggle* engraveSameBodies_ = nullptr;
     Toggle* sameRandomColor_ = nullptr;
@@ -6305,6 +7908,7 @@ private:
     Button* editConfig_ = nullptr;
     Tooling::InsertTextBuilder* previewBuilder_ = nullptr;
     NXObject* previewUdo_ = nullptr;
+    std::vector<tag_t> modernPreviewCurveTags_;
     NXObject* lastBody_ = nullptr;
     Assemblies::Component* lastComponent_ = nullptr;
     Part* lastWorkPart_ = nullptr;
@@ -6312,15 +7916,42 @@ private:
     std::string lastResolvedText_;
     std::string lastTextTemplate_;
     std::string ruleText_;
+    std::string lastValidFontName_ = "Arial";
+    std::string normalFontName_ = "Arial";
     bool isAssemblyContext_ = false;
     bool refreshingPreview_ = false;
     bool updatingResolvedText_ = false;
     bool updatingRuleInput_ = false;
+    bool selectingSystemFont_ = false;
     bool applying_ = false;
+    bool loadingEditedFeature_ = false;
     bool componentReplacedInApply_ = false;
     bool suppressPreviewUntilSelection_ = false;
+    bool deferredEditedReplacement_ = false;
+    bool executingDeferredEditedReplacement_ = false;
+    UINT_PTR deferredTimerId_ = 0;
+    Face* deferredReplacementFace_ = nullptr;
+    Point3d deferredReplacementOrigin_ = Point3d(0.0, 0.0, 0.0);
+    Matrix3x3 deferredReplacementMatrix_ = {};
+    bool deferredPlacementCaptured_ = false;
+    tag_t deferredReplacementAnchorTag_ = NULL_TAG;
+    bool deferredDisplaySuppressed_ = false;
+    TextSettings deferredReplacementSettings_ = {};
+    std::string deferredReplacementText_;
+    bool buildingModernCustomFeature_ = false;
+    std::vector<tag_t> modernConstructionFeatureTags_;
     KeZiConfig config_;
 };
+
+extern "C" DllExport int ZhihuiKeZiBuildCustomFeature(void* eventPointer)
+{
+    if (gActiveKeZiDialog == nullptr || eventPointer == nullptr)
+    {
+        return 1;
+    }
+    return gActiveKeZiDialog->BuildModernCustomFeatureConstruction(
+        static_cast<Features::CustomFeaturePreUpdateEvent*>(eventPointer));
+}
 
 extern "C" DllExport void ufusr(char* /*param*/, int* /*retcod*/, int /*param_len*/)
 {
@@ -6341,9 +7972,17 @@ extern "C" DllExport void ufusr(char* /*param*/, int* /*retcod*/, int /*param_le
 
     try
     {
-        KeZiDialog dialog;
-        dialog.Show();
+        KeZiDialog* dialog = new KeZiDialog();
+        dialog->Show();
         Log(Session::GetSession(), "ufusr: dialog.Show返回");
+        if (!dialog->HasScheduledReplacement())
+        {
+            delete dialog;
+        }
+        else
+        {
+            Log(Session::GetSession(), "ufusr: 对话框对象保留至主线程延时替换完成");
+        }
     }
     catch (const NXException& ex)
     {
@@ -6365,7 +8004,7 @@ extern "C" DllExport void ufusr(char* /*param*/, int* /*retcod*/, int /*param_le
 
 extern "C" DllExport int ufusr_ask_unload()
 {
-    return static_cast<int>(Session::LibraryUnloadOptionImmediately);
+    return static_cast<int>(Session::LibraryUnloadOptionAtTermination);
 }
 
 extern "C" DllExport void ufusr_cleanup(void)
