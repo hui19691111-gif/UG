@@ -1,5 +1,4 @@
-﻿<?xml version="1.0" encoding="UTF-8"?>
-
+<?xml version='1.0' encoding='UTF-8'?>
 <Dialog ContainerItems="17" Expanded="1" NX="8.5.0" id="Dialog" name="Dialog" title="XuanZeGuanJian.dlx" type="uicomp" version="1.0.0">
   <item Expanded="1" class="UICOMP_selection" icon="selection_cursor.bmp" id="bodySelection" name="bodySelection" presentation="Select Object" type="uicomp">
     <PropertyList id="id" mode="0">
@@ -948,7 +947,7 @@
     <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="SmartSelectonAvailabilityState" mask="4100" name="SmartSelectonAvailabilityState" sname="SmartSelectonAvailabilityState" source="2" type="logical" value="True"/>
     <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="SmartSelectonStrictnessValue" mask="4100" name="SmartSelectonStrictnessValue" sname="SmartSelectonStrictnessValue" source="2" type="double" value="0"/>
     <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False"/>
-    <Property ClassID="UGS::UICOMP" brief="0" dynamic="0" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="DockPolicy" mask="256" name="DockPolicy" selected="0" sname="Dialog Sizing" source="1" type="enum">
+    <Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="HelpTag" mask="4096" name="HelpTag" sname="HelpTag" source="3" type="string" value="Zhihui_XuanZeGuanJian"/><Property ClassID="UGS::UICOMP" brief="0" dynamic="0" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="DockPolicy" mask="256" name="DockPolicy" selected="0" sname="Dialog Sizing" source="1" type="enum">
       <Option name="Allow Resize" value="0"/>
       <Option name="Follow Policy" value="1"/>
     </Property>

@@ -23,9 +23,15 @@
 #include <NXOpen/Features_FeatureCollection.hxx>
 #include <NXOpen/Features_ShadowCurve.hxx>
 #include <NXOpen/Features_ShadowCurveBuilder.hxx>
+#include <NXOpen/Features_ToolingBox.hxx>
+#include <NXOpen/Features_ToolingBoxBuilder.hxx>
+#include <NXOpen/Features_ToolingFeatureCollection.hxx>
 #include <NXOpen/GeometricUtilities_CurveFitData.hxx>
 #include <NXOpen/GeometricUtilities_CurveSettings.hxx>
+#include <NXOpen/IParameterizedSurface.hxx>
 #include <NXOpen/ListingWindow.hxx>
+#include <NXOpen/MeasureFaces.hxx>
+#include <NXOpen/MeasureManager.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObjectManager.hxx>
@@ -43,6 +49,8 @@
 #include <NXOpen/SmartObject.hxx>
 #include <NXOpen/TaggedObject.hxx>
 #include <NXOpen/UI.hxx>
+#include <NXOpen/Unit.hxx>
+#include <NXOpen/UnitCollection.hxx>
 
 #include <uf.h>
 #include <uf_defs.h>
@@ -426,7 +434,33 @@ std::string SelectDebugLogPath()
 
 void AppendSelectDebugLog(const std::string& message)
 {
-    (void)message;
+    const std::string path = SelectDebugLogPath();
+    if (path.empty())
+    {
+        return;
+    }
+
+    std::ofstream output(path.c_str(), std::ios::out | std::ios::app | std::ios::binary);
+    if (!output)
+    {
+        return;
+    }
+
+    SYSTEMTIME localTime = {};
+    GetLocalTime(&localTime);
+    char timestamp[32] = {0};
+    std::snprintf(
+        timestamp,
+        sizeof(timestamp),
+        "%04u-%02u-%02u %02u:%02u:%02u.%03u",
+        static_cast<unsigned int>(localTime.wYear),
+        static_cast<unsigned int>(localTime.wMonth),
+        static_cast<unsigned int>(localTime.wDay),
+        static_cast<unsigned int>(localTime.wHour),
+        static_cast<unsigned int>(localTime.wMinute),
+        static_cast<unsigned int>(localTime.wSecond),
+        static_cast<unsigned int>(localTime.wMilliseconds));
+    output << timestamp << " " << message << "\r\n";
 }
 
 std::string UfTypeText(tag_t objectTag)
@@ -611,11 +645,6 @@ bool ReclassifyTubeDimensionsBySpec(double& length, double& width, double& heigh
                 break;
             }
         }
-        if (dimensions[lengthIndex] < std::max(5.0, std::min(firstSpec, secondSpec) * 0.5))
-        {
-            continue;
-        }
-
         Match match = {};
         match.firstIndex = firstIndex;
         match.secondIndex = secondIndex;
@@ -2032,17 +2061,109 @@ bool IsRectangularTubeLoop(const SectionLoop& loop)
     return false;
 }
 
-bool EstimateThicknessFromSectionLoops(const std::vector<SectionLoop>& loops, double& thickness)
+bool EstimateRectangularLoopDimensions(
+    const SectionLoop& loop,
+    double& width,
+    double& height)
 {
+    width = 0.0;
+    height = 0.0;
+    if (!IsRectangularTubeLoop(loop))
+    {
+        return false;
+    }
+
+    struct RayDirectionGroup
+    {
+        double angle;
+        std::vector<double> offsets;
+    };
+
+    std::vector<RayDirectionGroup> groups;
+    const double angleTolerance = 8.0 * 3.14159265358979323846 / 180.0;
+    for (std::size_t index = 0; index < loop.lineRays.size(); ++index)
+    {
+        double angle = std::fmod(loop.lineRays[index].first, 3.14159265358979323846);
+        if (angle < 0.0)
+        {
+            angle += 3.14159265358979323846;
+        }
+
+        bool found = false;
+        for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+        {
+            if (SameAngleModuloPi(angle, groups[groupIndex].angle, angleTolerance))
+            {
+                groups[groupIndex].offsets.push_back(loop.lineRays[index].second);
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            RayDirectionGroup group = {};
+            group.angle = angle;
+            group.offsets.push_back(loop.lineRays[index].second);
+            groups.push_back(group);
+        }
+    }
+
+    if (groups.size() != 2)
+    {
+        return false;
+    }
+
+    double dimensions[2] = {0.0, 0.0};
+    for (int groupIndex = 0; groupIndex < 2; ++groupIndex)
+    {
+        if (groups[static_cast<std::size_t>(groupIndex)].offsets.size() < 2)
+        {
+            return false;
+        }
+        const std::vector<double>& offsets = groups[static_cast<std::size_t>(groupIndex)].offsets;
+        const std::pair<std::vector<double>::const_iterator, std::vector<double>::const_iterator> range =
+            std::minmax_element(offsets.begin(), offsets.end());
+        dimensions[groupIndex] = *range.second - *range.first;
+        if (dimensions[groupIndex] <= 0.5)
+        {
+            return false;
+        }
+    }
+
+    std::sort(dimensions, dimensions + 2);
+    height = dimensions[0];
+    width = dimensions[1];
+    return true;
+}
+
+bool EstimateDimensionsFromSectionLoops(
+    const std::vector<SectionLoop>& loops,
+    double& width,
+    double& height,
+    double& thickness)
+{
+    width = 0.0;
+    height = 0.0;
     thickness = 0.0;
-    std::vector<SectionLoop> acceptedLoops;
+
+    struct MeasuredLoop
+    {
+        SectionLoop loop;
+        double width;
+        double height;
+    };
+
+    std::vector<MeasuredLoop> acceptedLoops;
     for (std::size_t index = 0; index < loops.size(); ++index)
     {
-        if (IsRectangularTubeLoop(loops[index]) &&
-            loops[index].width > 0.5 &&
-            loops[index].height > 0.5)
+        MeasuredLoop measured = {};
+        measured.loop = loops[index];
+        if (EstimateRectangularLoopDimensions(
+                loops[index],
+                measured.width,
+                measured.height))
         {
-            acceptedLoops.push_back(loops[index]);
+            acceptedLoops.push_back(measured);
         }
     }
 
@@ -2054,15 +2175,15 @@ bool EstimateThicknessFromSectionLoops(const std::vector<SectionLoop>& loops, do
     std::sort(
         acceptedLoops.begin(),
         acceptedLoops.end(),
-        [](const SectionLoop& lhs, const SectionLoop& rhs)
+        [](const MeasuredLoop& lhs, const MeasuredLoop& rhs)
         {
-            return lhs.area > rhs.area;
+            return lhs.width * lhs.height > rhs.width * rhs.height;
         });
 
-    const SectionLoop& outer = acceptedLoops[0];
+    const MeasuredLoop& outer = acceptedLoops[0];
     for (std::size_t index = 1; index < acceptedLoops.size(); ++index)
     {
-        const SectionLoop& inner = acceptedLoops[index];
+        const MeasuredLoop& inner = acceptedLoops[index];
         const double widthThickness = (outer.width - inner.width) * 0.5;
         const double heightThickness = (outer.height - inner.height) * 0.5;
         if (widthThickness <= 0.05 || heightThickness <= 0.05)
@@ -2071,8 +2192,10 @@ bool EstimateThicknessFromSectionLoops(const std::vector<SectionLoop>& loops, do
         }
 
         const double rawThickness = (widthThickness + heightThickness) * 0.5;
+        width = outer.width;
+        height = outer.height;
         thickness = RoundTo(rawThickness, 0.1);
-        return thickness > 0.0;
+        return width > 0.0 && height > 0.0 && thickness > 0.0;
     }
 
     return false;
@@ -2084,20 +2207,23 @@ bool HasAcceptedRectangularSectionAt(
     const double lengthAxis[3],
     const double xAxis[3],
     const double yAxis[3],
+    double* sectionWidth,
+    double* sectionHeight,
     double* sectionThickness)
 {
-    std::vector<SectionCurveSegment> shadowSegments;
-    if (!CollectShadowCurveSegmentsAt(bodyTag, sectionPosition, lengthAxis, shadowSegments))
+    std::vector<SectionCurveSegment> sectionSegments;
+    if (!CollectTrueSectionCurveSegmentsAt(bodyTag, sectionPosition, lengthAxis, sectionSegments))
     {
         return false;
     }
 
     std::vector<SectionLoop> loops;
-    if (!BuildSectionLoops(shadowSegments, xAxis, yAxis, loops))
+    if (!BuildSectionLoops(sectionSegments, xAxis, yAxis, loops))
     {
         std::ostringstream stream;
-        stream << "  shadow bodyTag=" << bodyTag
-            << " loopBuild=no segments=" << shadowSegments.size();
+        stream << "  section bodyTag=" << bodyTag
+            << " position=" << FormatDouble(sectionPosition, 3)
+            << " loopBuild=no segments=" << sectionSegments.size();
         AppendSelectDebugLog(stream.str());
         return false;
     }
@@ -2112,7 +2238,8 @@ bool HasAcceptedRectangularSectionAt(
     }
     {
         std::ostringstream stream;
-        stream << "  shadow bodyTag=" << bodyTag
+        stream << "  section bodyTag=" << bodyTag
+            << " position=" << FormatDouble(sectionPosition, 3)
             << " loops=" << loops.size()
             << " rectangularLoops=" << acceptedLoopCount;
         AppendSelectDebugLog(stream.str());
@@ -2134,13 +2261,24 @@ bool HasAcceptedRectangularSectionAt(
         return false;
     }
 
+    double width = 0.0;
+    double height = 0.0;
+    double thickness = 0.0;
+    if (!EstimateDimensionsFromSectionLoops(loops, width, height, thickness))
+    {
+        return false;
+    }
+    if (sectionWidth != NULL)
+    {
+        *sectionWidth = width;
+    }
+    if (sectionHeight != NULL)
+    {
+        *sectionHeight = height;
+    }
     if (sectionThickness != NULL)
     {
-        double thickness = 0.0;
-        if (EstimateThicknessFromSectionLoops(loops, thickness))
-        {
-            *sectionThickness = thickness;
-        }
+        *sectionThickness = thickness;
     }
     return true;
 }
@@ -2201,27 +2339,11 @@ bool CollectTrueSectionCurveSegmentsAt(
             {
                 continue;
             }
-
-            if (type == UF_line_type)
+            if (type == UF_line_type ||
+                type == UF_circle_type ||
+                type == UF_spline_type)
             {
-                UF_CURVE_line_t lineData = {};
-                if (UF_CURVE_ask_line_data(curveTag, &lineData) != 0)
-                {
-                    continue;
-                }
-
-                SectionCurveSegment segment = {};
-                for (int axis = 0; axis < 3; ++axis)
-                {
-                    segment.first[axis] = lineData.start_point[axis];
-                    segment.second[axis] = lineData.end_point[axis];
-                }
-                segment.line = LineDirectionInSection(segment.first, segment.second, lengthAxis, segment.direction);
-                segment.arc = false;
-                if (segment.line)
-                {
-                    segments.push_back(segment);
-                }
+                AppendEvaluatedCurveSegments(curveTag, lengthAxis, segments);
             }
         }
     }
@@ -2251,8 +2373,28 @@ bool CollectTrueSectionCurveSegmentsAt(
 
 bool HasClosedRectangularTubeSections(
     tag_t bodyTag,
-    double* sectionThickness = NULL)
+    double* sectionThickness = NULL,
+    double* sectionWidth = NULL,
+    double* sectionHeight = NULL,
+    double* tubeLength = NULL)
 {
+    double fastDimensions[3] = {0.0, 0.0, 0.0};
+    if (AskBodyDimensions(bodyTag, fastDimensions))
+    {
+        if (fastDimensions[0] <= 5.0 &&
+            std::fabs(fastDimensions[1] - fastDimensions[2]) <= 1.0)
+        {
+            std::ostringstream stream;
+            stream << "  section bodyTag=" << bodyTag
+                << " fastReject=thin_square_cap"
+                << " boxDims=" << FormatDouble(fastDimensions[0], 3)
+                << "," << FormatDouble(fastDimensions[1], 3)
+                << "," << FormatDouble(fastDimensions[2], 3);
+            AppendSelectDebugLog(stream.str());
+            return false;
+        }
+    }
+
     double lengthAxis[3] = {0.0, 0.0, 0.0};
     if (!EstimateMainLengthAxisFromEdges(bodyTag, lengthAxis))
     {
@@ -2278,23 +2420,134 @@ bool HasClosedRectangularTubeSections(
     {
         return false;
     }
-    const double sectionPosition = (bodyMinProjection + bodyMaxProjection) * 0.5;
-    double thickness = 0.0;
-    if (HasAcceptedRectangularSectionAt(
-        bodyTag,
-        sectionPosition,
-        lengthAxis,
-        xAxis,
-        yAxis,
-        &thickness))
+
+    struct SectionMeasurement
     {
-        if (sectionThickness != NULL && thickness > 0.0)
+        double width;
+        double height;
+        double thickness;
+        double fraction;
+    };
+
+    const double fractions[] = {0.50, 0.35, 0.65, 0.20, 0.80};
+    std::map<std::pair<int, int>, std::vector<SectionMeasurement> > measurementsBySpec;
+    const std::set<std::pair<int, int> >& tubeSpecs = GetTubeSpecs();
+    for (std::size_t index = 0; index < sizeof(fractions) / sizeof(fractions[0]); ++index)
+    {
+        const double sectionPosition = bodyMinProjection + span * fractions[index];
+        SectionMeasurement measurement = {};
+        measurement.fraction = fractions[index];
+        if (!HasAcceptedRectangularSectionAt(
+                bodyTag,
+                sectionPosition,
+                lengthAxis,
+                xAxis,
+                yAxis,
+                &measurement.width,
+                &measurement.height,
+                &measurement.thickness))
         {
-            *sectionThickness = thickness;
+            std::ostringstream stream;
+            stream << "  section bodyTag=" << bodyTag
+                << " fraction=" << FormatDouble(fractions[index], 2)
+                << " accepted=no";
+            AppendSelectDebugLog(stream.str());
+            continue;
         }
-        return true;
+
+        const int widthSpec = static_cast<int>(std::floor(RoundTo(measurement.width, 5.0) + 0.5));
+        const int heightSpec = static_cast<int>(std::floor(RoundTo(measurement.height, 5.0) + 0.5));
+        const std::pair<int, int> spec = NormalizeSpecPair(widthSpec, heightSpec);
+        const bool matchesSpec =
+            std::fabs(measurement.width - widthSpec) <= 0.25 &&
+            std::fabs(measurement.height - heightSpec) <= 0.25 &&
+            tubeSpecs.find(spec) != tubeSpecs.end();
+
+        {
+            std::ostringstream stream;
+            stream << "  section bodyTag=" << bodyTag
+                << " fraction=" << FormatDouble(fractions[index], 2)
+                << " width=" << FormatDouble(measurement.width, 3)
+                << " height=" << FormatDouble(measurement.height, 3)
+                << " thickness=" << FormatDouble(measurement.thickness, 3)
+                << " spec=" << spec.first << "x" << spec.second
+                << " accepted=" << (matchesSpec ? "yes" : "no");
+            AppendSelectDebugLog(stream.str());
+        }
+        if (matchesSpec)
+        {
+            measurementsBySpec[spec].push_back(measurement);
+            if (measurementsBySpec[spec].size() >= 2)
+            {
+                break;
+            }
+        }
     }
-    return false;
+
+    const std::vector<SectionMeasurement>* bestMeasurements = NULL;
+    std::pair<int, int> bestSpec(0, 0);
+    for (std::map<std::pair<int, int>, std::vector<SectionMeasurement> >::const_iterator
+            it = measurementsBySpec.begin();
+         it != measurementsBySpec.end();
+         ++it)
+    {
+        if (bestMeasurements == NULL || it->second.size() > bestMeasurements->size())
+        {
+            bestSpec = it->first;
+            bestMeasurements = &it->second;
+        }
+    }
+
+    if (bestMeasurements == NULL || bestMeasurements->size() < 2)
+    {
+        std::ostringstream stream;
+        stream << "  section bodyTag=" << bodyTag
+            << " consensus=no validCount="
+            << (bestMeasurements == NULL ? 0 : bestMeasurements->size());
+        AppendSelectDebugLog(stream.str());
+        return false;
+    }
+
+    std::vector<double> thicknesses;
+    for (std::size_t index = 0; index < bestMeasurements->size(); ++index)
+    {
+        if ((*bestMeasurements)[index].thickness > 0.0)
+        {
+            thicknesses.push_back((*bestMeasurements)[index].thickness);
+        }
+    }
+    std::sort(thicknesses.begin(), thicknesses.end());
+    const double medianThickness = thicknesses.empty()
+        ? 0.0
+        : thicknesses[thicknesses.size() / 2];
+
+    if (sectionWidth != NULL)
+    {
+        *sectionWidth = static_cast<double>(bestSpec.first);
+    }
+    if (sectionHeight != NULL)
+    {
+        *sectionHeight = static_cast<double>(bestSpec.second);
+    }
+    if (sectionThickness != NULL)
+    {
+        *sectionThickness = medianThickness;
+    }
+    if (tubeLength != NULL)
+    {
+        *tubeLength = span;
+    }
+
+    {
+        std::ostringstream stream;
+        stream << "  section bodyTag=" << bodyTag
+            << " consensus=yes validCount=" << bestMeasurements->size()
+            << " spec=" << bestSpec.first << "x" << bestSpec.second
+            << " thickness=" << FormatDouble(medianThickness, 3)
+            << " length=" << FormatDouble(span, 3);
+        AppendSelectDebugLog(stream.str());
+    }
+    return true;
 }
 
 bool CylindricalFaceHitsSixSegments(
@@ -2920,6 +3173,541 @@ double EstimateWallThicknessFromEdges(tag_t bodyTag, double width, double height
     return bestTenths > 0 ? static_cast<double>(bestTenths) / 10.0 : 0.0;
 }
 
+bool AskInteriorPointOnFace(tag_t faceTag, double point[3])
+{
+    double uvRange[4] = {0.0, 0.0, 0.0, 0.0};
+    if (UF_MODL_ask_face_uv_minmax(faceTag, uvRange) != 0)
+    {
+        return false;
+    }
+
+    const double fractions[] = {0.50, 0.25, 0.75, 0.125, 0.875, 0.375, 0.625};
+    const int fractionCount = static_cast<int>(sizeof(fractions) / sizeof(fractions[0]));
+    const int sampleCount = fractionCount * fractionCount;
+    std::vector<double> uParameters(static_cast<std::size_t>(sampleCount));
+    std::vector<double> vParameters(static_cast<std::size_t>(sampleCount));
+    std::vector<int> statuses(static_cast<std::size_t>(sampleCount), 0);
+    int sampleIndex = 0;
+    for (int uIndex = 0; uIndex < fractionCount; ++uIndex)
+    {
+        for (int vIndex = 0; vIndex < fractionCount; ++vIndex)
+        {
+            uParameters[static_cast<std::size_t>(sampleIndex)] =
+                uvRange[0] + (uvRange[1] - uvRange[0]) * fractions[uIndex];
+            vParameters[static_cast<std::size_t>(sampleIndex)] =
+                uvRange[2] + (uvRange[3] - uvRange[2]) * fractions[vIndex];
+            ++sampleIndex;
+        }
+    }
+
+    if (UF_MODL_ask_uv_points_containment(
+            sampleCount,
+            &uParameters[0],
+            &vParameters[0],
+            faceTag,
+            &statuses[0]) != 0)
+    {
+        return false;
+    }
+
+    for (int index = 0; index < sampleCount; ++index)
+    {
+        if (statuses[static_cast<std::size_t>(index)] != 1)
+        {
+            continue;
+        }
+
+        double parameters[2] =
+        {
+            uParameters[static_cast<std::size_t>(index)],
+            vParameters[static_cast<std::size_t>(index)]
+        };
+        double firstUDerivative[3] = {0.0, 0.0, 0.0};
+        double firstVDerivative[3] = {0.0, 0.0, 0.0};
+        double secondUDerivative[3] = {0.0, 0.0, 0.0};
+        double secondVDerivative[3] = {0.0, 0.0, 0.0};
+        double faceNormal[3] = {0.0, 0.0, 0.0};
+        double radii[2] = {0.0, 0.0};
+        if (UF_MODL_ask_face_props(
+                faceTag,
+                parameters,
+                point,
+                firstUDerivative,
+                firstVDerivative,
+                secondUDerivative,
+                secondVDerivative,
+                faceNormal,
+                radii) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AskPlanarFaceGeometry(
+    NXOpen::Face* face,
+    double point[3],
+    double normal[3])
+{
+    if (face == NULL)
+    {
+        return false;
+    }
+
+    int faceType = 0;
+    double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double radius = 0.0;
+    double radialData = 0.0;
+    int normalDirection = 0;
+    if (UF_MODL_ask_face_data(
+        face->Tag(),
+        &faceType,
+        point,
+        normal,
+        box,
+        &radius,
+        &radialData,
+        &normalDirection) != 0 ||
+        faceType != UF_MODL_PLANAR_FACE)
+    {
+        return false;
+    }
+
+    if (!AskInteriorPointOnFace(face->Tag(), point) || !Normalize3(normal))
+    {
+        return false;
+    }
+
+    tag_t bodyTag = NULL_TAG;
+    if (UF_MODL_ask_face_body(face->Tag(), &bodyTag) != 0 || bodyTag == NULL_TAG)
+    {
+        return false;
+    }
+
+    // Determine the solid body's outward direction geometrically.  Start at a
+    // point that is inside the trimmed face and probe exactly 0.5 mm along both
+    // normal directions.  The direction whose probe is outside the solid is
+    // the outward normal (including inner walls, whose outward side is the
+    // hollow cavity rather than the tube's exterior).
+    double positiveProbe[3] = {0.0, 0.0, 0.0};
+    double negativeProbe[3] = {0.0, 0.0, 0.0};
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        positiveProbe[axis] = point[axis] + normal[axis] * 0.5;
+        negativeProbe[axis] = point[axis] - normal[axis] * 0.5;
+    }
+
+    int positiveStatus = 0;
+    int negativeStatus = 0;
+    const bool positiveAsked =
+        UF_MODL_ask_point_containment(positiveProbe, bodyTag, &positiveStatus) == 0;
+    const bool negativeAsked =
+        UF_MODL_ask_point_containment(negativeProbe, bodyTag, &negativeStatus) == 0;
+    const bool positiveOutside = positiveAsked && positiveStatus == 2;
+    const bool negativeOutside = negativeAsked && negativeStatus == 2;
+    if (!positiveOutside && negativeOutside)
+    {
+        normal[0] = -normal[0];
+        normal[1] = -normal[1];
+        normal[2] = -normal[2];
+    }
+    else if (positiveOutside == negativeOutside && normalDirection < 0)
+    {
+        // If both 0.5 mm probes have the same status (for example a wall thinner
+        // than 0.5 mm), fall back to NX's solid-face orientation flag.
+        normal[0] = -normal[0];
+        normal[1] = -normal[1];
+        normal[2] = -normal[2];
+    }
+    return true;
+}
+
+bool AskRecognitionFaceArea(
+    NXOpen::Part* workPart,
+    NXOpen::Face* face,
+    double& area)
+{
+    area = 0.0;
+    if (workPart == NULL || face == NULL)
+    {
+        return false;
+    }
+
+    NXOpen::MeasureFaces* measurement = NULL;
+    try
+    {
+        NXOpen::Unit* areaUnit = workPart->UnitCollection()->GetBase("Area");
+        NXOpen::Unit* lengthUnit = workPart->UnitCollection()->GetBase("Length");
+        std::vector<NXOpen::IParameterizedSurface*> faces(1, face);
+        measurement = workPart->MeasureManager()->NewFaceProperties(
+            areaUnit,
+            lengthUnit,
+            0.99,
+            faces);
+        area = measurement->Area();
+        delete measurement;
+        return area > 1.0e-6;
+    }
+    catch (...)
+    {
+        delete measurement;
+        return false;
+    }
+}
+
+bool FindLargestPlanarFaceFrame(
+    NXOpen::Part* workPart,
+    NXOpen::Body* body,
+    NXOpen::Face*& largestFace,
+    double origin[3],
+    double xAxis[3],
+    double yAxis[3],
+    double zAxis[3],
+    double& largestArea)
+{
+    largestFace = NULL;
+    largestArea = 0.0;
+    if (workPart == NULL || body == NULL)
+    {
+        return false;
+    }
+
+    const std::vector<NXOpen::Face*> faces = body->GetFaces();
+    for (std::size_t index = 0; index < faces.size(); ++index)
+    {
+        double point[3] = {0.0, 0.0, 0.0};
+        double normal[3] = {0.0, 0.0, 0.0};
+        double area = 0.0;
+        if (AskPlanarFaceGeometry(faces[index], point, normal) &&
+            AskRecognitionFaceArea(workPart, faces[index], area) &&
+            area > largestArea)
+        {
+            largestFace = faces[index];
+            largestArea = area;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                origin[axis] = point[axis];
+                yAxis[axis] = normal[axis];
+            }
+        }
+    }
+    if (largestFace == NULL)
+    {
+        return false;
+    }
+
+    double longestLength = 0.0;
+    const std::vector<NXOpen::Edge*> edges = largestFace->GetEdges();
+    for (std::size_t index = 0; index < edges.size(); ++index)
+    {
+        if (edges[index] == NULL)
+        {
+            continue;
+        }
+        int edgeType = 0;
+        if (UF_MODL_ask_edge_type(edges[index]->Tag(), &edgeType) != 0 ||
+            edgeType != UF_MODL_LINEAR_EDGE)
+        {
+            continue;
+        }
+
+        double first[3] = {0.0, 0.0, 0.0};
+        double second[3] = {0.0, 0.0, 0.0};
+        int vertexCount = 0;
+        if (UF_MODL_ask_edge_verts(
+                edges[index]->Tag(),
+                first,
+                second,
+                &vertexCount) != 0 ||
+            vertexCount != 2)
+        {
+            continue;
+        }
+
+        const double edgeLength = Distance3(first, second);
+        if (edgeLength > longestLength)
+        {
+            longestLength = edgeLength;
+            xAxis[0] = second[0] - first[0];
+            xAxis[1] = second[1] - first[1];
+            xAxis[2] = second[2] - first[2];
+        }
+    }
+    if (longestLength <= 0.01)
+    {
+        return false;
+    }
+
+    // The edge belongs to the planar face, but remove tiny modeling deviations
+    // so ToolingBox always receives a strictly orthogonal coordinate system.
+    const double xyDot = Dot3(xAxis, yAxis);
+    xAxis[0] -= xyDot * yAxis[0];
+    xAxis[1] -= xyDot * yAxis[1];
+    xAxis[2] -= xyDot * yAxis[2];
+    if (!Normalize3(xAxis))
+    {
+        return false;
+    }
+
+    zAxis[0] = xAxis[1] * yAxis[2] - xAxis[2] * yAxis[1];
+    zAxis[1] = xAxis[2] * yAxis[0] - xAxis[0] * yAxis[2];
+    zAxis[2] = xAxis[0] * yAxis[1] - xAxis[1] * yAxis[0];
+    return Normalize3(zAxis);
+}
+
+bool AskMinimumParallelPlanarFaceDistance(
+    NXOpen::Part* workPart,
+    NXOpen::Body* body,
+    NXOpen::Face* baseFace,
+    double baseArea,
+    const double basePoint[3],
+    const double baseNormal[3],
+    double& thickness)
+{
+    thickness = 0.0;
+    if (workPart == NULL || body == NULL || baseFace == NULL || baseArea <= 0.0)
+    {
+        return false;
+    }
+
+    double minimumDistance = DBL_MAX;
+    const std::vector<NXOpen::Face*> faces = body->GetFaces();
+    for (std::size_t index = 0; index < faces.size(); ++index)
+    {
+        if (faces[index] == NULL || faces[index] == baseFace)
+        {
+            continue;
+        }
+
+        double point[3] = {0.0, 0.0, 0.0};
+        double normal[3] = {0.0, 0.0, 0.0};
+        if (!AskPlanarFaceGeometry(faces[index], point, normal) ||
+            Dot3(baseNormal, normal) > -0.999)
+        {
+            continue;
+        }
+
+        double candidateArea = 0.0;
+        if (!AskRecognitionFaceArea(workPart, faces[index], candidateArea) ||
+            candidateArea <= baseArea * 0.60)
+        {
+            continue;
+        }
+
+        const double offset[3] =
+        {
+            point[0] - basePoint[0],
+            point[1] - basePoint[1],
+            point[2] - basePoint[2]
+        };
+        const double distance = std::fabs(Dot3(offset, baseNormal));
+        if (distance > 0.01 && distance < minimumDistance)
+        {
+            minimumDistance = distance;
+        }
+    }
+
+    if (minimumDistance == DBL_MAX)
+    {
+        return false;
+    }
+    thickness = RoundTo(minimumDistance, 0.1);
+    return thickness > 0.0;
+}
+
+bool AskZeroOffsetToolingBoxSize(
+    NXOpen::Part* workPart,
+    NXOpen::Body* body,
+    const double origin[3],
+    const double xAxis[3],
+    const double yAxis[3],
+    const double zAxis[3],
+    double& xLength,
+    double& yLength,
+    double& zLength)
+{
+    xLength = 0.0;
+    yLength = 0.0;
+    zLength = 0.0;
+    if (workPart == NULL || body == NULL ||
+        workPart->Features() == NULL ||
+        workPart->Features()->ToolingFeatureCollection() == NULL)
+    {
+        return false;
+    }
+
+    NXOpen::Features::ToolingBoxBuilder* builder = NULL;
+    bool measured = false;
+    try
+    {
+        builder = workPart->Features()->ToolingFeatureCollection()->
+            CreateToolingBoxBuilder(NULL);
+        if (builder == NULL)
+        {
+            return false;
+        }
+
+        builder->SetReferenceCsysType(
+            NXOpen::Features::ToolingBoxBuilder::RefCsysTypeAbsoluteinDisplayedPart);
+        builder->SetType(NXOpen::Features::ToolingBoxBuilder::TypesBoundedBlock);
+        builder->SetShowDimension(false);
+        builder->SetSingleOffset(false);
+        builder->OffsetPositiveX()->SetFormula("0");
+        builder->OffsetNegativeX()->SetFormula("0");
+        builder->OffsetPositiveY()->SetFormula("0");
+        builder->OffsetNegativeY()->SetFormula("0");
+        builder->OffsetPositiveZ()->SetFormula("0");
+        builder->OffsetNegativeZ()->SetFormula("0");
+
+        NXOpen::Matrix3x3 matrix = {};
+        matrix.Xx = xAxis[0];
+        matrix.Xy = xAxis[1];
+        matrix.Xz = xAxis[2];
+        matrix.Yx = yAxis[0];
+        matrix.Yy = yAxis[1];
+        matrix.Yz = yAxis[2];
+        matrix.Zx = zAxis[0];
+        matrix.Zy = zAxis[1];
+        matrix.Zz = zAxis[2];
+        builder->SetBoxMatrixAndPosition(
+            matrix,
+            NXOpen::Point3d(origin[0], origin[1], origin[2]));
+
+        NXOpen::SelectionIntentRuleOptions* ruleOptions =
+            workPart->ScRuleFactory()->CreateRuleOptions();
+        ruleOptions->SetSelectedFromInactive(false);
+        std::vector<NXOpen::Body*> bodies(1, body);
+        NXOpen::BodyDumbRule* bodyRule =
+            workPart->ScRuleFactory()->CreateRuleBodyDumb(bodies, true, ruleOptions);
+        std::vector<NXOpen::SelectionIntentRule*> rules(1, bodyRule);
+        builder->BoundedObject()->ReplaceRules(rules, false);
+        delete ruleOptions;
+
+        std::vector<NXOpen::NXObject*> selectedOccurrences(1, body);
+        std::vector<NXOpen::NXObject*> deselectedOccurrences;
+        builder->SetSelectedOccurrences(selectedOccurrences, deselectedOccurrences);
+
+        builder->CalculateBoxSize();
+        NXOpen::Point3d lowerPoint;
+        builder->AskBlockBoundingBoxSize(
+            &xLength,
+            &yLength,
+            &zLength,
+            &lowerPoint);
+        measured = xLength > 0.01 && yLength > 0.01 && zLength > 0.01;
+    }
+    catch (...)
+    {
+        measured = false;
+    }
+
+    if (builder != NULL)
+    {
+        try
+        {
+            builder->Destroy();
+        }
+        catch (...)
+        {
+        }
+    }
+    return measured;
+}
+
+bool EstimateRectangularTubeByToolingBox(
+    NXOpen::Body* body,
+    double& length,
+    double& width,
+    double& height,
+    double& thickness)
+{
+    NXOpen::Session* session = NXOpen::Session::GetSession();
+    NXOpen::Part* workPart =
+        session != NULL && session->Parts() != NULL ? session->Parts()->Work() : NULL;
+    if (body == NULL || workPart == NULL)
+    {
+        return false;
+    }
+
+    NXOpen::Face* largestFace = NULL;
+    double origin[3] = {0.0, 0.0, 0.0};
+    double xAxis[3] = {0.0, 0.0, 0.0};
+    double yAxis[3] = {0.0, 0.0, 0.0};
+    double zAxis[3] = {0.0, 0.0, 0.0};
+    double largestArea = 0.0;
+    if (!FindLargestPlanarFaceFrame(
+            workPart,
+            body,
+            largestFace,
+            origin,
+            xAxis,
+            yAxis,
+            zAxis,
+            largestArea))
+    {
+        return false;
+    }
+
+    double xLength = 0.0;
+    double yLength = 0.0;
+    double zLength = 0.0;
+    if (!AskZeroOffsetToolingBoxSize(
+            workPart,
+            body,
+            origin,
+            xAxis,
+            yAxis,
+            zAxis,
+            xLength,
+            yLength,
+            zLength))
+    {
+        return false;
+    }
+
+    // ToolingBox only supplies the three oriented extents.  Do not assume the
+    // longest edge on the largest face is the tube length: a short tube can
+    // have a section edge longer than its actual length.  Any two extents that
+    // match the shared tube-spec table form the section; the remaining extent
+    // is the tube length.
+    length = xLength;
+    width = yLength;
+    height = zLength;
+    if (!ReclassifyTubeDimensionsBySpec(length, width, height))
+    {
+        return false;
+    }
+    if (!AskMinimumParallelPlanarFaceDistance(
+            workPart,
+            body,
+            largestFace,
+            largestArea,
+            origin,
+            yAxis,
+            thickness))
+    {
+        return false;
+    }
+    if (thickness <= 0.05 ||
+        thickness > std::min(width, height) * 0.35)
+    {
+        return false;
+    }
+
+    {
+        std::ostringstream stream;
+        stream << "  tooling_box bodyTag=" << body->Tag()
+            << " largestFace=" << largestFace->Tag()
+            << " area=" << largestArea
+            << " raw=" << xLength << "x" << yLength << "x" << zLength
+            << " result=" << length << "x" << width << "x" << height
+            << " thickness=" << thickness;
+        AppendSelectDebugLog(stream.str());
+    }
+    return length > 0.01 && width > 0.01 && height > 0.01;
+}
+
 TubeRecord ClassifyBody(NXOpen::Body* body, double minimumRoundDiameter)
 {
     TubeRecord record = {};
@@ -2949,14 +3737,21 @@ TubeRecord ClassifyBody(NXOpen::Body* body, double minimumRoundDiameter)
         record.length = dimensions[2];
     }
 
-    double sectionThickness = 0.0;
-    const bool dimensionsMatchTubeSpec = ReclassifyTubeDimensionsBySpec(record.length, record.width, record.height);
-    if (dimensionsMatchTubeSpec &&
-        HasClosedRectangularTubeSections(body->Tag(), &sectionThickness))
+    double toolingLength = 0.0;
+    double toolingWidth = 0.0;
+    double toolingHeight = 0.0;
+    double toolingThickness = 0.0;
+    if (EstimateRectangularTubeByToolingBox(
+            body,
+            toolingLength,
+            toolingWidth,
+            toolingHeight,
+            toolingThickness))
     {
-        record.thickness = sectionThickness > 0.0
-            ? sectionThickness
-            : EstimateWallThicknessFromEdges(body->Tag(), record.width, record.height);
+        record.length = toolingLength;
+        record.width = toolingWidth;
+        record.height = toolingHeight;
+        record.thickness = toolingThickness;
         record.kind = std::fabs(record.width - record.height) <= 1.0 ? TubeKindSquare : TubeKindRectangular;
         record.spec = BuildTubeSpec(record.width, record.height, record.thickness);
         return record;
