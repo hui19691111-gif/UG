@@ -47,6 +47,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <map>
 #include <set>
 #include <sstream>
@@ -558,7 +559,44 @@ void OpenSpecTable()
 
 void AppendDebugLog(const std::string& message)
 {
-    (void)message;
+    const wchar_t* logDirectory = L"D:\\UG智辉钣金插件\\logs";
+    const wchar_t* logPath = L"D:\\UG智辉钣金插件\\logs\\FangTongKaKou_debug.log";
+    CreateDirectoryW(logDirectory, NULL);
+
+    HANDLE file = CreateFileW(
+        logPath,
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+
+    SYSTEMTIME localTime = {};
+    GetLocalTime(&localTime);
+    std::ostringstream line;
+    line << "["
+         << std::setfill('0') << std::setw(4) << localTime.wYear << "-"
+         << std::setw(2) << localTime.wMonth << "-"
+         << std::setw(2) << localTime.wDay << " "
+         << std::setw(2) << localTime.wHour << ":"
+         << std::setw(2) << localTime.wMinute << ":"
+         << std::setw(2) << localTime.wSecond << "."
+         << std::setw(3) << localTime.wMilliseconds << "] "
+         << message << "\r\n";
+    const std::string text = line.str();
+    DWORD bytesWritten = 0;
+    WriteFile(
+        file,
+        text.data(),
+        static_cast<DWORD>(text.size()),
+        &bytesWritten,
+        NULL);
+    CloseHandle(file);
 }
 
 class DisplaySuppressionGuard
@@ -716,12 +754,6 @@ bool ReclassifyTubeDimensionsBySectionStep(double& length, double& width, double
             }
         }
 
-        const double sectionMin = std::min(static_cast<double>(firstSpec), static_cast<double>(secondSpec));
-        if (dimensions[lengthIndex] < std::max(5.0, sectionMin * 0.5))
-        {
-            continue;
-        }
-
         Match match = {};
         match.firstIndex = firstIndex;
         match.secondIndex = secondIndex;
@@ -820,6 +852,9 @@ struct TouchingPortPlacement
     FacePlacement malePlacement;
     tag_t femaleBodyTag;
 };
+
+bool EstimateTubeDimensionsFromEdges(tag_t bodyTag, double& length, double& width, double& height);
+bool FindLengthAxisFromEdges(tag_t bodyTag, double expectedLength, double lengthAxis[3]);
 
 const char* CreatedPortFaceAttributeName()
 {
@@ -1110,18 +1145,31 @@ void PointAtFaceCoords(const FacePlacement& placement, double lengthCoord, doubl
     }
 }
 
-bool AskPlanarFacePlacement(NXOpen::Face* face, const double pickPoint[3], FacePlacement& placement, bool useWholeBodyEnds = true)
+bool AskPlanarFacePlacement(
+    NXOpen::Face* face,
+    const double pickPoint[3],
+    FacePlacement& placement,
+    bool useWholeBodyEnds = true,
+    std::string* failureReason = NULL)
 {
+    const auto fail = [failureReason](const char* reason) -> bool
+    {
+        if (failureReason != NULL)
+        {
+            *failureReason = reason;
+        }
+        return false;
+    };
     if (face == NULL)
     {
-        return false;
+        return fail(u8"未选择面。");
     }
 
     placement.faceTag = face->Tag();
     ThrowUfError(UF_MODL_ask_face_body(placement.faceTag, &placement.bodyTag), "UF_MODL_ask_face_body");
     if (placement.bodyTag == NULL_TAG)
     {
-        return false;
+        return fail(u8"所选面不属于实体。");
     }
 
     int faceType = 0;
@@ -1136,14 +1184,14 @@ bool AskPlanarFacePlacement(NXOpen::Face* face, const double pickPoint[3], FaceP
         "UF_MODL_ask_face_data");
     if (faceType != UF_MODL_PLANAR_FACE)
     {
-        return false;
+        return fail(u8"所选面不是平面，请选择方通或扁通的长壁平面。");
     }
 
     std::vector<EdgeEndpointPair> endpointPairs;
     if (!AskFaceEdgeEndpointPairs(placement.faceTag, endpointPairs) ||
         !AskFaceNormalFromDirectionCollection(placement.faceTag, placement.normal))
     {
-        return false;
+        return fail(u8"所选平面没有可用的边界边或面法向，无法识别。");
     }
 
     double bestLength = 0.0;
@@ -1192,38 +1240,95 @@ bool AskPlanarFacePlacement(NXOpen::Face* face, const double pickPoint[3], FaceP
 
     if (!Normalize3(placement.lengthAxis))
     {
-        return false;
+        return fail(u8"无法根据所选面确定方通长度方向。");
     }
+
+    double recognizedLength = 0.0;
+    double recognizedWidth = 0.0;
+    double recognizedHeight = 0.0;
+    if (!EstimateTubeDimensionsFromEdges(
+            placement.bodyTag,
+            recognizedLength,
+            recognizedWidth,
+            recognizedHeight))
+    {
+        double bodyBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        ThrowUfError(UF_MODL_ask_bounding_box(placement.bodyTag, bodyBox), "UF_MODL_ask_bounding_box");
+        double dimensions[3] =
+        {
+            std::fabs(bodyBox[3] - bodyBox[0]),
+            std::fabs(bodyBox[4] - bodyBox[1]),
+            std::fabs(bodyBox[5] - bodyBox[2])
+        };
+        recognizedLength = dimensions[0];
+        recognizedWidth = dimensions[1];
+        recognizedHeight = dimensions[2];
+    }
+    if (!ReclassifyTubeDimensionsBySectionStep(
+            recognizedLength,
+            recognizedWidth,
+            recognizedHeight))
+    {
+        return fail(u8"外形长、宽、高中没有两个尺寸匹配方通规格表。");
+    }
+
+    // The tube length may be shorter than either section dimension (for
+    // example 16.5 x 50 x 50).  The longest edge of the selected wall is
+    // therefore not necessarily the tube axis.  Once the two specification
+    // dimensions have been matched, use the remaining measured dimension to
+    // resolve the actual length direction from body edges.
+    double recognizedLengthAxis[3] = {0.0, 0.0, 0.0};
+    if (!FindLengthAxisFromEdges(
+            placement.bodyTag,
+            recognizedLength,
+            recognizedLengthAxis))
+    {
+        return fail(u8"已匹配方通规格，但无法根据剩余尺寸确定方通长度方向。");
+    }
+    placement.lengthAxis[0] = recognizedLengthAxis[0];
+    placement.lengthAxis[1] = recognizedLengthAxis[1];
+    placement.lengthAxis[2] = recognizedLengthAxis[2];
 
     double bestOppositeDistance = DBL_MAX;
     double bestOppositeSignedDistance = 0.0;
+    tag_t referenceFaceTag = placement.faceTag;
     double referenceFaceArea = 0.0;
-    const bool hasReferenceFaceArea = AskFaceArea(placement.faceTag, referenceFaceArea);
+    double referencePlaneDistance = 0.0;
+    double referenceCenter[3] = {0.0, 0.0, 0.0};
+    double referenceNormal[3] = {0.0, 0.0, 0.0};
     uf_list_p_t orientationFaceList = NULL;
     ThrowUfError(UF_MODL_ask_body_faces(placement.bodyTag, &orientationFaceList), "UF_MODL_ask_body_faces");
     std::vector<tag_t> orientationFaces = UfListToTags(orientationFaceList);
     UF_MODL_delete_list(&orientationFaceList);
+
+    // Manual mode uses the user-selected plane. Automatic mode uses the
+    // current plane found by the automatic coplanar scan. In both cases the
+    // current placement face is the exact thickness base; never replace it
+    // with another larger parallel wall from the same tube.
+    if (!AskPlanarFaceCenterAndEdgeNormal(
+            referenceFaceTag,
+            referenceCenter,
+            referenceNormal) ||
+        !AskFaceArea(referenceFaceTag, referenceFaceArea))
+    {
+        return fail(u8"无法读取当前基面的中心、外法向或面积。");
+    }
+
     for (std::size_t index = 0; index < orientationFaces.size(); ++index)
     {
-        if (orientationFaces[index] == placement.faceTag)
+        if (orientationFaces[index] == referenceFaceTag)
         {
             continue;
         }
-
         double otherCenter[3] = {0.0, 0.0, 0.0};
         double otherNormal[3] = {0.0, 0.0, 0.0};
-        if (!AskPlanarFaceCenterAndEdgeNormal(orientationFaces[index], otherCenter, otherNormal))
-        {
-            continue;
-        }
-        const double normalDot = Dot3(otherNormal, placement.normal);
-        if (normalDot > -0.98)
+        if (!AskPlanarFaceCenterAndEdgeNormal(orientationFaces[index], otherCenter, otherNormal) ||
+            Dot3(otherNormal, referenceNormal) > -0.98)
         {
             continue;
         }
         double otherFaceArea = 0.0;
-        if (!hasReferenceFaceArea ||
-            !AskFaceArea(orientationFaces[index], otherFaceArea) ||
+        if (!AskFaceArea(orientationFaces[index], otherFaceArea) ||
             otherFaceArea <= referenceFaceArea * 0.60)
         {
             continue;
@@ -1231,11 +1336,11 @@ bool AskPlanarFacePlacement(NXOpen::Face* face, const double pickPoint[3], FaceP
 
         double delta[3] =
         {
-            otherCenter[0] - placement.center[0],
-            otherCenter[1] - placement.center[1],
-            otherCenter[2] - placement.center[2]
+            otherCenter[0] - referenceCenter[0],
+            otherCenter[1] - referenceCenter[1],
+            otherCenter[2] - referenceCenter[2]
         };
-        const double signedDistance = Dot3(delta, placement.normal);
+        const double signedDistance = Dot3(delta, referenceNormal);
         const double distance = std::fabs(signedDistance);
         if (distance > 0.05 && distance < bestOppositeDistance)
         {
@@ -1250,10 +1355,41 @@ bool AskPlanarFacePlacement(NXOpen::Face* face, const double pickPoint[3], FaceP
         placement.normal[2] = -placement.normal[2];
     }
 
+    // All tool profiles are extruded from negative normal coordinates toward
+    // the selected wall.  Do not rely only on the face normal returned by NX:
+    // for trimmed/imported faces it can point toward the material.  Probe both
+    // sides of the selected wall and keep the normal pointing away from the
+    // solid, so -normal always enters the tube wall.
+    if (bestOppositeDistance < DBL_MAX)
+    {
+        const double probeDistance =
+            std::max(0.05, std::min(0.50, bestOppositeDistance * 0.25));
+        double plusPoint[3] = {};
+        double minusPoint[3] = {};
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            plusPoint[axis] = placement.center[axis] + placement.normal[axis] * probeDistance;
+            minusPoint[axis] = placement.center[axis] - placement.normal[axis] * probeDistance;
+        }
+
+        int plusStatus = 0;
+        int minusStatus = 0;
+        const bool plusAsked =
+            UF_MODL_ask_point_containment(plusPoint, placement.bodyTag, &plusStatus) == 0;
+        const bool minusAsked =
+            UF_MODL_ask_point_containment(minusPoint, placement.bodyTag, &minusStatus) == 0;
+        if (plusAsked && minusAsked && plusStatus == 1 && minusStatus != 1)
+        {
+            placement.normal[0] = -placement.normal[0];
+            placement.normal[1] = -placement.normal[1];
+            placement.normal[2] = -placement.normal[2];
+        }
+    }
+
     Cross3(placement.normal, placement.lengthAxis, placement.widthAxis);
     if (!Normalize3(placement.widthAxis))
     {
-        return false;
+        return fail(u8"无法根据规格长壁平面确定方通宽度方向。");
     }
 
     double faceLengthMin = DBL_MAX;
@@ -1277,7 +1413,7 @@ bool AskPlanarFacePlacement(NXOpen::Face* face, const double pickPoint[3], FaceP
     }
     else
     {
-        return false;
+        return fail(u8"所选平面没有可用于定位方通端部的边界。");
     }
 
     placement.lengthMin = faceLengthMin;
@@ -1384,9 +1520,6 @@ bool AskPlanarFacePlacement(NXOpen::Face* face, const double pickPoint[3], FaceP
         placement.inwardSign = -1.0;
     }
 
-    double bodyBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-    ThrowUfError(UF_MODL_ask_bounding_box(placement.bodyTag, bodyBox), "UF_MODL_ask_bounding_box");
-
     placement.wallThickness = bestOppositeDistance;
 
     if (placement.wallThickness == DBL_MAX)
@@ -1394,20 +1527,24 @@ bool AskPlanarFacePlacement(NXOpen::Face* face, const double pickPoint[3], FaceP
         std::ostringstream log;
         log << "TubeWallThicknessRejected"
             << " body=" << placement.bodyTag
-            << " referenceFace=" << placement.faceTag
+            << " referenceFace=" << referenceFaceTag
             << " referenceArea=" << FormatDouble(referenceFaceArea)
             << " reason=no opposite-normal parallel face above 60 percent area";
         AppendDebugLog(log.str());
-        return false;
+        return fail(u8"无法识别方通板厚：规格长壁面没有找到外法向相反、面积大于基面60%的平行配对面。");
     }
     {
         std::ostringstream log;
         log << "TubeWallThickness"
             << " body=" << placement.bodyTag
-            << " referenceFace=" << placement.faceTag
+            << " referenceFace=" << referenceFaceTag
             << " referenceArea=" << FormatDouble(referenceFaceArea)
+            << " referencePlaneDistance=" << FormatDouble(referencePlaneDistance)
             << " thickness=" << FormatDouble(placement.wallThickness)
-            << " rule=opposite normal, area above 60 percent, perpendicular distance";
+            << " recognizedSpec=" << FormatDouble(recognizedWidth)
+            << "x" << FormatDouble(recognizedHeight)
+            << " recognizedLength=" << FormatDouble(recognizedLength)
+            << " rule=spec long-wall plane, opposite normal, area above 60 percent, perpendicular distance";
         AppendDebugLog(log.str());
     }
     placement.toolDepth = placement.wallThickness + 1.0;
@@ -1497,7 +1634,7 @@ std::vector<tag_t> CreateTrapezoidProfile(
 {
     if (baseWidth <= 0.0 || tipWidth <= 0.0)
     {
-        throw std::runtime_error("Taper port width is invalid.");
+        throw std::runtime_error(u8"斜口宽度无效，请检查 W 和角度参数。");
     }
 
     std::vector<FaceProfilePoint> points;
@@ -1644,14 +1781,14 @@ tag_t CreateExtrudedToolBody(const std::vector<tag_t>& profileCurves, const doub
     UF_MODL_delete_list(&featureList);
     if (featureTags.empty())
     {
-        throw std::runtime_error("No tool body was created.");
+        throw std::runtime_error(u8"未能创建用于切割的工具体。");
     }
 
     tag_t toolBody = NULL_TAG;
     ThrowUfError(UF_MODL_ask_feat_body(featureTags.front(), &toolBody), "UF_MODL_ask_feat_body");
     if (toolBody == NULL_TAG)
     {
-        throw std::runtime_error("Failed to resolve tool body.");
+        throw std::runtime_error(u8"无法获取用于切割的工具体。");
     }
 
     uf_list_p_t bodyList = NULL;
@@ -1703,6 +1840,17 @@ double AskTubeOuterCornerRadiusForBody(tag_t bodyTag, const FacePlacement& refer
     std::vector<tag_t> faceTags = UfListToTags(faceList);
     UF_MODL_delete_list(&faceList);
 
+    double targetLength = 0.0;
+    double targetWidth = 0.0;
+    double targetHeight = 0.0;
+    double targetLengthAxis[3] = {0.0, 0.0, 0.0};
+    if (!EstimateTubeDimensionsFromEdges(bodyTag, targetLength, targetWidth, targetHeight) ||
+        !ReclassifyTubeDimensionsBySectionStep(targetLength, targetWidth, targetHeight) ||
+        !FindLengthAxisFromEdges(bodyTag, targetLength, targetLengthAxis))
+    {
+        return 0.0;
+    }
+
     const double faceWidth = referencePlacement.widthMax - referencePlacement.widthMin;
     const double maxReasonableRadius = std::max(referencePlacement.wallThickness * 12.0, faceWidth * 0.75 + 2.0);
     double outerRadius = 0.0;
@@ -1727,11 +1875,67 @@ double AskTubeOuterCornerRadiusForBody(tag_t bodyTag, const FacePlacement& refer
         }
         if (radius <= 0.05 || radius > maxReasonableRadius || !Normalize3(direction))
         {
+            std::ostringstream candidateLog;
+            candidateLog << "AutoTubeRCandidate rejected"
+                         << " face=" << faceTags[index]
+                         << " radius=" << FormatDouble(radius)
+                         << " reason=invalid radius or axis";
+            AppendDebugLog(candidateLog.str());
+            continue;
+        }
+        const double axisAlignment = std::fabs(Dot3(direction, targetLengthAxis));
+        if (axisAlignment < 0.98)
+        {
+            std::ostringstream candidateLog;
+            candidateLog << "AutoTubeRCandidate rejected"
+                         << " face=" << faceTags[index]
+                         << " radius=" << FormatDouble(radius)
+                         << " axisAlignment=" << FormatDouble(axisAlignment)
+                         << " reason=axis not parallel to tube length";
+            AppendDebugLog(candidateLog.str());
+            continue;
+        }
+
+        std::vector<EdgeEndpointPair> cornerEdges;
+        if (!AskFaceEdgeEndpointPairs(faceTags[index], cornerEdges))
+        {
+            continue;
+        }
+        double lengthMin = DBL_MAX;
+        double lengthMax = -DBL_MAX;
+        for (std::size_t edgeIndex = 0; edgeIndex < cornerEdges.size(); ++edgeIndex)
+        {
+            lengthMin = std::min(lengthMin, Dot3(cornerEdges[edgeIndex].first, targetLengthAxis));
+            lengthMin = std::min(lengthMin, Dot3(cornerEdges[edgeIndex].second, targetLengthAxis));
+            lengthMax = std::max(lengthMax, Dot3(cornerEdges[edgeIndex].first, targetLengthAxis));
+            lengthMax = std::max(lengthMax, Dot3(cornerEdges[edgeIndex].second, targetLengthAxis));
+        }
+        const double lengthSpan =
+            lengthMin == DBL_MAX || lengthMax == -DBL_MAX ? 0.0 : lengthMax - lengthMin;
+        if (lengthSpan < targetLength * 0.60)
+        {
+            std::ostringstream candidateLog;
+            candidateLog << "AutoTubeRCandidate rejected"
+                         << " face=" << faceTags[index]
+                         << " radius=" << FormatDouble(radius)
+                         << " axisAlignment=" << FormatDouble(axisAlignment)
+                         << " lengthSpan=" << FormatDouble(lengthSpan)
+                         << " requiredSpan=" << FormatDouble(targetLength * 0.60)
+                         << " reason=insufficient length coverage";
+            AppendDebugLog(candidateLog.str());
             continue;
         }
 
         ++candidateCount;
         outerRadius = std::max(outerRadius, radius);
+        std::ostringstream candidateLog;
+        candidateLog << "AutoTubeRCandidate accepted"
+                     << " face=" << faceTags[index]
+                     << " radius=" << FormatDouble(radius)
+                     << " axisAlignment=" << FormatDouble(axisAlignment)
+                     << " lengthSpan=" << FormatDouble(lengthSpan)
+                     << " targetLength=" << FormatDouble(targetLength);
+        AppendDebugLog(candidateLog.str());
     }
 
     std::ostringstream log;
@@ -1776,7 +1980,7 @@ bool CreateMalePortAtPlacement(
     const double faceWidth = placement.widthMax - placement.widthMin;
     if (width <= 0.0 || height <= 0.0 || width >= faceWidth - 0.1)
     {
-        throw std::runtime_error("W must be smaller than the selected face width.");
+        throw std::runtime_error(u8"卡口宽度 W 必须小于所选面的宽度。");
     }
 
     const double widthCenter = (placement.widthMin + placement.widthMax) * 0.5;
@@ -1855,7 +2059,7 @@ bool CreateTaperMalePortAtPlacement(
     const double tipWidth = ComputeTaperTipWidth(width, height, angle);
     if (width <= 0.0 || height <= 0.0 || width >= faceWidth - 0.1 || tipWidth <= 0.1)
     {
-        throw std::runtime_error("Taper W, H or angle is invalid for the selected face.");
+        throw std::runtime_error(u8"当前斜口的 W、H 或角度不适用于所选面。");
     }
 
     const double widthCenter = (placement.widthMin + placement.widthMax) * 0.5;
@@ -1932,26 +2136,27 @@ void CreateFemalePortAtPlacement(
     double height,
     double femaleExtrudeDepth,
     double sideClearance,
+    double topClearance,
     std::vector<tag_t>* createdFaces)
 {
     if (targetBodyTag == NULL_TAG)
     {
-        throw std::runtime_error("Female slot target body was not found.");
+        throw std::runtime_error(u8"未找到母槽对应的目标方通实体。");
     }
 
     const double clearanceWidth = width + 2.0 * sideClearance;
-    const double clearanceLength = height;
+    const double clearanceLength = height + topClearance;
     const double faceWidth = placement.widthMax - placement.widthMin;
     if (clearanceWidth <= 0.0 || clearanceLength <= 0.0 || clearanceWidth >= faceWidth + placement.wallThickness)
     {
-        throw std::runtime_error("Female slot dimensions are invalid for the selected face.");
+        throw std::runtime_error(u8"母槽尺寸不适用于所选面，请检查 W、母槽深度和间隙。");
     }
 
     const double widthCenter = (placement.widthMin + placement.widthMax) * 0.5;
     const double widthStart = widthCenter - clearanceWidth * 0.5;
     const double widthEnd = widthCenter + clearanceWidth * 0.5;
     const double lengthStart = placement.endCoord;
-    const double lengthEnd = placement.endCoord - placement.inwardSign * height;
+    const double lengthEnd = placement.endCoord - placement.inwardSign * clearanceLength;
     const double tabThickness = femaleExtrudeDepth;
     const double thicknessStart = -femaleExtrudeDepth;
     const double thicknessEnd = 0.0;
@@ -1963,6 +2168,7 @@ void CreateFemalePortAtPlacement(
             << " H=" << FormatDouble(height)
             << " femaleExtrudeDepth=" << FormatDouble(femaleExtrudeDepth)
             << " sideClearance=" << FormatDouble(sideClearance)
+            << " topClearance=" << FormatDouble(topClearance)
             << " sourceBody=" << placement.bodyTag
             << " targetBody=" << targetBodyTag
             << " clearanceWidth=" << FormatDouble(clearanceWidth)
@@ -2007,12 +2213,13 @@ void CreateTaperFemalePortAtPlacement(
     double height,
     double femaleExtrudeDepth,
     double sideClearance,
+    double topClearance,
     double angle,
     std::vector<tag_t>* createdFaces)
 {
     if (targetBodyTag == NULL_TAG)
     {
-        throw std::runtime_error("Taper female slot target body was not found.");
+        throw std::runtime_error(u8"未找到斜口母槽对应的目标方通实体。");
     }
 
     const double maleTipWidth = ComputeTaperTipWidth(width, height, angle);
@@ -2021,12 +2228,14 @@ void CreateTaperFemalePortAtPlacement(
     const double faceWidth = placement.widthMax - placement.widthMin;
     if (maleTipWidth <= 0.1 || clearanceRootWidth <= 0.0 || clearanceTipWidth <= 0.1)
     {
-        throw std::runtime_error("Taper female slot dimensions are invalid for the selected face.");
+        throw std::runtime_error(u8"斜口母槽尺寸不适用于所选面，请检查 W、母槽深度、角度和间隙。");
     }
 
     const double widthCenter = (placement.widthMin + placement.widthMax) * 0.5;
     const double lengthStart = placement.endCoord;
-    const double lengthEnd = placement.endCoord - placement.inwardSign * height;
+    const double maleTipLength = placement.endCoord - placement.inwardSign * height;
+    const double clearanceTipLength =
+        placement.endCoord - placement.inwardSign * (height + topClearance);
     const double tabThickness = femaleExtrudeDepth;
     const double thicknessStart = -femaleExtrudeDepth;
     const double thicknessEnd = 0.0;
@@ -2038,10 +2247,14 @@ void CreateTaperFemalePortAtPlacement(
     point.length = lengthStart;
     point.width = widthCenter + clearanceRootWidth * 0.5;
     clearanceProfile.push_back(point);
-    point.length = lengthEnd;
+    point.length = maleTipLength;
     point.width = widthCenter + clearanceTipWidth * 0.5;
     clearanceProfile.push_back(point);
-    point.length = lengthEnd;
+    point.length = clearanceTipLength;
+    clearanceProfile.push_back(point);
+    point.width = widthCenter - clearanceTipWidth * 0.5;
+    clearanceProfile.push_back(point);
+    point.length = maleTipLength;
     point.width = widthCenter - clearanceTipWidth * 0.5;
     clearanceProfile.push_back(point);
 
@@ -2060,7 +2273,7 @@ void CreateTaperFemalePortAtPlacement(
     const double clearanceLength = profileLengthMax - profileLengthMin;
     if (clearanceWidth <= 0.0 || clearanceLength <= 0.0 || clearanceWidth >= faceWidth + placement.wallThickness)
     {
-        throw std::runtime_error("Taper female slot dimensions are invalid for the selected face.");
+        throw std::runtime_error(u8"斜口母槽尺寸不适用于所选面，请检查 W、母槽深度、角度和间隙。");
     }
 
     {
@@ -2070,6 +2283,7 @@ void CreateTaperFemalePortAtPlacement(
             << " H=" << FormatDouble(height)
             << " femaleExtrudeDepth=" << FormatDouble(femaleExtrudeDepth)
             << " sideClearance=" << FormatDouble(sideClearance)
+            << " topClearance=" << FormatDouble(topClearance)
             << " angle=" << FormatDouble(angle)
             << " sourceBody=" << placement.bodyTag
             << " targetBody=" << targetBodyTag
@@ -4399,7 +4613,7 @@ void RunFangTongKaKou(const std::vector<NXOpen::Body*>& bodies)
         ui->NXMessageBox()->Show(
             "FangTongKaKou",
             NXOpen::NXMessageBox::DialogTypeInformation,
-            "No body was selected.");
+            u8"没有选择任何实体。");
         return;
     }
 
@@ -4483,12 +4697,12 @@ void RunFangTongKaKou(const std::vector<NXOpen::Body*>& bodies)
     }
 
     std::ostringstream message;
-    message << "Square tube recognition finished"
-            << "\nSelected bodies: " << bodies.size()
-            << "\nCandidate tubes: " << acceptedCount
-            << "\nRejected bodies colored red: " << rejectedBodyTags.size()
-            << "\nStat rows: " << stats.size()
-            << "\n\nDetails were written to the Listing Window.";
+    message << u8"方通识别完成"
+            << u8"\n选择的实体数：" << bodies.size()
+            << u8"\n识别为方通的实体数：" << acceptedCount
+            << u8"\n未识别并标红的实体数：" << rejectedBodyTags.size()
+            << u8"\n规格统计行数：" << stats.size()
+            << u8"\n\n详细信息已写入信息窗口。";
     ui->NXMessageBox()->Show(
         "FangTongKaKou",
         NXOpen::NXMessageBox::DialogTypeInformation,
@@ -4509,6 +4723,7 @@ public:
           heightValueBlock(NULL),
           femaleDepthValueBlock(NULL),
           sideClearanceValueBlock(NULL),
+          topClearanceValueBlock(NULL),
           angleValueBlock(NULL),
           selectionColorToggle(NULL),
           selectionColorPicker(NULL),
@@ -4523,7 +4738,7 @@ public:
             zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_FANGTONGKAKOU_DLX);
         if (dlxPath.empty())
         {
-            throw std::runtime_error("FangTongKaKou dialog resource is missing.");
+            throw std::runtime_error(u8"找不到方通卡口对话框资源文件。");
         }
         dialog = ui->CreateDialog(dlxPath.c_str());
         dialog->AddInitializeHandler(NXOpen::make_callback(this, &FangTongKaKouDialog::Initialize));
@@ -4560,6 +4775,7 @@ private:
     NXOpen::BlockStyler::DoubleBlock* heightValueBlock;
     NXOpen::BlockStyler::DoubleBlock* femaleDepthValueBlock;
     NXOpen::BlockStyler::DoubleBlock* sideClearanceValueBlock;
+    NXOpen::BlockStyler::DoubleBlock* topClearanceValueBlock;
     NXOpen::BlockStyler::DoubleBlock* angleValueBlock;
     NXOpen::BlockStyler::Toggle* selectionColorToggle;
     NXOpen::BlockStyler::ObjectColorPicker* selectionColorPicker;
@@ -4732,7 +4948,8 @@ private:
     void UpdateDimensionTitles()
     {
         const bool autoRecognizeTubeR =
-            autoRecognizeTubeRToggle != NULL && autoRecognizeTubeRToggle->Value();
+            autoRecognizeTubeRToggle != NULL &&
+            autoRecognizeTubeRToggle->Value();
         SetBlockLabel(
             heightValueBlock,
             autoRecognizeTubeR ?
@@ -4983,6 +5200,12 @@ private:
                 values,
                 "sideClearance",
                 sideClearanceValueBlock != NULL ? sideClearanceValueBlock->Value() : 0.2));
+        SetDoubleValue(
+            topClearanceValueBlock,
+            ReadStateDouble(
+                values,
+                "topClearance",
+                topClearanceValueBlock != NULL ? topClearanceValueBlock->Value() : 0.2));
         SetDoubleValue(angleValueBlock, ReadStateDouble(values, "angle", angleValueBlock != NULL ? angleValueBlock->Value() : 10.0));
         SetSelectionColorValue(ReadStateInt(values, "selectionColor", GetSelectionColorValue()));
 
@@ -5016,6 +5239,7 @@ private:
         output << "height=" << FormatDouble(heightValueBlock != NULL ? heightValueBlock->Value() : 0.0) << "\n";
         output << "femaleDepth=" << FormatDouble(femaleDepthValueBlock != NULL ? femaleDepthValueBlock->Value() : 0.0) << "\n";
         output << "sideClearance=" << FormatDouble(sideClearanceValueBlock != NULL ? sideClearanceValueBlock->Value() : 0.0) << "\n";
+        output << "topClearance=" << FormatDouble(topClearanceValueBlock != NULL ? topClearanceValueBlock->Value() : 0.0) << "\n";
         output << "angle=" << FormatDouble(angleValueBlock != NULL ? angleValueBlock->Value() : 0.0) << "\n";
         output << "autoRecognizeTubeR=" << (autoRecognizeTubeRToggle != NULL && autoRecognizeTubeRToggle->Value() ? 1 : 0) << "\n";
         output << "mistakeProof=" << (mistakeProofToggle != NULL && mistakeProofToggle->Value() ? 1 : 0) << "\n";
@@ -5044,6 +5268,7 @@ private:
         {
             maleFaceSelections.clear();
         }
+        UpdateDimensionTitles();
     }
 
     int GetCreateModeValue()
@@ -5259,6 +5484,8 @@ private:
             dialog->TopBlock()->FindBlock("femaleDepthValue"));
         sideClearanceValueBlock = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(
             dialog->TopBlock()->FindBlock("sideClearanceValue"));
+        topClearanceValueBlock = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(
+            dialog->TopBlock()->FindBlock("topClearanceValue"));
         angleValueBlock = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(
             dialog->TopBlock()->FindBlock("angleValue"));
         selectionColorToggle = dynamic_cast<NXOpen::BlockStyler::Toggle*>(
@@ -5305,6 +5532,8 @@ private:
         {
             if (GetCreateModeValue() == 0)
             {
+                const double retainedTopClearance =
+                    topClearanceValueBlock != NULL ? topClearanceValueBlock->Value() : 0.0;
                 std::vector<SelectedFaceInfo> newSelections = TrackMaleFaceClickSelection();
                 if (!newSelections.empty())
                 {
@@ -5313,6 +5542,7 @@ private:
                     Ok();
                     creatingFromSelectionUpdate = false;
                     maleFaceSelections.clear();
+                    SetDoubleValue(topClearanceValueBlock, retainedTopClearance);
                 }
             }
         }
@@ -5366,7 +5596,7 @@ private:
                     ui->NXMessageBox()->Show(
                         "FangTongKaKou",
                         NXOpen::NXMessageBox::DialogTypeInformation,
-                        "Please select one or more male faces.");
+                        u8"请至少选择一个公槽面。");
                     return 1;
                 }
             }
@@ -5378,7 +5608,7 @@ private:
                     ui->NXMessageBox()->Show(
                         "FangTongKaKou",
                         NXOpen::NXMessageBox::DialogTypeInformation,
-                        "Please select male face.");
+                        u8"请选择公槽面。");
                     return 1;
                 }
             }
@@ -5390,21 +5620,25 @@ private:
                 femaleDepthValueBlock != NULL ? femaleDepthValueBlock->Value() : height;
             const double sideClearance =
                 sideClearanceValueBlock != NULL ? sideClearanceValueBlock->Value() : 0.0;
+            const double topClearance =
+                topClearanceValueBlock != NULL ? topClearanceValueBlock->Value() : 0.0;
             const double angle = angleValueBlock != NULL ? angleValueBlock->Value() : 0.0;
             const bool autoRecognizeTubeR =
-                autoRecognizeTubeRToggle != NULL && autoRecognizeTubeRToggle->Value();
+                autoRecognizeTubeRToggle != NULL &&
+                autoRecognizeTubeRToggle->Value();
             const bool mistakeProof =
                 mistakeProofToggle != NULL && mistakeProofToggle->Value();
             SaveDialogState();
             if (width <= 0.0 || (!autoRecognizeTubeR && height <= 0.0) ||
                 (autoRecognizeTubeR && height < 0.0) ||
                 (!autoRecognizeTubeR && femaleDepth <= 0.0) ||
-                (autoRecognizeTubeR && femaleDepth < 0.0) || sideClearance < 0.0)
+                (autoRecognizeTubeR && femaleDepth < 0.0) ||
+                sideClearance < 0.0 || topClearance < 0.0)
             {
                 ui->NXMessageBox()->Show(
                     "FangTongKaKou",
                     NXOpen::NXMessageBox::DialogTypeInformation,
-                    "Please input valid W, H, female depth and side clearance values.");
+                    u8"请输入有效的 W、H、母槽深度、两侧间隙和顶部间隙；尺寸必须大于零，间隙不能为负数。");
                 return 1;
             }
             if (portType == 1 && (angle <= 0.0 || angle >= 89.0))
@@ -5412,7 +5646,7 @@ private:
                 ui->NXMessageBox()->Show(
                     "FangTongKaKou",
                     NXOpen::NXMessageBox::DialogTypeInformation,
-                    "Please input a valid taper angle between 0 and 89 degrees.");
+                    u8"请输入有效的斜口角度，角度必须大于 0° 且小于 89°。");
                 return 1;
             }
 
@@ -5422,16 +5656,20 @@ private:
                 for (std::size_t faceIndex = 0; faceIndex < manualMaleFaces.size(); ++faceIndex)
                 {
                     FacePlacement malePlacement = {};
+                    std::string placementFailure;
                     if (!AskPlanarFacePlacement(
                             manualMaleFaces[faceIndex].face,
                             manualMaleFaces[faceIndex].pickPoint,
                             malePlacement,
-                            false))
+                            false,
+                            &placementFailure))
                     {
                         ui->NXMessageBox()->Show(
                             "FangTongKaKou",
                             NXOpen::NXMessageBox::DialogTypeInformation,
-                            "The selected faces must be planar faces.");
+                            placementFailure.empty() ?
+                                u8"无法识别所选面的几何信息。" :
+                                placementFailure.c_str());
                         return 1;
                     }
 
@@ -5467,12 +5705,20 @@ private:
             else
             {
                 FacePlacement malePlacement = {};
-                if (!AskPlanarFacePlacement(autoMaleFace.face, autoMaleFace.pickPoint, malePlacement, true))
+                std::string placementFailure;
+                if (!AskPlanarFacePlacement(
+                        autoMaleFace.face,
+                        autoMaleFace.pickPoint,
+                        malePlacement,
+                        true,
+                        &placementFailure))
                 {
                     ui->NXMessageBox()->Show(
                         "FangTongKaKou",
                         NXOpen::NXMessageBox::DialogTypeInformation,
-                        "The selected face must be a planar face.");
+                        placementFailure.empty() ?
+                            u8"无法识别所选面的几何信息。" :
+                            placementFailure.c_str());
                     return 1;
                 }
 
@@ -5491,7 +5737,7 @@ private:
                     ui->NXMessageBox()->Show(
                         "FangTongKaKou",
                         NXOpen::NXMessageBox::DialogTypeInformation,
-                        "The selected body is not recognized as a square or rectangular tube.");
+                        u8"所选实体未识别为方通或扁通：外形尺寸中没有两个尺寸匹配规格表。");
                     return 1;
                 }
 
@@ -5536,7 +5782,7 @@ private:
                 ui->NXMessageBox()->Show(
                     "FangTongKaKou",
                     NXOpen::NXMessageBox::DialogTypeInformation,
-                    "Could not find touching female tubes from the selected male faces.");
+                    u8"未找到与所选公槽面接触的母方通。请确认公槽面与另一根方通或扁通相接，并且两者都符合规格表。");
                 return 1;
             }
 
@@ -5596,7 +5842,7 @@ private:
                     ui->NXMessageBox()->Show(
                         "FangTongKaKou",
                         NXOpen::NXMessageBox::DialogTypeInformation,
-                        "The resolved H and female depth values must be greater than 0.");
+                        u8"计算得到的 H 和母槽深度必须大于 0，请检查输入值或关闭自动识别方通 R。" );
                     return 1;
                 }
                 resolvedMaleHeights.push_back(resolvedMaleHeight);
@@ -5621,6 +5867,7 @@ private:
                             resolvedMaleHeights[index],
                             resolvedFemaleDepths[index],
                             sideClearance,
+                            topClearance,
                             angle,
                             &femaleCreatedFaces[index]);
                     }
@@ -5633,6 +5880,7 @@ private:
                             resolvedMaleHeights[index],
                             resolvedFemaleDepths[index],
                             sideClearance,
+                            topClearance,
                             &femaleCreatedFaces[index]);
                     }
                     femaleSucceeded[index] = 1;
