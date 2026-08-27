@@ -1,4 +1,5 @@
 #include <NXOpen/BlockStyler_BlockDialog.hxx>
+#include <cstdlib>
 #include <stdexcept>
 #include <NXOpen/BlockStyler_Button.hxx>
 #include <NXOpen/BlockStyler_CompositeBlock.hxx>
@@ -93,6 +94,7 @@ const char* kColorMatchedBodiesToggleBlockId = "colorMatchedBodiesToggle";
 const char* kFindSameBodiesButtonBlockId = "findSameBodiesButton";
 const char* kNameModeBlockId = "nameMode";
 const char* kNameCustomTextBlockId = "nameCustomText";
+const char* kSerialStartBlockId = "serialStart";
 const char* kNameAttributeBlockId = "nameAttribute";
 const char* kNameFormatBlockId = "nameFormat";
 const char* kNamePlaceholderBlockId = "namePlaceholder";
@@ -122,6 +124,7 @@ const int kAssemblyParentColumnId = 2;
 const int kAssemblyQuantityColumnId = 3;
 const char* kComponentTemplateFileName = "model-plain-1-mm-template.prt";
 const char* kDefaultComponentNamePrefix = "SameBody";
+const char* kDefaultSerialStart = "01";
 const char* kDefaultNameFormat = "\x7B\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x7D\x5F\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D";
 const char* kDefaultBodyNameAttribute = "DB_PART_NAME";
 const char* kNameConfigFileName = "DuoSiTiZuanZuanPei_name_config.ini";
@@ -1670,6 +1673,10 @@ void EnsureNameConfigFileExists()
         Utf8Text("\xE5\x91\xBD\xE5\x90\x8D\xE8\xA7\x84\xE5\x88\x99"),
         Utf8Text("\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7\xE5\x90\x8D"),
         std::string());
+    std::string serialStart = ReadSimpleIniValue(
+        Utf8Text("\xE5\x91\xBD\xE5\x90\x8D\xE8\xA7\x84\xE5\x88\x99"),
+        Utf8Text("\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\xE8\xB5\xB7\xE5\xA7\x8B\xE5\x8F\xB7"),
+        kDefaultSerialStart);
 
     if (nameFormat.empty())
     {
@@ -1726,12 +1733,15 @@ void EnsureNameConfigFileExists()
     config << Utf8Text("\xE5\x90\x8D\xE7\xA7\xB0\xE6\xA0\xBC\xE5\xBC\x8F\x3D") << nameFormat << std::endl;
     config << Utf8Text("\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x3D") << customName << std::endl;
     config << Utf8Text("\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7\xE5\x90\x8D\x3D") << attributeName << std::endl;
+    config << Utf8Text("\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\xE8\xB5\xB7\xE5\xA7\x8B\xE5\x8F\xB7\x3D")
+           << (serialStart.empty() ? kDefaultSerialStart : serialStart) << std::endl;
 }
 
 void WriteNameConfigValues(
     const std::string& nameFormat,
     const std::string& customName,
-    const std::string& attributeName)
+    const std::string& attributeName,
+    const std::string& serialStart)
 {
     std::ofstream config(GetNameConfigPath().c_str(), std::ios::out | std::ios::trunc);
     if (!config.is_open())
@@ -1754,6 +1764,8 @@ void WriteNameConfigValues(
            << (customName.empty() ? kDefaultComponentNamePrefix : customName) << std::endl;
     config << Utf8Text("\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7\xE5\x90\x8D\x3D")
            << (attributeName.empty() ? kDefaultBodyNameAttribute : attributeName) << std::endl;
+    config << Utf8Text("\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\xE8\xB5\xB7\xE5\xA7\x8B\xE5\x8F\xB7\x3D")
+           << (serialStart.empty() ? kDefaultSerialStart : serialStart) << std::endl;
 }
 
 std::string ReadNameConfigValue(
@@ -1800,6 +1812,35 @@ std::string ReadConfiguredBodyNameAttribute()
         Utf8Text("\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7\xE5\x90\x8D"),
         kDefaultBodyNameAttribute);
     return attributeName.empty() ? kDefaultBodyNameAttribute : attributeName;
+}
+
+std::string NormalizeSerialStartText(const std::string& value)
+{
+    if (value.empty() || value.size() > 9)
+    {
+        return kDefaultSerialStart;
+    }
+
+    for (std::size_t index = 0; index < value.size(); ++index)
+    {
+        if (value[index] < '0' || value[index] > '9')
+        {
+            return kDefaultSerialStart;
+        }
+    }
+
+    const long parsed = std::strtol(value.c_str(), NULL, 10);
+    return parsed > 0 && parsed <= 999999999L
+        ? value
+        : kDefaultSerialStart;
+}
+
+std::string ReadConfiguredSerialStart()
+{
+    return NormalizeSerialStartText(ReadSimpleIniValue(
+        Utf8Text("\xE5\x91\xBD\xE5\x90\x8D\xE8\xA7\x84\xE5\x88\x99"),
+        Utf8Text("\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\xE8\xB5\xB7\xE5\xA7\x8B\xE5\x8F\xB7"),
+        kDefaultSerialStart));
 }
 
 bool OpenNameConfigFileAndWait()
@@ -2057,7 +2098,8 @@ std::string BuildComponentNameFromFormat(
     int groupNumber,
     const std::string& requestedFormat,
     const std::string& requestedCustomText,
-    const std::string& requestedAttributeName)
+    const std::string& requestedAttributeName,
+    const std::string& requestedSerialStart)
 {
     const tag_t referenceTag = group.instances.empty()
         ? NULL_TAG
@@ -2087,10 +2129,13 @@ std::string BuildComponentNameFromFormat(
     std::string name = requestedFormat.empty()
         ? kDefaultNameFormat
         : requestedFormat;
+    const std::string serialStart = NormalizeSerialStartText(requestedSerialStart);
+    const int serialNumber =
+        static_cast<int>(std::strtol(serialStart.c_str(), NULL, 10)) + groupNumber - 1;
     name = ReplaceAllText(
         name,
         kSerialToken,
-        FormatPaddedNumber(groupNumber, 3));
+        FormatPaddedNumber(serialNumber, static_cast<int>(serialStart.size())));
     name = ReplaceAllText(
         name,
         kCustomToken,
@@ -2125,7 +2170,8 @@ std::string BuildComponentNameForRule(
         groupNumber,
         ReadConfiguredNameFormat(),
         ReadConfiguredComponentPrefix(),
-        ReadConfiguredBodyNameAttribute());
+        ReadConfiguredBodyNameAttribute(),
+        ReadConfiguredSerialStart());
 }
 
 std::string BuildComponentInstanceName(
@@ -4546,6 +4592,7 @@ public:
           findSameBodiesButton(NULL),
           nameMode(NULL),
           nameCustomText(NULL),
+          serialStart(NULL),
           nameAttribute(NULL),
           nameFormat(NULL),
           namePlaceholder(NULL),
@@ -4553,8 +4600,6 @@ public:
           assemblyList(NULL),
           assemblyListReady(false),
           namingControlsInitializing(false),
-          suppressBodySelectionUpdate(false),
-          previewRowHighlightActive(false),
           cachedSearchDataValid(false)
     {
         ResetPreviewDebugLog();
@@ -4575,6 +4620,7 @@ public:
 
     ~DuoSiTiZuanZuanPeiDialog()
     {
+        ClearPreviewHighlights();
         if (dialog != NULL)
         {
             delete dialog;
@@ -4597,6 +4643,7 @@ private:
     NXOpen::BlockStyler::Button* findSameBodiesButton;
     NXOpen::BlockStyler::Enumeration* nameMode;
     NXOpen::BlockStyler::StringBlock* nameCustomText;
+    NXOpen::BlockStyler::StringBlock* serialStart;
     NXOpen::BlockStyler::Enumeration* nameAttribute;
     NXOpen::BlockStyler::StringBlock* nameFormat;
     NXOpen::BlockStyler::Enumeration* namePlaceholder;
@@ -4607,16 +4654,34 @@ private:
     std::vector<AssemblyPreviewRow> previewRows;
     std::vector<NXOpen::BlockStyler::Node*> previewNodes;
     std::vector<tag_t> previewSelectionTags;
-    std::vector<NXOpen::TaggedObject*> searchSelectionObjects;
-    bool suppressBodySelectionUpdate;
-    bool previewRowHighlightActive;
     SameBodySearchData cachedSearchData;
     std::vector<tag_t> cachedSearchSelectionTags;
     bool cachedSearchDataValid;
+    std::vector<tag_t> previewHighlightedTags;
+
+    void ResetBlockPointersForInitialize()
+    {
+        bodySelection = NULL;
+        outputFolder = NULL;
+        colorMatchedBodiesToggle = NULL;
+        findSameBodiesButton = NULL;
+        nameMode = NULL;
+        nameCustomText = NULL;
+        serialStart = NULL;
+        nameAttribute = NULL;
+        nameFormat = NULL;
+        namePlaceholder = NULL;
+        addPlaceholderButton = NULL;
+        assemblyList = NULL;
+        assemblyListReady = false;
+        namingControlsInitializing = false;
+        previewNodes.clear();
+    }
 
     void Initialize()
     {
         WritePreviewDebugLog("Initialize begin");
+        ResetBlockPointersForInitialize();
         EnsureNameConfigFileExists();
         RefreshBlockPointers();
         InitializeNamingControls();
@@ -4632,7 +4697,12 @@ private:
         try
         {
             RefreshBlockPointers();
+            UpdateNamingControlVisibility();
             InitializeAssemblyList();
+            if (!previewRows.empty())
+            {
+                PopulateAssemblyList(previewRows);
+            }
             WritePreviewDebugLog("DialogShown end, assemblyReady=" + std::string(assemblyListReady ? "true" : "false"));
         }
         catch (const NXOpen::NXException& ex)
@@ -4669,12 +4739,14 @@ private:
             else if (
                 block == nameMode ||
                 block == nameCustomText ||
+                block == serialStart ||
                 block == nameAttribute ||
                 block == nameFormat ||
                 block == namePlaceholder ||
                 block == addPlaceholderButton ||
                 blockName == kNameModeBlockId ||
                 blockName == kNameCustomTextBlockId ||
+                blockName == kSerialStartBlockId ||
                 blockName == kNameAttributeBlockId ||
                 blockName == kNameFormatBlockId ||
                 blockName == kNamePlaceholderBlockId ||
@@ -4698,12 +4770,6 @@ private:
             else if (block == bodySelection || blockName == kBodySelectionBlockId)
             {
                 bodySelection = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(block);
-                if (suppressBodySelectionUpdate)
-                {
-                    WritePreviewDebugLog("Update bodySelection skipped: suppressBodySelectionUpdate");
-                    return 0;
-                }
-                previewRowHighlightActive = false;
                 InitializeAssemblyList();
                 std::vector<NXOpen::Body*> selectedBodies = GetSelectedBodies();
                 RefreshBodyAttributeMembers(selectedBodies);
@@ -4712,7 +4778,6 @@ private:
                 {
                     SaveNamingControls();
                 }
-                StoreSearchSelectionFromBodySelection();
                 std::ostringstream line;
                 line << "Update bodySelection selectedBodies=" << selectedBodies.size();
                 WritePreviewDebugLog(line.str());
@@ -4812,6 +4877,11 @@ private:
             nameCustomText = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(
                 FindBlockRecursive(topBlock, kNameCustomTextBlockId));
         }
+        if (serialStart == NULL)
+        {
+            serialStart = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(
+                FindBlockRecursive(topBlock, kSerialStartBlockId));
+        }
         if (nameAttribute == NULL)
         {
             nameAttribute = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(
@@ -4845,6 +4915,7 @@ private:
              << ", button=" << PointerText(findSameBodiesButton)
              << ", nameMode=" << PointerText(nameMode)
              << ", nameCustomText=" << PointerText(nameCustomText)
+             << ", serialStart=" << PointerText(serialStart)
              << ", nameAttribute=" << PointerText(nameAttribute)
              << ", nameFormat=" << PointerText(nameFormat)
              << ", namePlaceholder=" << PointerText(namePlaceholder)
@@ -4979,6 +5050,12 @@ private:
         return GetStringBlockValue(nameCustomText, kDefaultComponentNamePrefix);
     }
 
+    std::string GetCurrentSerialStart() const
+    {
+        return NormalizeSerialStartText(
+            GetStringBlockValue(serialStart, kDefaultSerialStart));
+    }
+
     std::string GetCurrentAttributeName() const
     {
         return GetEnumerationValue(nameAttribute, kDefaultBodyNameAttribute);
@@ -5097,7 +5174,8 @@ private:
             groupNumber,
             GetCurrentNameFormat(),
             GetCurrentCustomText(),
-            GetCurrentAttributeName());
+            GetCurrentAttributeName(),
+            GetCurrentSerialStart());
     }
 
     void UpdateNamingControlVisibility()
@@ -5108,10 +5186,16 @@ private:
         const bool showAttribute =
             mode == NamingModeBodyAttribute || mode == NamingModeAdvanced;
         const bool showAdvanced = mode == NamingModeAdvanced;
+        const bool showSerialStart =
+            GetCurrentNameFormat().find(kSerialToken) != std::string::npos;
 
         if (nameCustomText != NULL)
         {
             nameCustomText->SetShow(showCustomText);
+        }
+        if (serialStart != NULL)
+        {
+            serialStart->SetShow(showSerialStart);
         }
         if (nameAttribute != NULL)
         {
@@ -5188,6 +5272,7 @@ private:
             }
 
             SetStringBlockValue(nameCustomText, ReadConfiguredComponentPrefix());
+            SetStringBlockValue(serialStart, ReadConfiguredSerialStart());
             if (nameAttribute != NULL)
             {
                 const std::vector<std::string> attributeValues = {
@@ -5200,7 +5285,6 @@ private:
             }
             SetStringBlockValue(nameFormat, configuredFormat);
             SetNamingMode(configuredMode);
-            UpdateNamingControlVisibility();
         }
         catch (...)
         {
@@ -5242,7 +5326,8 @@ private:
         WriteNameConfigValues(
             GetCurrentNameFormat(),
             GetCurrentCustomText(),
-            GetCurrentAttributeName());
+            GetCurrentAttributeName(),
+            GetCurrentSerialStart());
     }
 
     void HandleNamingControlUpdate(const std::string& blockName)
@@ -5264,6 +5349,10 @@ private:
             if (blockName == kAddPlaceholderButtonBlockId)
             {
                 AppendSelectedPlaceholder();
+            }
+            if (blockName == kSerialStartBlockId)
+            {
+                SetStringBlockValue(serialStart, GetCurrentSerialStart());
             }
             UpdateNamingControlVisibility();
             if (blockName == kNameModeBlockId &&
@@ -5453,74 +5542,31 @@ private:
         return NXOpen::BlockStyler::Tree::EndLabelEditStateAcceptText;
     }
 
-    void StoreSearchSelectionFromBodySelection()
+    void ClearPreviewHighlights()
     {
-        searchSelectionObjects.clear();
-        if (bodySelection == NULL)
+        if (!previewHighlightedTags.empty())
         {
-            return;
+            UF_DISP_set_highlights(
+                static_cast<int>(previewHighlightedTags.size()),
+                &previewHighlightedTags[0],
+                0);
+            previewHighlightedTags.clear();
+            UF_DISP_refresh();
         }
-
-        searchSelectionObjects = bodySelection->GetSelectedObjects();
     }
 
-    std::vector<NXOpen::TaggedObject*> BuildTaggedObjectsFromTags(
-        const std::vector<tag_t>& tags) const
+    void HighlightPreviewRow(const std::vector<tag_t>& tags)
     {
-        std::vector<NXOpen::TaggedObject*> objects;
-        objects.reserve(tags.size());
-        for (std::size_t index = 0; index < tags.size(); ++index)
+        ClearPreviewHighlights();
+        if (!tags.empty() &&
+            UF_DISP_set_highlights(
+                static_cast<int>(tags.size()),
+                const_cast<tag_t*>(&tags[0]),
+                1) == 0)
         {
-            NXOpen::TaggedObject* object =
-                NXOpen::NXObjectManager::Get(tags[index]);
-            if (object != NULL)
-            {
-                objects.push_back(object);
-            }
+            previewHighlightedTags = tags;
+            UF_DISP_refresh();
         }
-        return objects;
-    }
-
-    void SetBodySelectionObjects(
-        const std::vector<NXOpen::TaggedObject*>& objects,
-        bool suppressUpdate)
-    {
-        if (bodySelection == NULL)
-        {
-            return;
-        }
-
-        const bool previousSuppress = suppressBodySelectionUpdate;
-        suppressBodySelectionUpdate = suppressUpdate;
-        try
-        {
-            std::vector<NXOpen::TaggedObject*> emptyObjects;
-            bodySelection->SetSelectedObjects(emptyObjects);
-            if (!objects.empty())
-            {
-                bodySelection->SetSelectedObjects(objects);
-            }
-        }
-        catch (...)
-        {
-            suppressBodySelectionUpdate = previousSuppress;
-            throw;
-        }
-        suppressBodySelectionUpdate = previousSuppress;
-    }
-
-    bool RestoreSearchSelectionForExecution()
-    {
-        if (!previewRowHighlightActive || searchSelectionObjects.empty())
-        {
-            return false;
-        }
-
-        SetBodySelectionObjects(searchSelectionObjects, true);
-        previewRowHighlightActive = false;
-        previewSelectionTags = GetCurrentSelectionTags();
-        WritePreviewDebugLog("RestoreSearchSelectionForExecution restored body selection");
-        return true;
     }
 
     bool ConfirmAndDeleteFeatureParameters(
@@ -5587,19 +5633,11 @@ private:
                 continue;
             }
 
-            if (!previewRowHighlightActive)
-            {
-                StoreSearchSelectionFromBodySelection();
-            }
-
-            const std::vector<NXOpen::TaggedObject*> rowObjects =
-                BuildTaggedObjectsFromTags(previewRows[index].tags);
-            SetBodySelectionObjects(rowObjects, true);
-            previewRowHighlightActive = true;
+            HighlightPreviewRow(previewRows[index].tags);
 
             std::ostringstream line;
             line << "OnAssemblyRowSelect highlighted row=" << (index + 1)
-                 << ", bodies=" << rowObjects.size();
+                 << ", bodies=" << previewRows[index].tags.size();
             WritePreviewDebugLog(line.str());
             return;
         }
@@ -5676,6 +5714,7 @@ private:
     void ClearAssemblyList()
     {
         WritePreviewDebugLog("ClearAssemblyList begin");
+        ClearPreviewHighlights();
         if (assemblyList == NULL || !assemblyListReady)
         {
             previewNodes.clear();
@@ -5901,8 +5940,6 @@ private:
             WritePreviewDebugLog("BuildAssemblyPreviewFromSelection using cached search data");
             PopulateAssemblyList(BuildPreviewRows(cachedSearchData.assemblyGroups));
             previewSelectionTags = selectionTags;
-            StoreSearchSelectionFromBodySelection();
-            previewRowHighlightActive = false;
             return;
         }
 
@@ -5921,8 +5958,6 @@ private:
         StoreCachedSearchData(data, selectionTags);
         PopulateAssemblyList(BuildPreviewRows(data.assemblyGroups));
         previewSelectionTags = selectionTags;
-        StoreSearchSelectionFromBodySelection();
-        previewRowHighlightActive = false;
 
         if (kWriteResultToListingWindow)
         {
@@ -5987,25 +6022,8 @@ private:
         try
         {
             RefreshBlockPointers();
-            RestoreSearchSelectionForExecution();
-            std::vector<NXOpen::Body*> selectedBodies = GetSelectedBodies();
-            {
-                std::ostringstream line;
-                line << "Apply selectedBodies=" << selectedBodies.size();
-                WritePreviewDebugLog(line.str());
-            }
-            if (selectedBodies.empty())
-            {
-                ui->NXMessageBox()->Show(
-                    NXOpen::NXString(kDialogName),
-                    NXOpen::NXMessageBox::DialogTypeInformation,
-                    NXOpen::NXString(
-                        Utf8Text("\xE8\xAF\xB7\xE8\x87\xB3\xE5\xB0\x91\xE9\x80\x89\xE6\x8B\xA9\xE4\xB8\x80\xE4\xB8\xAA\xE5\xAE\x9E\xE4\xBD\x93\xE3\x80\x82"),
-                        NXOpen::NXString::UTF8));
-                return 1;
-            }
-
-            BuildAssemblyPreviewFromSelection();
+            HarvestPreviewNames();
+            SaveNamingControls();
             WritePreviewDebugLog("Apply end");
             return 0;
         }
@@ -6079,7 +6097,6 @@ private:
         try
         {
             RefreshBlockPointers();
-            RestoreSearchSelectionForExecution();
             std::vector<NXOpen::Body*> selectedBodies = GetSelectedBodies();
             {
                 std::ostringstream line;
@@ -6103,7 +6120,6 @@ private:
                 return 1;
             }
             selectedBodies = GetSelectedBodies();
-            StoreSearchSelectionFromBodySelection();
 
             UpdateSelectedOutputFolder();
             const std::vector<tag_t> selectionTags = GetCurrentSelectionTags();

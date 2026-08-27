@@ -82,6 +82,24 @@
               </PropertyList>
             </item>
           </Property>
+          <Property class="UICOMP_string" hierarchy="UGS::UICOMP_group" id="serialStart" mask="256" name="serialStart" presentation="String" type="uicomp">
+            <item Expanded="1" class="UICOMP_string" hierarchy="UGS::UICOMP_group" icon="styler_string.bmp" id="serialStart" name="serialStart" presentation="String" type="uicomp">
+              <PropertyList id="id" mode="0">
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_string" id="API Name" mask="16400" name="API Name" sname="BlockID" source="3" type="string" value="serialStart"/>
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_string" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True"/>
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_string" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True"/>
+                <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_string" id="ReadWrite" mask="0" name="ReadWrite" sname="RetainValue" source="1" type="logical" value="True"/>
+                <Property ClassID="UGS::UICOMP_string" group="Block Specific::" hierarchy="UGS::UICOMP_string" id="Value" mask="0" name="Value" sname="Value" source="4" type="string" value="01"/>
+                <Property ClassID="UGS::UICOMP_string" group="Block Specific::" hierarchy="UGS::UICOMP_string" id="WideValue" mask="4" name="WideValue" sname="WideValue" source="4" type="utfstring" value="01"/>
+                <Property ClassID="UGS::UICOMP_string" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_string" id="PresentationStyle" mask="16384" name="PresentationStyle" selected="0" sname="PresentationStyle" source="1" type="enum"><Option name="KeyIn" value="0"/><Option name="Wide" value="1"/><Option name="List" value="2"/><Option name="Combo" value="3"/><Option name="Autocomplete" value="4"/></Property>
+                <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Top" loc="1" mask="16384" name="Top" offset="0" sname="Top" source="3" target="Default" type="attachment"/>
+                <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Left" loc="2" mask="16384" name="Left" offset="0" sname="Left" source="3" target="Default" type="attachment"/>
+                <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment"/>
+                <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Bottom" loc="4" mask="16384" name="Bottom" offset="0" sname="Bottom" source="3" target="Default" type="attachment"/>
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_string" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="流水号起始号"/>
+              </PropertyList>
+            </item>
+          </Property>
           <Property class="UICOMP_enum" hierarchy="UGS::UICOMP_group" id="nameAttribute" mask="256" name="nameAttribute" presentation="Enumeration" type="uicomp">
             <item Expanded="1" SupportsDisablingLogic="1" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" icon="styler_optionmenu.bmp" id="nameAttribute" name="nameAttribute" presentation="Enumeration" type="uicomp">
               <PropertyList id="id" mode="0">
