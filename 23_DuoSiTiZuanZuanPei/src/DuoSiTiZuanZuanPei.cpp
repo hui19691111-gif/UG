@@ -6019,29 +6019,9 @@ private:
     int Apply()
     {
         WritePreviewDebugLog("Apply begin");
-        try
-        {
-            RefreshBlockPointers();
-            HarvestPreviewNames();
-            SaveNamingControls();
-            WritePreviewDebugLog("Apply end");
-            return 0;
-        }
-        catch (const NXOpen::NXException& ex)
-        {
-            LogCallbackError("Apply NXException", ex.Message());
-            return 1;
-        }
-        catch (const std::exception& ex)
-        {
-            LogCallbackError("Apply exception", ex.what());
-            return 1;
-        }
-        catch (...)
-        {
-            LogCallbackError("Apply unknown exception", "Unknown apply error.");
-            return 1;
-        }
+        const int result = ConvertSelectedBodies();
+        WritePreviewDebugLog(result == 0 ? "Apply end" : "Apply failed");
+        return result;
     }
 
     void ExecuteCachedSameBodySearch()
