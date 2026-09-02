@@ -52,11 +52,17 @@ target_include_directories(KonFanLaLiaoCore PRIVATE
     "${NX_INSTALL_ROOT}/UGOPEN/NXOpen"
     "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(KonFanLaLiaoCore PRIVATE
-    UNICODE _UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    UNICODE _UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS
+    $<$<CONFIG:Release>:ZH_PROTECTED_BUILD=1>
+    $<$<CONFIG:Release>:NDEBUG>)
 target_compile_options(KonFanLaLiaoCore PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /EHsc /utf-8>)
 target_link_directories(KonFanLaLiaoCore PRIVATE
     "${NX_INSTALL_ROOT}/UGOPEN")
+target_link_options(KonFanLaLiaoCore PRIVATE
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/RELEASE>
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/DYNAMICBASE>
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/NXCOMPAT>)
 target_link_libraries(KonFanLaLiaoCore PRIVATE
     libugopenint.lib
     libufun.lib
