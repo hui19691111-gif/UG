@@ -845,6 +845,9 @@ struct FacePlacement
     double inwardSign;
     double wallThickness;
     double toolDepth;
+    double recognizedLength;
+    double recognizedWidth;
+    double recognizedHeight;
 };
 
 struct TouchingPortPlacement
@@ -939,6 +942,268 @@ bool AskFaceEdgeEndpointPairs(tag_t faceTag, std::vector<EdgeEndpointPair>& endp
         endpointPairs.push_back(endpoints);
     }
     return !endpointPairs.empty();
+}
+
+bool AskPeripheralFaceEdgeEndpointPairs(tag_t faceTag, std::vector<EdgeEndpointPair>& endpointPairs)
+{
+    endpointPairs.clear();
+    uf_loop_p_t loopList = NULL;
+    if (UF_MODL_ask_face_loops(faceTag, &loopList) != 0 || loopList == NULL)
+    {
+        return false;
+    }
+
+    int loopCount = 0;
+    if (UF_MODL_ask_loop_list_count(loopList, &loopCount) != 0)
+    {
+        UF_MODL_delete_loop_list(&loopList);
+        return false;
+    }
+
+    for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)
+    {
+        int loopType = 0;
+        uf_list_p_t edgeLoop = NULL;
+        if (UF_MODL_ask_loop_list_item(loopList, loopIndex, &loopType, &edgeLoop) != 0 ||
+            loopType != 1 || edgeLoop == NULL)
+        {
+            continue;
+        }
+
+        const std::vector<tag_t> edgeTags = UfListToTags(edgeLoop);
+        for (std::size_t edgeIndex = 0; edgeIndex < edgeTags.size(); ++edgeIndex)
+        {
+            double point1[3] = {0.0, 0.0, 0.0};
+            double point2[3] = {0.0, 0.0, 0.0};
+            int vertexCount = 0;
+            if (UF_MODL_ask_edge_verts(edgeTags[edgeIndex], point1, point2, &vertexCount) != 0 ||
+                vertexCount != 2 || Distance3(point1, point2) < 0.5)
+            {
+                continue;
+            }
+
+            EdgeEndpointPair endpoints = {};
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                endpoints.first[axis] = point1[axis];
+                endpoints.second[axis] = point2[axis];
+            }
+            endpointPairs.push_back(endpoints);
+        }
+    }
+
+    UF_MODL_delete_loop_list(&loopList);
+    return endpointPairs.size() >= 2;
+}
+
+bool ProjectBodyDimensionsOnAxes(
+    tag_t bodyTag,
+    const double axisX[3],
+    const double axisY[3],
+    const double axisZ[3],
+    double dimensions[3])
+{
+    uf_list_p_t edgeList = NULL;
+    if (UF_MODL_ask_body_edges(bodyTag, &edgeList) != 0)
+    {
+        return false;
+    }
+
+    const std::vector<tag_t> edgeTags = UfListToTags(edgeList);
+    UF_MODL_delete_list(&edgeList);
+    const double* axes[3] = {axisX, axisY, axisZ};
+    double minimum[3] = {DBL_MAX, DBL_MAX, DBL_MAX};
+    double maximum[3] = {-DBL_MAX, -DBL_MAX, -DBL_MAX};
+    bool foundPoint = false;
+    for (std::size_t edgeIndex = 0; edgeIndex < edgeTags.size(); ++edgeIndex)
+    {
+        double point1[3] = {0.0, 0.0, 0.0};
+        double point2[3] = {0.0, 0.0, 0.0};
+        int vertexCount = 0;
+        if (UF_MODL_ask_edge_verts(edgeTags[edgeIndex], point1, point2, &vertexCount) != 0 || vertexCount != 2)
+        {
+            continue;
+        }
+
+        const double* points[2] = {point1, point2};
+        for (int pointIndex = 0; pointIndex < 2; ++pointIndex)
+        {
+            for (int axisIndex = 0; axisIndex < 3; ++axisIndex)
+            {
+                const double projection = Dot3(points[pointIndex], axes[axisIndex]);
+                minimum[axisIndex] = std::min(minimum[axisIndex], projection);
+                maximum[axisIndex] = std::max(maximum[axisIndex], projection);
+            }
+            foundPoint = true;
+        }
+    }
+
+    if (!foundPoint)
+    {
+        return false;
+    }
+    for (int axisIndex = 0; axisIndex < 3; ++axisIndex)
+    {
+        dimensions[axisIndex] = maximum[axisIndex] - minimum[axisIndex];
+        if (dimensions[axisIndex] <= 0.5)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool EstimateTubeDimensionsFromSelectedFaceAxes(
+    tag_t bodyTag,
+    tag_t faceTag,
+    const double faceNormal[3],
+    double& dimensionX,
+    double& dimensionY,
+    double& dimensionZ)
+{
+    struct FaceAxisCandidate
+    {
+        double direction[3];
+        double score;
+    };
+
+    std::vector<EdgeEndpointPair> peripheralEdges;
+    if (!AskPeripheralFaceEdgeEndpointPairs(faceTag, peripheralEdges))
+    {
+        return false;
+    }
+
+    double axisX[3] = {faceNormal[0], faceNormal[1], faceNormal[2]};
+    if (!Normalize3(axisX))
+    {
+        return false;
+    }
+
+    std::vector<FaceAxisCandidate> candidates;
+    const double parallelToleranceCos = std::cos(1.0 * 3.14159265358979323846 / 180.0);
+    for (std::size_t firstIndex = 0; firstIndex < peripheralEdges.size(); ++firstIndex)
+    {
+        double firstDirection[3] =
+        {
+            peripheralEdges[firstIndex].second[0] - peripheralEdges[firstIndex].first[0],
+            peripheralEdges[firstIndex].second[1] - peripheralEdges[firstIndex].first[1],
+            peripheralEdges[firstIndex].second[2] - peripheralEdges[firstIndex].first[2]
+        };
+        const double firstLength = std::sqrt(Dot3(firstDirection, firstDirection));
+        if (!Normalize3(firstDirection))
+        {
+            continue;
+        }
+
+        for (std::size_t secondIndex = firstIndex + 1; secondIndex < peripheralEdges.size(); ++secondIndex)
+        {
+            double secondDirection[3] =
+            {
+                peripheralEdges[secondIndex].second[0] - peripheralEdges[secondIndex].first[0],
+                peripheralEdges[secondIndex].second[1] - peripheralEdges[secondIndex].first[1],
+                peripheralEdges[secondIndex].second[2] - peripheralEdges[secondIndex].first[2]
+            };
+            const double secondLength = std::sqrt(Dot3(secondDirection, secondDirection));
+            if (!Normalize3(secondDirection))
+            {
+                continue;
+            }
+
+            const double alignment = Dot3(firstDirection, secondDirection);
+            if (std::fabs(alignment) < parallelToleranceCos)
+            {
+                continue;
+            }
+            if (alignment < 0.0)
+            {
+                secondDirection[0] = -secondDirection[0];
+                secondDirection[1] = -secondDirection[1];
+                secondDirection[2] = -secondDirection[2];
+            }
+
+            FaceAxisCandidate candidate = {};
+            candidate.direction[0] = firstDirection[0] + secondDirection[0];
+            candidate.direction[1] = firstDirection[1] + secondDirection[1];
+            candidate.direction[2] = firstDirection[2] + secondDirection[2];
+            const double normalComponent = Dot3(candidate.direction, axisX);
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                candidate.direction[axis] -= normalComponent * axisX[axis];
+            }
+            if (!Normalize3(candidate.direction))
+            {
+                continue;
+            }
+
+            bool duplicate = false;
+            for (std::size_t candidateIndex = 0; candidateIndex < candidates.size(); ++candidateIndex)
+            {
+                if (std::fabs(Dot3(candidate.direction, candidates[candidateIndex].direction)) >= parallelToleranceCos)
+                {
+                    candidates[candidateIndex].score = std::max(
+                        candidates[candidateIndex].score,
+                        firstLength + secondLength);
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate)
+            {
+                candidate.score = firstLength + secondLength;
+                candidates.push_back(candidate);
+            }
+        }
+    }
+
+    std::sort(
+        candidates.begin(),
+        candidates.end(),
+        [](const FaceAxisCandidate& lhs, const FaceAxisCandidate& rhs)
+        {
+            return lhs.score > rhs.score;
+        });
+
+    bool haveFallbackDimensions = false;
+    for (std::size_t candidateIndex = 0; candidateIndex < candidates.size(); ++candidateIndex)
+    {
+        double axisZ[3] =
+        {
+            candidates[candidateIndex].direction[0],
+            candidates[candidateIndex].direction[1],
+            candidates[candidateIndex].direction[2]
+        };
+        double axisY[3] = {0.0, 0.0, 0.0};
+        Cross3(axisZ, axisX, axisY);
+        if (!Normalize3(axisY))
+        {
+            continue;
+        }
+
+        double dimensions[3] = {0.0, 0.0, 0.0};
+        if (!ProjectBodyDimensionsOnAxes(bodyTag, axisX, axisY, axisZ, dimensions))
+        {
+            continue;
+        }
+        if (!haveFallbackDimensions)
+        {
+            dimensionX = dimensions[0];
+            dimensionY = dimensions[1];
+            dimensionZ = dimensions[2];
+            haveFallbackDimensions = true;
+        }
+
+        double matchedLength = dimensions[0];
+        double matchedWidth = dimensions[1];
+        double matchedHeight = dimensions[2];
+        if (ReclassifyTubeDimensionsBySectionStep(matchedLength, matchedWidth, matchedHeight))
+        {
+            dimensionX = dimensions[0];
+            dimensionY = dimensions[1];
+            dimensionZ = dimensions[2];
+            return true;
+        }
+    }
+    return haveFallbackDimensions;
 }
 
 bool ComputeFaceCenterFromEndpoints(const std::vector<EdgeEndpointPair>& endpointPairs, double center[3])
@@ -1247,11 +1512,23 @@ bool AskPlanarFacePlacement(
     double recognizedLength = 0.0;
     double recognizedWidth = 0.0;
     double recognizedHeight = 0.0;
-    if (!EstimateTubeDimensionsFromEdges(
+    const bool dimensionsFromSelectedFace = EstimateTubeDimensionsFromSelectedFaceAxes(
+        placement.bodyTag,
+        placement.faceTag,
+        placement.normal,
+        recognizedLength,
+        recognizedWidth,
+        recognizedHeight);
+    bool dimensionsFromEdges = false;
+    if (!dimensionsFromSelectedFace)
+    {
+        dimensionsFromEdges = EstimateTubeDimensionsFromEdges(
             placement.bodyTag,
             recognizedLength,
             recognizedWidth,
-            recognizedHeight))
+            recognizedHeight);
+    }
+    if (!dimensionsFromSelectedFace && !dimensionsFromEdges)
     {
         double bodyBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
         ThrowUfError(UF_MODL_ask_bounding_box(placement.bodyTag, bodyBox), "UF_MODL_ask_bounding_box");
@@ -1265,13 +1542,42 @@ bool AskPlanarFacePlacement(
         recognizedWidth = dimensions[1];
         recognizedHeight = dimensions[2];
     }
+
+    const double measuredDimension1 = recognizedLength;
+    const double measuredDimension2 = recognizedWidth;
+    const double measuredDimension3 = recognizedHeight;
+    {
+        std::ostringstream log;
+        log << "TubeDimensionsMeasured"
+            << " body=" << placement.bodyTag
+            << " face=" << placement.faceTag
+            << " source=" << (dimensionsFromSelectedFace
+                ? "selected-face-local-csys"
+                : (dimensionsFromEdges ? "edge-projection" : "bounding-box"))
+            << " dimensions=" << FormatDouble(measuredDimension1)
+            << "x" << FormatDouble(measuredDimension2)
+            << "x" << FormatDouble(measuredDimension3);
+        AppendDebugLog(log.str());
+    }
     if (!ReclassifyTubeDimensionsBySectionStep(
             recognizedLength,
             recognizedWidth,
             recognizedHeight))
     {
+        std::ostringstream log;
+        log << "TubeSpecMatchRejected"
+            << " body=" << placement.bodyTag
+            << " face=" << placement.faceTag
+            << " dimensions=" << FormatDouble(measuredDimension1)
+            << "x" << FormatDouble(measuredDimension2)
+            << "x" << FormatDouble(measuredDimension3)
+            << " tolerance=0.10";
+        AppendDebugLog(log.str());
         return fail(u8"外形长、宽、高中没有两个尺寸匹配方通规格表。");
     }
+    placement.recognizedLength = recognizedLength;
+    placement.recognizedWidth = recognizedWidth;
+    placement.recognizedHeight = recognizedHeight;
 
     // The tube length may be shorter than either section dimension (for
     // example 16.5 x 50 x 50).  The longest edge of the selected wall is
@@ -1453,6 +1759,7 @@ bool AskPlanarFacePlacement(
 
     const double pickProjection = Dot3(pickPoint, placement.lengthAxis);
     bool pickedEndEdgeFound = false;
+    std::size_t pickedEndEdgeIndex = 0;
     double pickedEndCoord = 0.0;
     if (!useWholeBodyEnds)
     {
@@ -1470,17 +1777,13 @@ bool AskPlanarFacePlacement(
                 continue;
             }
 
-            const double lengthSpan = std::fabs(
-                Dot3(endpointPairs[index].second, placement.lengthAxis) -
-                Dot3(endpointPairs[index].first, placement.lengthAxis));
-            const double widthSpan = std::fabs(
-                Dot3(endpointPairs[index].second, placement.widthAxis) -
-                Dot3(endpointPairs[index].first, placement.widthAxis));
             const double lengthAlignment = std::fabs(Dot3(edgeDirection, placement.lengthAxis));
+            // A mitered end edge is not perpendicular to the tube axis.  Treat
+            // any substantial boundary edge that is not longitudinal as an
+            // end-edge candidate, then use the user's pick point to select it.
             const bool isEndEdge =
-                widthSpan > 0.1 &&
-                lengthSpan <= std::max(0.5, widthSpan * 0.35) &&
-                lengthAlignment < 0.65;
+                Distance3(endpointPairs[index].first, endpointPairs[index].second) > 0.5 &&
+                lengthAlignment < 0.95;
             if (!isEndEdge)
             {
                 continue;
@@ -1493,6 +1796,7 @@ bool AskPlanarFacePlacement(
                 pickedEndCoord =
                     (Dot3(endpointPairs[index].first, placement.lengthAxis) +
                      Dot3(endpointPairs[index].second, placement.lengthAxis)) * 0.5;
+                pickedEndEdgeIndex = index;
                 pickedEndEdgeFound = true;
             }
         }
@@ -1519,6 +1823,86 @@ bool AskPlanarFacePlacement(
     {
         placement.endCoord = placement.lengthMax;
         placement.inwardSign = -1.0;
+    }
+
+    if (pickedEndEdgeFound && !useWholeBodyEnds)
+    {
+        const EdgeEndpointPair& endEdge = endpointPairs[pickedEndEdgeIndex];
+        double endEdgeAxis[3] =
+        {
+            endEdge.second[0] - endEdge.first[0],
+            endEdge.second[1] - endEdge.first[1],
+            endEdge.second[2] - endEdge.first[2]
+        };
+        double inwardReference[3] =
+        {
+            placement.lengthAxis[0] * placement.inwardSign,
+            placement.lengthAxis[1] * placement.inwardSign,
+            placement.lengthAxis[2] * placement.inwardSign
+        };
+        double endFaceNormalInWall[3] = {0.0, 0.0, 0.0};
+        if (Normalize3(endEdgeAxis))
+        {
+            // The port width follows the end edge.  Its height direction is
+            // perpendicular to that edge while remaining in the selected wall
+            // plane, which makes the completed port perpendicular to a mitered
+            // tube end face.
+            Cross3(endEdgeAxis, placement.normal, endFaceNormalInWall);
+        }
+        if (Normalize3(endFaceNormalInWall))
+        {
+            if (Dot3(endFaceNormalInWall, inwardReference) < 0.0)
+            {
+                endFaceNormalInWall[0] = -endFaceNormalInWall[0];
+                endFaceNormalInWall[1] = -endFaceNormalInWall[1];
+                endFaceNormalInWall[2] = -endFaceNormalInWall[2];
+            }
+
+            placement.lengthAxis[0] = endFaceNormalInWall[0];
+            placement.lengthAxis[1] = endFaceNormalInWall[1];
+            placement.lengthAxis[2] = endFaceNormalInWall[2];
+            placement.widthAxis[0] = endEdgeAxis[0];
+            placement.widthAxis[1] = endEdgeAxis[1];
+            placement.widthAxis[2] = endEdgeAxis[2];
+            placement.inwardSign = 1.0;
+            placement.endCoord =
+                (Dot3(endEdge.first, placement.lengthAxis) +
+                 Dot3(endEdge.second, placement.lengthAxis)) * 0.5;
+            placement.widthMin = std::min(
+                Dot3(endEdge.first, placement.widthAxis),
+                Dot3(endEdge.second, placement.widthAxis));
+            placement.widthMax = std::max(
+                Dot3(endEdge.first, placement.widthAxis),
+                Dot3(endEdge.second, placement.widthAxis));
+
+            placement.lengthMin = DBL_MAX;
+            placement.lengthMax = -DBL_MAX;
+            for (std::size_t edgeIndex = 0; edgeIndex < endpointPairs.size(); ++edgeIndex)
+            {
+                placement.lengthMin = std::min(
+                    placement.lengthMin,
+                    std::min(
+                        Dot3(endpointPairs[edgeIndex].first, placement.lengthAxis),
+                        Dot3(endpointPairs[edgeIndex].second, placement.lengthAxis)));
+                placement.lengthMax = std::max(
+                    placement.lengthMax,
+                    std::max(
+                        Dot3(endpointPairs[edgeIndex].first, placement.lengthAxis),
+                        Dot3(endpointPairs[edgeIndex].second, placement.lengthAxis)));
+            }
+
+            std::ostringstream log;
+            log << "PortAlignedPerpendicularToEndFace"
+                << " body=" << placement.bodyTag
+                << " face=" << placement.faceTag
+                << " endEdgeIndex=" << pickedEndEdgeIndex
+                << " endCoord=" << FormatDouble(placement.endCoord)
+                << " usableWidth=" << FormatDouble(placement.widthMax - placement.widthMin)
+                << " portAxis=" << FormatDouble(placement.lengthAxis[0]) << ","
+                << FormatDouble(placement.lengthAxis[1]) << ","
+                << FormatDouble(placement.lengthAxis[2]);
+            AppendDebugLog(log.str());
+        }
     }
 
     placement.wallThickness = bestOppositeDistance;
@@ -1919,6 +2303,144 @@ bool SelectFemaleBodyIntersectingTool(
     return true;
 }
 
+bool AlignAutomaticPlacementToActualEndFace(
+    FacePlacement& placement,
+    bool maximumTubeEnd)
+{
+    std::vector<EdgeEndpointPair> endpointPairs;
+    if (!AskPeripheralFaceEdgeEndpointPairs(placement.faceTag, endpointPairs) ||
+        endpointPairs.empty())
+    {
+        return false;
+    }
+
+    const double tubeAxis[3] =
+    {
+        placement.lengthAxis[0],
+        placement.lengthAxis[1],
+        placement.lengthAxis[2]
+    };
+    const double targetCoord = maximumTubeEnd
+        ? placement.lengthMax
+        : placement.lengthMin;
+    const double inwardTubeSign = maximumTubeEnd ? -1.0 : 1.0;
+
+    std::size_t bestEdgeIndex = endpointPairs.size();
+    double bestDistance = DBL_MAX;
+    double bestEdgeLength = -1.0;
+    for (std::size_t edgeIndex = 0; edgeIndex < endpointPairs.size(); ++edgeIndex)
+    {
+        double edgeDirection[3] =
+        {
+            endpointPairs[edgeIndex].second[0] - endpointPairs[edgeIndex].first[0],
+            endpointPairs[edgeIndex].second[1] - endpointPairs[edgeIndex].first[1],
+            endpointPairs[edgeIndex].second[2] - endpointPairs[edgeIndex].first[2]
+        };
+        const double edgeLength = Distance3(
+            endpointPairs[edgeIndex].first,
+            endpointPairs[edgeIndex].second);
+        if (edgeLength <= 0.5 || !Normalize3(edgeDirection) ||
+            std::fabs(Dot3(edgeDirection, tubeAxis)) >= 0.95)
+        {
+            continue;
+        }
+
+        const double edgeCoord =
+            (Dot3(endpointPairs[edgeIndex].first, tubeAxis) +
+             Dot3(endpointPairs[edgeIndex].second, tubeAxis)) * 0.5;
+        const double distance = std::fabs(edgeCoord - targetCoord);
+        if (distance < bestDistance - 0.01 ||
+            (std::fabs(distance - bestDistance) <= 0.01 && edgeLength > bestEdgeLength))
+        {
+            bestDistance = distance;
+            bestEdgeLength = edgeLength;
+            bestEdgeIndex = edgeIndex;
+        }
+    }
+
+    if (bestEdgeIndex >= endpointPairs.size())
+    {
+        return false;
+    }
+
+    const EdgeEndpointPair& endEdge = endpointPairs[bestEdgeIndex];
+    double endEdgeAxis[3] =
+    {
+        endEdge.second[0] - endEdge.first[0],
+        endEdge.second[1] - endEdge.first[1],
+        endEdge.second[2] - endEdge.first[2]
+    };
+    if (!Normalize3(endEdgeAxis))
+    {
+        return false;
+    }
+
+    double portAxis[3] = {0.0, 0.0, 0.0};
+    Cross3(endEdgeAxis, placement.normal, portAxis);
+    if (!Normalize3(portAxis))
+    {
+        return false;
+    }
+    double inwardReference[3] =
+    {
+        tubeAxis[0] * inwardTubeSign,
+        tubeAxis[1] * inwardTubeSign,
+        tubeAxis[2] * inwardTubeSign
+    };
+    if (Dot3(portAxis, inwardReference) < 0.0)
+    {
+        portAxis[0] = -portAxis[0];
+        portAxis[1] = -portAxis[1];
+        portAxis[2] = -portAxis[2];
+    }
+
+    placement.lengthAxis[0] = portAxis[0];
+    placement.lengthAxis[1] = portAxis[1];
+    placement.lengthAxis[2] = portAxis[2];
+    placement.widthAxis[0] = endEdgeAxis[0];
+    placement.widthAxis[1] = endEdgeAxis[1];
+    placement.widthAxis[2] = endEdgeAxis[2];
+    placement.inwardSign = 1.0;
+    placement.endCoord =
+        (Dot3(endEdge.first, placement.lengthAxis) +
+         Dot3(endEdge.second, placement.lengthAxis)) * 0.5;
+    placement.widthMin = std::min(
+        Dot3(endEdge.first, placement.widthAxis),
+        Dot3(endEdge.second, placement.widthAxis));
+    placement.widthMax = std::max(
+        Dot3(endEdge.first, placement.widthAxis),
+        Dot3(endEdge.second, placement.widthAxis));
+    placement.lengthMin = DBL_MAX;
+    placement.lengthMax = -DBL_MAX;
+    for (std::size_t edgeIndex = 0; edgeIndex < endpointPairs.size(); ++edgeIndex)
+    {
+        placement.lengthMin = std::min(
+            placement.lengthMin,
+            std::min(
+                Dot3(endpointPairs[edgeIndex].first, placement.lengthAxis),
+                Dot3(endpointPairs[edgeIndex].second, placement.lengthAxis)));
+        placement.lengthMax = std::max(
+            placement.lengthMax,
+            std::max(
+                Dot3(endpointPairs[edgeIndex].first, placement.lengthAxis),
+                Dot3(endpointPairs[edgeIndex].second, placement.lengthAxis)));
+    }
+
+    std::ostringstream log;
+    log << "PortAlignedPerpendicularToEndFace"
+        << " mode=auto"
+        << " body=" << placement.bodyTag
+        << " face=" << placement.faceTag
+        << " tubeEnd=" << (maximumTubeEnd ? "maximum" : "minimum")
+        << " endEdgeIndex=" << bestEdgeIndex
+        << " edgeDistance=" << FormatDouble(bestDistance)
+        << " usableWidth=" << FormatDouble(placement.widthMax - placement.widthMin)
+        << " portAxis=" << FormatVector3(placement.lengthAxis)
+        << " endEdgeAxis=" << FormatVector3(placement.widthAxis);
+    AppendDebugLog(log.str());
+    return true;
+}
+
 FacePlacement OppositeEndPlacement(const FacePlacement& placement)
 {
     FacePlacement opposite = placement;
@@ -1935,7 +2457,10 @@ FacePlacement OppositeEndPlacement(const FacePlacement& placement)
     return opposite;
 }
 
-double AskTubeOuterCornerRadiusForBody(tag_t bodyTag, const FacePlacement& referencePlacement)
+double AskTubeOuterCornerRadiusForBody(
+    tag_t bodyTag,
+    const FacePlacement& referencePlacement,
+    double recognizedTargetLength = 0.0)
 {
     uf_list_p_t faceList = NULL;
     if (bodyTag == NULL_TAG || UF_MODL_ask_body_faces(bodyTag, &faceList) != 0 || faceList == NULL)
@@ -1946,15 +2471,44 @@ double AskTubeOuterCornerRadiusForBody(tag_t bodyTag, const FacePlacement& refer
     std::vector<tag_t> faceTags = UfListToTags(faceList);
     UF_MODL_delete_list(&faceList);
 
-    double targetLength = 0.0;
-    double targetWidth = 0.0;
-    double targetHeight = 0.0;
+    double targetLength = recognizedTargetLength;
     double targetLengthAxis[3] = {0.0, 0.0, 0.0};
-    if (!EstimateTubeDimensionsFromEdges(bodyTag, targetLength, targetWidth, targetHeight) ||
-        !ReclassifyTubeDimensionsBySectionStep(targetLength, targetWidth, targetHeight) ||
-        !FindLengthAxisFromEdges(bodyTag, targetLength, targetLengthAxis))
+    std::string lengthSource = "candidate-cache";
+    if (targetLength <= 0.0)
     {
+        lengthSource = "legacy-edge-projection";
+        double targetWidth = 0.0;
+        double targetHeight = 0.0;
+        if (!EstimateTubeDimensionsFromEdges(bodyTag, targetLength, targetWidth, targetHeight) ||
+            !ReclassifyTubeDimensionsBySectionStep(targetLength, targetWidth, targetHeight))
+        {
+            std::ostringstream log;
+            log << "AutoTubeRRejected"
+                << " body=" << bodyTag
+                << " reason=target dimensions not recognized before radius scan";
+            AppendDebugLog(log.str());
+            return 0.0;
+        }
+    }
+    if (!FindLengthAxisFromEdges(bodyTag, targetLength, targetLengthAxis))
+    {
+        std::ostringstream log;
+        log << "AutoTubeRRejected"
+            << " body=" << bodyTag
+            << " targetLength=" << FormatDouble(targetLength)
+            << " lengthSource=" << lengthSource
+            << " reason=target length axis not found before radius scan";
+        AppendDebugLog(log.str());
         return 0.0;
+    }
+
+    {
+        std::ostringstream log;
+        log << "AutoTubeRInput"
+            << " body=" << bodyTag
+            << " targetLength=" << FormatDouble(targetLength)
+            << " lengthSource=" << lengthSource;
+        AppendDebugLog(log.str());
     }
 
     const double faceWidth = referencePlacement.widthMax - referencePlacement.widthMin;
@@ -3722,7 +4276,10 @@ bool EstimateTubeDimensionsFromEdges(tag_t bodyTag, double& length, double& widt
 
     double bestScore = -1.0;
     double bestDimensions[3] = {0.0, 0.0, 0.0};
-    const double perpendicularTolerance = 0.20;
+    // Tube axes are mutually perpendicular regardless of how the component is
+    // rotated in the assembly.  A loose tolerance here can mistake a miter-cut
+    // edge for a section axis and leak the tube length into the section size.
+    const double perpendicularTolerance = 0.02;
     for (std::size_t i = 0; i < clusters.size(); ++i)
     {
         for (std::size_t j = i + 1; j < clusters.size(); ++j)
@@ -3740,7 +4297,34 @@ bool EstimateTubeDimensionsFromEdges(tag_t bodyTag, double& length, double& widt
                     continue;
                 }
 
-                const double* axes[3] = {clusters[i].direction, clusters[j].direction, clusters[k].direction};
+                double orthogonalAxes[3][3] =
+                {
+                    {clusters[i].direction[0], clusters[i].direction[1], clusters[i].direction[2]},
+                    {clusters[j].direction[0], clusters[j].direction[1], clusters[j].direction[2]},
+                    {0.0, 0.0, 0.0}
+                };
+
+                // Remove any small numerical component along the first axis,
+                // then derive the third axis by a cross product.  Projection is
+                // therefore performed in a true local orthonormal coordinate
+                // system rather than in three merely near-perpendicular vectors.
+                const double axis1AlongAxis0 = Dot3(orthogonalAxes[1], orthogonalAxes[0]);
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    orthogonalAxes[1][axis] -= axis1AlongAxis0 * orthogonalAxes[0][axis];
+                }
+                if (!Normalize3(orthogonalAxes[1]))
+                {
+                    continue;
+                }
+                Cross3(orthogonalAxes[0], orthogonalAxes[1], orthogonalAxes[2]);
+                if (!Normalize3(orthogonalAxes[2]) ||
+                    std::fabs(Dot3(orthogonalAxes[2], clusters[k].direction)) < 0.98)
+                {
+                    continue;
+                }
+
+                const double* axes[3] = {orthogonalAxes[0], orthogonalAxes[1], orthogonalAxes[2]};
                 double minProjection[3] = {DBL_MAX, DBL_MAX, DBL_MAX};
                 double maxProjection[3] = {-DBL_MAX, -DBL_MAX, -DBL_MAX};
                 for (std::size_t endpointIndex = 0; endpointIndex < endpointPairs.size(); ++endpointIndex)
@@ -3857,6 +4441,121 @@ SquareTubeCandidate AnalyzeBody(NXOpen::Body* body)
     return candidate;
 }
 
+SquareTubeCandidate AnalyzeBodyFromPlanarFaceLocalAxes(NXOpen::Body* body)
+{
+    SquareTubeCandidate candidate = {};
+    candidate.body = body;
+    candidate.accepted = false;
+
+    if (body == NULL)
+    {
+        candidate.reason = "empty body";
+        return candidate;
+    }
+
+    candidate.planarFaceCount = CountPlanarFaces(body->Tag());
+    uf_list_p_t faceList = NULL;
+    int rc = UF_MODL_ask_body_faces(body->Tag(), &faceList);
+    if (rc != 0)
+    {
+        throw NXOpen::NXException::Create(rc);
+    }
+    std::vector<tag_t> faceTags = UfListToTags(faceList);
+    UF_MODL_delete_list(&faceList);
+
+    std::string lastSectionStatus;
+    for (std::size_t faceIndex = 0; faceIndex < faceTags.size(); ++faceIndex)
+    {
+        int faceType = 0;
+        double point[3] = {0.0, 0.0, 0.0};
+        double direction[3] = {0.0, 0.0, 0.0};
+        double faceBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        double radius = 0.0;
+        double radData = 0.0;
+        int normalDir = 0;
+        if (UF_MODL_ask_face_data(
+                faceTags[faceIndex],
+                &faceType,
+                point,
+                direction,
+                faceBox,
+                &radius,
+                &radData,
+                &normalDir) != 0 ||
+            faceType != UF_MODL_PLANAR_FACE)
+        {
+            continue;
+        }
+
+        double faceNormal[3] = {0.0, 0.0, 0.0};
+        if (!AskFaceNormalFromDirectionCollection(faceTags[faceIndex], faceNormal))
+        {
+            continue;
+        }
+
+        double measuredLength = 0.0;
+        double measuredWidth = 0.0;
+        double measuredHeight = 0.0;
+        if (!EstimateTubeDimensionsFromSelectedFaceAxes(
+                body->Tag(),
+                faceTags[faceIndex],
+                faceNormal,
+                measuredLength,
+                measuredWidth,
+                measuredHeight))
+        {
+            continue;
+        }
+
+        double recognizedLength = measuredLength;
+        double recognizedWidth = measuredWidth;
+        double recognizedHeight = measuredHeight;
+        if (!ReclassifyTubeDimensionsBySectionStep(
+                recognizedLength,
+                recognizedWidth,
+                recognizedHeight))
+        {
+            continue;
+        }
+
+        std::string sampledSectionStatus;
+        if (!HasClosedHollowSampledSectionOnly(
+                body->Tag(),
+                recognizedLength,
+                &sampledSectionStatus))
+        {
+            lastSectionStatus = sampledSectionStatus;
+            continue;
+        }
+
+        candidate.length = recognizedLength;
+        candidate.width = recognizedWidth;
+        candidate.height = recognizedHeight;
+        candidate.accepted = true;
+        candidate.reason = std::fabs(candidate.width - candidate.height) <= 1.0
+            ? "square tube candidate from planar-face local axes"
+            : "flat tube candidate from planar-face local axes";
+
+        std::ostringstream log;
+        log << "FemaleTubeRecognizedByLocalFace"
+            << " body=" << body->Tag()
+            << " face=" << faceTags[faceIndex]
+            << " measured=" << FormatDouble(measuredLength)
+            << "x" << FormatDouble(measuredWidth)
+            << "x" << FormatDouble(measuredHeight)
+            << " recognized(L/W/H)=" << FormatDouble(candidate.length)
+            << "/" << FormatDouble(candidate.width)
+            << "/" << FormatDouble(candidate.height);
+        AppendDebugLog(log.str());
+        return candidate;
+    }
+
+    candidate.reason = lastSectionStatus.empty()
+        ? "no planar-face local axes match tube specification"
+        : "local axes matched but hollow section rejected; " + lastSectionStatus;
+    return candidate;
+}
+
 SquareTubeCandidate AnalyzeBodyCached(
     NXOpen::Body* body,
     std::map<tag_t, SquareTubeCandidate>* candidateCache)
@@ -3907,6 +4606,45 @@ bool IsAcceptedTubeBody(
         candidate.reason = "AnalyzeBody threw";
     }
 
+    if (analyzedCandidate != NULL)
+    {
+        *analyzedCandidate = candidate;
+    }
+    return candidate.accepted;
+}
+
+bool IsAcceptedTubeBodyWithLocalFaceFallback(
+    tag_t bodyTag,
+    std::map<tag_t, SquareTubeCandidate>* candidateCache,
+    SquareTubeCandidate* analyzedCandidate = NULL)
+{
+    SquareTubeCandidate candidate = {};
+    if (IsAcceptedTubeBody(bodyTag, candidateCache, &candidate))
+    {
+        if (analyzedCandidate != NULL)
+        {
+            *analyzedCandidate = candidate;
+        }
+        return true;
+    }
+
+    NXOpen::Body* body =
+        dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(bodyTag));
+    try
+    {
+        candidate = AnalyzeBodyFromPlanarFaceLocalAxes(body);
+    }
+    catch (...)
+    {
+        candidate.body = body;
+        candidate.accepted = false;
+        candidate.reason = "local planar-face analyzer threw";
+    }
+
+    if (candidateCache != NULL)
+    {
+        (*candidateCache)[bodyTag] = candidate;
+    }
     if (analyzedCandidate != NULL)
     {
         *analyzedCandidate = candidate;
@@ -4246,62 +4984,28 @@ std::vector<tag_t> CollectTouchCandidateBodyTags(
     std::map<tag_t, SquareTubeCandidate>* candidateCache = NULL,
     bool excludeLengthAxisAlignedWithFaceNormal = true)
 {
+    (void)candidateCache;
+    (void)excludeLengthAxisAlignedWithFaceNormal;
     std::vector<tag_t> candidateBodyTags;
     std::vector<tag_t> bodyTags = AskSolidBodiesInDisplayPart();
-    int excludedNonTubeCount = 0;
-    int excludedPerpendicularTubeCount = 0;
+
+    // Both modes defer the comparatively expensive tube recognition until
+    // after the projection-range prefilter.  The generated tool volume is the
+    // authoritative contact test; direction and legacy body-box checks must
+    // not discard an oblique mother tube before that test is reached.
     for (std::size_t bodyIndex = 0; bodyIndex < bodyTags.size(); ++bodyIndex)
     {
-        bool excludeBody = false;
-        SquareTubeCandidate candidate = {};
-        if (!IsAcceptedTubeBody(bodyTags[bodyIndex], candidateCache, &candidate))
-        {
-            ++excludedNonTubeCount;
-            std::ostringstream detailLog;
-            detailLog << "TouchCandidateBodyExcluded"
-                      << " body=" << bodyTags[bodyIndex]
-                      << " reason=not accepted tube"
-                      << " analyzeReason=" << candidate.reason
-                      << " dims(L/W/H)=" << FormatDouble(candidate.length)
-                      << "/" << FormatDouble(candidate.width)
-                      << "/" << FormatDouble(candidate.height);
-            AppendDebugLog(detailLog.str());
-            continue;
-        }
-
-        double lengthAxis[3] = {0.0, 0.0, 0.0};
-        if (excludeLengthAxisAlignedWithFaceNormal &&
-            FindLengthAxisFromEdges(bodyTags[bodyIndex], candidate.length, lengthAxis))
-        {
-            const double lengthNormalDot = std::fabs(Dot3(lengthAxis, referencePlacement.normal));
-            if (lengthNormalDot > 0.85)
-            {
-                excludeBody = true;
-                ++excludedPerpendicularTubeCount;
-                std::ostringstream detailLog;
-                detailLog << "TouchCandidateBodyExcluded"
-                          << " body=" << bodyTags[bodyIndex]
-                          << " reason=length axis aligned with selected face normal"
-                          << " dims(L/W/H)=" << FormatDouble(candidate.length)
-                          << "/" << FormatDouble(candidate.width)
-                          << "/" << FormatDouble(candidate.height)
-                          << " lengthAxis=" << FormatVector3(lengthAxis)
-                          << " lengthNormalDot=" << FormatDouble(lengthNormalDot);
-                AppendDebugLog(detailLog.str());
-            }
-        }
-
-        if (!excludeBody)
+        if (bodyTags[bodyIndex] != NULL_TAG)
         {
             candidateBodyTags.push_back(bodyTags[bodyIndex]);
         }
     }
-
     std::ostringstream log;
-    log << "TouchCandidateBodies count=" << candidateBodyTags.size()
+    log << "TouchCandidateBodiesDeferredRecognition"
+        << " count=" << candidateBodyTags.size()
         << " sourceBodies=" << bodyTags.size()
-        << " excludedNonTubes=" << excludedNonTubeCount
-        << " excludedPerpendicularTubes=" << excludedPerpendicularTubeCount;
+        << " sourceBody=" << referencePlacement.bodyTag
+        << " mode=all";
     AppendDebugLog(log.str());
     return candidateBodyTags;
 }
@@ -4535,53 +5239,13 @@ std::vector<FacePlacement> CollectCoplanarTubeFacePlacements(
             continue;
         }
 
-        bool acceptedTube = false;
         SquareTubeCandidate candidate = {};
-        try
-        {
-            candidate = AnalyzeBodyCached(body, candidateCache);
-            acceptedTube = candidate.accepted;
-        }
-        catch (...)
-        {
-            acceptedTube = false;
-            candidate.reason = "AnalyzeBody threw";
-        }
-        if (!acceptedTube)
-        {
-            std::ostringstream log;
-            log << "CoplanarBody rejected"
-                << " body=" << bodyTags[bodyIndex]
-                << " reason=not accepted tube"
-                << " analyzeReason=" << candidate.reason
-                << " dims(L/W/H)=" << FormatDouble(candidate.length)
-                << "/" << FormatDouble(candidate.width)
-                << "/" << FormatDouble(candidate.height)
-                << " planarFaces=" << candidate.planarFaceCount;
-            AppendDebugLog(log.str());
-            continue;
-        }
-
+        candidate.body = body;
+        bool tubeRecognitionAttempted = false;
+        bool acceptedTube = false;
         double tubeLengthAxis[3] = {0.0, 0.0, 0.0};
-        const bool hasTubeLengthAxis = FindLengthAxisFromEdges(bodyTags[bodyIndex], candidate.length, tubeLengthAxis);
-        const double tubeLengthNormalDot = hasTubeLengthAxis
-            ? std::fabs(Dot3(tubeLengthAxis, referencePlacement.normal))
-            : -1.0;
-        if (hasTubeLengthAxis && tubeLengthNormalDot > 0.85)
-        {
-            std::ostringstream log;
-            log << "CoplanarBody rejected"
-                << " body=" << bodyTags[bodyIndex]
-                << " reason=length axis aligned with selected face normal"
-                << " dims(L/W/H)=" << FormatDouble(candidate.length)
-                << "/" << FormatDouble(candidate.width)
-                << "/" << FormatDouble(candidate.height)
-                << " planarFaces=" << candidate.planarFaceCount
-                << " lengthAxis=" << FormatVector3(tubeLengthAxis)
-                << " lengthNormalDot=" << FormatDouble(tubeLengthNormalDot);
-            AppendDebugLog(log.str());
-            continue;
-        }
+        bool hasTubeLengthAxis = false;
+        double tubeLengthNormalDot = -1.0;
 
         uf_list_p_t faceList = NULL;
         if (UF_MODL_ask_body_faces(bodyTags[bodyIndex], &faceList) != 0 || faceList == NULL)
@@ -4651,6 +5315,37 @@ std::vector<FacePlacement> CollectCoplanarTubeFacePlacements(
                 firstMatchedFace = faceTags[faceIndex];
             }
 
+            // Only bodies that actually contain a face on the reference plane
+            // reach tube recognition.  Use the local-face fallback here so an
+            // oblique 60x40 tube is not rejected by its world/body-box extents.
+            if (!tubeRecognitionAttempted)
+            {
+                tubeRecognitionAttempted = true;
+                acceptedTube = IsAcceptedTubeBodyWithLocalFaceFallback(
+                    bodyTags[bodyIndex],
+                    candidateCache,
+                    &candidate);
+                if (acceptedTube)
+                {
+                    hasTubeLengthAxis = FindLengthAxisFromEdges(
+                        bodyTags[bodyIndex],
+                        candidate.length,
+                        tubeLengthAxis);
+                    tubeLengthNormalDot = hasTubeLengthAxis
+                        ? std::fabs(Dot3(tubeLengthAxis, referencePlacement.normal))
+                        : -1.0;
+                    if (hasTubeLengthAxis && tubeLengthNormalDot > 0.85)
+                    {
+                        acceptedTube = false;
+                        candidate.reason = "length axis aligned with selected face normal";
+                    }
+                }
+            }
+            if (!acceptedTube)
+            {
+                continue;
+            }
+
             if (!placementAddedForBody)
             {
                 NXOpen::Face* face =
@@ -4709,6 +5404,11 @@ std::vector<FacePlacement> CollectCoplanarTubeFacePlacements(
             else if (minPlaneDistance > planeDistanceTolerance)
             {
                 log << " rejectReason=plane distance too large";
+            }
+            else if (tubeRecognitionAttempted && !acceptedTube)
+            {
+                log << " rejectReason=tube recognition failed"
+                    << " tubeReason=" << candidate.reason;
             }
             else
             {
@@ -5851,19 +6551,32 @@ private:
                         return 1;
                     }
 
+                    // The selected-face local coordinate system has already
+                    // matched two section dimensions against the tube table
+                    // and measured the wall thickness.  Do not re-run the
+                    // legacy world/body-box analyzer here: an oblique or
+                    // mitred short tube can otherwise be rejected even though
+                    // the selected face was recognized correctly.
                     SquareTubeCandidate maleCandidate = {};
-                    if (!IsAcceptedTubeBody(
-                            malePlacement.bodyTag,
-                            &tubeCandidateCache,
-                            &maleCandidate))
+                    maleCandidate.body = dynamic_cast<NXOpen::Body*>(
+                        NXOpen::NXObjectManager::Get(malePlacement.bodyTag));
+                    maleCandidate.length = malePlacement.recognizedLength;
+                    maleCandidate.width = malePlacement.recognizedWidth;
+                    maleCandidate.height = malePlacement.recognizedHeight;
+                    maleCandidate.planarFaceCount = CountPlanarFaces(malePlacement.bodyTag);
+                    maleCandidate.accepted = true;
+                    maleCandidate.reason = "selected face local coordinate recognition";
+                    tubeCandidateCache[malePlacement.bodyTag] = maleCandidate;
+
                     {
                         std::ostringstream log;
-                        log << "ManualMaleBodyExcluded"
+                        log << "ManualMaleBodyAcceptedBySelectedFace"
                             << " body=" << malePlacement.bodyTag
-                            << " reason=not accepted tube"
-                            << " analyzeReason=" << maleCandidate.reason;
+                            << " dims(L/W/H)=" << FormatDouble(maleCandidate.length)
+                            << "/" << FormatDouble(maleCandidate.width)
+                            << "/" << FormatDouble(maleCandidate.height)
+                            << " wallThickness=" << FormatDouble(malePlacement.wallThickness);
                         AppendDebugLog(log.str());
-                        continue;
                     }
 
                     std::vector<tag_t> touchingCandidateBodyTags =
@@ -5896,23 +6609,26 @@ private:
                     return 1;
                 }
 
-                SquareTubeCandidate selectedMaleCandidate = {};
-                if (!IsAcceptedTubeBody(
-                        malePlacement.bodyTag,
-                        &tubeCandidateCache,
-                        &selectedMaleCandidate))
                 {
+                    SquareTubeCandidate selectedMaleCandidate = {};
+                    selectedMaleCandidate.body = dynamic_cast<NXOpen::Body*>(
+                        NXOpen::NXObjectManager::Get(malePlacement.bodyTag));
+                    selectedMaleCandidate.length = malePlacement.recognizedLength;
+                    selectedMaleCandidate.width = malePlacement.recognizedWidth;
+                    selectedMaleCandidate.height = malePlacement.recognizedHeight;
+                    selectedMaleCandidate.planarFaceCount = CountPlanarFaces(malePlacement.bodyTag);
+                    selectedMaleCandidate.accepted = true;
+                    selectedMaleCandidate.reason = "selected face local coordinate recognition";
+                    tubeCandidateCache[malePlacement.bodyTag] = selectedMaleCandidate;
+
                     std::ostringstream log;
-                    log << "AutoMaleBodyExcluded"
+                    log << "AutoMaleBodyAcceptedBySelectedFace"
                         << " body=" << malePlacement.bodyTag
-                        << " reason=not accepted tube"
-                        << " analyzeReason=" << selectedMaleCandidate.reason;
+                        << " dims(L/W/H)=" << FormatDouble(selectedMaleCandidate.length)
+                        << "/" << FormatDouble(selectedMaleCandidate.width)
+                        << "/" << FormatDouble(selectedMaleCandidate.height)
+                        << " wallThickness=" << FormatDouble(malePlacement.wallThickness);
                     AppendDebugLog(log.str());
-                    ui->NXMessageBox()->Show(
-                        "FangTongKaKou",
-                        NXOpen::NXMessageBox::DialogTypeInformation,
-                        u8"所选实体未识别为方通或扁通：外形尺寸中没有两个尺寸匹配规格表。");
-                    return 1;
                 }
 
                 DisplaySuppressionGuard autoRecognitionDisplayGuard;
@@ -5928,15 +6644,29 @@ private:
 
                 for (std::size_t index = 0; index < coplanarPlacements.size(); ++index)
                 {
-                    FacePlacement oppositePlacement = OppositeEndPlacement(coplanarPlacements[index]);
+                    FacePlacement minimumEndPlacement = coplanarPlacements[index];
+                    FacePlacement maximumEndPlacement = coplanarPlacements[index];
+                    if (!AlignAutomaticPlacementToActualEndFace(minimumEndPlacement, false))
+                    {
+                        minimumEndPlacement.endCoord = minimumEndPlacement.lengthMin;
+                        minimumEndPlacement.inwardSign = 1.0;
+                        AppendDebugLog("AutoEndFaceAlignmentFallback tubeEnd=minimum");
+                    }
+                    if (!AlignAutomaticPlacementToActualEndFace(maximumEndPlacement, true))
+                    {
+                        maximumEndPlacement.endCoord = maximumEndPlacement.lengthMax;
+                        maximumEndPlacement.inwardSign = -1.0;
+                        AppendDebugLog("AutoEndFaceAlignmentFallback tubeEnd=maximum");
+                    }
+
                     TouchingPortPlacement portPlacement = {};
-                    portPlacement.malePlacement = coplanarPlacements[index];
+                    portPlacement.malePlacement = minimumEndPlacement;
                     portPlacement.femaleBodyTag = NULL_TAG;
                     portPlacement.femaleCandidateBodyTags = touchingCandidateBodyTags;
                     touchingEndPlacements.push_back(portPlacement);
 
                     portPlacement = TouchingPortPlacement();
-                    portPlacement.malePlacement = oppositePlacement;
+                    portPlacement.malePlacement = maximumEndPlacement;
                     portPlacement.femaleBodyTag = NULL_TAG;
                     portPlacement.femaleCandidateBodyTags = touchingCandidateBodyTags;
                     touchingEndPlacements.push_back(portPlacement);
@@ -6086,8 +6816,26 @@ private:
                 {
                     const tag_t candidateBody = spatialCandidateBodies[candidateIndex];
 
+                    SquareTubeCandidate recognizedCandidate = {};
+                    if (!IsAcceptedTubeBodyWithLocalFaceFallback(
+                            candidateBody,
+                            &tubeCandidateCache,
+                            &recognizedCandidate))
+                    {
+                        std::ostringstream log;
+                        log << "FemaleSpatialCandidateRejected"
+                            << " body=" << candidateBody
+                            << " reason=" << recognizedCandidate.reason;
+                        AppendDebugLog(log.str());
+                        continue;
+                    }
+                    const double recognizedCandidateLength = recognizedCandidate.length;
+
                     const double outerRadius = autoRecognizeTubeR ?
-                        AskTubeOuterCornerRadiusForBody(candidateBody, malePlacement) :
+                        AskTubeOuterCornerRadiusForBody(
+                            candidateBody,
+                            malePlacement,
+                            recognizedCandidateLength) :
                         0.0;
                     const double candidateMaleHeight =
                         ResolvePortHeight(height, outerRadius, autoRecognizeTubeR);
