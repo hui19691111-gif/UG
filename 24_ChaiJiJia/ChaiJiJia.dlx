@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version='1.0' encoding='UTF-8'?>
 <Dialog NX="2412" id="Dialog" name="Dialog" type="uicomp" title="拆机架" version="1.0.0" Expanded="1" ContainerItems="1">
   <item id="faceSelection" icon="selection_cursor.bmp" name="faceSelection" type="uicomp" class="UICOMP_selection" Expanded="1" presentation="Select Object">
     <PropertyList id="id" mode="0">
@@ -29,7 +29,7 @@
   <item id="squareTubeRValue" icon="styler_double.bmp" name="squareTubeRValue" type="uicomp" class="UICOMP_double" Expanded="1" presentation="Double">
     <PropertyList id="id" mode="0">
       <Property id="API Name" mask="16400" name="API Name" type="string" group="General::" sname="BlockID" value="squareTubeRValue" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
-      <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="&#x65B9;&#x901A;R" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="方通R" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
       <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
       <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
       <Property id="Value" mask="0" name="Value" type="double" group="Block Specific::" sname="Value" value="1.0" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
@@ -45,7 +45,7 @@
   <item id="springbackThicknessValue" icon="styler_double.bmp" name="springbackThicknessValue" type="uicomp" class="UICOMP_double" Expanded="1" presentation="Double">
     <PropertyList id="id" mode="0">
       <Property id="API Name" mask="16400" name="API Name" type="string" group="General::" sname="BlockID" value="springbackThicknessValue" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
-      <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="&#x53CD;&#x5F39;&#x539A;&#x5EA6;" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+      <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="反弹厚度" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
       <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
       <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
       <Property id="Value" mask="0" name="Value" type="double" group="Block Specific::" sname="Value" value="1.0" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
@@ -60,7 +60,7 @@
   </item>
   <PropertyList id="id" mode="0">
     <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="拆机架"/>
-    <Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="DockPolicy" mask="4096" name="DockPolicy" selected="0" sname="Dialog Sizing" source="1" type="enum"><Option name="Allow Resize" value="0"/><Option name="Follow Policy" value="1"/></Property>
+    <Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="HelpTag" mask="4096" name="HelpTag" sname="HelpTag" source="3" type="string" value="Zhihui_ChaiJiJia"/><Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="DockPolicy" mask="4096" name="DockPolicy" selected="0" sname="Dialog Sizing" source="1" type="enum"><Option name="Allow Resize" value="0"/><Option name="Follow Policy" value="1"/></Property>
     <Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="HideApply" mask="4096" name="HideApply" sname="HideApply" source="3" type="logical" value="False"/>
   </PropertyList>
 </Dialog>

@@ -517,7 +517,7 @@ static void replaceAllText(std::string& text, const std::string& from, const std
 static std::string formatRuleNumber(double value)
 {
     std::ostringstream out;
-    out << std::fixed << std::setprecision(2) << value;
+    out << std::fixed << std::setprecision(3) << value;
     return out.str();
 }
 
@@ -3022,7 +3022,7 @@ std::string HoleAttribute::defaultType()
 std::string HoleAttribute::formatDiameter(double value) const
 {
     std::ostringstream stream;
-    stream << std::fixed << std::setprecision(2) << value;
+    stream << std::fixed << std::setprecision(3) << value;
     return stream.str();
 }
 
@@ -3037,7 +3037,7 @@ std::string HoleAttribute::defaultSpec(const std::string& type, double diameter)
 {
     std::ostringstream stream;
     if (type.empty() || type == "孔")
-        stream << "直径" << std::fixed << std::setprecision(2) << diameter;
+        stream << "直径" << std::fixed << std::setprecision(3) << diameter;
     else
         stream << type;
 

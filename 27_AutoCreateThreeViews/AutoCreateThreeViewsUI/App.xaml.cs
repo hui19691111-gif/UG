@@ -20,6 +20,7 @@ public partial class App : Application
         };
 
         base.OnStartup(e);
+
     }
 
     private static void WriteCrashLog(Exception? exception)

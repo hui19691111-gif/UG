@@ -296,7 +296,7 @@ BanJinCaiTuDialog::BanJinCaiTuDialog()
         g_dlxFileName = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_BANJINCAITUDIALOG_DLX);
         if (g_dlxFileName.empty())
         {
-            throw std::runtime_error("BanJinCaiTuDialog dialog resource is missing.");
+            throw std::runtime_error("找不到钣金裁图对话框资源。");
         }
         theDlxFileName = g_dlxFileName.c_str();
         theDialog = BanJinCaiTuDialog::theUI->CreateDialog(theDlxFileName);
@@ -637,7 +637,7 @@ extern "C" DllExport void  ufusr(char *param, int *retcod, int param_len)
     catch(exception& ex)
     {
         //---- Enter your exception handling code here -----
-        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("钣金裁图", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
     if(theBanJinCaiTuDialog != NULL)
     {
@@ -683,7 +683,7 @@ extern "C" DllExport void ufusr_cleanup(void)
     catch(exception& ex)
     {
         //---- Enter your exception handling code here -----
-        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("钣金裁图", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
 }
 
@@ -704,7 +704,7 @@ NXOpen::BlockStyler::BlockDialog::DialogResponse BanJinCaiTuDialog::Launch()
     catch(exception& ex)
     {
         //---- Enter your exception handling code here -----
-        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("钣金裁图", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
     return dialogResponse;
 }
@@ -748,12 +748,15 @@ void BanJinCaiTuDialog::initialize_cb()
         {
             selection1->ResetFilter();
             selection1->AddFilter(BlockStyler::SelectObject::FilterTypeFaces);
+            PropertyList* endSelectionProperties = selection1->GetProperties();
+            endSelectionProperties->SetEnum("SelectMode", 0);
+            delete endSelectionProperties;
         }
     }
     catch(exception& ex)
     {
         //---- Enter your exception handling code here -----
-        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("钣金裁图", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
 }
 
@@ -771,7 +774,7 @@ void BanJinCaiTuDialog::dialogShown_cb()
     catch(exception& ex)
     {
         //---- Enter your exception handling code here -----
-        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("钣金裁图", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
 }
 
@@ -809,7 +812,7 @@ int BanJinCaiTuDialog::apply_cb()
         }
         if (selectedSplitMethod < 0 || selectedSplitMethod > 1)
         {
-            throw NXException::Create(1, "Invalid split method.");
+            throw NXException::Create(1, "拆分方式无效。");
         }
         AppendSectionDebugLog(
             std::string("split-method=") +
@@ -817,6 +820,12 @@ int BanJinCaiTuDialog::apply_cb()
             ", random-part-color=" +
             (useRandomPartColors ? "1" : "0"));
 
+        {
+            std::ostringstream selectedFacesLog;
+            selectedFacesLog << "selected-faces start=" << selectedFace->Tag()
+                             << ", end=" << selectedEndFace->Tag();
+            AppendSectionDebugLog(selectedFacesLog.str());
+        }
         FaceInfo seedFaceInfo = QueryFaceInfo(selectedFace->Tag());
         if (!seedFaceInfo.isPlanar)
         {
@@ -833,53 +842,142 @@ int BanJinCaiTuDialog::apply_cb()
             throw NXException::Create(1, "起始面和终止面必须在同一个实体上。");
         }
 
-        std::vector<RecognizedFaceRegion> bendFaces = CollectContinuousBendFaces(selectedFace, selectedEndFace);
-        const bool sameStartAndEndFace =
-            selectedFace->Tag() == selectedEndFace->Tag();
-        int endFaceOccurrenceCount = 0;
+        const TraversalContext branchContext =
+            BuildTraversalContext(selectedFace);
+        const tag_t terminalBoundaryReferenceTag =
+            FindNearestLinearFaceEdge(
+                selectedEndFace->Tag(),
+                selectedEndPickPoint);
+        double terminalBoundaryDirection[3] = {};
+        if (terminalBoundaryReferenceTag == NULL_TAG ||
+            !TryGetLinearEdgeDirection(
+                terminalBoundaryReferenceTag,
+                terminalBoundaryDirection) ||
+            !AreDirectionsParallel(
+                branchContext.referenceEdgeDirection,
+                terminalBoundaryDirection,
+                5.0))
+        {
+            throw NXException::Create(
+                1,
+                "终止面点击位置附近的边必须与起始折弯边平行。");
+        }
+
+        std::vector<tag_t> branchStartEdges =
+            CollectCollinearOuterFaceEdges(
+                selectedFace->Tag(),
+                branchContext.referenceEdgeTag);
+        std::vector<tag_t> validBranchStartEdges;
+        for (std::size_t edgeIndex = 0;
+             edgeIndex < branchStartEdges.size();
+             ++edgeIndex)
+        {
+            const tag_t branchEdgeTag = branchStartEdges[edgeIndex];
+            if (!IsBendReferenceEdge(
+                    selectedFace->Tag(),
+                    branchEdgeTag,
+                    branchContext.thickness))
+            {
+                continue;
+            }
+            const std::vector<tag_t> neighborFaces =
+                CollectReferenceEdgeNeighborFaces(
+                    selectedFace->Tag(),
+                    branchEdgeTag);
+            if (!neighborFaces.empty())
+            {
+                validBranchStartEdges.push_back(branchEdgeTag);
+            }
+        }
+        if (validBranchStartEdges.empty())
+        {
+            throw NXException::Create(
+                1,
+                "起始面上没有找到可连续追踪的共线折弯边段。");
+        }
+
+        std::vector<RecognizedFaceRegion> bendFaces;
         std::vector<tag_t> parentFaceTags;
         std::set<tag_t> uniqueParentFaceTags;
-        for (std::size_t index = 0; index < bendFaces.size(); ++index)
+        std::size_t reachedBranchCount = 0;
+        for (std::size_t branchIndex = 0;
+             branchIndex < validBranchStartEdges.size();
+             ++branchIndex)
         {
-            if (bendFaces[index].face == NULL)
+            const tag_t branchStartEdgeTag =
+                validBranchStartEdges[branchIndex];
+            std::vector<RecognizedFaceRegion> branchRegions =
+                CollectContinuousBendFaces(
+                    selectedFace,
+                    selectedEndFace,
+                    branchStartEdgeTag,
+                    terminalBoundaryReferenceTag);
+            bool reachedTerminalLine = false;
+            for (std::size_t regionIndex = branchRegions.size();
+                 regionIndex > 0;
+                 --regionIndex)
+            {
+                RecognizedFaceRegion& region = branchRegions[regionIndex - 1];
+                if (region.outgoingEdgeTag != NULL_TAG &&
+                    AreEdgesCollinear(
+                        terminalBoundaryReferenceTag,
+                        region.outgoingEdgeTag))
+                {
+                    region.manualEndSupplement =
+                        region.face == NULL ||
+                        region.face->Tag() != selectedEndFace->Tag();
+                    reachedTerminalLine = true;
+                    break;
+                }
+            }
+            std::ostringstream branchLog;
+            branchLog
+                << "split-bend-branch startEdge=" << branchStartEdgeTag
+                << ", regionCount=" << branchRegions.size()
+                << ", reachedTerminalLine="
+                << (reachedTerminalLine ? 1 : 0);
+            AppendSectionDebugLog(branchLog.str());
+            if (!reachedTerminalLine)
             {
                 continue;
             }
 
-            const tag_t faceTag = bendFaces[index].face->Tag();
-            if (faceTag == selectedEndFace->Tag())
+            ++reachedBranchCount;
+            for (std::size_t regionIndex = 0;
+                 regionIndex < branchRegions.size();
+                 ++regionIndex)
             {
-                ++endFaceOccurrenceCount;
+                RecognizedFaceRegion region = branchRegions[regionIndex];
+                if (region.face == NULL)
+                {
+                    continue;
+                }
+                const tag_t faceTag = region.face->Tag();
+                if (faceTag == selectedFace->Tag() && !bendFaces.empty())
+                {
+                    continue;
+                }
+                bendFaces.push_back(region);
+                if (uniqueParentFaceTags.insert(faceTag).second)
+                {
+                    parentFaceTags.push_back(faceTag);
+                }
             }
-            if (uniqueParentFaceTags.insert(faceTag).second)
-            {
-                parentFaceTags.push_back(faceTag);
-            }
         }
-        const bool reachedEndFace = sameStartAndEndFace ?
-            endFaceOccurrenceCount >= 2 :
-            endFaceOccurrenceCount >= 1;
-        if (!reachedEndFace)
+        if (reachedBranchCount == 0 || bendFaces.empty())
         {
-            throw NXException::Create(1, "没有从起始面的连续折弯路径中找到终止面，请检查两个面是否位于同一条折弯路径上。");
+            throw NXException::Create(
+                1,
+                "没有任何起始折弯边分支能连续追踪到终止共线边。");
         }
-        if (sameStartAndEndFace)
-        {
-            std::ostringstream sameFaceLog;
-            sameFaceLog << "same-start-end face=" << selectedFace->Tag()
-                        << ", occurrences=" << endFaceOccurrenceCount
-                        << ", action=extract_and_trim_twice";
-            AppendSectionDebugLog(sameFaceLog.str());
-        }
+
         std::vector<tag_t> extractedSheetBodies;
         if (selectedSplitMethod == 0)
         {
-            CompleteTrimBoundaryEdges(bendFaces);
             extractedSheetBodies = ExtractRecognizedFaces(bendFaces, NULL);
         }
         else
         {
-            CompleteTrimBoundaryEdges(bendFaces);
             extractedSheetBodies = ExtractRecognizedFacesByShortestBendEdge(
                 bendFaces,
                 NULL);
@@ -895,7 +993,7 @@ int BanJinCaiTuDialog::apply_cb()
                     UF_OBJ_delete_object(extractedSheetBodies[index]);
                 }
             }
-            throw NXException::Create(1, "Cannot determine the sheet-metal thickness from the selected start face.");
+            throw NXException::Create(1, "无法根据所选起始面确定板厚。");
         }
 
         double sourceBodyBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
@@ -909,7 +1007,7 @@ int BanJinCaiTuDialog::apply_cb()
                     UF_OBJ_delete_object(extractedSheetBodies[index]);
                 }
             }
-            throw NXException::Create(1, "Cannot determine the source body center for inward thickening.");
+            throw NXException::Create(1, "无法确定原实体中心，不能判断向内加厚方向。");
         }
 
         const double sourceBodyCenter[3] =
@@ -942,7 +1040,7 @@ int BanJinCaiTuDialog::apply_cb()
                 thickenAlongPositiveNormal);
             if (thickenedBodies.empty())
             {
-                throw NXException::Create(1, "NX did not create a thickened body.");
+                throw NXException::Create(1, "NX 未能创建加厚体。");
             }
             pendingThickenedBodyTags = thickenedBodies;
 
@@ -1029,7 +1127,7 @@ int BanJinCaiTuDialog::apply_cb()
     {
         //---- Enter your exception handling code here -----
         errorCode = 1;
-        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("钣金裁图", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
     return errorCode;
 }
@@ -1076,6 +1174,7 @@ int BanJinCaiTuDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 ClearSelectionPreview(true);
             }
             selectedEndFace = NULL;
+            selectedEndFaces.clear();
 
             PropertyList* selection1Props = selection1->GetProperties();
             std::vector<NXOpen::TaggedObject*> selectedObjects = selection1Props->GetTaggedObjectVector("SelectedObjects");
@@ -1088,9 +1187,43 @@ int BanJinCaiTuDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 return 0;
             }
 
-            selectedEndFace = dynamic_cast<NXOpen::Face*>(selectedObjects[0]);
+            double pickPoint[3] =
+            {
+                selectedEndPickPoint.X,
+                selectedEndPickPoint.Y,
+                selectedEndPickPoint.Z
+            };
+            for (std::size_t index = 0; index < selectedObjects.size(); ++index)
+            {
+                NXOpen::Face* face =
+                    dynamic_cast<NXOpen::Face*>(selectedObjects[index]);
+                if (face == NULL)
+                {
+                    continue;
+                }
+                selectedEndFaces.push_back(face);
+                int containmentStatus = 0;
+                if (UF_MODL_ask_point_containment(
+                        pickPoint,
+                        face->Tag(),
+                        &containmentStatus) == 0 &&
+                    (containmentStatus == 1 || containmentStatus == 3))
+                {
+                    selectedEndFace = face;
+                }
+            }
+            if (selectedEndFace == NULL && !selectedEndFaces.empty())
+            {
+                selectedEndFace = selectedEndFaces.back();
+            }
             if (selectedEndFace != NULL)
             {
+                std::ostringstream multiSelectLog;
+                multiSelectLog
+                    << "end-face-multiselect count="
+                    << selectedEndFaces.size()
+                    << ", anchor=" << selectedEndFace->Tag();
+                AppendSectionDebugLog(multiSelectLog.str());
                 return CreateSelectionPreview();
             }
         }
@@ -1129,7 +1262,7 @@ int BanJinCaiTuDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
     catch(exception& ex)
     {
         //---- Enter your exception handling code here -----
-        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("钣金裁图", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
     return 0;
 }
@@ -1306,6 +1439,7 @@ void BanJinCaiTuDialog::ResetCompletedSelectionState()
 {
     selectedFace = NULL;
     selectedEndFace = NULL;
+    selectedEndFaces.clear();
     selectedBody = NULL;
     selectedPickPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
     selectedEndPickPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
@@ -1415,7 +1549,7 @@ int BanJinCaiTuDialog::ok_cb()
     {
         //---- Enter your exception handling code here -----
         errorCode = 1;
-        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+        BanJinCaiTuDialog::theUI->NXMessageBox()->Show("钣金裁图", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
     return errorCode;
 }
@@ -1497,44 +1631,28 @@ BanJinCaiTuDialog::FaceInfo BanJinCaiTuDialog::QueryFaceInfo(tag_t faceTag) cons
     {
         info.box[index] = box[index];
     }
-    NXOpen::Face* nxFace = dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(faceTag));
-    if (nxFace != NULL)
-    {
-        NXOpen::BasePart* workPart = BanJinCaiTuDialog::theSession->Parts()->Work();
-        if (workPart != NULL)
-        {
-            NXOpen::Direction* direction1 = workPart->Directions()->CreateDirection(
-                nxFace,
-                NXOpen::SenseForward,
-                NXOpen::SmartObject::UpdateOptionWithinModeling);
-            if (direction1 != NULL)
-            {
-                const NXOpen::Vector3d normalVector = direction1->Vector();
-                info.normal[0] = normalVector.X;
-                info.normal[1] = normalVector.Y;
-                info.normal[2] = normalVector.Z;
-            }
-            else
-            {
-                info.normal[0] = unitNorm[0];
-                info.normal[1] = unitNorm[1];
-                info.normal[2] = unitNorm[2];
-            }
-        }
-        else
-        {
-            info.normal[0] = unitNorm[0];
-            info.normal[1] = unitNorm[1];
-            info.normal[2] = unitNorm[2];
-        }
-    }
-    else
-    {
-        info.normal[0] = unitNorm[0];
-        info.normal[1] = unitNorm[1];
-        info.normal[2] = unitNorm[2];
-    }
+    // UF_MODL_ask_face_props already returns the evaluated face normal at the
+    // requested UV point.  Creating an associative NXOpen Direction from the
+    // face is unnecessary and can raise NX error 1520005 ("face is not
+    // planar") even for a Parasolid plane face.  Use the UF normal directly.
+    info.normal[0] = unitNorm[0];
+    info.normal[1] = unitNorm[1];
+    info.normal[2] = unitNorm[2];
     info.radius = radius;
+
+    {
+        std::ostringstream faceInfoLog;
+        faceInfoLog << "face-info tag=" << faceTag
+                    << ", ufType=" << faceType
+                    << ", planar=" << (info.isPlanar ? 1 : 0)
+                    << ", normDir=" << normDir
+                    << ", normalSource=UF_MODL_ask_face_props"
+                    << ", normal=(" << std::setprecision(15)
+                    << info.normal[0] << ","
+                    << info.normal[1] << ","
+                    << info.normal[2] << ")";
+        AppendSectionDebugLog(faceInfoLog.str());
+    }
 
     return info;
 }
@@ -2354,6 +2472,323 @@ std::vector<tag_t> BanJinCaiTuDialog::CollectOutgoingChainEdges(
     return result;
 }
 
+std::vector<tag_t> BanJinCaiTuDialog::CollectCollinearOuterFaceEdges(
+    tag_t faceTag,
+    tag_t referenceEdgeTag) const
+{
+    std::vector<tag_t> result;
+    if (faceTag == NULL_TAG || referenceEdgeTag == NULL_TAG)
+    {
+        return result;
+    }
+
+    uf_loop_p_t loopList = NULL;
+    if (UF_MODL_ask_face_loops(faceTag, &loopList) != 0 || loopList == NULL)
+    {
+        return result;
+    }
+
+    std::set<tag_t> uniqueEdges;
+    int loopCount = 0;
+    if (UF_MODL_ask_loop_list_count(loopList, &loopCount) == 0)
+    {
+        for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)
+        {
+            int loopType = 0;
+            uf_list_p_t edgeList = NULL;
+            if (UF_MODL_ask_loop_list_item(
+                    loopList,
+                    loopIndex,
+                    &loopType,
+                    &edgeList) != 0 ||
+                edgeList == NULL || loopType != 1)
+            {
+                continue;
+            }
+
+            const std::vector<tag_t> edgeTags = UfListToTags(edgeList);
+            for (std::size_t edgeIndex = 0;
+                 edgeIndex < edgeTags.size();
+                 ++edgeIndex)
+            {
+                const tag_t edgeTag = edgeTags[edgeIndex];
+                if (edgeTag != NULL_TAG &&
+                    uniqueEdges.insert(edgeTag).second &&
+                    AreEdgesCollinear(referenceEdgeTag, edgeTag))
+                {
+                    result.push_back(edgeTag);
+                }
+            }
+        }
+    }
+    UF_MODL_delete_loop_list(&loopList);
+
+    std::sort(result.begin(), result.end());
+    std::ostringstream log;
+    log << "collinear-outer-face-edges face=" << faceTag
+        << ", reference=" << referenceEdgeTag
+        << ", count=" << result.size()
+        << ", edges=";
+    for (std::size_t index = 0; index < result.size(); ++index)
+    {
+        if (index > 0)
+        {
+            log << ",";
+        }
+        log << result[index];
+    }
+    AppendSectionDebugLog(log.str());
+    return result;
+}
+
+bool BanJinCaiTuDialog::ExpandTerminalEdgeWithConnectedBoundaryEdges(
+    tag_t faceTag,
+    tag_t terminalEdgeTag,
+    double endpoints[2][3],
+    double* combinedLength,
+    std::size_t* connectedEdgeCount) const
+{
+    if (faceTag == NULL_TAG || terminalEdgeTag == NULL_TAG ||
+        endpoints == NULL)
+    {
+        return false;
+    }
+
+    int terminalVertexCount = 0;
+    if (UF_MODL_ask_edge_verts(
+            terminalEdgeTag,
+            endpoints[0],
+            endpoints[1],
+            &terminalVertexCount) != 0 ||
+        terminalVertexCount != 2)
+    {
+        return false;
+    }
+
+    NXOpen::Edge* terminalEdge = dynamic_cast<NXOpen::Edge*>(
+        NXOpen::NXObjectManager::Get(terminalEdgeTag));
+    const double terminalDelta[3] =
+    {
+        endpoints[1][0] - endpoints[0][0],
+        endpoints[1][1] - endpoints[0][1],
+        endpoints[1][2] - endpoints[0][2]
+    };
+    double totalLength = terminalEdge != NULL ?
+        terminalEdge->GetLength() :
+        Length3(terminalDelta);
+    double terminalDirection[3] =
+    {
+        terminalDelta[0], terminalDelta[1], terminalDelta[2]
+    };
+    if (!Normalize3(terminalDirection))
+    {
+        return false;
+    }
+
+    // A notch can split the terminal boundary into several separate linear
+    // segments on the same outer loop.  Merge their complete collinear span
+    // before following any connected arcs/chamfers at the two outer ends.
+    // Otherwise only the segment nearest the user's click is retained.
+    double collinearEndpoints[2][3] = {};
+    double collinearSpanLength = 0.0;
+    std::size_t collinearEdgeCount = 0;
+    const bool includesSplitCollinearEdges =
+        TryGetCollinearLoopEdgeSpan(
+            faceTag,
+            terminalEdgeTag,
+            collinearEndpoints,
+            &collinearSpanLength,
+            &collinearEdgeCount) &&
+        collinearEdgeCount > 1;
+    if (includesSplitCollinearEdges)
+    {
+        totalLength = collinearSpanLength;
+        for (int endpointIndex = 0; endpointIndex < 2; ++endpointIndex)
+        {
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                endpoints[endpointIndex][axis] =
+                    collinearEndpoints[endpointIndex][axis];
+            }
+        }
+    }
+
+    std::vector<tag_t> outerLoopEdges;
+    uf_loop_p_t loopList = NULL;
+    if (UF_MODL_ask_face_loops(faceTag, &loopList) == 0 && loopList != NULL)
+    {
+        int loopCount = 0;
+        if (UF_MODL_ask_loop_list_count(loopList, &loopCount) == 0)
+        {
+            for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)
+            {
+                int loopType = 0;
+                uf_list_p_t edgeList = NULL;
+                if (UF_MODL_ask_loop_list_item(
+                        loopList,
+                        loopIndex,
+                        &loopType,
+                        &edgeList) != 0 ||
+                    edgeList == NULL || loopType != 1)
+                {
+                    continue;
+                }
+                const std::vector<tag_t> loopEdges = UfListToTags(edgeList);
+                if (std::find(
+                        loopEdges.begin(),
+                        loopEdges.end(),
+                        terminalEdgeTag) != loopEdges.end())
+                {
+                    outerLoopEdges = loopEdges;
+                    break;
+                }
+            }
+        }
+        UF_MODL_delete_loop_list(&loopList);
+    }
+
+    const auto pointsMatch = [](const double lhs[3], const double rhs[3]) -> bool
+    {
+        const double dx = lhs[0] - rhs[0];
+        const double dy = lhs[1] - rhs[1];
+        const double dz = lhs[2] - rhs[2];
+        return dx * dx + dy * dy + dz * dz <= 0.05 * 0.05;
+    };
+
+    std::set<tag_t> usedBoundaryEdges;
+    std::size_t arcCount = 0;
+    std::size_t slantedLineCount = 0;
+    for (int endpointIndex = 0; endpointIndex < 2; ++endpointIndex)
+    {
+        double currentPoint[3] =
+        {
+            endpoints[endpointIndex][0],
+            endpoints[endpointIndex][1],
+            endpoints[endpointIndex][2]
+        };
+        bool advanced = true;
+        while (advanced)
+        {
+            advanced = false;
+            for (std::size_t edgeIndex = 0;
+                 edgeIndex < outerLoopEdges.size();
+                 ++edgeIndex)
+            {
+                const tag_t edgeTag = outerLoopEdges[edgeIndex];
+                if (edgeTag == terminalEdgeTag ||
+                    usedBoundaryEdges.find(edgeTag) != usedBoundaryEdges.end())
+                {
+                    continue;
+                }
+                int edgeType = 0;
+                if (UF_MODL_ask_edge_type(edgeTag, &edgeType) != 0 ||
+                    (edgeType != UF_MODL_CIRCULAR_EDGE &&
+                     edgeType != UF_MODL_LINEAR_EDGE))
+                {
+                    continue;
+                }
+
+                double arcStart[3] = {};
+                double arcEnd[3] = {};
+                int arcVertexCount = 0;
+                if (UF_MODL_ask_edge_verts(
+                        edgeTag,
+                        arcStart,
+                        arcEnd,
+                        &arcVertexCount) != 0 ||
+                    arcVertexCount != 2)
+                {
+                    continue;
+                }
+
+                const double* nextPoint = NULL;
+                if (pointsMatch(currentPoint, arcStart))
+                {
+                    nextPoint = arcEnd;
+                }
+                else if (pointsMatch(currentPoint, arcEnd))
+                {
+                    nextPoint = arcStart;
+                }
+                if (nextPoint == NULL)
+                {
+                    continue;
+                }
+
+                if (edgeType == UF_MODL_LINEAR_EDGE)
+                {
+                    const double extensionVector[3] =
+                    {
+                        nextPoint[0] - currentPoint[0],
+                        nextPoint[1] - currentPoint[1],
+                        nextPoint[2] - currentPoint[2]
+                    };
+                    const double outwardProjection =
+                        Dot3(extensionVector, terminalDirection) *
+                        (endpointIndex == 0 ? -1.0 : 1.0);
+                    // Include a chamfer/slanted continuation only when it
+                    // extends the terminal range. A perpendicular width edge
+                    // has essentially zero projection and must stop the walk.
+                    if (outwardProjection <= 0.05)
+                    {
+                        continue;
+                    }
+                }
+
+                NXOpen::Edge* connectedEdge = dynamic_cast<NXOpen::Edge*>(
+                    NXOpen::NXObjectManager::Get(edgeTag));
+                if (connectedEdge != NULL)
+                {
+                    totalLength += connectedEdge->GetLength();
+                }
+                usedBoundaryEdges.insert(edgeTag);
+                if (edgeType == UF_MODL_CIRCULAR_EDGE)
+                {
+                    ++arcCount;
+                }
+                else
+                {
+                    ++slantedLineCount;
+                }
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    currentPoint[axis] = nextPoint[axis];
+                    endpoints[endpointIndex][axis] = nextPoint[axis];
+                }
+                advanced = true;
+                break;
+            }
+        }
+    }
+
+    if (combinedLength != NULL)
+    {
+        *combinedLength = totalLength;
+    }
+    if (connectedEdgeCount != NULL)
+    {
+        *connectedEdgeCount =
+            (includesSplitCollinearEdges ? collinearEdgeCount - 1 : 0) +
+            arcCount + slantedLineCount;
+    }
+
+    std::ostringstream log;
+    log << "terminal-edge-connected-boundary face=" << faceTag
+        << ", terminalEdge=" << terminalEdgeTag
+        << ", collinearEdgeCount=" << collinearEdgeCount
+        << ", splitCollinearIncluded="
+        << (includesSplitCollinearEdges ? 1 : 0)
+        << ", arcCount=" << arcCount
+        << ", slantedLineCount=" << slantedLineCount
+        << ", combinedLength=" << std::setprecision(15) << totalLength
+        << ", endpoint0=(" << endpoints[0][0] << ","
+        << endpoints[0][1] << "," << endpoints[0][2] << ")"
+        << ", endpoint1=(" << endpoints[1][0] << ","
+        << endpoints[1][1] << "," << endpoints[1][2] << ")";
+    AppendSectionDebugLog(log.str());
+    return includesSplitCollinearEdges || arcCount + slantedLineCount > 0;
+}
+
 tag_t BanJinCaiTuDialog::FindTerminalOuterBoundaryEdge(
     tag_t faceTag,
     tag_t adjacentBendEdgeTag,
@@ -2612,14 +3047,14 @@ void BanJinCaiTuDialog::CompleteSharedBendEdges(
 {
     if (faceRegions.size() < 2)
     {
-        throw NXException::Create(1, "At least two continuous faces are required.");
+        throw NXException::Create(1, "至少需要两个连续面。");
     }
 
     for (std::size_t index = 0; index + 1 < faceRegions.size(); ++index)
     {
         if (faceRegions[index].face == NULL || faceRegions[index + 1].face == NULL)
         {
-            throw NXException::Create(1, "A recognized face is no longer valid.");
+            throw NXException::Create(1, "已识别的面已失效。");
         }
 
         tag_t sharedEdgeTag = faceRegions[index + 1].incomingEdgeTag;
@@ -2631,7 +3066,7 @@ void BanJinCaiTuDialog::CompleteSharedBendEdges(
         }
         if (sharedEdgeTag == NULL_TAG)
         {
-            throw NXException::Create(1, "Cannot determine a shared bend edge between consecutive faces.");
+            throw NXException::Create(1, "无法确定相邻连续面之间的公共折弯边。");
         }
 
         faceRegions[index].outgoingEdgeTag = sharedEdgeTag;
@@ -2646,7 +3081,8 @@ void BanJinCaiTuDialog::CompleteSharedBendEdges(
 }
 
 void BanJinCaiTuDialog::CompleteTrimBoundaryEdges(
-    std::vector<RecognizedFaceRegion>& faceRegions) const
+    std::vector<RecognizedFaceRegion>& faceRegions,
+    tag_t endBoundaryPickFaceTag) const
 {
     CompleteSharedBendEdges(faceRegions);
 
@@ -2662,13 +3098,16 @@ void BanJinCaiTuDialog::CompleteTrimBoundaryEdges(
         firstRegion.outgoingEdgeTag == NULL_TAG ||
         lastRegion.incomingEdgeTag == NULL_TAG)
     {
-        throw NXException::Create(1, "The first or last bend edge is missing.");
+        throw NXException::Create(1, "缺少起始或终止折弯边。");
     }
 
     // B0 and B4 are controlled directly by the two face-pick positions.
     // BuildTraversalContext already stored B0 on the first region.
+    const tag_t boundaryPickFaceTag =
+        endBoundaryPickFaceTag != NULL_TAG ?
+            endBoundaryPickFaceTag : lastRegion.face->Tag();
     lastRegion.outgoingEdgeTag = FindNearestLinearFaceEdge(
-        lastRegion.face->Tag(), selectedEndPickPoint);
+        boundaryPickFaceTag, selectedEndPickPoint);
 
     double firstBoundaryDirection[3] = {0.0, 0.0, 0.0};
     double firstBendDirection[3] = {0.0, 0.0, 0.0};
@@ -2683,12 +3122,13 @@ void BanJinCaiTuDialog::CompleteTrimBoundaryEdges(
     {
         throw NXException::Create(
             1,
-            "The clicked B0/B4 edges must be straight and parallel to their adjacent bend edges.");
+            "点击确定的 B0/B4 必须是直边，并且与相邻折弯边平行。");
     }
 
     {
         std::ostringstream pickLog;
-        pickLog << "end-pick-boundary face=" << lastRegion.face->Tag()
+        pickLog << "end-pick-boundary mainFace=" << lastRegion.face->Tag()
+                << ", pickFace=" << boundaryPickFaceTag
                 << ", incomingBendEdge=" << lastRegion.incomingEdgeTag
                 << ", B4=" << lastRegion.outgoingEdgeTag
                 << ", pick=(" << std::setprecision(15)
@@ -2712,7 +3152,7 @@ void BanJinCaiTuDialog::CompleteTrimBoundaryEdges(
     {
         throw NXException::Create(
             1,
-            "Cannot find a terminal outer-loop edge. Check that both end faces have linear outer edges parallel to their adjacent bend edge.");
+            "找不到终止轮廓边，请检查两端面是否存在与相邻折弯边平行的直边。");
     }
 }
 
@@ -2904,7 +3344,8 @@ bool BanJinCaiTuDialog::TrimExtractedFaceToInnerBand(
 bool BanJinCaiTuDialog::TrimExtractedFaceBetweenBendEndpoints(
     tag_t sourceFaceTag,
     tag_t extractedSheetBodyTag,
-    tag_t bendEdgeTag) const
+    tag_t bendEdgeTag,
+    const double expandedBoundaryEndpoints[2][3]) const
 {
     if (sourceFaceTag == NULL_TAG ||
         extractedSheetBodyTag == NULL_TAG ||
@@ -2927,6 +3368,25 @@ bool BanJinCaiTuDialog::TrimExtractedFaceBetweenBendEndpoints(
     if (vertexCount != 2)
     {
         return false;
+    }
+
+    double expandedSpanLength = 0.0;
+    const bool expandCollinearBoundary =
+        expandedBoundaryEndpoints != NULL;
+    if (expandCollinearBoundary)
+    {
+        for (int endpointIndex = 0; endpointIndex < 2; ++endpointIndex)
+        {
+            for (int coordinateIndex = 0; coordinateIndex < 3; ++coordinateIndex)
+            {
+                endpoints[endpointIndex][coordinateIndex] =
+                    expandedBoundaryEndpoints[endpointIndex][coordinateIndex];
+            }
+        }
+        const double dx = endpoints[1][0] - endpoints[0][0];
+        const double dy = endpoints[1][1] - endpoints[0][1];
+        const double dz = endpoints[1][2] - endpoints[0][2];
+        expandedSpanLength = std::sqrt(dx * dx + dy * dy + dz * dz);
     }
 
     double bendDirection[3] =
@@ -3058,6 +3518,8 @@ bool BanJinCaiTuDialog::TrimExtractedFaceBetweenBendEndpoints(
         << endpoints[0][1] << "," << endpoints[0][2] << ")"
         << ", endpoint1=(" << endpoints[1][0] << ","
         << endpoints[1][1] << "," << endpoints[1][2] << ")"
+        << ", expandCollinearBoundary=" << (expandCollinearBoundary ? 1 : 0)
+        << ", expandedSpanLength=" << expandedSpanLength
         << ", trimRc=" << trimRc
         << ", gapPointCount=" << gapPointCount;
     AppendSectionDebugLog(log.str());
@@ -3414,7 +3876,9 @@ void BanJinCaiTuDialog::LogTraversalDecision(
 
 std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectContinuousBendFaces(
     Face* seedFace,
-    Face* stopFace) const
+    Face* stopFace,
+    tag_t startBendEdgeTag,
+    tag_t terminalBoundaryReferenceTag) const
 {
     std::vector<RecognizedFaceRegion> result;
     if (seedFace == NULL)
@@ -3422,7 +3886,19 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
         return result;
     }
 
-    const TraversalContext context = BuildTraversalContext(seedFace);
+    TraversalContext context = BuildTraversalContext(seedFace);
+    if (startBendEdgeTag != NULL_TAG)
+    {
+        double startBendDirection[3] = {};
+        if (!TryGetLinearEdgeDirection(startBendEdgeTag, startBendDirection))
+        {
+            throw NXException::Create(1, "分支的起始折弯边不是直边。");
+        }
+        context.referenceEdgeTag = startBendEdgeTag;
+        context.referenceEdgeDirection[0] = startBendDirection[0];
+        context.referenceEdgeDirection[1] = startBendDirection[1];
+        context.referenceEdgeDirection[2] = startBendDirection[2];
+    }
 
 #if 0
     // Search every qualified branch and reconstruct only the path that reaches
@@ -3702,10 +4178,13 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
 
         visitedFaceEntryStates.insert(std::make_pair(
             candidateFaceTag,
-            edgeStats.firstParallelQualifiedEdgeTag));
+            context.referenceEdgeTag));
         TraversalNode node = {};
         node.faceTag = candidateFaceTag;
-        node.incomingEdgeTag = edgeStats.firstParallelQualifiedEdgeTag;
+        // This traversal instance was created for one exact split B1 segment.
+        // Preserve that segment instead of taking the first parallel shared
+        // edge returned by a face-pair scan.
+        node.incomingEdgeTag = context.referenceEdgeTag;
         pendingFaces.push(node);
     }
 
@@ -3728,6 +4207,53 @@ std::vector<BanJinCaiTuDialog::RecognizedFaceRegion> BanJinCaiTuDialog::CollectC
                 currentRegion.incomingEdgeTag = currentNode.incomingEdgeTag;
                 currentRegion.outgoingEdgeTag = NULL_TAG;
                 result.push_back(currentRegion);
+            }
+        }
+
+        // Every branch stops independently when it reaches an outer edge on
+        // the same infinite line as the user-selected terminal boundary.
+        if (terminalBoundaryReferenceTag != NULL_TAG)
+        {
+            const std::vector<tag_t> terminalEdges =
+                CollectCollinearOuterFaceEdges(
+                    currentFaceTag,
+                    terminalBoundaryReferenceTag);
+            tag_t terminalEdgeTag = NULL_TAG;
+            double terminalEdgeDistance = 0.0;
+            for (std::size_t edgeIndex = 0;
+                 edgeIndex < terminalEdges.size();
+                 ++edgeIndex)
+            {
+                if (terminalEdges[edgeIndex] == currentNode.incomingEdgeTag)
+                {
+                    continue;
+                }
+                const double distance = ComputeEdgeMidpointDistance(
+                    currentNode.incomingEdgeTag,
+                    terminalEdges[edgeIndex]);
+                if (terminalEdgeTag == NULL_TAG || distance < terminalEdgeDistance)
+                {
+                    terminalEdgeTag = terminalEdges[edgeIndex];
+                    terminalEdgeDistance = distance;
+                }
+            }
+            if (terminalEdgeTag != NULL_TAG)
+            {
+                if (!result.empty() && result.back().face != NULL &&
+                    result.back().face->Tag() == currentFaceTag)
+                {
+                    result.back().outgoingEdgeTag = terminalEdgeTag;
+                }
+                std::ostringstream terminalLog;
+                terminalLog
+                    << "branch-terminal-collinear-edge face="
+                    << currentFaceTag
+                    << ", incoming=" << currentNode.incomingEdgeTag
+                    << ", terminalEdge=" << terminalEdgeTag
+                    << ", terminalReference="
+                    << terminalBoundaryReferenceTag;
+                AppendSectionDebugLog(terminalLog.str());
+                continue;
             }
         }
 
@@ -4138,6 +4664,392 @@ bool BanJinCaiTuDialog::AreEdgesCollinear(tag_t firstEdgeTag, tag_t secondEdgeTa
             return false;
         }
     }
+    return true;
+}
+
+bool BanJinCaiTuDialog::TryGetCollinearLoopEdgeSpan(
+    tag_t faceTag,
+    tag_t referenceEdgeTag,
+    double endpoints[2][3],
+    double* spanLength,
+    std::size_t* collinearEdgeCount) const
+{
+    if (faceTag == NULL_TAG || referenceEdgeTag == NULL_TAG || endpoints == NULL)
+    {
+        return false;
+    }
+
+    double referenceStart[3] = {};
+    double referenceEnd[3] = {};
+    int referenceVertexCount = 0;
+    if (UF_MODL_ask_edge_verts(
+            referenceEdgeTag,
+            referenceStart,
+            referenceEnd,
+            &referenceVertexCount) != 0 ||
+        referenceVertexCount != 2)
+    {
+        return false;
+    }
+
+    double referenceDirection[3] =
+    {
+        referenceEnd[0] - referenceStart[0],
+        referenceEnd[1] - referenceStart[1],
+        referenceEnd[2] - referenceStart[2]
+    };
+    if (!Normalize3(referenceDirection))
+    {
+        return false;
+    }
+
+    uf_loop_p_t loopList = NULL;
+    int rc = UF_MODL_ask_face_loops(faceTag, &loopList);
+    if (rc != 0 || loopList == NULL)
+    {
+        return false;
+    }
+
+    int loopCount = 0;
+    rc = UF_MODL_ask_loop_list_count(loopList, &loopCount);
+    if (rc != 0)
+    {
+        UF_MODL_delete_loop_list(&loopList);
+        return false;
+    }
+
+    std::vector<tag_t> referenceLoopEdges;
+    for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)
+    {
+        int loopType = 0;
+        uf_list_p_t edgeList = NULL;
+        if (UF_MODL_ask_loop_list_item(
+                loopList,
+                loopIndex,
+                &loopType,
+                &edgeList) != 0 ||
+            edgeList == NULL)
+        {
+            continue;
+        }
+
+        const std::vector<tag_t> loopEdges = UfListToTags(edgeList);
+        UF_MODL_delete_list(&edgeList);
+        if (std::find(loopEdges.begin(), loopEdges.end(), referenceEdgeTag) !=
+            loopEdges.end())
+        {
+            referenceLoopEdges = loopEdges;
+            break;
+        }
+    }
+    UF_MODL_delete_loop_list(&loopList);
+
+    if (referenceLoopEdges.empty())
+    {
+        return false;
+    }
+
+    const double lineTolerance = 0.05;
+    double minimumProjection = 0.0;
+    const double referenceOffset[3] =
+    {
+        referenceEnd[0] - referenceStart[0],
+        referenceEnd[1] - referenceStart[1],
+        referenceEnd[2] - referenceStart[2]
+    };
+    double maximumProjection = Dot3(referenceDirection, referenceOffset);
+    std::size_t includedEdgeCount = 0;
+
+    for (std::size_t edgeIndex = 0;
+         edgeIndex < referenceLoopEdges.size();
+         ++edgeIndex)
+    {
+        double edgeStart[3] = {};
+        double edgeEnd[3] = {};
+        int vertexCount = 0;
+        if (UF_MODL_ask_edge_verts(
+                referenceLoopEdges[edgeIndex],
+                edgeStart,
+                edgeEnd,
+                &vertexCount) != 0 ||
+            vertexCount != 2)
+        {
+            continue;
+        }
+
+        const double* edgePoints[2] = {edgeStart, edgeEnd};
+        double projections[2] = {};
+        bool liesOnReferenceLine = true;
+        for (int pointIndex = 0; pointIndex < 2; ++pointIndex)
+        {
+            const double offset[3] =
+            {
+                edgePoints[pointIndex][0] - referenceStart[0],
+                edgePoints[pointIndex][1] - referenceStart[1],
+                edgePoints[pointIndex][2] - referenceStart[2]
+            };
+            projections[pointIndex] = Dot3(offset, referenceDirection);
+            const double residual[3] =
+            {
+                offset[0] - projections[pointIndex] * referenceDirection[0],
+                offset[1] - projections[pointIndex] * referenceDirection[1],
+                offset[2] - projections[pointIndex] * referenceDirection[2]
+            };
+            if (Length3(residual) > lineTolerance)
+            {
+                liesOnReferenceLine = false;
+                break;
+            }
+        }
+        if (!liesOnReferenceLine)
+        {
+            continue;
+        }
+
+        minimumProjection = std::min(
+            minimumProjection,
+            std::min(projections[0], projections[1]));
+        maximumProjection = std::max(
+            maximumProjection,
+            std::max(projections[0], projections[1]));
+        ++includedEdgeCount;
+    }
+
+    if (includedEdgeCount == 0 || maximumProjection - minimumProjection < 1.0e-6)
+    {
+        return false;
+    }
+
+    for (int coordinateIndex = 0; coordinateIndex < 3; ++coordinateIndex)
+    {
+        endpoints[0][coordinateIndex] =
+            referenceStart[coordinateIndex] +
+            minimumProjection * referenceDirection[coordinateIndex];
+        endpoints[1][coordinateIndex] =
+            referenceStart[coordinateIndex] +
+            maximumProjection * referenceDirection[coordinateIndex];
+    }
+    if (spanLength != NULL)
+    {
+        *spanLength = maximumProjection - minimumProjection;
+    }
+    if (collinearEdgeCount != NULL)
+    {
+        *collinearEdgeCount = includedEdgeCount;
+    }
+
+    std::ostringstream log;
+    log << "collinear-loop-span face=" << faceTag
+        << ", referenceEdge=" << referenceEdgeTag
+        << ", edgeCount=" << includedEdgeCount
+        << ", spanLength=" << std::setprecision(15)
+        << (maximumProjection - minimumProjection);
+    AppendSectionDebugLog(log.str());
+    return true;
+}
+
+bool BanJinCaiTuDialog::TryGetCollinearFaceChainEdgeSpan(
+    const std::vector<RecognizedFaceRegion>& faceRegions,
+    tag_t referenceEdgeTag,
+    double endpoints[2][3],
+    double* spanLength,
+    std::size_t* collinearEdgeCount) const
+{
+    if (referenceEdgeTag == NULL_TAG || endpoints == NULL)
+    {
+        return false;
+    }
+
+    double referenceStart[3] = {};
+    double referenceEnd[3] = {};
+    int referenceVertexCount = 0;
+    if (UF_MODL_ask_edge_verts(
+            referenceEdgeTag,
+            referenceStart,
+            referenceEnd,
+            &referenceVertexCount) != 0 ||
+        referenceVertexCount != 2)
+    {
+        return false;
+    }
+
+    double referenceDirection[3] =
+    {
+        referenceEnd[0] - referenceStart[0],
+        referenceEnd[1] - referenceStart[1],
+        referenceEnd[2] - referenceStart[2]
+    };
+    if (!Normalize3(referenceDirection))
+    {
+        return false;
+    }
+
+    const double referenceOffset[3] =
+    {
+        referenceEnd[0] - referenceStart[0],
+        referenceEnd[1] - referenceStart[1],
+        referenceEnd[2] - referenceStart[2]
+    };
+    double minimumProjection = 0.0;
+    double maximumProjection = Dot3(referenceOffset, referenceDirection);
+    const double lineTolerance = 0.05;
+    const double parallelTolerance =
+        std::cos(2.0 * 3.14159265358979323846 / 180.0);
+    std::set<tag_t> testedEdgeTags;
+    std::size_t includedEdgeCount = 0;
+    std::set<tag_t> includedFaceTags;
+
+    for (std::size_t faceIndex = 0;
+         faceIndex < faceRegions.size();
+         ++faceIndex)
+    {
+        if (faceRegions[faceIndex].face == NULL)
+        {
+            continue;
+        }
+        const tag_t faceTag = faceRegions[faceIndex].face->Tag();
+        uf_loop_p_t loopList = NULL;
+        if (UF_MODL_ask_face_loops(faceTag, &loopList) != 0 ||
+            loopList == NULL)
+        {
+            continue;
+        }
+
+        int loopCount = 0;
+        if (UF_MODL_ask_loop_list_count(loopList, &loopCount) != 0)
+        {
+            UF_MODL_delete_loop_list(&loopList);
+            continue;
+        }
+
+        for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)
+        {
+            int loopType = 0;
+            uf_list_p_t edgeList = NULL;
+            if (UF_MODL_ask_loop_list_item(
+                    loopList,
+                    loopIndex,
+                    &loopType,
+                    &edgeList) != 0 ||
+                edgeList == NULL)
+            {
+                continue;
+            }
+
+            const std::vector<tag_t> loopEdges = UfListToTags(edgeList);
+            UF_MODL_delete_list(&edgeList);
+            // Only peripheral loops participate; inner holes remain excluded.
+            if (loopType != 1)
+            {
+                continue;
+            }
+
+            for (std::size_t edgeIndex = 0;
+                 edgeIndex < loopEdges.size();
+                 ++edgeIndex)
+            {
+                const tag_t edgeTag = loopEdges[edgeIndex];
+                if (!testedEdgeTags.insert(edgeTag).second)
+                {
+                    continue;
+                }
+
+                double edgeDirection[3] = {};
+                if (!TryGetLinearEdgeDirection(edgeTag, edgeDirection) ||
+                    std::fabs(Dot3(edgeDirection, referenceDirection)) <
+                        parallelTolerance)
+                {
+                    continue;
+                }
+
+                double edgeStart[3] = {};
+                double edgeEnd[3] = {};
+                int vertexCount = 0;
+                if (UF_MODL_ask_edge_verts(
+                        edgeTag,
+                        edgeStart,
+                        edgeEnd,
+                        &vertexCount) != 0 ||
+                    vertexCount != 2)
+                {
+                    continue;
+                }
+
+                const double* edgePoints[2] = {edgeStart, edgeEnd};
+                double projections[2] = {};
+                bool liesOnReferenceLine = true;
+                for (int pointIndex = 0; pointIndex < 2; ++pointIndex)
+                {
+                    const double offset[3] =
+                    {
+                        edgePoints[pointIndex][0] - referenceStart[0],
+                        edgePoints[pointIndex][1] - referenceStart[1],
+                        edgePoints[pointIndex][2] - referenceStart[2]
+                    };
+                    projections[pointIndex] =
+                        Dot3(offset, referenceDirection);
+                    const double residual[3] =
+                    {
+                        offset[0] - projections[pointIndex] * referenceDirection[0],
+                        offset[1] - projections[pointIndex] * referenceDirection[1],
+                        offset[2] - projections[pointIndex] * referenceDirection[2]
+                    };
+                    if (Length3(residual) > lineTolerance)
+                    {
+                        liesOnReferenceLine = false;
+                        break;
+                    }
+                }
+                if (!liesOnReferenceLine)
+                {
+                    continue;
+                }
+
+                minimumProjection = std::min(
+                    minimumProjection,
+                    std::min(projections[0], projections[1]));
+                maximumProjection = std::max(
+                    maximumProjection,
+                    std::max(projections[0], projections[1]));
+                ++includedEdgeCount;
+                includedFaceTags.insert(faceTag);
+            }
+        }
+        UF_MODL_delete_loop_list(&loopList);
+    }
+
+    if (includedEdgeCount == 0 ||
+        maximumProjection - minimumProjection < 1.0e-6)
+    {
+        return false;
+    }
+
+    for (int coordinateIndex = 0; coordinateIndex < 3; ++coordinateIndex)
+    {
+        endpoints[0][coordinateIndex] =
+            referenceStart[coordinateIndex] +
+            minimumProjection * referenceDirection[coordinateIndex];
+        endpoints[1][coordinateIndex] =
+            referenceStart[coordinateIndex] +
+            maximumProjection * referenceDirection[coordinateIndex];
+    }
+    if (spanLength != NULL)
+    {
+        *spanLength = maximumProjection - minimumProjection;
+    }
+    if (collinearEdgeCount != NULL)
+    {
+        *collinearEdgeCount = includedEdgeCount;
+    }
+
+    std::ostringstream log;
+    log << "collinear-face-chain-span referenceEdge=" << referenceEdgeTag
+        << ", chainFaceCount=" << faceRegions.size()
+        << ", matchedFaceCount=" << includedFaceTags.size()
+        << ", edgeCount=" << includedEdgeCount
+        << ", spanLength=" << std::setprecision(15)
+        << (maximumProjection - minimumProjection);
+    AppendSectionDebugLog(log.str());
     return true;
 }
 
@@ -4762,7 +5674,7 @@ void BanJinCaiTuDialog::OffsetThicknessFacesUntilBendTrianglesDisappear(
                                 NXOpen::NXObjectManager::Get(thicknessFaceTag));
                             if (thicknessFace == NULL)
                             {
-                                throw NXException::Create(1, "Cannot resolve the thickness face for offset.");
+                                throw NXException::Create(1, "无法获取需要偏置的板厚面。");
                             }
 
                             builder = workPart->Features()->CreateOffsetFaceBuilder(NULL);
@@ -4779,7 +5691,7 @@ void BanJinCaiTuDialog::OffsetThicknessFacesUntilBendTrianglesDisappear(
                             builder = NULL;
                             if (offsetFeature == NULL)
                             {
-                                throw NXException::Create(1, "NX did not create the thickness-face offset feature.");
+                                throw NXException::Create(1, "NX 未能创建板厚面偏置特征。");
                             }
 
                             const std::vector<NXOpen::Body*> resultBodies = offsetFeature->GetBodies();
@@ -4951,7 +5863,7 @@ int BanJinCaiTuDialog::DeleteTriangularFacesFromBodies(
                 workPart->Features()->CreateDeleteFaceBuilder(NULL);
             if (builder == NULL)
             {
-                throw NXException::Create(1, "NX Delete Face builder is unavailable.");
+                throw NXException::Create(1, "NX 无法创建删除面特征。");
             }
 
             try
@@ -4977,7 +5889,7 @@ int BanJinCaiTuDialog::DeleteTriangularFacesFromBodies(
                 {
                     throw NXException::Create(
                         1,
-                        "NX did not delete the triangular faces.");
+                        "NX 未能删除三角面。");
                 }
                 requestedDeleteCount += static_cast<int>(triangularFaces.size());
             }
@@ -5008,7 +5920,7 @@ int BanJinCaiTuDialog::DeleteTriangularFacesFromBodies(
         {
             throw NXException::Create(
                 1,
-                "Triangular faces remain on a thickened body after deletion.");
+                "删除后加厚体上仍然存在三角面。");
         }
     }
 
@@ -6161,7 +7073,7 @@ std::vector<tag_t> BanJinCaiTuDialog::ExtractRecognizedFaces(
                     UF_OBJ_delete_object(sheetBodyTag);
                     throw NXException::Create(
                         1,
-                        "Failed to trim an extracted face between its two boundary edges.");
+                        "无法使用两条边界边修剪抽取面。");
                 }
                 sheetBodyTags.push_back(sheetBodyTag);
                 if (sourceFaceTags != NULL)
@@ -6199,6 +7111,136 @@ std::vector<tag_t> BanJinCaiTuDialog::ExtractRecognizedFacesByShortestBendEdge(
         sourceFaceTags->clear();
     }
 
+    // Compare the two mouse-selected end boundaries (B0 and B4).  The longer
+    // one is the reference.  Only the shorter end is expanded when its outer
+    // loop contains additional collinear segments separated by a notch.
+    tag_t expandedClickedBoundaryTag = NULL_TAG;
+    tag_t expandedClickedBoundaryFaceTag = NULL_TAG;
+    double expandedClickedBoundarySpan = 0.0;
+    std::size_t expandedClickedBoundaryEdgeCount = 0;
+    double expandedClickedBoundaryEndpoints[2][3] = {};
+    tag_t mainEndBoundaryTag = NULL_TAG;
+    tag_t mainEndFaceTag =
+        selectedEndFace != NULL ? selectedEndFace->Tag() : NULL_TAG;
+    for (std::size_t regionIndex = faceRegions.size();
+         regionIndex > 0;
+         --regionIndex)
+    {
+        const RecognizedFaceRegion& region = faceRegions[regionIndex - 1];
+        if (region.face != NULL &&
+            (mainEndFaceTag == NULL_TAG ||
+             region.face->Tag() == mainEndFaceTag) &&
+            !region.manualEndSupplement)
+        {
+            mainEndFaceTag = region.face->Tag();
+            mainEndBoundaryTag = region.outgoingEdgeTag;
+            break;
+        }
+    }
+    std::size_t terminalRegionInstanceCount = 0;
+    for (std::size_t regionIndex = 0;
+         regionIndex < faceRegions.size();
+         ++regionIndex)
+    {
+        if (faceRegions[regionIndex].face != NULL &&
+            (faceRegions[regionIndex].manualEndSupplement ||
+             faceRegions[regionIndex].face->Tag() == mainEndFaceTag))
+        {
+            ++terminalRegionInstanceCount;
+        }
+    }
+    if (terminalRegionInstanceCount <= 1 &&
+        !faceRegions.empty() &&
+        faceRegions.front().face != NULL &&
+        faceRegions.front().incomingEdgeTag != NULL_TAG &&
+        mainEndFaceTag != NULL_TAG &&
+        mainEndBoundaryTag != NULL_TAG)
+    {
+        const auto askLinearEdgeLength = [](tag_t edgeTag, double* length) -> bool
+        {
+            double point1[3] = {};
+            double point2[3] = {};
+            int vertexCount = 0;
+            if (length == NULL ||
+                UF_MODL_ask_edge_verts(
+                    edgeTag,
+                    point1,
+                    point2,
+                    &vertexCount) != 0 ||
+                vertexCount != 2)
+            {
+                return false;
+            }
+            const double dx = point2[0] - point1[0];
+            const double dy = point2[1] - point1[1];
+            const double dz = point2[2] - point1[2];
+            *length = std::sqrt(dx * dx + dy * dy + dz * dz);
+            return true;
+        };
+
+        const tag_t startBoundaryTag = faceRegions.front().incomingEdgeTag;
+        const tag_t endBoundaryTag = mainEndBoundaryTag;
+        double startBoundaryLength = 0.0;
+        double endBoundaryLength = 0.0;
+        if (askLinearEdgeLength(startBoundaryTag, &startBoundaryLength) &&
+            askLinearEdgeLength(endBoundaryTag, &endBoundaryLength) &&
+            std::fabs(startBoundaryLength - endBoundaryLength) > 1.0e-6)
+        {
+            const bool startIsShorter =
+                startBoundaryLength < endBoundaryLength;
+            const tag_t shorterBoundaryTag =
+                startIsShorter ? startBoundaryTag : endBoundaryTag;
+            const tag_t shorterBoundaryFaceTag =
+                startIsShorter ?
+                    faceRegions.front().face->Tag() :
+                    mainEndFaceTag;
+            double groupEndpoints[2][3] = {};
+            double groupSpanLength = 0.0;
+            std::size_t groupEdgeCount = 0;
+            if (TryGetCollinearFaceChainEdgeSpan(
+                    faceRegions,
+                    shorterBoundaryTag,
+                    groupEndpoints,
+                    &groupSpanLength,
+                    &groupEdgeCount) &&
+                groupEdgeCount > 1)
+            {
+                expandedClickedBoundaryTag = shorterBoundaryTag;
+                expandedClickedBoundaryFaceTag = shorterBoundaryFaceTag;
+                expandedClickedBoundarySpan = groupSpanLength;
+                expandedClickedBoundaryEdgeCount = groupEdgeCount;
+                for (int endpointIndex = 0;
+                     endpointIndex < 2;
+                     ++endpointIndex)
+                {
+                    for (int coordinateIndex = 0;
+                         coordinateIndex < 3;
+                         ++coordinateIndex)
+                    {
+                        expandedClickedBoundaryEndpoints[endpointIndex][coordinateIndex] =
+                            groupEndpoints[endpointIndex][coordinateIndex];
+                    }
+                }
+            }
+
+            std::ostringstream boundaryCompareLog;
+            boundaryCompareLog
+                << "bend-length-end-boundary-compare B0=" << startBoundaryTag
+                << ", B0Length=" << std::setprecision(15)
+                << startBoundaryLength
+                << ", B4=" << endBoundaryTag
+                << ", B4Length=" << endBoundaryLength
+                << ", referenceLongEdge="
+                << (startIsShorter ? endBoundaryTag : startBoundaryTag)
+                << ", shorterEdge=" << shorterBoundaryTag
+                << ", collinearEdgeCount=" << groupEdgeCount
+                << ", expandedSpan=" << groupSpanLength
+                << ", expandTogether="
+                << (expandedClickedBoundaryTag != NULL_TAG ? 1 : 0);
+            AppendSectionDebugLog(boundaryCompareLog.str());
+        }
+    }
+
     try
     {
         for (std::size_t index = 0; index < faceRegions.size(); ++index)
@@ -6209,6 +7251,11 @@ std::vector<tag_t> BanJinCaiTuDialog::ExtractRecognizedFacesByShortestBendEdge(
             }
 
             const tag_t faceTag = faceRegions[index].face->Tag();
+            const bool isMainEndFace = faceTag == mainEndFaceTag;
+            const bool isManualEndSupplement =
+                faceRegions[index].manualEndSupplement;
+            const bool isTerminalEndRegion =
+                isMainEndFace || isManualEndSupplement;
 
             tag_t sheetBodyTag = NULL_TAG;
             const int extractRc = UF_MODL_extract_face(faceTag, 0, &sheetBodyTag);
@@ -6243,6 +7290,10 @@ std::vector<tag_t> BanJinCaiTuDialog::ExtractRecognizedFacesByShortestBendEdge(
 
                 tag_t shortestBendEdgeTag = NULL_TAG;
                 double shortestLength = 0.0;
+                bool shortestUsesCollinearSpan = false;
+                double shortestCollinearEndpoints[2][3] = {};
+                bool shortestIncludesConnectedArcs = false;
+                double shortestArcExpandedEndpoints[2][3] = {};
                 for (std::size_t edgeIndex = 0;
                      edgeIndex < bendEdgeCandidates.size();
                      ++edgeIndex)
@@ -6262,11 +7313,99 @@ std::vector<tag_t> BanJinCaiTuDialog::ExtractRecognizedFacesByShortestBendEdge(
                     const double dx = point2[0] - point1[0];
                     const double dy = point2[1] - point1[1];
                     const double dz = point2[2] - point1[2];
-                    const double edgeLength = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    double edgeLength = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    double candidateGroupEndpoints[2][3] = {};
+                    double candidateGroupSpan = 0.0;
+                    std::size_t candidateGroupEdgeCount = 0;
+                    const bool candidateUsesCollinearSpan = index == 0 &&
+                        TryGetCollinearFaceChainEdgeSpan(
+                            faceRegions,
+                            bendEdgeCandidates[edgeIndex],
+                            candidateGroupEndpoints,
+                            &candidateGroupSpan,
+                            &candidateGroupEdgeCount) &&
+                        candidateGroupEdgeCount > 1;
+                    if (candidateUsesCollinearSpan)
+                    {
+                        edgeLength = candidateGroupSpan;
+                    }
+                    double candidateArcEndpoints[2][3] = {};
+                    double candidateArcCombinedLength = 0.0;
+                    std::size_t candidateConnectedArcCount = 0;
+                    const bool candidateIncludesConnectedArcs =
+                        isTerminalEndRegion &&
+                        bendEdgeCandidates[edgeIndex] ==
+                            faceRegions[index].outgoingEdgeTag &&
+                        ExpandTerminalEdgeWithConnectedBoundaryEdges(
+                            faceTag,
+                            bendEdgeCandidates[edgeIndex],
+                            candidateArcEndpoints,
+                            &candidateArcCombinedLength,
+                            &candidateConnectedArcCount);
+                    if (candidateIncludesConnectedArcs)
+                    {
+                        edgeLength = candidateArcCombinedLength;
+                    }
+                    const bool isExpandedClickedBoundary =
+                        bendEdgeCandidates[edgeIndex] ==
+                            expandedClickedBoundaryTag &&
+                        (faceTag == expandedClickedBoundaryFaceTag ||
+                         (isTerminalEndRegion &&
+                          expandedClickedBoundaryTag == mainEndBoundaryTag));
+                    if (isExpandedClickedBoundary)
+                    {
+                        edgeLength = expandedClickedBoundarySpan;
+                        std::ostringstream groupLengthLog;
+                        groupLengthLog
+                            << "bend-length-short-end-collinear-group face="
+                            << faceTag
+                            << ", selectedSegment="
+                            << bendEdgeCandidates[edgeIndex]
+                            << ", segmentLength=" << std::setprecision(15)
+                            << std::sqrt(dx * dx + dy * dy + dz * dz)
+                            << ", groupEdgeCount="
+                            << expandedClickedBoundaryEdgeCount
+                            << ", groupSpanLength="
+                            << expandedClickedBoundarySpan;
+                        AppendSectionDebugLog(groupLengthLog.str());
+                    }
                     if (shortestBendEdgeTag == NULL_TAG || edgeLength < shortestLength)
                     {
                         shortestBendEdgeTag = bendEdgeCandidates[edgeIndex];
                         shortestLength = edgeLength;
+                        shortestUsesCollinearSpan = candidateUsesCollinearSpan;
+                        shortestIncludesConnectedArcs =
+                            candidateIncludesConnectedArcs;
+                        if (candidateUsesCollinearSpan)
+                        {
+                            for (int endpointIndex = 0;
+                                 endpointIndex < 2;
+                                 ++endpointIndex)
+                            {
+                                for (int coordinateIndex = 0;
+                                     coordinateIndex < 3;
+                                     ++coordinateIndex)
+                                {
+                                    shortestCollinearEndpoints[endpointIndex][coordinateIndex] =
+                                        candidateGroupEndpoints[endpointIndex][coordinateIndex];
+                                }
+                            }
+                        }
+                        if (candidateIncludesConnectedArcs)
+                        {
+                            for (int endpointIndex = 0;
+                                 endpointIndex < 2;
+                                 ++endpointIndex)
+                            {
+                                for (int coordinateIndex = 0;
+                                     coordinateIndex < 3;
+                                     ++coordinateIndex)
+                                {
+                                    shortestArcExpandedEndpoints[endpointIndex][coordinateIndex] =
+                                        candidateArcEndpoints[endpointIndex][coordinateIndex];
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -6283,19 +7422,32 @@ std::vector<tag_t> BanJinCaiTuDialog::ExtractRecognizedFacesByShortestBendEdge(
                     AppendSectionDebugLog(selectLog.str());
                 }
 
+                const bool expandShortClickedBoundary =
+                    shortestBendEdgeTag == expandedClickedBoundaryTag &&
+                    (faceTag == expandedClickedBoundaryFaceTag ||
+                     (isTerminalEndRegion &&
+                      expandedClickedBoundaryTag == mainEndBoundaryTag));
+                const double (*trimBoundaryEndpoints)[3] =
+                    shortestIncludesConnectedArcs ?
+                        shortestArcExpandedEndpoints :
+                    shortestUsesCollinearSpan ?
+                        shortestCollinearEndpoints :
+                        (expandShortClickedBoundary ?
+                            expandedClickedBoundaryEndpoints : NULL);
                 if (shortestBendEdgeTag == NULL_TAG ||
                     !TrimExtractedFaceBetweenBendEndpoints(
                         faceTag,
                         sheetBodyTag,
-                        shortestBendEdgeTag))
+                        shortestBendEdgeTag,
+                        trimBoundaryEndpoints))
                 {
                     UF_OBJ_delete_object(sheetBodyTag);
                     throw NXException::Create(
                         1,
-                        "Failed to trim an extracted face between perpendicular planes at the shortest bend-edge endpoints.");
+                        "无法使用最短折弯边两端的垂直平面修剪抽取面。");
                 }
 
-                if (index == 0 || index + 1 == faceRegions.size())
+                if (index == 0 || isTerminalEndRegion)
                 {
                     const bool widthTrimmed = TrimExtractedFaceToInnerBand(
                         faceTag,
@@ -6307,14 +7459,16 @@ std::vector<tag_t> BanJinCaiTuDialog::ExtractRecognizedFacesByShortestBendEdge(
                         UF_OBJ_delete_object(sheetBodyTag);
                         throw NXException::Create(
                             1,
-                            "Failed to add the face-width trim to an end extracted face.");
+                            "无法对端部抽取面增加按面宽修剪。");
                     }
 
                     std::ostringstream endFaceLog;
                     endFaceLog << "bend-length-trim faceIndex=" << index
                                << ", face=" << faceTag
                                << ", action=endpoint_trim_plus_"
-                               << (index == 0 ? "start" : "last")
+                               << (index == 0 ? "start" :
+                                   (isManualEndSupplement ?
+                                       "manual_end_supplement" : "end"))
                                << "_face_width_trim"
                                << ", shortestBendEdge=" << shortestBendEdgeTag
                                << ", incomingEdge="
@@ -9494,7 +10648,7 @@ std::vector<tag_t> BanJinCaiTuDialog::ThickenTrimmedFaces(
     NXOpen::Part* workPart = BanJinCaiTuDialog::theSession->Parts()->Work();
     if (workPart == NULL)
     {
-        throw NXException::Create(1, "There is no active work part for thickening.");
+        throw NXException::Create(1, "当前没有可用于加厚的工作部件。");
     }
 
     std::vector<NXOpen::Face*> facesToThicken;
@@ -9519,7 +10673,7 @@ std::vector<tag_t> BanJinCaiTuDialog::ThickenTrimmedFaces(
 
     if (facesToThicken.empty())
     {
-        throw NXException::Create(1, "No trimmed faces are available for thickening.");
+        throw NXException::Create(1, "没有可用于加厚的已修剪面。");
     }
 
     // The extracted sheet set has only two unified offset directions.  Test
@@ -9662,7 +10816,7 @@ std::vector<tag_t> BanJinCaiTuDialog::ThickenTrimmedFaces(
         thickenBuilder = NULL;
         if (thickenFeature == NULL)
         {
-            throw NXException::Create(1, "NX did not create the combined Thicken feature.");
+            throw NXException::Create(1, "NX 未能创建合并加厚特征。");
         }
 
         const std::vector<NXOpen::Body*> featureBodies = thickenFeature->GetBodies();
@@ -9707,13 +10861,13 @@ tag_t BanJinCaiTuDialog::ConvertTrimmedFacesToSheetmetal(
 {
     if (sheetBodyTags.empty() || thickness <= 1.0e-6)
     {
-        throw NXException::Create(1, "The trimmed faces are not ready for sheet-metal conversion.");
+        throw NXException::Create(1, "已修剪面尚不具备转换为钣金的条件。");
     }
 
     NXOpen::Part* workPart = BanJinCaiTuDialog::theSession->Parts()->Work();
     if (workPart == NULL)
     {
-        throw NXException::Create(1, "There is no active work part.");
+        throw NXException::Create(1, "当前没有活动的工作部件。");
     }
 
     const char* markName = "Convert trimmed faces to sheet metal";
@@ -9741,14 +10895,14 @@ tag_t BanJinCaiTuDialog::ConvertTrimmedFacesToSheetmetal(
         }
         if (facesToConvert.empty())
         {
-            throw NXException::Create(1, "No trimmed sheet face is available for conversion.");
+            throw NXException::Create(1, "没有可用于转换的已修剪片体面。");
         }
 
         NXOpen::Features::SheetMetal::SheetmetalManager* manager =
             workPart->Features()->SheetmetalManager();
         if (manager == NULL)
         {
-            throw NXException::Create(1, "NX Sheet Metal manager is unavailable.");
+            throw NXException::Create(1, "NX 钣金管理器不可用。");
         }
 
         NXOpen::Preferences::SheetMetalPreferencesManager* preferencesManager =
@@ -9832,7 +10986,7 @@ tag_t BanJinCaiTuDialog::ConvertTrimmedFacesToSheetmetal(
         convertBuilder = NULL;
         if (convertFeature == NULL)
         {
-            throw NXException::Create(1, "NX did not create the Convert To Sheet Metal feature.");
+            throw NXException::Create(1, "NX 未能创建转换为钣金特征。");
         }
 
         // A zero bend radius is represented by NX with two small cylindrical
@@ -9884,13 +11038,13 @@ tag_t BanJinCaiTuDialog::DeleteCreatedSheetmetalRadiusFaces(double thickness) co
 {
     if (thickness <= 1.0e-6)
     {
-        throw NXException::Create(1, "The sheet-metal thickness is unavailable for radius-face removal.");
+        throw NXException::Create(1, "无法获取用于删除圆角面的钣金厚度。");
     }
 
     NXOpen::Part* workPart = BanJinCaiTuDialog::theSession->Parts()->Work();
     if (workPart == NULL)
     {
-        throw NXException::Create(1, "There is no active work part.");
+        throw NXException::Create(1, "当前没有活动的工作部件。");
     }
 
     const double innerRadius = 0.002;
@@ -9967,7 +11121,7 @@ tag_t BanJinCaiTuDialog::DeleteCreatedSheetmetalRadiusFaces(double thickness) co
         workPart->Features()->CreateDeleteFaceBuilder(NULL);
     if (deleteFaceBuilder == NULL)
     {
-        throw NXException::Create(1, "NX Delete Face builder is unavailable.");
+        throw NXException::Create(1, "NX 无法创建删除面特征。");
     }
 
     try
@@ -9992,7 +11146,7 @@ tag_t BanJinCaiTuDialog::DeleteCreatedSheetmetalRadiusFaces(double thickness) co
         deleteFaceBuilder = NULL;
         if (deleteFeature == NULL)
         {
-            throw NXException::Create(1, "NX did not delete the sheet-metal radius faces.");
+            throw NXException::Create(1, "NX 未能删除钣金圆角面。");
         }
         return deleteFeature->Tag();
     }
@@ -10375,7 +11529,7 @@ void BanJinCaiTuDialog::FinalizeCommittedThickenedBodies(
     {
         throw NXException::Create(
             1,
-            "There is no thickened tool body to finalize.");
+            "没有可用于完成操作的加厚工具体。");
     }
 
     std::vector<tag_t> liveThickenedBodyTags;
@@ -10391,7 +11545,7 @@ void BanJinCaiTuDialog::FinalizeCommittedThickenedBodies(
     {
         throw NXException::Create(
             1,
-            "The thickened tool body is no longer available.");
+            "加厚工具体已失效或不再存在。");
     }
 
     RemoveBodyParameters(liveThickenedBodyTags);
@@ -10438,7 +11592,7 @@ void BanJinCaiTuDialog::FinalizeCommittedThickenedBodies(
             AppendSectionDebugLog(failureLog.str());
             throw NXException::Create(
                 1,
-                "Failed to subtract the thickened tool body from the source body.");
+                "原实体与加厚工具体求差失败。");
         }
 
         ++subtractSuccessCount;
@@ -10453,7 +11607,7 @@ void BanJinCaiTuDialog::FinalizeCommittedThickenedBodies(
     {
         throw NXException::Create(
             1,
-            "Not every thickened tool body was subtracted.");
+            "部分加厚工具体未能完成求差。");
     }
 
     BanJinCaiTuDialog::theSession->CleanUpFacetedFacesAndEdges();

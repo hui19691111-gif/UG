@@ -1,5 +1,2 @@
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\bin\Release\net8.0-windows\win-x64\publish\MinXiBiaoUI.exe
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\bin\Release\net8.0-windows\win-x64\publish\MinXiBiaoUI.dll
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\bin\Release\net8.0-windows\win-x64\publish\MinXiBiaoUI.deps.json
-G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\bin\Release\net8.0-windows\win-x64\publish\MinXiBiaoUI.runtimeconfig.json
 G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\bin\Release\net8.0-windows\win-x64\publish\MinXiBiaoUI.pdb
+G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\32_MinXiBiao\MinXiBiaoUI\bin\Release\net8.0-windows\win-x64\publish\MinXiBiaoUI.exe

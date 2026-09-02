@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Text.Encodings.Web;
@@ -511,6 +512,26 @@ public partial class MainWindow : Window
         UiOutput output = new() { Confirmed = false };
         File.WriteAllText(outputPath, JsonSerializer.Serialize(output));
         CloseAndShutdown();
+    }
+
+    private void HelpButton_Click(object sender, RoutedEventArgs e)
+    {
+        string executableDirectory = AppContext.BaseDirectory.TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string applicationDirectory =
+            Directory.GetParent(executableDirectory)?.FullName ?? executableDirectory;
+        string helpPath = Path.Combine(applicationDirectory, "ZhihuiHelp", "MinXiBiao.html");
+        if (!File.Exists(helpPath))
+        {
+            MessageBox.Show(
+                $"未找到帮助文件：\n{helpPath}",
+                "智辉钣金帮助",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
+        Process.Start(new ProcessStartInfo(helpPath) { UseShellExecute = true });
     }
 
     private void DeleteRowsButton_Click(object sender, RoutedEventArgs e)

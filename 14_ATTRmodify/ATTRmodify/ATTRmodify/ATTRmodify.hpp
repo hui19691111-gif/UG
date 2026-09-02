@@ -23,6 +23,8 @@
 #include <uf_ui_types.h>
 #include <iostream>
 #include <NXOpen/Session.hxx>
+#include <NXOpen/Update.hxx>
+#include <NXOpen/DisplayManager.hxx>
 #include <NXOpen/UI.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/Callback.hxx>
@@ -43,15 +45,11 @@
 #include <NXOpen/NXObjectManager.hxx>
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
-#include <NXOpen/Face.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureBuilder.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
-#include <NXOpen/Features_FlatPattern.hxx>
 #include <NXOpen/Features_SheetMetal_CornerTreatmentBuilder.hxx>
-#include <NXOpen/Features_SheetMetal_FlatPatternBuilder.hxx>
 #include <NXOpen/Features_SheetMetal_HoleTreatmentBuilder.hxx>
-#include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
 #include <NXOpen/Drawings_DraftingViewCollection.hxx>
 #include <NXOpen/Drawings_DrawingSheet.hxx>
 #include <NXOpen/Drawings_DrawingSheetCollection.hxx>
@@ -60,6 +58,7 @@
 #include <NXOpen/ExpressionCollection.hxx>
 #include <uf_modl.h>
 #include <uf_obj.h>
+#include <uf_disp.h>
 #include <NXOpen/AttributeManager.hxx>
 #include <NXOpen/AttributePropertiesBaseBuilder.hxx>
 #include <NXOpen/AttributePropertiesBuilder.hxx>
@@ -136,13 +135,9 @@ private:
     NXOpen::BlockStyler::SelectObject* selection0;// Block type: Selection
     NXOpen::BlockStyler::Group* group4;// Block type: Group
     NXOpen::BlockStyler::StringBlock* string0;// Block type: String
+    NXOpen::BlockStyler::StringBlock* string06;// Block type: String
     NXOpen::BlockStyler::Enumeration* string04;// Block type: Enumeration
     NXOpen::BlockStyler::StringBlock* string05;// Block type: String
     NXOpen::BlockStyler::Toggle* toggle02;// Block type: Toggle
-    NXOpen::BlockStyler::Group* group2;// Block type: Group
-    NXOpen::BlockStyler::StringBlock* string01;// Block type: String
-    NXOpen::BlockStyler::StringBlock* string02;// Block type: String
-    NXOpen::BlockStyler::StringBlock* string03;// Block type: String
-    
 };
 #endif //ATTRMODIFY_H_INCLUDED

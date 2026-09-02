@@ -50,6 +50,39 @@ namespace
 
     constexpr double kTwoPi = 6.28318530717958647692;
 
+    std::string TrimCopy(const std::string& value)
+    {
+        const auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char ch) {
+            return std::isspace(ch) != 0;
+        });
+        const auto last = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char ch) {
+            return std::isspace(ch) != 0;
+        }).base();
+        return first < last ? std::string(first, last) : std::string();
+    }
+
+    std::string ResolveAnnotationLength(
+        const KonBiaoZu::RuleRecord& rule,
+        const KonBiaoZu::DraftingRequest& request)
+    {
+        const std::string ruleLength = TrimCopy(rule.lengthText);
+        if (!ruleLength.empty() && ruleLength != "按输入")
+        {
+            return ruleLength;
+        }
+        return request.lengthValue > 0 ? std::to_string(request.lengthValue) : std::string();
+    }
+
+    void ReplaceAll(std::string& text, const std::string& from, const std::string& to)
+    {
+        size_t position = 0;
+        while (!from.empty() && (position = text.find(from, position)) != std::string::npos)
+        {
+            text.replace(position, from.size(), to);
+            position += to.size();
+        }
+    }
+
     std::vector<DebugFaceColorState>& GetDebugFaceColorStates()
     {
         static std::vector<DebugFaceColorState> states;
@@ -2089,23 +2122,30 @@ namespace KonBiaoZu
             out << sameDiameterCount << "-";
         }
 
+        std::string labelText;
         if (!rule.displayText.empty())
         {
-            out << rule.displayText;
+            labelText = rule.displayText;
         }
         else if (!rule.threadSpec.empty())
         {
-            out << rule.threadSpec;
+            labelText = rule.threadSpec;
         }
         else
         {
-            out << rule.size;
+            labelText = rule.size;
         }
 
-        if (request.lengthValue > 0 &&
+        const std::string annotationLength = ResolveAnnotationLength(rule, request);
+        const bool labelContainsLengthToken = labelText.find("{长度}") != std::string::npos;
+        ReplaceAll(labelText, "{长度}", annotationLength);
+        out << labelText;
+
+        if (!annotationLength.empty() &&
+            !labelContainsLengthToken &&
             (request.type == AnnotationType::PemScrew || request.type == AnnotationType::PemStud))
         {
-            out << "x" << request.lengthValue;
+            out << "x" << annotationLength;
         }
 
         return out.str();
@@ -2149,7 +2189,9 @@ namespace KonBiaoZu
         {
             out << "标准长度: " << primary.lengthText << "\n";
         }
-        out << "标准注释: " << primary.standardComment << "\n";
+        std::string standardComment = primary.standardComment;
+        ReplaceAll(standardComment, "{长度}", ResolveAnnotationLength(primary, request));
+        out << "标准注释: " << standardComment << "\n";
         out << "图纸标注: " << BuildAnnotationLabel(request, primary, sameDiameterCount);
 
         if (rules.size() > 1)

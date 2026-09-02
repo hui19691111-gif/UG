@@ -7,6 +7,7 @@
 #include <uf_curve.h>
 #include <uf_disp.h>
 #include <uf_eval.h>
+#include <uf_help.h>
 #include <uf_modl.h>
 #include <uf_modl_types.h>
 #include <uf_modl_utilities.h>
@@ -164,6 +165,9 @@ private:
     bool runAfterDialog_;
     AutoConvertOptions pendingOptions_;
     std::set<tag_t> manualButtonProcessedBodyTags_;
+    bool helpMapLoaded_;
+    bool helpUfInitialized_;
+    std::string helpMapPath_;
 
     void initialize_cb();
     int update_cb(NXOpen::BlockStyler::UIBlock* block);
@@ -171,6 +175,7 @@ private:
     int apply_cb();
 
     void InitializeValues();
+    void InitializeContextHelp();
     void UpdateSensitivity();
     AutoConvertOptions CollectOptions() const;
     void Run(const AutoConvertOptions& options);

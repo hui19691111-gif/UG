@@ -47,6 +47,7 @@
 #include <NXOpen/Assemblies_ComponentAssembly.hxx>
 #include <NXOpen/BasePart.hxx>
 #include <NXOpen/Update.hxx>
+#include <uf_help.h>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -84,6 +85,78 @@ namespace
         }
 
         return path.substr(0, slash);
+    }
+
+    bool FileExistsW(const std::wstring& path)
+    {
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        return attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    }
+
+    std::string WideTextToUtf8(const std::wstring& value)
+    {
+        if (value.empty())
+        {
+            return std::string();
+        }
+
+        const int length = WideCharToMultiByte(
+            CP_UTF8, 0, value.c_str(), -1, NULL, 0, NULL, NULL);
+        if (length <= 0)
+        {
+            return std::string();
+        }
+
+        std::string result(static_cast<size_t>(length), '\0');
+        WideCharToMultiByte(
+            CP_UTF8, 0, value.c_str(), -1, &result[0], length, NULL, NULL);
+        if (!result.empty() && result[result.size() - 1] == '\0')
+        {
+            result.resize(result.size() - 1);
+        }
+        return result;
+    }
+
+    std::string WidePathToAnsi(const std::wstring& value)
+    {
+        if (value.empty())
+        {
+            return std::string();
+        }
+
+        const int length = WideCharToMultiByte(
+            CP_ACP, 0, value.c_str(), -1, NULL, 0, NULL, NULL);
+        if (length <= 0)
+        {
+            return std::string();
+        }
+
+        std::string result(static_cast<size_t>(length), '\0');
+        WideCharToMultiByte(
+            CP_ACP, 0, value.c_str(), -1, &result[0], length, NULL, NULL);
+        if (!result.empty() && result[result.size() - 1] == '\0')
+        {
+            result.resize(result.size() - 1);
+        }
+        return result;
+    }
+
+    std::wstring HelpFileUrlBase(const std::wstring& directory)
+    {
+        std::wstring value = directory;
+        for (size_t i = 0; i < value.size(); ++i)
+        {
+            if (value[i] == L'\\')
+            {
+                value[i] = L'/';
+            }
+        }
+        if (!value.empty() && value[value.size() - 1] != L'/')
+        {
+            value.push_back(L'/');
+        }
+        return L"file:/" + value;
     }
 
     std::wstring ConfigFilePath()
@@ -530,6 +603,24 @@ namespace
         }
     }
 
+    std::string StringAttributeFromPart(NXOpen::Part* workPart, const char* attributeName)
+    {
+        if (workPart == NULL || attributeName == NULL || attributeName[0] == '\0')
+        {
+            return std::string();
+        }
+
+        const NXOpen::NXString title(attributeName, NXOpen::NXString::UTF8);
+        if (!workPart->HasUserAttribute(
+            title, NXOpen::NXObject::AttributeType::AttributeTypeString, -1))
+        {
+            return std::string();
+        }
+
+        return Trim(Utf8Text(workPart->GetUserAttributeAsString(
+            title, NXOpen::NXObject::AttributeType::AttributeTypeString, -1)));
+    }
+
     void SetStringBlockValue(NXOpen::BlockStyler::StringBlock* block, const std::string& value)
     {
         if (block == NULL)
@@ -862,10 +953,55 @@ namespace
     {
         AppendDebugLog(std::string("CommitStringAttribute begin title=") + (title != NULL ? title : "<null>") +
             " value=" + Utf8Text(value));
-        builder->SetTitle(title);
+        builder->SetTitle(NXOpen::NXString(title, NXOpen::NXString::UTF8));
         builder->SetStringValue(value);
         builder->Commit();
         AppendDebugLog(std::string("CommitStringAttribute ok title=") + (title != NULL ? title : "<null>"));
+    }
+
+    void DeletePartAttributeTitleIfPresent(NXOpen::Part* workPart, const char* titleText, NXOpen::NXObject::AttributeType type)
+    {
+        if (workPart == NULL || titleText == NULL || titleText[0] == '\0')
+        {
+            return;
+        }
+
+        const NXOpen::NXString title(titleText, NXOpen::NXString::UTF8);
+        try
+        {
+            if (workPart->HasUserAttribute(title, type, -1))
+            {
+                AppendDebugLog(std::string("DeletePartAttributeTitleIfPresent begin title=") + titleText +
+                    " type=" + std::to_string(static_cast<int>(type)));
+                workPart->DeleteUserAttribute(type, title, true, NXOpen::Update::OptionNow);
+                AppendDebugLog(std::string("DeletePartAttributeTitleIfPresent ok title=") + titleText);
+            }
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog(std::string("DeletePartAttributeTitleIfPresent failed title=") + titleText +
+                " type=" + std::to_string(static_cast<int>(type)) + " " + NxExceptionText(ex));
+        }
+    }
+
+    void DeletePartAttributeTitleIfPresent(NXOpen::Part* workPart, const char* titleText)
+    {
+        DeletePartAttributeTitleIfPresent(workPart, titleText, NXOpen::NXObject::AttributeTypeInteger);
+        DeletePartAttributeTitleIfPresent(workPart, titleText, NXOpen::NXObject::AttributeTypeReal);
+        DeletePartAttributeTitleIfPresent(workPart, titleText, NXOpen::NXObject::AttributeTypeString);
+        DeletePartAttributeTitleIfPresent(workPart, titleText, NXOpen::NXObject::AttributeTypeBoolean);
+        DeletePartAttributeTitleIfPresent(workPart, titleText, NXOpen::NXObject::AttributeTypeTime);
+    }
+
+    void DeleteLegacyMojibakePartAttributes(NXOpen::Part* workPart)
+    {
+        DeletePartAttributeTitleIfPresent(workPart, "瀹㈡埛");
+        DeletePartAttributeTitleIfPresent(workPart, "鏈哄瀷");
+        DeletePartAttributeTitleIfPresent(workPart, "鍚嶇О");
+        DeletePartAttributeTitleIfPresent(workPart, "鍥惧彿");
+        DeletePartAttributeTitleIfPresent(workPart, "棰滆壊");
+        DeletePartAttributeTitleIfPresent(workPart, "鏉愭枡");
+        DeletePartAttributeTitleIfPresent(workPart, "鏁伴噺");
     }
 
     void SetPartStringAttribute(NXOpen::Part* workPart, const char* title, const NXOpen::NXString& value)
@@ -878,7 +1014,7 @@ namespace
 
         AppendDebugLog(std::string("SetPartStringAttribute begin title=") + (title != NULL ? title : "<null>") +
             " value=" + Utf8Text(value));
-        workPart->SetUserAttribute(title, -1, value, NXOpen::Update::OptionNow);
+        workPart->SetUserAttribute(NXOpen::NXString(title, NXOpen::NXString::UTF8), -1, value, NXOpen::Update::OptionNow);
         AppendDebugLog(std::string("SetPartStringAttribute ok title=") + (title != NULL ? title : "<null>"));
     }
 
@@ -1431,6 +1567,10 @@ UI *(Write_Prat_Attr::theUI) = NULL;
 //------------------------------------------------------------------------------
 Write_Prat_Attr::Write_Prat_Attr()
 {
+    helpMapLoaded_ = false;
+    helpUfInitialized_ = false;
+    helpMapPath_.clear();
+
     // Initialize the NX Open C++ API environment
     Write_Prat_Attr::theSession = NXOpen::Session::GetSession();
     Write_Prat_Attr::theUI = UI::GetUI();
@@ -1440,6 +1580,7 @@ Write_Prat_Attr::Write_Prat_Attr()
         throw std::runtime_error("Write_Prat_Attr dialog resource is missing.");
     }
     theDlxFileName = NULL;
+    InitializeContextHelp();
     theDialog = Write_Prat_Attr::theUI->CreateDialog(dlxPath.c_str());
     // Registration of callback functions
     theDialog->AddApplyHandler(make_callback(this, &Write_Prat_Attr::apply_cb));
@@ -1459,6 +1600,75 @@ Write_Prat_Attr::~Write_Prat_Attr()
         delete theDialog;
         theDialog = NULL;
     }
+    if (helpMapLoaded_ && !helpMapPath_.empty())
+    {
+        const std::string ansiMapPath = WidePathToAnsi(helpMapPath_);
+        std::vector<char> mapPath(ansiMapPath.begin(), ansiMapPath.end());
+        mapPath.push_back('\0');
+        const int unloadStatus = UF_HELP_unload_map_file(mapPath.data());
+        AppendDebugLog(
+            std::string("context help unload status=") + std::to_string(unloadStatus));
+        helpMapLoaded_ = false;
+    }
+    if (helpUfInitialized_)
+    {
+        UF_terminate();
+        helpUfInitialized_ = false;
+    }
+}
+
+void Write_Prat_Attr::InitializeContextHelp()
+{
+    const std::wstring helpDirectory = PluginDirectory() + L"\\Write_Prat_AttrHelp";
+    const std::wstring helpIndex = helpDirectory + L"\\index.html";
+    helpMapPath_ = helpDirectory + L"\\Write_Prat_Attr.map";
+
+    const bool indexExists = FileExistsW(helpIndex);
+    const bool mapExists = FileExistsW(helpMapPath_);
+    if (!indexExists || !mapExists)
+    {
+        AppendDebugLog(
+            std::string("context help init failed reason=missing-file index=[") +
+            WideTextToUtf8(helpIndex) + "] indexExists=" + (indexExists ? "1" : "0") +
+            " map=[" + WideTextToUtf8(helpMapPath_) + "] mapExists=" +
+            (mapExists ? "1" : "0"));
+        helpMapPath_.clear();
+        return;
+    }
+
+    const int ufInitStatus = UF_initialize();
+    if (ufInitStatus != 0)
+    {
+        AppendDebugLog(
+            std::string("context help init failed reason=uf-initialize status=") +
+            std::to_string(ufInitStatus));
+        helpMapPath_.clear();
+        return;
+    }
+    helpUfInitialized_ = true;
+
+    const std::wstring helpUrlBase = HelpFileUrlBase(helpDirectory);
+    const BOOL environmentSet = SetEnvironmentVariableW(
+        L"ZHIHUI_WRITE_ATTR_HELP_PATH", helpUrlBase.c_str());
+
+    const std::string ansiMapPath = WidePathToAnsi(helpMapPath_);
+    if (ansiMapPath.empty())
+    {
+        AppendDebugLog("context help init failed reason=map-path-conversion");
+        return;
+    }
+
+    std::vector<char> mapPath(ansiMapPath.begin(), ansiMapPath.end());
+    mapPath.push_back('\0');
+    const int helpLoadStatus = UF_HELP_load_map_file(mapPath.data());
+    helpMapLoaded_ = helpLoadStatus == 0;
+
+    AppendDebugLog(
+        std::string("context help init map=[") + WideTextToUtf8(helpMapPath_) +
+        "] urlBase=[" + WideTextToUtf8(helpUrlBase) +
+        "] environmentSet=" + (environmentSet ? "1" : "0") +
+        " ufInitStatus=" + std::to_string(ufInitStatus) +
+        " loadStatus=" + std::to_string(helpLoadStatus));
 }
 //------------------------------- DIALOG LAUNCHING ---------------------------------
 //
@@ -1677,6 +1887,22 @@ void Write_Prat_Attr::initialize_cb()
 {
     try
     {
+        try
+        {
+            std::unique_ptr<NXOpen::BlockStyler::PropertyList> dialogProps(
+                theDialog->TopBlock()->GetProperties());
+            dialogProps->SetString("HelpTag", "Zhihui_Write_Prat_Attr");
+        }
+        catch (const std::exception& ex)
+        {
+            AppendDebugLog(
+                std::string("context help tag update failed message=") + ex.what());
+        }
+        catch (...)
+        {
+            AppendDebugLog("context help tag update failed message=unknown");
+        }
+
         enum0 = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(theDialog->TopBlock()->FindBlock("enum0"));
         string0 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string0"));
         string01 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string01"));
@@ -1709,11 +1935,20 @@ void Write_Prat_Attr::dialogShown_cb()
     try
     {
         DialogConfig config = LoadDialogConfig();
+        NXOpen::Part* workPart = CurrentWorkPart();
+
+        // A material already stored on the part takes precedence over the
+        // remembered dialog value. Keep it selectable even when it is not yet
+        // present in the current configuration file.
+        const std::string partMaterial = StringAttributeFromPart(workPart, "材料");
+        if (!partMaterial.empty() && !ContainsText(config.materials, partMaterial))
+        {
+            config.materials.push_back(partMaterial);
+        }
+
         ApplyEnumMembers(enum0, config.customers);
         ApplyEnumMembers(enum01, config.colors);
         ApplyEnumMembers(enum02, config.materials);
-
-        NXOpen::Part* workPart = CurrentWorkPart();
 
         std::unique_ptr<PropertyList> string01Props(string01->GetProperties());
         string01Props->SetString("Value", workPart->Name());
@@ -1731,6 +1966,15 @@ void Write_Prat_Attr::dialogShown_cb()
         if (config.lastManualQuantity && IsPositiveInteger(config.lastQuantity))
         {
             SetStringBlockValue(string03, config.lastQuantity);
+        }
+
+        // Apply part values last so saved dialog preferences cannot overwrite
+        // the material and quantity that belong to the current part.
+        SetEnumValueFromAttribute(workPart, enum02, "材料", config.materials);
+        const std::string partQuantity = QuantityFromPartAttribute(workPart);
+        if (!partQuantity.empty())
+        {
+            SetStringBlockValue(string03, partQuantity);
         }
         RefreshQuantityInput(toggleManualQuantity, string03, workPart);
 
@@ -1802,6 +2046,7 @@ int Write_Prat_Attr::apply_cb()
             " quantity=" + quantityText);
 
         AppendDebugLog("apply_cb write part string attributes begin");
+        DeleteLegacyMojibakePartAttributes(workPart);
         SetPartStringAttribute(workPart, "客户", Theenum0);
         SetPartStringAttribute(workPart, "机型", Thestring0);
         SetPartStringAttribute(workPart, "名称", Thestring01);

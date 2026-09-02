@@ -1,6 +1,7 @@
 #include "CaiRBan.hpp"
 #include "CaiRBanCustomFeatureShared.hpp"
 #include "../../common/ZhihuiDialogMemory.hpp"
+#include "../../common/ZhihuiContextHelp.hpp"
 #ifdef CreateDialog
 #undef CreateDialog
 #endif
@@ -488,6 +489,12 @@ std::string DialogPath()
     return "CaiRBan.dlx";
 }
 
+std::string DialogPathWithHelp()
+{
+    zhihui_context_help::EnsureGlobalHelpLoaded();
+    return DialogPath();
+}
+
 std::string Number(double value)
 {
     std::ostringstream stream;
@@ -500,7 +507,7 @@ std::string Number(double value)
 CaiRBanDialog::CaiRBanDialog()
     : ui_(NXOpen::UI::GetUI()),
       session_(NXOpen::Session::GetSession()),
-      dialog_(ui_->CreateDialog(DialogPath().c_str())),
+      dialog_(ui_->CreateDialog(DialogPathWithHelp().c_str())),
       recolorToggle_(nullptr),
       colorMode_(nullptr),
       fixedColor_(nullptr),

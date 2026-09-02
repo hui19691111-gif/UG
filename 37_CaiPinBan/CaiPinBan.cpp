@@ -1,6 +1,7 @@
 #include "CaiPinBan.hpp"
 #include "CaiPinBanCustomFeatureShared.hpp"
 #include "../../common/ZhihuiDialogMemory.hpp"
+#include "../../common/ZhihuiContextHelp.hpp"
 #ifdef CreateDialog
 #undef CreateDialog
 #endif
@@ -459,6 +460,12 @@ std::string DialogPath()
     return "CaiPinBan.dlx";
 }
 
+std::string DialogPathWithHelp()
+{
+    zhihui_context_help::EnsureGlobalHelpLoaded();
+    return DialogPath();
+}
+
 std::string Number(double value)
 {
     std::ostringstream stream;
@@ -471,7 +478,7 @@ std::string Number(double value)
 CaiPinBanDialog::CaiPinBanDialog()
     : ui_(NXOpen::UI::GetUI()),
       session_(NXOpen::Session::GetSession()),
-      dialog_(ui_->CreateDialog(DialogPath().c_str())),
+      dialog_(ui_->CreateDialog(DialogPathWithHelp().c_str())),
       recolorToggle_(nullptr),
       colorMode_(nullptr),
       fixedColor_(nullptr),
@@ -1246,7 +1253,14 @@ bool CaiPinBanDialog::CreateAndSubtract(
             {
                 throw std::runtime_error("选择面外围边没有找到原体相邻面。");
             }
-            originalAdjacentFaces.push_back(adjacent);
+            // Replace Face is only meaningful here when the face connected to
+            // the selected-face boundary is planar.  Preserve the one-to-one
+            // edge indexing with a null entry so curved adjacent faces are
+            // simply excluded while the final subtraction still proceeds.
+            originalAdjacentFaces.push_back(
+                adjacent->SolidFaceType() == NXOpen::Face::FaceTypePlanar
+                    ? adjacent
+                    : nullptr);
         }
 
         const std::vector<NXOpen::Edge*> boundaryEdges = face->GetEdges();
@@ -1319,6 +1333,12 @@ bool CaiPinBanDialog::CreateAndSubtract(
         {
             try
             {
+                NXOpen::Face* originalAdjacent = originalAdjacentFaces[index];
+                if (originalAdjacent == nullptr)
+                {
+                    continue;
+                }
+
                 failureStage = "匹配第一对替换面";
                 const std::vector<NXOpen::Face*> currentToolFaces =
                     toolBody->GetFaces();
@@ -1326,12 +1346,6 @@ bool CaiPinBanDialog::CreateAndSubtract(
                     ExtrudedSideFaceForEdge(
                         outerEdges[index], currentToolFaces, innerNormal);
                 if (extrudedSide == nullptr)
-                {
-                    continue;
-                }
-
-                NXOpen::Face* originalAdjacent = originalAdjacentFaces[index];
-                if (originalAdjacent == nullptr)
                 {
                     continue;
                 }

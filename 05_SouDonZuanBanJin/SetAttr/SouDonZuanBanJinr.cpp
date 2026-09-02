@@ -803,9 +803,16 @@ namespace
             HasNonEmptyStringUserAttribute(part, "\xE6\x9D\x90\xE8\xB4\xA8");
     }
 
+    bool HasPartQuantityAttribute(NXOpen::Part* part)
+    {
+        const char* quantityTitle = "\xE6\x95\xB0\xE9\x87\x8F";
+        return HasPositiveIntegerUserAttribute(part, quantityTitle) ||
+            HasNonEmptyStringUserAttribute(part, quantityTitle);
+    }
+
     bool HasRequiredPartAttributes(NXOpen::Part* part)
     {
-        return HasNonEmptyStringUserAttribute(part, "\xE6\x95\xB0\xE9\x87\x8F") &&
+        return HasPartQuantityAttribute(part) &&
             HasPartMaterialAttribute(part);
     }
 
@@ -3496,6 +3503,7 @@ int SouDonZuanBanJin::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
             PropertyList* selectionEdge0Props = selectionEdge0->GetProperties();
             std::vector<NXOpen::TaggedObject*> edges = selectionEdge0Props->GetTaggedObjectVector("SelectedObjects");
+            NXOpen::Point3d edgePickPoint = selectionEdge0Props->GetPoint("PickPoint");
             delete selectionEdge0Props;
             selectionEdge0Props = NULL;
             if (edges.empty())
@@ -3525,6 +3533,17 @@ int SouDonZuanBanJin::update_cb(NXOpen::BlockStyler::UIBlock* block)
             NXOpen::Point3d endPoint;
             xAxisEdge->GetVertices(&startPoint, &endPoint);
 
+            const double pickToStartSquared =
+                (edgePickPoint.X - startPoint.X) * (edgePickPoint.X - startPoint.X) +
+                (edgePickPoint.Y - startPoint.Y) * (edgePickPoint.Y - startPoint.Y) +
+                (edgePickPoint.Z - startPoint.Z) * (edgePickPoint.Z - startPoint.Z);
+            const double pickToEndSquared =
+                (edgePickPoint.X - endPoint.X) * (edgePickPoint.X - endPoint.X) +
+                (edgePickPoint.Y - endPoint.Y) * (edgePickPoint.Y - endPoint.Y) +
+                (edgePickPoint.Z - endPoint.Z) * (edgePickPoint.Z - endPoint.Z);
+            const NXOpen::Point3d referenceVertex =
+                pickToStartSquared <= pickToEndSquared ? startPoint : endPoint;
+
             NXOpen::Features::Feature* nullNXOpen_Features_Feature(NULL);
             NXOpen::Features::SheetMetal::FlatPatternBuilder* flatPatternBuilder1;
             flatPatternBuilder1 = workPart->Features()->SheetmetalManager()->CreateFlatPatternBuilder(nullNXOpen_Features_Feature);
@@ -3534,7 +3553,7 @@ int SouDonZuanBanJin::update_cb(NXOpen::BlockStyler::UIBlock* block)
             flatPatternBuilder1->OuterCornerTreatment()->Value()->SetFormula("1");
             flatPatternBuilder1->UpwardFace()->SetValue(face1);
             flatPatternBuilder1->XAxisEdge()->SetValue(xAxisEdge);
-            flatPatternBuilder1->SetReferenceVertex(endPoint);
+            flatPatternBuilder1->SetReferenceVertex(referenceVertex);
 
             feature3 = flatPatternBuilder1->CommitFeature();
             flatPatternBuilder1->Destroy();

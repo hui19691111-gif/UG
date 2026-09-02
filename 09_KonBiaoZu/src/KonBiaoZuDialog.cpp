@@ -25,10 +25,84 @@
 #include <filesystem>
 #include <vector>
 
+#pragma comment(lib, "Advapi32.lib")
+
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 namespace
 {
+    constexpr const char* kDialogMemoryRegistryPath = "Software\\Zhihui\\KonBiaoZu";
+
+    DWORD ReadRegistryDword(HKEY key, const char* name, DWORD fallback)
+    {
+        DWORD value = fallback;
+        DWORD valueType = 0;
+        DWORD valueSize = sizeof(value);
+        if (RegQueryValueExA(
+                key,
+                name,
+                nullptr,
+                &valueType,
+                reinterpret_cast<BYTE*>(&value),
+                &valueSize) != ERROR_SUCCESS ||
+            valueType != REG_DWORD)
+        {
+            return fallback;
+        }
+        return value;
+    }
+
+    std::string ReadRegistryString(HKEY key, const char* name, const std::string& fallback)
+    {
+        DWORD valueType = 0;
+        DWORD valueSize = 0;
+        if (RegQueryValueExA(key, name, nullptr, &valueType, nullptr, &valueSize) != ERROR_SUCCESS ||
+            valueType != REG_SZ ||
+            valueSize == 0)
+        {
+            return fallback;
+        }
+
+        std::string value(static_cast<size_t>(valueSize), '\0');
+        if (RegQueryValueExA(
+                key,
+                name,
+                nullptr,
+                &valueType,
+                reinterpret_cast<BYTE*>(value.data()),
+                &valueSize) != ERROR_SUCCESS)
+        {
+            return fallback;
+        }
+        if (!value.empty() && value.back() == '\0')
+        {
+            value.pop_back();
+        }
+        return value;
+    }
+
+    void WriteRegistryDword(HKEY key, const char* name, DWORD value)
+    {
+        RegSetValueExA(
+            key,
+            name,
+            0,
+            REG_DWORD,
+            reinterpret_cast<const BYTE*>(&value),
+            sizeof(value));
+    }
+
+    void WriteRegistryString(HKEY key, const char* name, const std::string& value)
+    {
+        RegSetValueExA(
+            key,
+            name,
+            0,
+            REG_SZ,
+            reinterpret_cast<const BYTE*>(value.c_str()),
+            static_cast<DWORD>(value.size() + 1));
+    }
+
     std::string GetDialogFilePath()
     {
         char buffer[MAX_PATH] = {};
@@ -222,6 +296,7 @@ namespace KonBiaoZu
         circleSelectProperties->SetSelectionFilter("SelectionFilter", action, selectionMaskArray);
         circleSelectProperties->SetLogical("AutomaticProgression", true);
         delete circleSelectProperties;
+        LoadDialogMemory();
         UpdateConditionalBlocks();
     }
 
@@ -257,6 +332,7 @@ namespace KonBiaoZu
             }
 
             UpdateConditionalBlocks();
+            SaveDialogMemory();
 
             if (!isInternalUpdate_ && block == circleSelectBlock_)
             {
@@ -293,6 +369,7 @@ namespace KonBiaoZu
 
     int KonBiaoZuDialog::apply_cb()
     {
+        SaveDialogMemory();
         return 0;
     }
 
@@ -673,12 +750,14 @@ namespace KonBiaoZu
 
     int KonBiaoZuDialog::ok_cb()
     {
+        SaveDialogMemory();
         ClearHighlightedCircles();
         return 0;
     }
 
     int KonBiaoZuDialog::cancel_cb()
     {
+        SaveDialogMemory();
         ClearHighlightedCircles();
         return 0;
     }
@@ -867,6 +946,133 @@ namespace KonBiaoZu
         }
 
         return nullptr;
+    }
+
+    void KonBiaoZuDialog::LoadDialogMemory()
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExA(
+                HKEY_CURRENT_USER,
+                kDialogMemoryRegistryPath,
+                0,
+                KEY_QUERY_VALUE,
+                &key) != ERROR_SUCCESS)
+        {
+            return;
+        }
+
+        const auto setEnum = [key](NXOpen::BlockStyler::UIBlock* block, const char* name, int maximum) {
+            if (block == nullptr)
+            {
+                return;
+            }
+            NXOpen::BlockStyler::PropertyList* properties = block->GetProperties();
+            const int current = properties->GetEnum("Value");
+            const DWORD saved = ReadRegistryDword(key, name, static_cast<DWORD>(current));
+            if (saved <= static_cast<DWORD>(maximum))
+            {
+                properties->SetEnum("Value", static_cast<int>(saved));
+            }
+            delete properties;
+        };
+
+        isInternalUpdate_ = true;
+        setEnum(annotationTypeBlock_, "AnnotationType", 6);
+        setEnum(weldNutSeriesBlock_, "WeldNutSeries", 1);
+        setEnum(pemNutSeriesBlock_, "PemNutSeries", 2);
+        setEnum(pemScrewSeriesBlock_, "PemScrewSeries", 1);
+        setEnum(pemStudSeriesBlock_, "PemStudSeries", 3);
+
+        if (letterToggleBlock_ != nullptr)
+        {
+            NXOpen::BlockStyler::PropertyList* properties = letterToggleBlock_->GetProperties();
+            const bool current = properties->GetLogical("Value");
+            properties->SetLogical(
+                "Value",
+                ReadRegistryDword(key, "LetterToggle", current ? 1u : 0u) != 0);
+            delete properties;
+        }
+
+        if (markerStartBlock_ != nullptr)
+        {
+            NXOpen::BlockStyler::PropertyList* properties = markerStartBlock_->GetProperties();
+            const std::string current = properties->GetString("Value").GetText();
+            properties->SetString("Value", ReadRegistryString(key, "MarkerStart", current));
+            delete properties;
+        }
+
+        if (lengthBlock_ != nullptr)
+        {
+            NXOpen::BlockStyler::PropertyList* properties = lengthBlock_->GetProperties();
+            const int current = properties->GetInteger("Value");
+            properties->SetInteger(
+                "Value",
+                static_cast<int>(ReadRegistryDword(key, "LengthValue", static_cast<DWORD>(current))));
+            delete properties;
+        }
+        isInternalUpdate_ = false;
+        RegCloseKey(key);
+    }
+
+    void KonBiaoZuDialog::SaveDialogMemory() const
+    {
+        if (annotationTypeBlock_ == nullptr)
+        {
+            return;
+        }
+
+        HKEY key = nullptr;
+        DWORD disposition = 0;
+        if (RegCreateKeyExA(
+                HKEY_CURRENT_USER,
+                kDialogMemoryRegistryPath,
+                0,
+                nullptr,
+                REG_OPTION_NON_VOLATILE,
+                KEY_SET_VALUE,
+                nullptr,
+                &key,
+                &disposition) != ERROR_SUCCESS)
+        {
+            return;
+        }
+
+        const auto saveEnum = [key](NXOpen::BlockStyler::UIBlock* block, const char* name) {
+            if (block == nullptr)
+            {
+                return;
+            }
+            NXOpen::BlockStyler::PropertyList* properties = block->GetProperties();
+            WriteRegistryDword(key, name, static_cast<DWORD>(properties->GetEnum("Value")));
+            delete properties;
+        };
+
+        saveEnum(annotationTypeBlock_, "AnnotationType");
+        saveEnum(weldNutSeriesBlock_, "WeldNutSeries");
+        saveEnum(pemNutSeriesBlock_, "PemNutSeries");
+        saveEnum(pemScrewSeriesBlock_, "PemScrewSeries");
+        saveEnum(pemStudSeriesBlock_, "PemStudSeries");
+
+        if (letterToggleBlock_ != nullptr)
+        {
+            NXOpen::BlockStyler::PropertyList* properties = letterToggleBlock_->GetProperties();
+            WriteRegistryDword(key, "LetterToggle", properties->GetLogical("Value") ? 1u : 0u);
+            delete properties;
+        }
+        if (markerStartBlock_ != nullptr)
+        {
+            NXOpen::BlockStyler::PropertyList* properties = markerStartBlock_->GetProperties();
+            WriteRegistryString(key, "MarkerStart", properties->GetString("Value").GetText());
+            delete properties;
+        }
+        if (lengthBlock_ != nullptr)
+        {
+            NXOpen::BlockStyler::PropertyList* properties = lengthBlock_->GetProperties();
+            WriteRegistryDword(key, "LengthValue", static_cast<DWORD>(properties->GetInteger("Value")));
+            delete properties;
+        }
+
+        RegCloseKey(key);
     }
 
 

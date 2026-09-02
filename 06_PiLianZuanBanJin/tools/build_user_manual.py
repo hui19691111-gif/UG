@@ -366,6 +366,26 @@ def compact_table_text(table, size=9):
                     r._element.rPr.rFonts.set(qn("w:eastAsia"), "微软雅黑")
 
 
+def add_cropped_real_dialog_capture(doc: Document, path: Path):
+    """Insert the user-provided NX capture and crop it in Word without redrawing the UI."""
+    shape = doc.add_picture(str(path))
+    shape.width = Inches(3.05)
+    shape.height = Inches(5.72)
+
+    blip_fill = shape._inline.graphic.graphicData.pic.blipFill
+    src_rect = OxmlElement("a:srcRect")
+    # Original image is 750 x 844. Keep the real dialog at approximately
+    # x=112..374, y=173..653 and hide the unrelated chat/error area.
+    src_rect.set("l", "14933")
+    src_rect.set("t", "20498")
+    src_rect.set("r", "50133")
+    src_rect.set("b", "22630")
+    blip_fill.insert(1, src_rect)
+
+    paragraph = shape._inline.getparent()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+
 def set_margins(doc: Document):
     section = doc.sections[0]
     section.orientation = WD_ORIENT.PORTRAIT
@@ -574,13 +594,49 @@ def add_picker_dialog_control_table(doc: Document):
     compact_table_text(table, 9)
 
 
+def add_rules_dialog_control_table(doc: Document):
+    rows = [
+        ("选择规则", "下拉框", "选择要维护的折弯角度区间：90°、0～90°、90～180°或180～360°。"),
+        ("普通折弯", "下拉框", "指定普通折弯读取扣除1～3、K因子1～3或A1～A3中的哪一列。"),
+        ("多刀折圆", "下拉框", "指定多刀折圆读取的系数列。截图中选择的是“K因子3”。"),
+        ("多刀折圆最小半径", "数字输入框", "大于0时启用；达到该半径门槛的圆弧折弯按多刀折圆规则取值。单位跟随零件单位。"),
+        ("材料分页", "下拉框", "选择“全部”或单一材料，控制下方表格显示范围。"),
+        ("新增厚度", "按钮", "为材料新增一个厚度规格，再编辑厚度和各系数列。"),
+        ("系数表格", "可编辑表格", "双击单元格维护材料、厚度、扣除值、K因子和A1～A3。只有上方选中的列参与对应计算。"),
+        ("保存", "按钮", "将当前规则写入配置文件；每次修改后建议立即保存。"),
+        ("导入/导出EXCEL数据", "按钮", "批量交换CSV格式的表格数据。导入后先核对内容，再点击保存。"),
+        ("计算K因子", "按钮", "打开K因子计算工具，用试折或已知展开数据辅助计算。"),
+        ("确定 / 取消", "按钮", "确定会保存后关闭；取消会放弃尚未保存的修改。"),
+    ]
+    table = doc.add_table(rows=1, cols=3)
+    table.style = "Table Grid"
+    set_table_col_widths(table, [Inches(1.6), Inches(1.0), Inches(4.0)])
+    headers = ["控件", "类型", "使用说明"]
+    for i, text in enumerate(headers):
+        set_cell_text(table.cell(0, i), text, True, 9)
+    for row in rows:
+        cells = table.add_row().cells
+        set_table_col_widths(table, [Inches(1.6), Inches(1.0), Inches(4.0)])
+        for i, text in enumerate(row):
+            set_cell_text(cells[i], text, False, 9)
+    style_table(table)
+    compact_table_text(table, 9)
+
+
 def build_doc():
     ASSETS.mkdir(parents=True, exist_ok=True)
     create_flow_image(ASSETS / "流程图.png")
     create_manual_image(ASSETS / "手动选择示意.png")
     create_result_image(ASSETS / "结果提示.png")
-    create_main_dialog_image(ASSETS / "主对话框控件编号.png")
-    create_picker_dialog_image(ASSETS / "装配列表控件编号.png")
+    real_dialog_capture = ASSETS / "主对话框真实截图.png"
+    if not real_dialog_capture.is_file():
+        raise FileNotFoundError(f"缺少真实对话框截图：{real_dialog_capture}")
+    assembly_capture = ASSETS / "装配选择真实截图.png"
+    if not assembly_capture.is_file():
+        raise FileNotFoundError(f"缺少真实装配选择截图：{assembly_capture}")
+    rules_capture = ASSETS / "规则表真实截图.png"
+    if not rules_capture.is_file():
+        raise FileNotFoundError(f"缺少真实规则表截图：{rules_capture}")
 
     doc = Document()
     set_margins(doc)
@@ -604,17 +660,23 @@ def build_doc():
     ])
 
     doc.add_heading("3. 主对话框界面说明", level=1)
-    doc.add_paragraph("下图按主对话框上的按钮、输入框、下拉框和开关做了编号。实际软件界面不会显示红色编号，编号只用于对照本文档说明。")
-    doc.add_picture(str(ASSETS / "主对话框控件编号.png"), width=Inches(6.7))
+    doc.add_paragraph("下图来自 NX 中实际运行的“自动转钣金”对话框。截图右侧的错误窗口和聊天背景已通过文档裁切隐藏，没有重画或替换任何对话框控件。请按界面从上到下，对照下表查看每个选项的用途。")
+    add_cropped_real_dialog_capture(doc, real_dialog_capture)
     add_main_dialog_control_table(doc)
 
     doc.add_heading("4. 装配列表界面说明", level=1)
-    doc.add_paragraph("在装配环境下运行时，会先出现待处理部件列表。可以先设置过滤条件，再勾选需要处理的部件。")
-    doc.add_picture(str(ASSETS / "装配列表控件编号.png"), width=Inches(6.7))
+    doc.add_paragraph("在装配环境下运行时，会先出现待处理部件列表。下图来自实际装配模型运行界面。先设置过滤条件，再勾选需要处理的部件；点击“确定”后才进入主参数对话框。")
+    doc.add_picture(str(assembly_capture), width=Inches(6.7))
     add_picker_dialog_control_table(doc)
     add_note(doc, "图层输入示例", "输入 10 表示只看 10 层；输入 10,12,15 表示只看这几个图层；输入 10-15 表示 10 到 15 层。")
 
-    doc.add_heading("5. 手动选择基面和 X 向", level=1)
+    doc.add_heading("5. 折弯系数规则表", level=1)
+    doc.add_paragraph("在主对话框点击“规则设置…”打开折弯系数表。下图为实际运行界面。上方决定不同折弯类型使用哪一列数据，下方维护每种材料和板厚的具体数值。")
+    doc.add_picture(str(rules_capture), width=Inches(6.7))
+    add_rules_dialog_control_table(doc)
+    add_note(doc, "规则列必须对应", "若普通折弯选择“扣除1”，程序读取当前材料和板厚行的“扣除1”；若多刀折圆选择“K因子3”，程序读取“K因子3”。不要只修改某一列，却在上方选择另一列。", fill="FFF7E6")
+
+    doc.add_heading("6. 手动选择基面和 X 向", level=1)
     doc.add_picture(str(ASSETS / "手动选择示意.png"), width=Inches(6.7))
     add_numbered(doc, [
         "点击主对话框中的“手动选择...”。",
@@ -626,7 +688,7 @@ def build_doc():
     ])
     add_note(doc, "手动选择限制", "手动选择的面必须来自带有 sulian 属性且该属性有值的实体；X 向边必须是所选基面上的直线边。", fill="FFF7E6")
 
-    doc.add_heading("6. 结果提示和失败处理", level=1)
+    doc.add_heading("7. 结果提示和失败处理", level=1)
     doc.add_picture(str(ASSETS / "结果提示.png"), width=Inches(6.7))
     add_bullets(doc, [
         "全部处理成功时，不弹最终结果框。",
@@ -636,7 +698,7 @@ def build_doc():
         "如果选择失败改红或高亮，失败对象会按设置进行颜色或高亮标识。",
     ])
 
-    doc.add_heading("7. 常见问题", level=1)
+    doc.add_heading("8. 常见问题", level=1)
     qa = [
         ("为什么点“确定”后没有处理某些部件？", "先检查装配列表过滤条件、图层范围、材料/数量属性开关，以及该部件是否被勾选。"),
         ("为什么手动选择时选不到面？", "确认该实体是否有名称为 sulian 且有值的属性，并确认选择的是实体上的平面。"),
@@ -654,7 +716,7 @@ def build_doc():
         set_cell_text(cells[1], a)
     style_table(table)
 
-    doc.add_heading("8. 建议操作习惯", level=1)
+    doc.add_heading("9. 建议操作习惯", level=1)
     add_bullets(doc, [
         "正式批量处理前，先用少量零件验证规则和方向。",
         "复杂或方向敏感的零件优先手动指定基面和 X 向。",

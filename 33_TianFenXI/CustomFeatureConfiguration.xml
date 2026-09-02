@@ -44,4 +44,18 @@
         FeatureLibrary="TianFenXICore"
         FeatureUILibrary="TianFenXI"
         IsWithoutBody="true"/>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::KonFanLaLiao"
+        FeatureName="&#x5B54;&#x9632;&#x62C9;&#x69FD;"
+        FeatureIcon="KonFanLaLiao"
+        FeatureLibrary="KonFanLaLiaoCoreFix4"
+        FeatureUILibrary="KonFanLaLiao"
+        IsWithoutBody="true"/>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::KeZiSingleLine"
+        FeatureName="&#x5355;&#x7EBF;&#x523B;&#x5B57;"
+        FeatureIcon="KeZi"
+        FeatureLibrary="KeZiCore"
+        FeatureUILibrary="KeZi"
+        IsWithoutBody="true"/>
 </CustomFeatureLib>

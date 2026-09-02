@@ -250,14 +250,14 @@ namespace
     std::string FormatDouble(double value)
     {
         std::ostringstream out;
-        out << std::fixed << std::setprecision(2) << value;
+        out << std::fixed << std::setprecision(3) << value;
         return out.str();
     }
 
     std::string FormatHole(double value)
     {
         std::ostringstream out;
-        out << std::fixed << std::setprecision(2) << value;
+        out << std::fixed << std::setprecision(3) << value;
         return out.str();
     }
 
@@ -283,7 +283,8 @@ namespace
         ReplaceAll(result, "{规格}", record.size);
         ReplaceAll(result, "{螺纹}", record.threadSpec);
         ReplaceAll(result, "{底孔}", FormatHole(record.bottomHole));
-        ReplaceAll(result, "{长度}", record.lengthText);
+        // 长度要到生成标注时再解析：规则表未指定具体长度时，
+        // 需要使用对话框的当前输入值。
         return Trim(result);
     }
 
@@ -423,7 +424,7 @@ namespace
         output << "size=" << EscapeIni(rule.size) << "\n";
         output << "threadSpec=" << EscapeIni(rule.threadSpec) << "\n";
         output << "lengthText=" << EscapeIni(rule.lengthText) << "\n";
-        output << "bottomHole=" << std::fixed << std::setprecision(2) << rule.bottomHole << "\n";
+        output << "bottomHole=" << std::fixed << std::setprecision(3) << rule.bottomHole << "\n";
         output << "displayText=" << EscapeIni(rule.displayText) << "\n";
         output << "standardComment=" << EscapeIni(rule.standardComment) << "\n";
         output << "note=" << EscapeIni(rule.note) << "\n\n";
@@ -1419,7 +1420,7 @@ namespace
                << EscapeCsv(rule.size) << ','
                << EscapeCsv(rule.threadSpec) << ','
                << EscapeCsv(rule.lengthText) << ','
-               << std::fixed << std::setprecision(2) << rule.bottomHole << ','
+               << std::fixed << std::setprecision(3) << rule.bottomHole << ','
                << EscapeCsv(rule.displayText) << ','
                << EscapeCsv(rule.standardComment) << ','
                << EscapeCsv(rule.note) << "\n";
@@ -2073,6 +2074,7 @@ namespace KonBiaoZu
         double tolerance) const
     {
         std::vector<RuleRecord> matches;
+        (void)lengthValue;
         const std::string key = ToRuleKey(type);
         const auto rulesIt = rulesByType_.find(key);
         if (rulesIt == rulesByType_.end())
@@ -2090,14 +2092,6 @@ namespace KonBiaoZu
             if (std::abs(rule.bottomHole - bottomHole) > tolerance)
             {
                 continue;
-            }
-
-            if (lengthValue > 0 && !rule.lengthText.empty() && rule.lengthText != "按输入")
-            {
-                if (rule.lengthText != std::to_string(lengthValue))
-                {
-                    continue;
-                }
             }
 
             matches.push_back(rule);

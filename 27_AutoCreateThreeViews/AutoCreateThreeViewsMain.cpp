@@ -1640,8 +1640,16 @@ void ExecuteUiRequestParts(const std::filesystem::path& requestPath)
     }
     else
     {
+        std::set<tag_t> seenPrototypeParts;
         for (const SelectedDrawingPart& selected : drawingParts)
         {
+            if (!seenPrototypeParts.insert(selected.prototypePart).second)
+            {
+                WriteLauncherLog(
+                    "AutoCreateThreeViews: part/assembly drawing skipped duplicate occurrence of prototype part=" +
+                    std::to_string(static_cast<unsigned long long>(selected.prototypePart)) + ".");
+                continue;
+            }
             drawingTargets.push_back({selected, 0, 0, 1});
         }
     }
@@ -1852,8 +1860,18 @@ std::unique_ptr<AsyncDrawingBatch> PrepareAsyncDrawingBatch(
     }
     else
     {
+        std::set<tag_t> seenPrototypeParts;
         for (const SelectedDrawingPart& selected : drawingParts)
+        {
+            if (!seenPrototypeParts.insert(selected.prototypePart).second)
+            {
+                WriteLauncherLog(
+                    "AutoCreateThreeViews: async part/assembly drawing skipped duplicate occurrence of prototype part=" +
+                    std::to_string(static_cast<unsigned long long>(selected.prototypePart)) + ".");
+                continue;
+            }
             batch->targets.push_back({selected, 0, 0, 1});
+        }
     }
 
     if (batch->targets.empty())

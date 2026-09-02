@@ -1,5 +1,7 @@
 ﻿#include "TwoPointSiBianUI.hpp"
 
+#include "../../common/ZhihuiContextHelp.hpp"
+
 #include <NXOpen/BlockStyler_Enumeration.hxx>
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_StringBlock.hxx>
@@ -3474,6 +3476,7 @@ TwoPointSiBianUI::TwoPointSiBianUI()
     featureClass_ = customFeatureManager_->GetClassFromName(zhihui_twopoint_sibian::kFeatureClassName);
     gActiveTwoPointSiBianDialog = this;
 
+    zhihui_context_help::EnsureGlobalHelpLoaded();
     dialog_ = ui_->CreateDialog("TwoPointSiBian.dlx");
     dialog_->AddInitializeHandler(make_callback(this, &TwoPointSiBianUI::initialize_cb));
     dialog_->AddDialogShownHandler(make_callback(this, &TwoPointSiBianUI::dialogShown_cb));

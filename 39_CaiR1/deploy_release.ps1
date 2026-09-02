@@ -80,8 +80,17 @@ foreach ($name in @(
 
 foreach ($name in @("CaiR1.dll", "CaiR1CoreEdit.dll", "CaiR1.dlx", "CaiR1.bmp"))
 {
-    Copy-Item -LiteralPath (Join-Path $release $name) `
-        -Destination (Join-Path $application $name) -Force
+    $sourcePath = Join-Path $release $name
+    $destinationPath = Join-Path $application $name
+    $alreadyCurrent =
+        (Test-Path -LiteralPath $destinationPath -PathType Leaf) -and
+        ((Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash -eq
+         (Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256).Hash)
+    if (-not $alreadyCurrent)
+    {
+        Copy-Item -LiteralPath $sourcePath `
+            -Destination $destinationPath -Force
+    }
 }
 
 [xml]$customFeatureConfig =

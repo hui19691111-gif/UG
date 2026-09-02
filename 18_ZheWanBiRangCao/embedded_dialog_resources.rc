@@ -1,4 +1,4 @@
 #include "embedded_dialog_resources.h"
 
 IDR_ZH_DLX_ZHEWANBIRANGCAO_DLX RCDATA "ZheWanBiRangCao.dlx"
-IDR_ZH_UDF_ZHEWANBIRANGCAO_PRT RCDATA "ZW_BiLanCao.prt"
+IDR_ZH_UDF_ZHEWANBIRANGCAO_PRT RCDATA "ZW_BiLanCao1.prt"

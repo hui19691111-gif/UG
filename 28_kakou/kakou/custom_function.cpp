@@ -6,8 +6,8 @@
 #include "UG_TouWenJian.h"
 using namespace NXOpen;
 
-//选择实体获得工程图实�?
-void custom_Body_To_DraftingBody(NXOpen::Body* body1, Drawings::DraftingBody* &DraftingBody1, Drawings::BaseView* BaseView1A)//获得面的外围�?
+//选择实体并获得工程图实体。
+void custom_Body_To_DraftingBody(NXOpen::Body* body1, Drawings::DraftingBody* &DraftingBody1, Drawings::BaseView* BaseView1A)//获得面的外围线。
 {
 	//获取视图body
 	std::vector<Drawings::DraftingBody*>DraftingBodyVector;
@@ -28,7 +28,7 @@ void custom_Body_To_DraftingBody(NXOpen::Body* body1, Drawings::DraftingBody* &D
 		Drawings::DraftingCurveCollection* DraftingCurveCollection1 = DraftingBodyVector[i]->DraftingCurves();
 		Drawings::DraftingCurveCollection::iterator Ite2 = DraftingCurveCollection1->begin();
 
-		DraftingCurve = (*Ite2);//获得某个BODY的一条曲�?
+		DraftingCurve = (*Ite2);//获得某个 BODY 的一条曲线。
 
 		//得到要标尺寸的视图BODY
 
@@ -184,10 +184,10 @@ for (size_t i = 0; i < VTaggedObject1.size(); i++)
     {
         Point* point1 = dynamic_cast<NXOpen::Point*>(NXOpen::NXObjectManager::Get(VTaggedObject1[i]->Tag()));
         VPoint1.push_back(point1);
-        //获得对象的父�?
+        //获得对象的父项。
         int n_parents; tag_p_t parents;
         UF_SO_ask_parents(VTaggedObject1[i]->Tag(), UF_SO_ASK_ALL_PARENTS, &n_parents, &parents);
-        //循环得到父项的类型跟子类�?
+        //循环得到父项的类型和子类型。
         for (size_t ia = 0; ia < n_parents; ia++)
         {
             int type1, subtype1;

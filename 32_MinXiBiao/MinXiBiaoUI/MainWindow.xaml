@@ -87,6 +87,7 @@
                        VerticalAlignment="Center"
                        Foreground="#5D6875"/>
             <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">
+                <Button Content="帮助" Click="HelpButton_Click"/>
                 <Button Content="删除行" Click="DeleteRowsButton_Click"/>
                 <Button Content="确定" Style="{StaticResource PrimaryButton}" Click="OkButton_Click"/>
                 <Button Content="取消" Click="CancelButton_Click"/>

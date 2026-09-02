@@ -2300,23 +2300,6 @@ SameBodyPoint3 BuildSameBodyFallbackXAxis(const SameBodyPoint3& zAxis)
 	return xAxis;
 }
 
-bool AskSameBodyFaceOutwardNormal(NXOpen::Face* face, SameBodyPoint3& normal)
-{
-	NXOpen::Session* session = NXOpen::Session::GetSession();
-	if (face == NULL || session == NULL || session->Parts() == NULL || session->Parts()->Work() == NULL)
-	{
-		return false;
-	}
-	NXOpen::Direction* direction = session->Parts()->Work()->Directions()->CreateDumbDirectionFace(face, NXOpen::SenseForward, NXOpen::SmartObject::UpdateOptionWithinModeling);
-	if (direction == NULL)
-	{
-		return false;
-	}
-	const NXOpen::Vector3d vector = direction->Vector();
-	normal = MakeSameBodyPoint3(vector.X, vector.Y, vector.Z);
-	return NormalizeSameBodyPoint(normal);
-}
-
 bool BuildSameBodyPlanarFaceFeature(NXOpen::Face* face, SameBodyPlaneFaceFeature& feature)
 {
 	int faceType = 0;
@@ -2334,14 +2317,14 @@ bool BuildSameBodyPlanarFaceFeature(NXOpen::Face* face, SameBodyPlaneFaceFeature
 	int normalDirection = 0;
 	ThrowSameBodyUfError(UF_MODL_ask_face_data(face->Tag(), &dataType, point, normal, box, &radius, &radiusData, &normalDirection));
 
-	SameBodyPoint3 zAxis = {};
-	if (!AskSameBodyFaceOutwardNormal(face, zAxis))
+	// UF_MODL_ask_face_data already supplies the face normal and its outward
+	// direction.  Creating a dumb NXOpen Direction here left one persistent
+	// smart object behind for every planar face, so repeated runs accumulated
+	// hundreds of objects and became progressively slower.
+	SameBodyPoint3 zAxis = SameBodyPointFromArray(normal);
+	if (normalDirection < 0)
 	{
-		zAxis = SameBodyPointFromArray(normal);
-		if (normalDirection < 0)
-		{
-			zAxis = SameBodyScalePoint(zAxis, -1.0);
-		}
+		zAxis = SameBodyScalePoint(zAxis, -1.0);
 	}
 	if (!NormalizeSameBodyPoint(zAxis))
 	{
@@ -2810,12 +2793,82 @@ bool SameBodyTypedEdgeLengthsMatch(const SameBodyFingerprint& reference, const S
 		SameBodyLengthSequenceMatch(reference.lineEdgeLengths, candidate.lineEdgeLengths);
 }
 
-bool SameBodyFingerprintsMatch(SameBodyFingerprint& reference, SameBodyFingerprint& candidate)
+bool DescribeSameBodyLengthSequenceMismatch(
+	const char* sequenceName,
+	const std::vector<double>& referenceLengths,
+	const std::vector<double>& candidateLengths,
+	std::string& mismatchReason)
 {
-	return reference.edgeCount == candidate.edgeCount &&
-		reference.faceCount == candidate.faceCount &&
-		SameBodyTypedEdgeLengthsMatch(reference, candidate) &&
-		SameBodyAnchorsMatch(reference, candidate);
+	if (referenceLengths.size() != candidateLengths.size())
+	{
+		std::ostringstream oss;
+		oss << sequenceName << "Count"
+			<< " ref=" << referenceLengths.size()
+			<< " cand=" << candidateLengths.size();
+		mismatchReason = oss.str();
+		return true;
+	}
+	for (size_t index = 0; index < referenceLengths.size(); ++index)
+	{
+		if (!SameBodyNearlyEqual(referenceLengths[index], candidateLengths[index], kSameBodyLengthTolerance))
+		{
+			std::ostringstream oss;
+			oss << std::fixed << std::setprecision(6)
+				<< sequenceName << "Length"
+				<< " index=" << index
+				<< " ref=" << referenceLengths[index]
+				<< " cand=" << candidateLengths[index]
+				<< " diff=" << std::fabs(referenceLengths[index] - candidateLengths[index])
+				<< " tolerance=" << kSameBodyLengthTolerance;
+			mismatchReason = oss.str();
+			return true;
+		}
+	}
+	return false;
+}
+
+bool SameBodyFingerprintsMatch(SameBodyFingerprint& reference, SameBodyFingerprint& candidate, std::string* mismatchReason = NULL)
+{
+	std::string reason;
+	if (reference.edgeCount != candidate.edgeCount)
+	{
+		std::ostringstream oss;
+		oss << "edgeCount ref=" << reference.edgeCount << " cand=" << candidate.edgeCount;
+		reason = oss.str();
+	}
+	else if (reference.faceCount != candidate.faceCount)
+	{
+		std::ostringstream oss;
+		oss << "faceCount ref=" << reference.faceCount << " cand=" << candidate.faceCount;
+		reason = oss.str();
+	}
+	else if (DescribeSameBodyLengthSequenceMismatch("fullCircleEdge", reference.fullCircleEdgeLengths, candidate.fullCircleEdgeLengths, reason) ||
+		DescribeSameBodyLengthSequenceMismatch("arcEdge", reference.arcEdgeLengths, candidate.arcEdgeLengths, reason) ||
+		DescribeSameBodyLengthSequenceMismatch("curveEdge", reference.curveEdgeLengths, candidate.curveEdgeLengths, reason) ||
+		DescribeSameBodyLengthSequenceMismatch("lineEdge", reference.lineEdgeLengths, candidate.lineEdgeLengths, reason))
+	{
+	}
+	else if (!SameBodyAnchorsMatch(reference, candidate))
+	{
+		std::ostringstream oss;
+		oss << "anchorGeometry"
+			<< " refPlaneFaces=" << reference.planeFaces.size()
+			<< " candPlaneFaces=" << candidate.planeFaces.size()
+			<< " refPlaneGroups=" << reference.planeFaceGroups.size()
+			<< " candPlaneGroups=" << candidate.planeFaceGroups.size()
+			<< " distanceTolerance=" << kSameBodyDistanceTolerance
+			<< " areaAbsTolerance=" << kSameBodyFaceAreaAbsoluteTolerance
+			<< " areaRelTolerance=" << kSameBodyFaceAreaRelativeTolerance;
+		reason = oss.str();
+	}
+
+	if (!reason.empty())
+	{
+		if (mismatchReason != NULL) *mismatchReason = reason;
+		return false;
+	}
+	if (mismatchReason != NULL) mismatchReason->clear();
+	return true;
 }
 
 void ApplySameBodyColor(NXOpen::Body* body, int colorId)
@@ -6401,8 +6454,15 @@ int ProcessBatchBodyQuantityInPart(
 			{
 				continue;
 			}
-			if (!SameBodyFingerprintsMatch(batchFingerprints[referenceIndex], batchFingerprints[candidateIndex]))
+			std::string mismatchReason;
+			if (!SameBodyFingerprintsMatch(batchFingerprints[referenceIndex], batchFingerprints[candidateIndex], &mismatchReason))
 			{
+				std::ostringstream oss;
+				oss << "sameBody reject context=assemblyBatch"
+					<< " refTag=" << batchFingerprints[referenceIndex].tag
+					<< " candTag=" << batchFingerprints[candidateIndex].tag
+					<< " reason=" << mismatchReason;
+				ZiDonFenCenDebugLog(oss.str());
 				continue;
 			}
 			batchGrouped[candidateIndex] = true;
@@ -7179,7 +7239,8 @@ int ZiDonFenCen::apply_cb()
 						continue;
 					}
 					const unsigned long long compareStartMs = ZiDonFenCenNowMs();
-					const bool isSameBody = SameBodyFingerprintsMatch(batchFingerprints[referenceIndex], batchFingerprints[candidateIndex]);
+					std::string mismatchReason;
+					const bool isSameBody = SameBodyFingerprintsMatch(batchFingerprints[referenceIndex], batchFingerprints[candidateIndex], &mismatchReason);
 					const unsigned long long compareMs = ZiDonFenCenElapsedMs(compareStartMs);
 					++compareCount;
 					compareTotalMs += compareMs;
@@ -7203,6 +7264,14 @@ int ZiDonFenCen::apply_cb()
 					}
 					if (!isSameBody)
 					{
+						std::ostringstream oss;
+						oss << "sameBody reject context=batch"
+							<< " refIndex=" << referenceIndex
+							<< " refTag=" << batchFingerprints[referenceIndex].tag
+							<< " candIndex=" << candidateIndex
+							<< " candTag=" << batchFingerprints[candidateIndex].tag
+							<< " reason=" << mismatchReason;
+						ZiDonFenCenDebugLog(oss.str());
 						continue;
 					}
 					++matchedCompareCount;
@@ -7967,8 +8036,15 @@ int ZiDonFenCen::ask_xiantonti(Body* body1,vector<Body*> &VBody, std::vector<int
 				referenceFingerprintReady = true;
 			}
 			SameBodyFingerprint candidateFingerprint = BuildSameBodyFingerprint(VBody[i]);
-			if (!SameBodyFingerprintsMatch(referenceFingerprint, candidateFingerprint))
+			std::string mismatchReason;
+			if (!SameBodyFingerprintsMatch(referenceFingerprint, candidateFingerprint, &mismatchReason))
 			{
+				std::ostringstream oss;
+				oss << "sameBody reject context=manual"
+					<< " refTag=" << referenceFingerprint.tag
+					<< " candTag=" << candidateFingerprint.tag
+					<< " reason=" << mismatchReason;
+				ZiDonFenCenDebugLog(oss.str());
 				++i;
 				continue;
 			}

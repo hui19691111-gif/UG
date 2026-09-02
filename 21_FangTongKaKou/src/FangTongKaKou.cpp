@@ -851,6 +851,7 @@ struct TouchingPortPlacement
 {
     FacePlacement malePlacement;
     tag_t femaleBodyTag;
+    std::vector<tag_t> femaleCandidateBodyTags;
 };
 
 bool EstimateTubeDimensionsFromEdges(tag_t bodyTag, double& length, double& width, double& height);
@@ -1802,15 +1803,120 @@ tag_t CreateExtrudedToolBody(const std::vector<tag_t>& profileCurves, const doub
 
 void SubtractToolBody(tag_t targetBody, tag_t toolBody)
 {
+    {
+        std::ostringstream log;
+        log << "FemalePortSubtractBegin"
+            << " targetBody=" << targetBody
+            << " toolBody=" << toolBody;
+        AppendDebugLog(log.str());
+    }
+
     int resultCount = 0;
     tag_t* resultingBodies = NULL;
-    ThrowUfError(
-        UF_MODL_subtract_bodies(targetBody, toolBody, &resultCount, &resultingBodies),
-        "UF_MODL_subtract_bodies");
+    const int subtractRc = UF_MODL_subtract_bodies(targetBody, toolBody, &resultCount, &resultingBodies);
+    if (subtractRc != 0)
+    {
+        std::ostringstream log;
+        log << "FemalePortSubtractFailed"
+            << " targetBody=" << targetBody
+            << " toolBody=" << toolBody
+            << " error=" << subtractRc
+            << " resultCount=" << resultCount;
+        AppendDebugLog(log.str());
+    }
+    ThrowUfError(subtractRc, "UF_MODL_subtract_bodies");
     if (resultingBodies != NULL)
     {
         UF_free(resultingBodies);
     }
+
+    {
+        std::ostringstream log;
+        log << "FemalePortSubtractSucceeded"
+            << " targetBody=" << targetBody
+            << " toolBody=" << toolBody
+            << " resultCount=" << resultCount;
+        AppendDebugLog(log.str());
+    }
+}
+
+bool SelectFemaleBodyIntersectingTool(
+    tag_t toolBody,
+    tag_t sourceBody,
+    tag_t preferredBody,
+    const std::vector<tag_t>& candidateBodyTags,
+    tag_t* selectedBody)
+{
+    if (selectedBody != NULL)
+    {
+        *selectedBody = NULL_TAG;
+    }
+
+    std::vector<tag_t> orderedCandidates;
+    if (preferredBody != NULL_TAG && preferredBody != sourceBody)
+    {
+        orderedCandidates.push_back(preferredBody);
+    }
+    for (std::size_t index = 0; index < candidateBodyTags.size(); ++index)
+    {
+        const tag_t candidateBody = candidateBodyTags[index];
+        if (candidateBody == NULL_TAG || candidateBody == sourceBody ||
+            std::find(orderedCandidates.begin(), orderedCandidates.end(), candidateBody) != orderedCandidates.end())
+        {
+            continue;
+        }
+        orderedCandidates.push_back(candidateBody);
+    }
+
+    tag_t matchedBody = NULL_TAG;
+    for (std::size_t index = 0; index < orderedCandidates.size(); ++index)
+    {
+        tag_t candidateBody = orderedCandidates[index];
+        int interferenceStatus = 0;
+        const int interferenceRc = UF_MODL_check_interference(
+            candidateBody,
+            1,
+            &toolBody,
+            &interferenceStatus);
+
+        std::ostringstream log;
+        log << "FemaleBodyToolIntersection"
+            << " sourceBody=" << sourceBody
+            << " candidateBody=" << candidateBody
+            << " toolBody=" << toolBody
+            << " preferred=" << (candidateBody == preferredBody ? 1 : 0)
+            << " rc=" << interferenceRc
+            << " status=" << interferenceStatus;
+        AppendDebugLog(log.str());
+
+        if (interferenceRc == 0 && interferenceStatus == 1)
+        {
+            matchedBody = candidateBody;
+            break;
+        }
+    }
+    UF_MODL_update();
+
+    if (matchedBody == NULL_TAG)
+    {
+        AppendDebugLog("FemaleBodyToolIntersectionFailed no candidate body intersects the female tool body");
+        return false;
+    }
+
+    if (selectedBody != NULL)
+    {
+        *selectedBody = matchedBody;
+    }
+    {
+        std::ostringstream log;
+        log << "FemaleBodySelectedByToolIntersection"
+            << " sourceBody=" << sourceBody
+            << " previousBody=" << preferredBody
+            << " selectedBody=" << matchedBody
+            << " toolBody=" << toolBody;
+        AppendDebugLog(log.str());
+    }
+    return true;
 }
 
 FacePlacement OppositeEndPlacement(const FacePlacement& placement)
@@ -2131,7 +2237,8 @@ bool CreateTaperMalePortAtPlacement(
 
 void CreateFemalePortAtPlacement(
     const FacePlacement& placement,
-    tag_t targetBodyTag,
+    tag_t* targetBodyTag,
+    const std::vector<tag_t>& targetCandidateBodyTags,
     double width,
     double height,
     double femaleExtrudeDepth,
@@ -2139,7 +2246,7 @@ void CreateFemalePortAtPlacement(
     double topClearance,
     std::vector<tag_t>* createdFaces)
 {
-    if (targetBodyTag == NULL_TAG)
+    if (targetBodyTag == NULL || *targetBodyTag == NULL_TAG)
     {
         throw std::runtime_error(u8"未找到母槽对应的目标方通实体。");
     }
@@ -2170,7 +2277,7 @@ void CreateFemalePortAtPlacement(
             << " sideClearance=" << FormatDouble(sideClearance)
             << " topClearance=" << FormatDouble(topClearance)
             << " sourceBody=" << placement.bodyTag
-            << " targetBody=" << targetBodyTag
+            << " targetBody=" << *targetBodyTag
             << " clearanceWidth=" << FormatDouble(clearanceWidth)
             << " clearanceLength=" << FormatDouble(clearanceLength)
             << " wallThickness=" << FormatDouble(placement.wallThickness)
@@ -2186,21 +2293,36 @@ void CreateFemalePortAtPlacement(
 
     std::vector<tag_t> profile = CreateRectangleProfile(placement, lengthStart, lengthEnd, widthStart, widthEnd);
     tag_t toolBody = NULL_TAG;
-    const std::set<tag_t> beforeFaces = AskBodyFaceSet(targetBodyTag);
     try
     {
         toolBody = CreateExtrudedToolBody(profile, placement.normal, thicknessStart, thicknessEnd);
-        SubtractToolBody(targetBodyTag, toolBody);
+        tag_t resolvedTargetBody = NULL_TAG;
+        if (!SelectFemaleBodyIntersectingTool(
+                toolBody,
+                placement.bodyTag,
+                *targetBodyTag,
+                targetCandidateBodyTags,
+                &resolvedTargetBody))
+        {
+            throw std::runtime_error(u8"母槽方体未与任何候选母方通实体相交。");
+        }
+        *targetBodyTag = resolvedTargetBody;
+        const std::set<tag_t> beforeFaces = AskBodyFaceSet(resolvedTargetBody);
+        SubtractToolBody(resolvedTargetBody, toolBody);
         UF_OBJ_delete_object(toolBody);
         toolBody = NULL_TAG;
         DeleteObjects(profile);
         if (createdFaces != NULL)
         {
-            *createdFaces = AskNewBodyFaces(targetBodyTag, beforeFaces);
+            *createdFaces = AskNewBodyFaces(resolvedTargetBody, beforeFaces);
         }
     }
     catch (...)
     {
+        if (toolBody != NULL_TAG)
+        {
+            UF_OBJ_delete_object(toolBody);
+        }
         DeleteObjects(profile);
         throw;
     }
@@ -2208,7 +2330,8 @@ void CreateFemalePortAtPlacement(
 
 void CreateTaperFemalePortAtPlacement(
     const FacePlacement& placement,
-    tag_t targetBodyTag,
+    tag_t* targetBodyTag,
+    const std::vector<tag_t>& targetCandidateBodyTags,
     double width,
     double height,
     double femaleExtrudeDepth,
@@ -2217,7 +2340,7 @@ void CreateTaperFemalePortAtPlacement(
     double angle,
     std::vector<tag_t>* createdFaces)
 {
-    if (targetBodyTag == NULL_TAG)
+    if (targetBodyTag == NULL || *targetBodyTag == NULL_TAG)
     {
         throw std::runtime_error(u8"未找到斜口母槽对应的目标方通实体。");
     }
@@ -2286,7 +2409,7 @@ void CreateTaperFemalePortAtPlacement(
             << " topClearance=" << FormatDouble(topClearance)
             << " angle=" << FormatDouble(angle)
             << " sourceBody=" << placement.bodyTag
-            << " targetBody=" << targetBodyTag
+            << " targetBody=" << *targetBodyTag
             << " maleTipWidth=" << FormatDouble(maleTipWidth)
             << " clearanceWidth=" << FormatDouble(clearanceWidth)
             << " clearanceLength=" << FormatDouble(clearanceLength)
@@ -2304,21 +2427,36 @@ void CreateTaperFemalePortAtPlacement(
 
     std::vector<tag_t> profile = CreateFaceProfile(placement, clearanceProfile);
     tag_t toolBody = NULL_TAG;
-    const std::set<tag_t> beforeFaces = AskBodyFaceSet(targetBodyTag);
     try
     {
         toolBody = CreateExtrudedToolBody(profile, placement.normal, thicknessStart, thicknessEnd);
-        SubtractToolBody(targetBodyTag, toolBody);
+        tag_t resolvedTargetBody = NULL_TAG;
+        if (!SelectFemaleBodyIntersectingTool(
+                toolBody,
+                placement.bodyTag,
+                *targetBodyTag,
+                targetCandidateBodyTags,
+                &resolvedTargetBody))
+        {
+            throw std::runtime_error(u8"斜口母槽方体未与任何候选母方通实体相交。");
+        }
+        *targetBodyTag = resolvedTargetBody;
+        const std::set<tag_t> beforeFaces = AskBodyFaceSet(resolvedTargetBody);
+        SubtractToolBody(resolvedTargetBody, toolBody);
         UF_OBJ_delete_object(toolBody);
         toolBody = NULL_TAG;
         DeleteObjects(profile);
         if (createdFaces != NULL)
         {
-            *createdFaces = AskNewBodyFaces(targetBodyTag, beforeFaces);
+            *createdFaces = AskNewBodyFaces(resolvedTargetBody, beforeFaces);
         }
     }
     catch (...)
     {
+        if (toolBody != NULL_TAG)
+        {
+            UF_OBJ_delete_object(toolBody);
+        }
         DeleteObjects(profile);
         throw;
     }
@@ -3925,6 +4063,46 @@ bool AskBodyProjectionRange(tag_t bodyTag, const double axis[3], ProjectionRange
         AddProjectionPointToRange(point2, axis, range, hasPoint);
     }
     return hasPoint;
+}
+
+bool AskBodyProjectionRanges3(
+    tag_t bodyTag,
+    const double firstAxis[3],
+    const double secondAxis[3],
+    const double thirdAxis[3],
+    ProjectionRange& firstRange,
+    ProjectionRange& secondRange,
+    ProjectionRange& thirdRange)
+{
+    uf_list_p_t edgeList = NULL;
+    if (UF_MODL_ask_body_edges(bodyTag, &edgeList) != 0 || edgeList == NULL)
+    {
+        return false;
+    }
+
+    std::vector<tag_t> edgeTags = UfListToTags(edgeList);
+    UF_MODL_delete_list(&edgeList);
+    bool firstHasPoint = false;
+    bool secondHasPoint = false;
+    bool thirdHasPoint = false;
+    for (std::size_t index = 0; index < edgeTags.size(); ++index)
+    {
+        double point1[3] = {0.0, 0.0, 0.0};
+        double point2[3] = {0.0, 0.0, 0.0};
+        int vertexCount = 0;
+        if (UF_MODL_ask_edge_verts(edgeTags[index], point1, point2, &vertexCount) != 0 || vertexCount != 2)
+        {
+            continue;
+        }
+
+        AddProjectionPointToRange(point1, firstAxis, firstRange, firstHasPoint);
+        AddProjectionPointToRange(point2, firstAxis, firstRange, firstHasPoint);
+        AddProjectionPointToRange(point1, secondAxis, secondRange, secondHasPoint);
+        AddProjectionPointToRange(point2, secondAxis, secondRange, secondHasPoint);
+        AddProjectionPointToRange(point1, thirdAxis, thirdRange, thirdHasPoint);
+        AddProjectionPointToRange(point2, thirdAxis, thirdRange, thirdHasPoint);
+    }
+    return firstHasPoint && secondHasPoint && thirdHasPoint;
 }
 
 double RangeOverlap(const ProjectionRange& first, const ProjectionRange& second)
@@ -5688,17 +5866,13 @@ private:
                         continue;
                     }
 
-                    tag_t femaleBodyTag = NULL_TAG;
                     std::vector<tag_t> touchingCandidateBodyTags =
                         CollectTouchCandidateBodyTags(malePlacement, &tubeCandidateCache, false);
-                    if (!FindTouchingTubeAtEnd(malePlacement, touchingCandidateBodyTags, &femaleBodyTag))
-                    {
-                        continue;
-                    }
 
                     TouchingPortPlacement portPlacement = {};
                     portPlacement.malePlacement = malePlacement;
-                    portPlacement.femaleBodyTag = femaleBodyTag;
+                    portPlacement.femaleBodyTag = NULL_TAG;
+                    portPlacement.femaleCandidateBodyTags = touchingCandidateBodyTags;
                     touchingEndPlacements.push_back(portPlacement);
                 }
             }
@@ -5755,23 +5929,17 @@ private:
                 for (std::size_t index = 0; index < coplanarPlacements.size(); ++index)
                 {
                     FacePlacement oppositePlacement = OppositeEndPlacement(coplanarPlacements[index]);
-                    tag_t femaleBodyTag = NULL_TAG;
-                    if (FindTouchingTubeAtEnd(coplanarPlacements[index], touchingCandidateBodyTags, &femaleBodyTag))
-                    {
-                        TouchingPortPlacement portPlacement = {};
-                        portPlacement.malePlacement = coplanarPlacements[index];
-                        portPlacement.femaleBodyTag = femaleBodyTag;
-                        touchingEndPlacements.push_back(portPlacement);
-                    }
+                    TouchingPortPlacement portPlacement = {};
+                    portPlacement.malePlacement = coplanarPlacements[index];
+                    portPlacement.femaleBodyTag = NULL_TAG;
+                    portPlacement.femaleCandidateBodyTags = touchingCandidateBodyTags;
+                    touchingEndPlacements.push_back(portPlacement);
 
-                    femaleBodyTag = NULL_TAG;
-                    if (FindTouchingTubeAtEnd(oppositePlacement, touchingCandidateBodyTags, &femaleBodyTag))
-                    {
-                        TouchingPortPlacement portPlacement = {};
-                        portPlacement.malePlacement = oppositePlacement;
-                        portPlacement.femaleBodyTag = femaleBodyTag;
-                        touchingEndPlacements.push_back(portPlacement);
-                    }
+                    portPlacement = TouchingPortPlacement();
+                    portPlacement.malePlacement = oppositePlacement;
+                    portPlacement.femaleBodyTag = NULL_TAG;
+                    portPlacement.femaleCandidateBodyTags = touchingCandidateBodyTags;
+                    touchingEndPlacements.push_back(portPlacement);
                 }
 
                 touchingEndPlacements = FilterUnmarkedPortPlacements(touchingEndPlacements);
@@ -5782,7 +5950,7 @@ private:
                 ui->NXMessageBox()->Show(
                     "FangTongKaKou",
                     NXOpen::NXMessageBox::DialogTypeInformation,
-                    u8"未找到与所选公槽面接触的母方通。请确认公槽面与另一根方通或扁通相接，并且两者都符合规格表。");
+                    u8"未找到可用的母方通候选实体，请确认模型中有符合规格表的方通或扁通。");
                 return 1;
             }
 
@@ -5822,32 +5990,8 @@ private:
                 }
             }
 
-            std::vector<double> resolvedMaleHeights;
-            resolvedMaleHeights.reserve(touchingEndPlacements.size());
-            std::vector<double> resolvedFemaleDepths;
-            resolvedFemaleDepths.reserve(touchingEndPlacements.size());
-            for (std::size_t index = 0; index < touchingEndPlacements.size(); ++index)
-            {
-                const double outerRadius = autoRecognizeTubeR ?
-                    AskTubeOuterCornerRadiusForBody(
-                        touchingEndPlacements[index].femaleBodyTag,
-                        touchingEndPlacements[index].malePlacement) :
-                    0.0;
-                const double resolvedMaleHeight =
-                    ResolvePortHeight(height, outerRadius, autoRecognizeTubeR);
-                const double resolvedFemaleDepth =
-                    ResolvePortHeight(femaleDepth, outerRadius, autoRecognizeTubeR);
-                if (resolvedMaleHeight <= 0.0 || resolvedFemaleDepth <= 0.0)
-                {
-                    ui->NXMessageBox()->Show(
-                        "FangTongKaKou",
-                        NXOpen::NXMessageBox::DialogTypeInformation,
-                        u8"计算得到的 H 和母槽深度必须大于 0，请检查输入值或关闭自动识别方通 R。" );
-                    return 1;
-                }
-                resolvedMaleHeights.push_back(resolvedMaleHeight);
-                resolvedFemaleDepths.push_back(resolvedFemaleDepth);
-            }
+            std::vector<double> resolvedMaleHeights(touchingEndPlacements.size(), 0.0);
+            std::vector<double> resolvedFemaleDepths(touchingEndPlacements.size(), 0.0);
 
             std::vector<int> femaleSucceeded(touchingEndPlacements.size(), 0);
             std::vector<std::vector<tag_t> > femaleCreatedFaces(touchingEndPlacements.size());
@@ -5856,42 +6000,212 @@ private:
 
             for (std::size_t index = 0; index < touchingEndPlacements.size(); ++index)
             {
-                try
+                const FacePlacement& malePlacement = touchingEndPlacements[index].malePlacement;
+                const std::vector<tag_t>& candidateBodies =
+                    touchingEndPlacements[index].femaleCandidateBodyTags;
+
+                const double faceWidth = malePlacement.widthMax - malePlacement.widthMin;
+                const double maximumAutoRadius = autoRecognizeTubeR ?
+                    std::max(malePlacement.wallThickness * 12.0, faceWidth * 0.75 + 2.0) :
+                    0.0;
+                const double widthCenter = (malePlacement.widthMin + malePlacement.widthMax) * 0.5;
+                const double maximumToolWidth = resolvedWidths[index] + 2.0 * sideClearance;
+                ProjectionRange toolWidthRange =
                 {
-                    if (portType == 1)
+                    widthCenter - maximumToolWidth * 0.5,
+                    widthCenter + maximumToolWidth * 0.5
+                };
+                const double maximumToolLength = height + maximumAutoRadius + topClearance;
+                const double otherLengthEnd =
+                    malePlacement.endCoord - malePlacement.inwardSign * maximumToolLength;
+                ProjectionRange toolLengthRange =
+                {
+                    std::min(malePlacement.endCoord, otherLengthEnd),
+                    std::max(malePlacement.endCoord, otherLengthEnd)
+                };
+                const double faceNormalCoordinate = Dot3(malePlacement.center, malePlacement.normal);
+                const double maximumToolDepth = femaleDepth + maximumAutoRadius;
+                ProjectionRange toolNormalRange =
+                {
+                    faceNormalCoordinate - maximumToolDepth,
+                    faceNormalCoordinate
+                };
+
+                std::vector<tag_t> spatialCandidateBodies;
+                for (std::size_t candidateIndex = 0; candidateIndex < candidateBodies.size(); ++candidateIndex)
+                {
+                    const tag_t candidateBody = candidateBodies[candidateIndex];
+                    if (candidateBody == NULL_TAG || candidateBody == malePlacement.bodyTag)
                     {
-                        CreateTaperFemalePortAtPlacement(
-                            touchingEndPlacements[index].malePlacement,
-                            touchingEndPlacements[index].femaleBodyTag,
-                            resolvedWidths[index],
-                            resolvedMaleHeights[index],
-                            resolvedFemaleDepths[index],
-                            sideClearance,
-                            topClearance,
-                            angle,
-                            &femaleCreatedFaces[index]);
+                        continue;
                     }
-                    else
+
+                    ProjectionRange candidateWidthRange = {};
+                    ProjectionRange candidateLengthRange = {};
+                    ProjectionRange candidateNormalRange = {};
+                    if (!AskBodyProjectionRanges3(
+                            candidateBody,
+                            malePlacement.widthAxis,
+                            malePlacement.lengthAxis,
+                            malePlacement.normal,
+                            candidateWidthRange,
+                            candidateLengthRange,
+                            candidateNormalRange))
                     {
-                        CreateFemalePortAtPlacement(
-                            touchingEndPlacements[index].malePlacement,
-                            touchingEndPlacements[index].femaleBodyTag,
-                            resolvedWidths[index],
-                            resolvedMaleHeights[index],
-                            resolvedFemaleDepths[index],
-                            sideClearance,
-                            topClearance,
-                            &femaleCreatedFaces[index]);
+                        continue;
                     }
-                    femaleSucceeded[index] = 1;
+
+                    const double rangeTolerance = 0.25;
+                    if (RangeOverlap(toolWidthRange, candidateWidthRange) < -rangeTolerance ||
+                        RangeOverlap(toolLengthRange, candidateLengthRange) < -rangeTolerance ||
+                        RangeOverlap(toolNormalRange, candidateNormalRange) < -rangeTolerance)
+                    {
+                        continue;
+                    }
+                    spatialCandidateBodies.push_back(candidateBody);
                 }
-                catch (const NXOpen::NXException& ex)
+
                 {
-                    (void)ex;
+                    std::ostringstream log;
+                    log << "FemaleCandidateSpatialPrefilter"
+                        << " index=" << index
+                        << " sourceBody=" << malePlacement.bodyTag
+                        << " before=" << candidateBodies.size()
+                        << " after=" << spatialCandidateBodies.size();
+                    AppendDebugLog(log.str());
                 }
-                catch (const std::exception& ex)
+
+                struct FemaleCandidateGroup
                 {
-                    (void)ex;
+                    double maleHeight;
+                    double femaleDepth;
+                    std::vector<tag_t> bodies;
+                };
+                std::vector<FemaleCandidateGroup> candidateGroups;
+                for (std::size_t candidateIndex = 0; candidateIndex < spatialCandidateBodies.size(); ++candidateIndex)
+                {
+                    const tag_t candidateBody = spatialCandidateBodies[candidateIndex];
+
+                    const double outerRadius = autoRecognizeTubeR ?
+                        AskTubeOuterCornerRadiusForBody(candidateBody, malePlacement) :
+                        0.0;
+                    const double candidateMaleHeight =
+                        ResolvePortHeight(height, outerRadius, autoRecognizeTubeR);
+                    const double candidateFemaleDepth =
+                        ResolvePortHeight(femaleDepth, outerRadius, autoRecognizeTubeR);
+                    if (candidateMaleHeight <= 0.0 || candidateFemaleDepth <= 0.0)
+                    {
+                        continue;
+                    }
+
+                    std::size_t matchingGroup = candidateGroups.size();
+                    for (std::size_t groupIndex = 0; groupIndex < candidateGroups.size(); ++groupIndex)
+                    {
+                        if (std::fabs(candidateGroups[groupIndex].maleHeight - candidateMaleHeight) <= 0.001 &&
+                            std::fabs(candidateGroups[groupIndex].femaleDepth - candidateFemaleDepth) <= 0.001)
+                        {
+                            matchingGroup = groupIndex;
+                            break;
+                        }
+                    }
+                    if (matchingGroup == candidateGroups.size())
+                    {
+                        FemaleCandidateGroup group = {};
+                        group.maleHeight = candidateMaleHeight;
+                        group.femaleDepth = candidateFemaleDepth;
+                        candidateGroups.push_back(group);
+                    }
+                    candidateGroups[matchingGroup].bodies.push_back(candidateBody);
+                }
+
+                {
+                    std::ostringstream log;
+                    log << "FemaleCandidateGroups"
+                        << " index=" << index
+                        << " sourceBody=" << malePlacement.bodyTag
+                        << " candidates=" << spatialCandidateBodies.size()
+                        << " geometryGroups=" << candidateGroups.size();
+                    AppendDebugLog(log.str());
+                }
+
+                for (std::size_t groupIndex = 0; groupIndex < candidateGroups.size(); ++groupIndex)
+                {
+                    FemaleCandidateGroup& group = candidateGroups[groupIndex];
+                    if (group.bodies.empty())
+                    {
+                        continue;
+                    }
+
+                    tag_t trialTargetBody = group.bodies.front();
+                    try
+                    {
+                        if (portType == 1)
+                        {
+                            CreateTaperFemalePortAtPlacement(
+                                malePlacement,
+                                &trialTargetBody,
+                                group.bodies,
+                                resolvedWidths[index],
+                                group.maleHeight,
+                                group.femaleDepth,
+                                sideClearance,
+                                topClearance,
+                                angle,
+                                &femaleCreatedFaces[index]);
+                        }
+                        else
+                        {
+                            CreateFemalePortAtPlacement(
+                                malePlacement,
+                                &trialTargetBody,
+                                group.bodies,
+                                resolvedWidths[index],
+                                group.maleHeight,
+                                group.femaleDepth,
+                                sideClearance,
+                                topClearance,
+                                &femaleCreatedFaces[index]);
+                        }
+
+                        touchingEndPlacements[index].femaleBodyTag = trialTargetBody;
+                        resolvedMaleHeights[index] = group.maleHeight;
+                        resolvedFemaleDepths[index] = group.femaleDepth;
+                        femaleSucceeded[index] = 1;
+                        break;
+                    }
+                    catch (const NXOpen::NXException& ex)
+                    {
+                        std::ostringstream log;
+                        log << "FemaleCandidateRejected"
+                            << " index=" << index
+                            << " sourceBody=" << malePlacement.bodyTag
+                            << " candidateGroup=" << groupIndex
+                            << " groupSize=" << group.bodies.size()
+                            << " nxError=" << ex.ErrorCode()
+                            << " message=" << ex.Message();
+                        AppendDebugLog(log.str());
+                    }
+                    catch (const std::exception& ex)
+                    {
+                        std::ostringstream log;
+                        log << "FemaleCandidateRejected"
+                            << " index=" << index
+                            << " sourceBody=" << malePlacement.bodyTag
+                            << " candidateGroup=" << groupIndex
+                            << " groupSize=" << group.bodies.size()
+                            << " message=" << ex.what();
+                        AppendDebugLog(log.str());
+                    }
+                }
+
+                if (femaleSucceeded[index] == 0)
+                {
+                    std::ostringstream log;
+                    log << "FemaleBodySelectionFailed"
+                        << " index=" << index
+                        << " sourceBody=" << malePlacement.bodyTag
+                        << " reason=no candidate tube intersects generated tool body";
+                    AppendDebugLog(log.str());
                 }
             }
 
@@ -5938,15 +6252,34 @@ private:
                     }
                     else
                     {
+                        std::ostringstream log;
+                        log << "MalePortCreationReturnedFalse"
+                            << " index=" << index
+                            << " sourceBody=" << touchingEndPlacements[index].malePlacement.bodyTag
+                            << " targetBody=" << touchingEndPlacements[index].femaleBodyTag;
+                        AppendDebugLog(log.str());
                     }
                 }
                 catch (const NXOpen::NXException& ex)
                 {
-                    (void)ex;
+                    std::ostringstream log;
+                    log << "MalePortCreationFailed"
+                        << " index=" << index
+                        << " sourceBody=" << touchingEndPlacements[index].malePlacement.bodyTag
+                        << " targetBody=" << touchingEndPlacements[index].femaleBodyTag
+                        << " nxError=" << ex.ErrorCode()
+                        << " message=" << ex.Message();
+                    AppendDebugLog(log.str());
                 }
                 catch (const std::exception& ex)
                 {
-                    (void)ex;
+                    std::ostringstream log;
+                    log << "MalePortCreationFailed"
+                        << " index=" << index
+                        << " sourceBody=" << touchingEndPlacements[index].malePlacement.bodyTag
+                        << " targetBody=" << touchingEndPlacements[index].femaleBodyTag
+                        << " message=" << ex.what();
+                    AppendDebugLog(log.str());
                 }
             }
 
@@ -5954,11 +6287,20 @@ private:
         }
         catch (const NXOpen::NXException& ex)
         {
+            std::ostringstream log;
+            log << "ApplyFailed"
+                << " nxError=" << ex.ErrorCode()
+                << " message=" << ex.Message();
+            AppendDebugLog(log.str());
             ui->NXMessageBox()->Show("FangTongKaKou", NXOpen::NXMessageBox::DialogTypeError, ex.Message());
             return 1;
         }
         catch (const std::exception& ex)
         {
+            std::ostringstream log;
+            log << "ApplyFailed"
+                << " message=" << ex.what();
+            AppendDebugLog(log.str());
             ui->NXMessageBox()->Show("FangTongKaKou", NXOpen::NXMessageBox::DialogTypeError, ex.what());
             return 1;
         }

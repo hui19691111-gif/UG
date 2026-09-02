@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version='1.0' encoding='UTF-8'?>
 <Dialog NX="10.0.0" id="Dialog" icon="" name="Dialog" type="uicomp" title="ZheWanBiRangCao" creator="Codex" version="1.0.0" Expanded="1" languageInfo="Language and Codeset: simplified chinese 936" ContainerItems="1">
   <item id="main_group" icon="styler_block_sc.bmp" name="main_group" type="uicomp" class="UGS::UICOMP_group" notes="" Expanded="1" hierarchy="" presentation="Group" ContainerItems="1">
     <PropertyList>
@@ -15,11 +15,11 @@
                   <Option name="Optional" value="1"/>
                   <Option name="Satisfied" value="2"/>
                 </Property>
-                <Property id="Cue" mask="0" name="Cue" type="utfstring" group="Block Specific::" sname="Cue" value="&#x8BF7;&#x9009;&#x62E9;&#x9760;&#x8FD1;&#x6298;&#x5F2F;&#x8FB9;&#x7684;&#x5927;&#x9762;" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection"/>
+                <Property id="Cue" mask="0" name="Cue" type="utfstring" group="Block Specific::" sname="Cue" value="请选择靠近折弯边的大面" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection"/>
                 <Property id="Icon" mask="0" name="Icon" type="string" group="Block Specific::" sname="Bitmap" value="select_face" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"/>
                 <Property id="DetailedFilter" mask="69632" name="DetailedFilter" type="selfilter" group="Block Specific::" sname="DetailedFilter" source="2" ClassID="UGS::UICOMP_selection" SubTypes="256" hierarchy="UGS::UICOMP_selection"/>
-                <Property id="Label" mask="0" name="Label" type="utfstring" group="Block Specific::" sname="LabelString" value="&#x9009;&#x62E9;&#x9760;&#x8FD1;&#x6298;&#x5F2F;&#x8FB9;&#x7684;&#x5927;&#x9762;" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"/>
-                <Property id="ToolTip" mask="0" name="ToolTip" type="utfstring" group="Block Specific::" sname="ToolTip" value="&#x9009;&#x62E9;&#x9760;&#x8FD1;&#x6298;&#x5F2F;&#x8FB9;&#x7684;&#x5927;&#x9762;" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"/>
+                <Property id="Label" mask="0" name="Label" type="utfstring" group="Block Specific::" sname="LabelString" value="选择靠近折弯边的大面" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"/>
+                <Property id="ToolTip" mask="0" name="ToolTip" type="utfstring" group="Block Specific::" sname="ToolTip" value="选择靠近折弯边的大面" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"/>
                 <Property id="Many" mask="256" name="Many" type="enum" group="Block Specific::" sname="SelectMode" source="3" ClassID="UGS::UICOMP_selection" dynamic="0" selected="0" hierarchy="UGS::UICOMP_selection">
                   <Option name="Single" value="0"/>
                   <Option name="Multiple" value="1"/>
@@ -37,11 +37,32 @@
               </PropertyList>
             </item>
           </Property>
+          <Property id="cut_mode" mask="256" name="cut_mode" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="cut_mode" icon="styler_optionmenu.bmp" name="cut_mode" type="uicomp" class="UICOMP_enum" notes="" Expanded="1" hierarchy="" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" mask="16656" name="API Name" type="string" group="General::" sname="BlockID" value="cut_mode" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="Title" mask="257" name="Title" type="utfstring" group="General::" sname="Label" value="切割方式" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="MinimumValue" mask="69636" name="MinimumValue" type="integer" group="Block Specific::" sname="MinimumValue" value="0" source="1" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="MaximumValue" mask="69636" name="MaximumValue" type="integer" group="Block Specific::" sname="MaximumValue" value="1" source="1" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="Value" mask="69636" name="Value" type="integer" group="Block Specific::" sname="TEMPVALUE" value="1" source="1" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum"/>
+                <Property id="Titles_1" mask="256" name="Titles_1" type="enum" group="Block Specific::" sname="Value" source="4" ClassID="UGS::UICOMP_enum" dynamic="1" selected="1" hierarchy="UGS::UICOMP_enum">
+                  <Option name="单切" value="0"/>
+                  <Option name="多切" value="1"/>
+                </Property>
+                <Property id="Top" loc="1" mask="16384" name="Top" type="attachment" group="Other::Attachments::" sname="Top" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+                <Property id="Left" loc="2" mask="16384" name="Left" type="attachment" group="Other::Attachments::" sname="Left" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+                <Property id="Right" loc="3" mask="16384" name="Right" type="attachment" group="Other::Attachments::" sname="Right" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+                <Property id="Bottom" loc="4" mask="16384" name="Bottom" type="attachment" group="Other::Attachments::" sname="Bottom" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+              </PropertyList>
+            </item>
+          </Property>
           <Property id="slot_width_y" mask="256" name="slot_width_y" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
             <item id="slot_width_y" icon="styler_double" name="slot_width_y" type="uicomp" class="UICOMP_double" notes="" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
               <PropertyList id="id" mode="0">
                 <Property id="API Name" mask="16400" name="API Name" type="string" group="General::" sname="BlockID" value="slot_width_y" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
-                <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="&#x69FD;&#x5BBD; Y" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+                <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="槽宽 Y" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
                 <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
                 <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
                 <Property id="Value" mask="0" name="Value" type="double" group="Block Specific::" sname="Value" value="8.0" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
@@ -59,7 +80,7 @@
             <item id="slot_depth_z" icon="styler_double" name="slot_depth_z" type="uicomp" class="UICOMP_double" notes="" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
               <PropertyList id="id" mode="0">
                 <Property id="API Name" mask="16400" name="API Name" type="string" group="General::" sname="BlockID" value="slot_depth_z" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
-                <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="&#x4E0B;&#x5207;&#x6DF1;&#x5EA6; Z" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+                <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="下切深度 Z" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
                 <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
                 <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
                 <Property id="Value" mask="0" name="Value" type="double" group="Block Specific::" sname="Value" value="4.0" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
@@ -86,7 +107,7 @@
       <Property id="Left" loc="2" mask="16384" name="Left" type="attachment" group="Other::Attachments::" sname="Left" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
       <Property id="Right" loc="3" mask="16384" name="Right" type="attachment" group="Other::Attachments::" sname="Right" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
       <Property id="Bottom" loc="4" mask="16384" name="Bottom" type="attachment" group="Other::Attachments::" sname="Bottom" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
-      <Property id="Title" mask="257" name="Title" type="utfstring" group="General::" sname="Label" value="&#x6298;&#x5F2F;&#x907F;&#x8BA9;&#x69FD;" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group"/>
+      <Property id="Title" mask="257" name="Title" type="utfstring" group="General::" sname="Label" value="折弯避让槽" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group"/>
       <Property id="Group" mask="4100" name="Group" type="logical" group="General::" sname="Group" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group"/>
     </PropertyList>
   </item>
@@ -94,7 +115,7 @@
     <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem"/>
     <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem"/>
     <Property id="Expanded" mask="4" name="Expanded" type="logical" group="General::" sname="Expanded" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem"/>
-    <Property id="HelpTag" mask="4096" name="HelpTag" type="string" group="General::Other::" sname="HelpTag" value="Block_Styler" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem"/>
+    <Property id="HelpTag" mask="4096" name="HelpTag" type="string" group="General::Other::" sname="HelpTag" value="Zhihui_ZheWanBiRangCao" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem"/>
     <Property id="LightweightMode" mask="4096" name="LightweightMode" type="logical" group="General::Other::" sname="LightweightMode" value="False" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem"/>
     <Property id="ReadOnlyMode" mask="4096" name="ReadOnlyMode" type="logical" group="General::Other::" sname="ReadOnlyMode" value="False" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem"/>
     <Property id="ApplyAsDefaultAction" mask="4096" name="ApplyAsDefaultAction" type="logical" group="General::Other::" sname="ApplyAsDefaultAction" value="False" source="2" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem"/>

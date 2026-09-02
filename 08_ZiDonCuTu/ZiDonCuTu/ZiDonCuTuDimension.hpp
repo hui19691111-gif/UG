@@ -5,6 +5,9 @@
 #include "ZiDonCuTuCurve.hpp"
 
 NXOpen::Annotations::RapidDimensionBuilder* CreateRapidDimensionBuilder();
+void SetDimensionAutoPositionMode(int mode);
+bool IsLinearDimensionAutoPositionEnabled();
+bool IsRadialDimensionAutoPositionEnabled();
 void ApplyDefaultRapidDimensionStyle(NXOpen::Annotations::RapidDimensionBuilder* builder);
 NXOpen::NXObject* CommitAndDestroyRapidDimension(
 	NXOpen::Annotations::RapidDimensionBuilder* builder,

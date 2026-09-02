@@ -1,4 +1,4 @@
-
+ï»¿
 // custom_function.h
 #ifndef CUSTOM_FUNCTION_INCLUDED
 #define CUSTOM_FUNCTION_INCLUDED
@@ -12,52 +12,52 @@ using namespace std;
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
 
-//Í¨¹ıÑ¡ÔñÊµÌå£¬»ñµÃÊÓÍ¼ÀïµÄ¹¤³ÌÍ¼ÊµÌå
+//é€šè¿‡é€‰æ‹©å®ä½“åˆ›å»ºå·¥ç¨‹å›¾å®ä½“ã€‚
 extern  void custom_Body_To_DraftingBody(
-	Body* body1,//Ñ¡ÔñÊµÌå
-	Drawings::DraftingBody* &DraftingBody,//µÃµ½¹¤³ÌÍ¼ÊÓÍ¼ÀïµÄÊµÌå
-	Drawings::BaseView* BaseView1A);//ÏàÓ¦ÊÓÍ¼
+	Body* body1,//é€‰ä¸­çš„å®ä½“
+	Drawings::DraftingBody* &DraftingBody,//è¿”å›åˆ›å»ºçš„å·¥ç¨‹å›¾å®ä½“
+	Drawings::BaseView* BaseView1A);//å¯¹åº”çš„åŸºæœ¬è§†å›¾
 
-//´´½¨²¼¶ûÔËËã
+//æ‰§è¡Œå¸ƒå°”è¿ç®—ã€‚
 extern void custom_boolean(
-	Body* Body1,//ÊäÈë¹¤¾ßÌå
-	std::vector<NXOpen::Body*> bodies2,//ÊäÈëÄ¿±êÌå
-	Features::Feature::BooleanType BooleanType1,//ÊäÈë²¼¶ûÔËËãÀàĞÍ
-	Features::Feature*& Feature1, //Êä³ö²¼¶ûÔËËãÌØÕ÷
-	bool aa,//ÊäÈëÊÇ·ñ±£Áô¹¤¾ßÌå
-	bool bb);//ÊäÈëÊÇ·ñ±£ÁôÄ¿±êÌå
+	Body* Body1,//å·¥å…·ä½“
+	std::vector<NXOpen::Body*> bodies2,//ç›®æ ‡ä½“é›†åˆ
+	Features::Feature::BooleanType BooleanType1,//å¸ƒå°”è¿ç®—ç±»å‹
+	Features::Feature*& Feature1, //è¿”å›ç”Ÿæˆçš„ç‰¹å¾
+	bool aa,//æ˜¯å¦ä¿ç•™å·¥å…·ä½“
+	bool bb);//æ˜¯å¦ä¿ç•™ç›®æ ‡ä½“
 
-//´´½¨°üÈİÌå
+//åˆ›å»ºåŒ…å®¹ä½“ã€‚
 extern void custom_BaoLonTi(
-	std::vector<NXOpen::TaggedObject*> VTaggedObject1,//°üÈİÌåËù°üº¬µÄ¶ÔÏó	
-	NXOpen::Features::ToolingBox* &toolingBox1,//Êä³ö°üÈİÌåÌØÕ÷
-	Body* &Body1,//Êä³öËùÑ¡¶ÔÏóËùÔÚµÄÊµÌå
-	Body* &Body2,//°üÈİÌåÊµÌå
-	NXOpen::Matrix3x3 matrix1);//·½Î»
+	std::vector<NXOpen::TaggedObject*> VTaggedObject1,//ç”¨äºåˆ›å»ºåŒ…å®¹ä½“çš„å¯¹è±¡
+	NXOpen::Features::ToolingBox* &toolingBox1,//è¿”å›åŒ…å®¹ä½“ç‰¹å¾
+	Body* &Body1,//è¿”å›æ‰€é€‰å¯¹è±¡æ‰€åœ¨å®ä½“
+	Body* &Body2,//è¿”å›åŒ…å®¹ä½“å®ä½“
+	NXOpen::Matrix3x3 matrix1);//æ–¹ä½çŸ©é˜µ
 
-//ĞŞ¸Ä°üÈİÌå¼äÏ¶
+//ä¿®æ”¹åŒ…å®¹ä½“é—´éš™ã€‚
 extern void custom_reBaoLonTi(
-	Features::ToolingBox* toolingBox1,//ÊäÈëÈİÌåÌØÕ÷
-	const char* aa);//ÊäÈëĞŞ¸Ä¼äÏ¶
+	Features::ToolingBox* toolingBox1,//åŒ…å®¹ä½“ç‰¹å¾
+	const char* aa);//æ–°çš„é—´éš™å€¼
 
-//É¾³ı¶ÔÏó
+//åˆ é™¤å¯¹è±¡ã€‚
 extern void custom_del(
-	vector<NXOpen::TaggedObject*> objects1);//ÊäÈëÒªÉ¾³ıµÄ¶ÔÏó
+	vector<NXOpen::TaggedObject*> objects1);//éœ€è¦åˆ é™¤çš„å¯¹è±¡
 
-//ÊäÈëÖ¸¶¨·½Î»»ñµÃMatrix3x3
-extern void custom_manip_getMatrix(NXOpen::BlockStyler::SpecifyOrientation* manip0,//ÊäÈëÖ¸¶¨·½Î»
-	NXOpen::Matrix3x3 &matrix1);//Êä³öMatrix3x3
+//è¯»å–æŒ‡å®šæ–¹ä½æ§ä»¶çš„ Matrix3x3ã€‚
+extern void custom_manip_getMatrix(NXOpen::BlockStyler::SpecifyOrientation* manip0,//æ–¹ä½æ§ä»¶
+	NXOpen::Matrix3x3 &matrix1);//è¿”å›æ–¹ä½çŸ©é˜µ
 
-//´´½¨·½Ìå
-extern void custom_box(NXOpen::Point3d Point3d2,//ÊäÈëÖ¸¶¨·½Î»
-	NXOpen::Matrix3x3& matrix1,//ÊäÈëÖ¸¶¨·½Î»
-	const char* x, const char* y, const char* z,//ÊäÈë³¤¿í¸ß
-	Features::Feature* &Feature1);//Êä³öÌØÕ÷
+//åˆ›å»ºæ–¹å—ã€‚
+extern void custom_box(NXOpen::Point3d Point3d2,//åŸç‚¹
+	NXOpen::Matrix3x3& matrix1,//æ–¹ä½çŸ©é˜µ
+	const char* x, const char* y, const char* z,//é•¿ã€å®½ã€é«˜
+	Features::Feature* &Feature1);//è¿”å›ç”Ÿæˆçš„ç‰¹å¾
 
-//ĞŞ¸Ä·½Ìå
-extern void custom_rebox(NXOpen::Point3d Point3d2,//ÊäÈëÖ¸¶¨·½Î»
-	NXOpen::Matrix3x3& matrix1,//ÊäÈëÖ¸¶¨·½Î»
-	const char* x, const char* y, const char* z,//ÊäÈë³¤¿í¸ß
-	Features::Feature*& Feature1);//Êä³öÌØÕ÷
+//ä¿®æ”¹æ–¹å—ã€‚
+extern void custom_rebox(NXOpen::Point3d Point3d2,//åŸç‚¹
+	NXOpen::Matrix3x3& matrix1,//æ–¹ä½çŸ©é˜µ
+	const char* x, const char* y, const char* z,//é•¿ã€å®½ã€é«˜
+	Features::Feature*& Feature1);//å¾…ä¿®æ”¹çš„ç‰¹å¾
 
 #endif 

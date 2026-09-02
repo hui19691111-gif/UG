@@ -2438,21 +2438,33 @@ std::vector<Body*> FindMatchingVisibleBodies(Part* part, Body* referenceBody)
     const SameBodyCoarseSignature referenceCoarse = BuildSameBodyCoarseSignature(referenceBody);
     bool referenceFingerprintReady = false;
     SameBodyFingerprint referenceFingerprint = {};
-    for (Body* candidate : CollectVisibleBodies(part))
+    const std::vector<Body*> visibleBodies = CollectVisibleBodies(part);
+    int candidateCount = 0;
+    int topologyRejectedCount = 0;
+    int coarseDifferentCount = 0;
+    int fingerprintRejectedCount = 0;
+    for (Body* candidate : visibleBodies)
     {
         if (candidate == nullptr || candidate == referenceBody)
         {
             continue;
         }
+        ++candidateCount;
         if (static_cast<int>(candidate->GetEdges().size()) != referenceEdgeCount ||
             static_cast<int>(candidate->GetFaces().size()) != referenceFaceCount)
         {
+            ++topologyRejectedCount;
             continue;
         }
         const SameBodyCoarseSignature candidateCoarse = BuildSameBodyCoarseSignature(candidate);
         if (!SameBodyCoarseSignaturesMatch(referenceCoarse, candidateCoarse))
         {
-            continue;
+            // Mass properties are only an acceleration hint. NX may return
+            // slightly different principal moments for separately created
+            // but geometrically identical bodies, so never reject a body on
+            // this numerical comparison before the stronger edge/anchor
+            // fingerprint has been checked.
+            ++coarseDifferentCount;
         }
         if (!referenceFingerprintReady)
         {
@@ -2464,7 +2476,18 @@ std::vector<Body*> FindMatchingVisibleBodies(Part* part, Body* referenceBody)
         {
             matches.push_back(candidate);
         }
+        else
+        {
+            ++fingerprintRejectedCount;
+        }
     }
+    Log(Session::GetSession(), std::string("相同体多实体筛选: 可见体=") +
+        std::to_string(visibleBodies.size()) +
+        ", 候选=" + std::to_string(candidateCount) +
+        ", 边面数不同=" + std::to_string(topologyRejectedCount) +
+        ", 质量惯量差异=" + std::to_string(coarseDifferentCount) +
+        ", 强指纹不同=" + std::to_string(fingerprintRejectedCount) +
+        ", 匹配=" + std::to_string(matches.size()));
     return matches;
 }
 
@@ -4297,11 +4320,13 @@ private:
         }
         if (engraveSameBodies_ != nullptr)
         {
-            engraveSameBodies_->SetValue(config_.engraveSameBodies && !isAssemblyContext_);
+            engraveSameBodies_->SetValue(
+                editedFeature_ == nullptr && config_.engraveSameBodies);
         }
         if (sameRandomColor_ != nullptr)
         {
-            sameRandomColor_->SetValue(config_.sameRandomColor && !isAssemblyContext_);
+            sameRandomColor_->SetValue(
+                editedFeature_ == nullptr && config_.sameRandomColor);
         }
         if (autoEngraveVisibleTubes_ != nullptr)
         {
@@ -4700,6 +4725,13 @@ private:
             {
                 RefreshPreview();
             }
+        }
+        else if (block == engraveSameBodies_)
+        {
+            // Random coloring is meaningful only for the same-body batch.
+            // Turning the parent option off must also prevent the expensive
+            // same-body scan from being triggered by a stale child value.
+            UpdateUiState();
         }
         else if (block == manualFace_)
         {
@@ -5331,10 +5363,10 @@ private:
         }
         if (engraveSameBodies_ != nullptr)
         {
-            const bool showForSinglePart = !isAssemblyContext_;
-            engraveSameBodies_->SetShow(showForSinglePart);
-            engraveSameBodies_->SetEnable(showForSinglePart);
-            if (!showForSinglePart)
+            const bool allowBatchCreation = editedFeature_ == nullptr;
+            engraveSameBodies_->SetShow(allowBatchCreation);
+            engraveSameBodies_->SetEnable(allowBatchCreation);
+            if (!allowBatchCreation)
             {
                 engraveSameBodies_->SetValue(false);
             }
@@ -5346,10 +5378,12 @@ private:
         }
         if (sameRandomColor_ != nullptr)
         {
-            const bool showForSinglePart = !isAssemblyContext_;
-            sameRandomColor_->SetShow(showForSinglePart);
-            sameRandomColor_->SetEnable(showForSinglePart);
-            if (!showForSinglePart)
+            const bool allowBatchCreation = editedFeature_ == nullptr;
+            const bool engraveSameBodies =
+                allowBatchCreation && ReadToggle(engraveSameBodies_, false);
+            sameRandomColor_->SetShow(allowBatchCreation);
+            sameRandomColor_->SetEnable(engraveSameBodies);
+            if (!engraveSameBodies)
             {
                 sameRandomColor_->SetValue(false);
             }
@@ -5414,8 +5448,8 @@ private:
             settings.vShapeWidth = 1.0;
         }
         settings.renameComponentToText = isAssemblyContext_ && ReadToggle(renameComponentToText_, false);
-        settings.engraveSameBodies = !isAssemblyContext_ && ReadToggle(engraveSameBodies_, false);
-        settings.sameRandomColor = !isAssemblyContext_ && ReadToggle(sameRandomColor_, false);
+        settings.engraveSameBodies = editedFeature_ == nullptr && ReadToggle(engraveSameBodies_, false);
+        settings.sameRandomColor = settings.engraveSameBodies && ReadToggle(sameRandomColor_, false);
         settings.autoEngraveVisibleTubes = ReadToggle(autoEngraveVisibleTubes_, false);
         settings.hideEngravedText = ReadToggle(hideEngravedText_, false);
         settings.centerLongSide = ReadToggle(centerLongSide_, false);
@@ -5572,7 +5606,11 @@ private:
             if (FaceLongShortAxes(face, z, &longAxis, &shortAxis))
             {
                 x = settings.xShortSide ? shortAxis : longAxis;
-                if (Dot(ProjectToPlane(xAxis, z), x) < 0.0)
+                Vector3d screenRight = CurrentScreenRightVector();
+                screenRight = ComponentVectorToPrototype(component, screenRight);
+                const Vector3d projectedScreenRight = ProjectToPlane(screenRight, z);
+                if (Magnitude(projectedScreenRight) > kVectorTolerance &&
+                    Dot(projectedScreenRight, x) < 0.0)
                 {
                     x = Vector3d(-x.X, -x.Y, -x.Z);
                 }
@@ -5581,6 +5619,31 @@ private:
         Vector3d y = Normalize(Cross(z, x), Normalize(yAxis, Vector3d(0.0, 1.0, 0.0)));
         x = Normalize(Cross(y, z), x);
         return MakeMatrix(x, y, z);
+    }
+
+    Vector3d CurrentScreenRightVector() const
+    {
+        try
+        {
+            Part* displayPart = session_ == nullptr || session_->Parts() == nullptr
+                ? nullptr
+                : dynamic_cast<Part*>(session_->Parts()->Display());
+            if (displayPart != nullptr && displayPart->Views() != nullptr)
+            {
+                View* workView = displayPart->Views()->WorkView();
+                if (workView != nullptr)
+                {
+                    const Matrix3x3 viewMatrix = workView->Matrix();
+                    return Normalize(
+                        Vector3d(viewMatrix.Xx, viewMatrix.Xy, viewMatrix.Xz),
+                        Vector3d(1.0, 0.0, 0.0));
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+        return Vector3d(1.0, 0.0, 0.0);
     }
 
     Point3d TextOriginFromPickPoint(const Point3d& facePoint, const Vector3d& faceNormal) const
@@ -5776,8 +5839,8 @@ private:
         }
 
         Vector3d desiredX = settings.xShortSide ? shortAxis : longAxis;
-        const Vector3d currentX = Normalize(ProjectToPlane(orientation_->XAxis(), z), desiredX);
-        if (Dot(currentX, desiredX) < 0.0)
+        const Vector3d screenRight = ProjectToPlane(CurrentScreenRightVector(), z);
+        if (Magnitude(screenRight) > kVectorTolerance && Dot(screenRight, desiredX) < 0.0)
         {
             desiredX = Vector3d(-desiredX.X, -desiredX.Y, -desiredX.Z);
         }
@@ -5785,6 +5848,7 @@ private:
         const Vector3d desiredY = Normalize(Cross(z, desiredX), shortAxis);
         orientation_->SetXAxis(desiredX);
         orientation_->SetYAxis(desiredY);
+        Log(session_, "文字X轴正向已按当前屏幕从左到右校正");
     }
 
     void ApplyAxisModeToCurrentOrientation()
@@ -6731,15 +6795,24 @@ private:
                                      Point3d* matchedFacePoint,
                                      Vector3d* matchedNormal,
                                      SameBodyPlaneFaceFeature* referenceFeatureOut = nullptr,
-                                     SameBodyPlaneFaceFeature* matchedFeatureOut = nullptr) const
+                                     SameBodyPlaneFaceFeature* matchedFeatureOut = nullptr,
+                                     const SameBodyPlaneFaceFeature* cachedReferenceFeature = nullptr,
+                                     const SameBodyLocalCoordinateSignature* cachedReferenceBodySignature = nullptr,
+                                     int* matchedCoordinateVariantOut = nullptr) const
     {
-        if (candidateBody == nullptr || referenceFace == nullptr || matchedFace == nullptr || matchedFacePoint == nullptr || matchedNormal == nullptr)
+        if (candidateBody == nullptr ||
+            (referenceFace == nullptr && cachedReferenceFeature == nullptr) ||
+            matchedFace == nullptr || matchedFacePoint == nullptr || matchedNormal == nullptr)
         {
             return false;
         }
 
         SameBodyPlaneFaceFeature referenceFeature = {};
-        if (!BuildSameBodyPlanarFaceFeature(const_cast<Face*>(referenceFace), referenceFeature))
+        if (cachedReferenceFeature != nullptr)
+        {
+            referenceFeature = *cachedReferenceFeature;
+        }
+        else if (!BuildSameBodyPlanarFaceFeature(const_cast<Face*>(referenceFace), referenceFeature))
         {
             return false;
         }
@@ -6749,14 +6822,46 @@ private:
         Point3d bestPoint;
         Vector3d bestNormal;
         SameBodyPlaneFaceFeature bestFeature = {};
+        int bestCoordinateVariant = 0;
+        double bestNormalAlignment = -2.0;
         double bestDistance = std::numeric_limits<double>::max();
+        SameBodyFingerprint candidateFingerprint = {};
+        if (cachedReferenceBodySignature != nullptr)
+        {
+            candidateFingerprint = BuildSameBodyFingerprint(candidateBody);
+        }
         for (Face* candidateFace : candidateBody->GetFaces())
         {
             SameBodyPlaneFaceFeature candidateFeature = {};
+            int candidateCoordinateVariant = 0;
             if (!BuildSameBodyPlanarFaceFeature(candidateFace, candidateFeature) ||
                 !SameBodyPlaneFaceMatch(referenceFeature, candidateFeature))
             {
                 continue;
+            }
+
+            if (cachedReferenceBodySignature != nullptr)
+            {
+                const SameBodyLocalCoordinateSignature candidateSignature =
+                    BuildSameBodyLocalCoordinateSignature(candidateFingerprint, candidateFeature.frame);
+                bool sameBodyLocalFace = false;
+                static const int coordinateVariants[] = {0, 3, 5, 6};
+                for (const int variant : coordinateVariants)
+                {
+                    if (SameBodyLocalCoordinateSignaturesMatch(
+                            *cachedReferenceBodySignature,
+                            candidateSignature,
+                            variant))
+                    {
+                        sameBodyLocalFace = true;
+                        candidateCoordinateVariant = variant;
+                        break;
+                    }
+                }
+                if (!sameBodyLocalFace)
+                {
+                    continue;
+                }
             }
 
             Point3d candidatePoint;
@@ -6767,22 +6872,26 @@ private:
             }
 
             const Vector3d normalizedCandidateNormal = Normalize(candidateNormal, Vector3d(0.0, 0.0, 1.0));
-            if (Dot(normalizedReferenceNormal, normalizedCandidateNormal) < 0.95)
-            {
-                continue;
-            }
+            const double normalAlignment = Dot(normalizedReferenceNormal, normalizedCandidateNormal);
 
             const double dx = candidatePoint.X - referenceFacePoint.X;
             const double dy = candidatePoint.Y - referenceFacePoint.Y;
             const double dz = candidatePoint.Z - referenceFacePoint.Z;
             const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (distance < bestDistance)
+            // The whole-body local signature determines the corresponding
+            // datum face. World normal and distance only resolve genuinely
+            // symmetric alternatives, preferring the same visible side.
+            if (normalAlignment > bestNormalAlignment + 1.0e-6 ||
+                (std::fabs(normalAlignment - bestNormalAlignment) <= 1.0e-6 &&
+                 distance < bestDistance))
             {
+                bestNormalAlignment = normalAlignment;
                 bestDistance = distance;
                 bestFace = candidateFace;
                 bestPoint = candidatePoint;
                 bestNormal = candidateNormal;
                 bestFeature = candidateFeature;
+                bestCoordinateVariant = candidateCoordinateVariant;
             }
         }
 
@@ -6801,33 +6910,58 @@ private:
         {
             *matchedFeatureOut = bestFeature;
         }
+        if (matchedCoordinateVariantOut != nullptr)
+        {
+            *matchedCoordinateVariantOut = bestCoordinateVariant;
+        }
+        Log(session_, std::string("相同体基准面映射: referenceTag=") +
+                          std::to_string(referenceFeature.tag) +
+                          ", candidateBodyTag=" + std::to_string(candidateBody->Tag()) +
+                          ", matchedFaceTag=" + std::to_string(bestFace->Tag()) +
+                          ", coordinateVariant=" + std::to_string(bestCoordinateVariant) +
+                          ", normalAlignment=" + FormatNumber(bestNormalAlignment));
         return true;
+    }
+
+    SameBodyFrame3 AlignSameBodyCandidateFrame(
+        const SameBodyFrame3& candidateFrame,
+        int coordinateVariant) const
+    {
+        SameBodyFrame3 alignedFrame = candidateFrame;
+        const bool swapXY = (coordinateVariant & 1) != 0;
+        const double signX = (coordinateVariant & 2) != 0 ? -1.0 : 1.0;
+        const double signY = (coordinateVariant & 4) != 0 ? -1.0 : 1.0;
+        if (swapXY)
+        {
+            alignedFrame.xAxis = SameBodyScalePoint(candidateFrame.yAxis, signX);
+            alignedFrame.yAxis = SameBodyScalePoint(candidateFrame.xAxis, signY);
+        }
+        else
+        {
+            alignedFrame.xAxis = SameBodyScalePoint(candidateFrame.xAxis, signX);
+            alignedFrame.yAxis = SameBodyScalePoint(candidateFrame.yAxis, signY);
+        }
+        return alignedFrame;
     }
 
     Point3d TransferSameBodyTextOrigin(const Point3d& referenceOrigin,
                                        const SameBodyFrame3& referenceFrame,
-                                       const SameBodyFrame3& candidateFrame) const
+                                       const SameBodyFrame3& candidateFrame,
+                                       int coordinateVariant = 0) const
     {
-        SameBodyFrame3 alignedCandidateFrame = candidateFrame;
-        if (SameBodyDotPoint(referenceFrame.xAxis, alignedCandidateFrame.xAxis) < 0.0)
-        {
-            alignedCandidateFrame.xAxis = SameBodyScalePoint(alignedCandidateFrame.xAxis, -1.0);
-            alignedCandidateFrame.yAxis = SameBodyScalePoint(alignedCandidateFrame.yAxis, -1.0);
-        }
+        const SameBodyFrame3 alignedCandidateFrame =
+            AlignSameBodyCandidateFrame(candidateFrame, coordinateVariant);
         const SameBodyPoint3 localPoint = TransformSameBodyWorldPointToLocal(referenceFrame, SameBodyPointFromNx(referenceOrigin));
         return SameBodyPointToNx(TransformSameBodyLocalPointToWorld(alignedCandidateFrame, localPoint));
     }
 
     Matrix3x3 TransferSameBodyTextMatrix(const Matrix3x3& referenceMatrix,
                                          const SameBodyFrame3& referenceFrame,
-                                         const SameBodyFrame3& candidateFrame) const
+                                         const SameBodyFrame3& candidateFrame,
+                                         int coordinateVariant = 0) const
     {
-        SameBodyFrame3 alignedCandidateFrame = candidateFrame;
-        if (SameBodyDotPoint(referenceFrame.xAxis, alignedCandidateFrame.xAxis) < 0.0)
-        {
-            alignedCandidateFrame.xAxis = SameBodyScalePoint(alignedCandidateFrame.xAxis, -1.0);
-            alignedCandidateFrame.yAxis = SameBodyScalePoint(alignedCandidateFrame.yAxis, -1.0);
-        }
+        const SameBodyFrame3 alignedCandidateFrame =
+            AlignSameBodyCandidateFrame(candidateFrame, coordinateVariant);
         const SameBodyPoint3 refX = SameBodyPointFromVector(Vector3d(referenceMatrix.Xx, referenceMatrix.Xy, referenceMatrix.Xz));
         const SameBodyPoint3 refY = SameBodyPointFromVector(Vector3d(referenceMatrix.Yx, referenceMatrix.Yy, referenceMatrix.Yz));
         const SameBodyPoint3 refZ = SameBodyPointFromVector(Vector3d(referenceMatrix.Zx, referenceMatrix.Zy, referenceMatrix.Zz));
@@ -7379,6 +7513,9 @@ private:
                     }
 
                     std::vector<Body*> matchingBodies;
+                    SameBodyPlaneFaceFeature cachedAutomaticReferenceFeature = {};
+                    SameBodyLocalCoordinateSignature cachedAutomaticReferenceSignature = {};
+                    bool hasAutomaticReferenceSignature = false;
                     std::size_t referenceFingerprintIndex = cachedVisibleBodies.size();
                     for (std::size_t index = 0; index < cachedVisibleBodies.size(); ++index)
                     {
@@ -7391,6 +7528,15 @@ private:
                     if (referenceFingerprintIndex < cachedFingerprints.size())
                     {
                         const SameBodyFingerprint& referenceFingerprint = cachedFingerprints[referenceFingerprintIndex];
+                        if (BuildSameBodyPlanarFaceFeature(
+                                representative.face,
+                                cachedAutomaticReferenceFeature))
+                        {
+                            cachedAutomaticReferenceSignature = BuildSameBodyLocalCoordinateSignature(
+                                referenceFingerprint,
+                                cachedAutomaticReferenceFeature.frame);
+                            hasAutomaticReferenceSignature = true;
+                        }
                         for (std::size_t index = 0; index < cachedVisibleBodies.size(); ++index)
                         {
                             if (index != referenceFingerprintIndex &&
@@ -7422,6 +7568,7 @@ private:
                         Vector3d sameFaceNormal;
                         SameBodyPlaneFaceFeature referenceFeature = {};
                         SameBodyPlaneFaceFeature sameFeature = {};
+                        int coordinateVariant = 0;
                         if (!FindMatchingFaceForSameBody(
                                 matchingBody,
                                 representative.face,
@@ -7431,7 +7578,10 @@ private:
                                 &sameFacePoint,
                                 &sameFaceNormal,
                                 &referenceFeature,
-                                &sameFeature))
+                                &sameFeature,
+                                hasAutomaticReferenceSignature ? &cachedAutomaticReferenceFeature : nullptr,
+                                hasAutomaticReferenceSignature ? &cachedAutomaticReferenceSignature : nullptr,
+                                &coordinateVariant))
                         {
                             continue;
                         }
@@ -7439,8 +7589,16 @@ private:
                         AutoTubeEngravingTarget sameTarget;
                         sameTarget.body = matchingBody;
                         sameTarget.face = sameFace;
-                        sameTarget.origin = TransferSameBodyTextOrigin(representative.origin, referenceFeature.frame, sameFeature.frame);
-                        sameTarget.matrix = TransferSameBodyTextMatrix(representative.matrix, referenceFeature.frame, sameFeature.frame);
+                        sameTarget.origin = TransferSameBodyTextOrigin(
+                            representative.origin,
+                            referenceFeature.frame,
+                            sameFeature.frame,
+                            coordinateVariant);
+                        sameTarget.matrix = TransferSameBodyTextMatrix(
+                            representative.matrix,
+                            referenceFeature.frame,
+                            sameFeature.frame,
+                            coordinateVariant);
                         groupTargets.push_back(sameTarget);
                     }
                 }
@@ -7605,6 +7763,7 @@ private:
             Face* face = nullptr;
             Point3d origin;
             Matrix3x3 matrix;
+            int coordinateVariant = 0;
         };
 
         std::unique_ptr<Tooling::InsertTextBuilder, void (*)(Tooling::InsertTextBuilder*)> builder(
@@ -7644,6 +7803,63 @@ private:
         const bool hideEngravedText = settings.hideEngravedText;
         WorkContextGuard workContext(session_, selectedFace);
 
+        // Cache every reference derived from the selected face before the
+        // first engraving. MODERN single-line engraving performs its boolean
+        // subtraction inside CreatePreparedBuilder, so that operation can
+        // replace the selected face and invalidate its NXOpen wrapper before
+        // the matching-body loop starts.
+        Face* preEngravingPrototypeFace = selectedFace != nullptr ? PrototypeFace(selectedFace) : nullptr;
+        Point3d referenceFacePoint;
+        Vector3d referenceFaceNormal;
+        Point3d referenceOrigin;
+        Matrix3x3 referenceMatrix;
+        SameBodyPlaneFaceFeature cachedReferenceFeature = {};
+        SameBodyLocalCoordinateSignature cachedReferenceBodySignature = {};
+        bool hasReferenceBodySignature = false;
+        bool hasSameBodyReference = false;
+        if (!executingDeferredEditedReplacement_ &&
+            engraveSameBodies && preEngravingPrototypeFace != nullptr)
+        {
+            Point3d pickedPoint = manualFace_ != nullptr
+                ? manualFace_->PickPoint()
+                : Point3d(0.0, 0.0, 0.0);
+            Assemblies::Component* selectedComponent = selectedFace != nullptr && selectedFace->IsOccurrence()
+                ? selectedFace->OwningComponent()
+                : nullptr;
+            if (selectedComponent != nullptr)
+            {
+                pickedPoint = ComponentPointToPrototype(selectedComponent, pickedPoint);
+            }
+            if (AskPlanarFaceData(
+                    preEngravingPrototypeFace,
+                    &pickedPoint,
+                    &referenceFacePoint,
+                    &referenceFaceNormal) &&
+                BuildSameBodyPlanarFaceFeature(
+                    preEngravingPrototypeFace,
+                    cachedReferenceFeature))
+            {
+                Point3d orientationOrigin = orientation_ != nullptr && orientation_->IsOriginSpecified()
+                    ? orientation_->Origin()
+                    : pickedPoint;
+                if (selectedComponent != nullptr)
+                {
+                    orientationOrigin = ComponentPointToPrototype(selectedComponent, orientationOrigin);
+                }
+                referenceOrigin = ProjectPointToFacePlane(
+                    referenceFacePoint, referenceFaceNormal, orientationOrigin);
+                referenceOrigin = ApplyCenterOptions(
+                    preEngravingPrototypeFace, referenceFaceNormal, referenceOrigin, settings);
+                referenceMatrix = TextMatrixFromDialog(
+                    preEngravingPrototypeFace,
+                    referenceFaceNormal,
+                    settings,
+                    selectedComponent);
+                hasSameBodyReference = true;
+                Log(session_, "刻字前已缓存相同体参考面、文字位置和方向");
+            }
+        }
+
         // Resolve matching bodies before engraving changes the reference body's
         // topology.  Reusing this list also avoids an expensive post-commit scan.
         std::vector<Body*> preEngravingMatchingBodies;
@@ -7663,6 +7879,16 @@ private:
                 Log(session_, std::string("刻字前相同体识别完成，匹配=") +
                                   std::to_string(preEngravingMatchingBodies.size()) +
                                   ", 耗时=" + std::to_string(sameBodyScanMilliseconds) + " ms");
+                if (hasSameBodyReference)
+                {
+                    const SameBodyFingerprint referenceFingerprint =
+                        BuildSameBodyFingerprint(preEngravingReferenceBody);
+                    cachedReferenceBodySignature = BuildSameBodyLocalCoordinateSignature(
+                        referenceFingerprint,
+                        cachedReferenceFeature.frame);
+                    hasReferenceBodySignature = true;
+                    Log(session_, "刻字前已缓存手选基准面的整实体局部签名");
+                }
             }
         }
         NXObject* textUdo = nullptr;
@@ -7679,29 +7905,8 @@ private:
         NXObject* committedBody = lastBody_;
         Assemblies::Component* committedComponent = lastComponent_;
         Part* committedWorkPart = lastWorkPart_;
-        Face* committedPrototypeFace = selectedFace != nullptr ? PrototypeFace(selectedFace) : nullptr;
+        Face* committedPrototypeFace = preEngravingPrototypeFace;
         Body* referenceBody = dynamic_cast<Body*>(committedBody);
-        Point3d referenceFacePoint;
-        Vector3d referenceFaceNormal;
-        Point3d referenceOrigin;
-        Matrix3x3 referenceMatrix;
-        bool hasSameBodyReference = false;
-        if (!executingDeferredEditedReplacement_ &&
-            committedPrototypeFace != nullptr && referenceBody != nullptr && committedWorkPart != nullptr)
-        {
-            Point3d pickedPoint = manualFace_ != nullptr ? manualFace_->PickPoint() : Point3d(0.0, 0.0, 0.0);
-            if (selectedFace != nullptr && selectedFace->IsOccurrence() && selectedFace->OwningComponent() != nullptr)
-            {
-                pickedPoint = ComponentPointToPrototype(selectedFace->OwningComponent(), pickedPoint);
-            }
-            if (AskPlanarFaceData(committedPrototypeFace, &pickedPoint, &referenceFacePoint, &referenceFaceNormal))
-            {
-                referenceOrigin = ProjectPointToFacePlane(referenceFacePoint, referenceFaceNormal, orientation_ != nullptr && orientation_->IsOriginSpecified() ? orientation_->Origin() : pickedPoint);
-                referenceOrigin = ApplyCenterOptions(committedPrototypeFace, referenceFaceNormal, referenceOrigin, settings);
-                referenceMatrix = TextMatrixFromDialog(committedPrototypeFace, referenceFaceNormal, settings, selectedFace != nullptr && selectedFace->IsOccurrence() ? selectedFace->OwningComponent() : nullptr);
-                hasSameBodyReference = true;
-            }
-        }
         const std::string committedComponentJournalId = lastComponentJournalId_;
         const std::string committedText =
             (!dialogTextAtApply.empty() && !TextTemplateHasRuleToken(dialogTextAtApply)) ? dialogTextAtApply : lastResolvedText_;
@@ -7719,7 +7924,21 @@ private:
                 Vector3d sameFaceNormal;
                 SameBodyPlaneFaceFeature referenceFeature = {};
                 SameBodyPlaneFaceFeature sameFeature = {};
-                if (!FindMatchingFaceForSameBody(sameBody, committedPrototypeFace, referenceFacePoint, referenceFaceNormal, &sameFace, &sameFacePoint, &sameFaceNormal, &referenceFeature, &sameFeature))
+                int coordinateVariant = 0;
+                if (!hasSameBodyReference ||
+                    !FindMatchingFaceForSameBody(
+                        sameBody,
+                        nullptr,
+                        referenceFacePoint,
+                        referenceFaceNormal,
+                        &sameFace,
+                        &sameFacePoint,
+                        &sameFaceNormal,
+                        &referenceFeature,
+                        &sameFeature,
+                        &cachedReferenceFeature,
+                        hasReferenceBodySignature ? &cachedReferenceBodySignature : nullptr,
+                        &coordinateVariant))
                 {
                     continue;
                 }
@@ -7727,8 +7946,16 @@ private:
                 SameBodyEngravingTarget target;
                 target.body = sameBody;
                 target.face = sameFace;
-                target.origin = TransferSameBodyTextOrigin(referenceOrigin, referenceFeature.frame, sameFeature.frame);
-                target.matrix = TransferSameBodyTextMatrix(referenceMatrix, referenceFeature.frame, sameFeature.frame);
+                target.origin = TransferSameBodyTextOrigin(
+                    referenceOrigin, referenceFeature.frame, sameFeature.frame, coordinateVariant);
+                target.matrix = TransferSameBodyTextMatrix(
+                    referenceMatrix, referenceFeature.frame, sameFeature.frame, coordinateVariant);
+                target.coordinateVariant = coordinateVariant;
+                Log(session_, std::string("相同体文字变换: bodyTag=") +
+                    std::to_string(sameBody->Tag()) +
+                    ", coordinateVariant=" + std::to_string(coordinateVariant) +
+                    ", origin=(" + FormatNumber(target.origin.X) + "," +
+                    FormatNumber(target.origin.Y) + "," + FormatNumber(target.origin.Z) + ")");
                 sameBodyTargets.push_back(target);
             }
         }
@@ -8004,7 +8231,20 @@ extern "C" DllExport void ufusr(char* /*param*/, int* /*retcod*/, int /*param_le
 
 extern "C" DllExport int ufusr_ask_unload()
 {
-    return static_cast<int>(Session::LibraryUnloadOptionAtTermination);
+    // A normal Block Styler close leaves no callback owned by this UI DLL;
+    // the persistent CustomFeature handlers live in KeZiCore instead.  Let
+    // NX release KeZi.dll immediately so a rebuilt DLL can be replaced
+    // without closing the NX session.  The edited-feature workflow is the
+    // only exception: its replacement is deliberately posted to a Win32
+    // timer after LaunchInDialogMode returns, so unloading while that timer
+    // is pending would leave its callback pointing into unmapped code.
+    if (gDeferredKeZiDialog != nullptr)
+    {
+        Log(Session::GetSession(), "DLL卸载策略: 延迟编辑回调未完成，本次保持加载");
+        return static_cast<int>(Session::LibraryUnloadOptionAtTermination);
+    }
+    Log(Session::GetSession(), "DLL卸载策略: 对话框已关闭，立即释放KeZi.dll");
+    return static_cast<int>(Session::LibraryUnloadOptionImmediately);
 }
 
 extern "C" DllExport void ufusr_cleanup(void)

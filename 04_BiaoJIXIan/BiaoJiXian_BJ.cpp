@@ -116,7 +116,7 @@ namespace
 // 相贴判断容差。
 // 体与体、面与面最小距离小于这个值时，认为可以视为相贴。
 const double kContactTolerance = 0.01;
-const double kEdgePlanePairTolerance = 1.0e-6;
+const double kEdgePlanePairTolerance = 0.02;
 const bool kDebugStopAfterProjection = false;
 const bool kDebugStopAfterPreSegment = false;
 const bool kDebugStopAfterSegmentation = false;
@@ -1837,6 +1837,123 @@ double AskMinDistanceToSamplePolylines(
     return minDistance;
 }
 
+bool AskExactMinDistanceToObjects(
+    const double point[3],
+    const std::vector<tag_t>& objectTags,
+    double& minDistance)
+{
+    minDistance = DBL_MAX;
+    bool foundDistance = false;
+    for (std::size_t objectIndex = 0; objectIndex < objectTags.size(); ++objectIndex)
+    {
+        const tag_t objectTag = objectTags[objectIndex];
+        if (objectTag == NULL_TAG || UF_OBJ_ask_status(objectTag) != UF_OBJ_ALIVE)
+        {
+            continue;
+        }
+
+        double pointCoordinates[3] = {point[0], point[1], point[2]};
+        double objectGuess[3] = {0.0, 0.0, 0.0};
+        double pointOnInput[3] = {0.0, 0.0, 0.0};
+        double pointOnObject[3] = {0.0, 0.0, 0.0};
+        double distance = 0.0;
+        double accuracy = 0.0;
+        if (UF_MODL_ask_minimum_dist_3(
+                2,
+                NULL_TAG,
+                objectTag,
+                1,
+                pointCoordinates,
+                0,
+                objectGuess,
+                &distance,
+                pointOnInput,
+                pointOnObject,
+                &accuracy) == 0)
+        {
+            minDistance = std::min(minDistance, distance);
+            foundDistance = true;
+        }
+    }
+    return foundDistance;
+}
+
+bool IsCurvePointSafe(
+    tag_t curveTag,
+    double distanceAlongCurve,
+    const std::vector<std::vector<std::array<double, 3> > >& obstacleSamplePolylines,
+    const std::vector<tag_t>& exactObstacleTags,
+    double clearanceDistance,
+    tag_t containmentFaceTag)
+{
+    double point[3] = {0.0, 0.0, 0.0};
+    if (!AskCurvePointAtDistance(curveTag, distanceAlongCurve, point))
+    {
+        return false;
+    }
+
+    if (containmentFaceTag != NULL_TAG)
+    {
+        int containmentStatus = 0;
+        if (UF_MODL_ask_point_containment(point, containmentFaceTag, &containmentStatus) != 0 ||
+            containmentStatus == 2)
+        {
+            return false;
+        }
+    }
+
+    double minDistance = DBL_MAX;
+    if (!exactObstacleTags.empty() &&
+        AskExactMinDistanceToObjects(point, exactObstacleTags, minDistance))
+    {
+        return minDistance >= clearanceDistance;
+    }
+
+    if (obstacleSamplePolylines.empty())
+    {
+        return true;
+    }
+
+    const std::array<double, 3> samplePoint = {point[0], point[1], point[2]};
+    return AskMinDistanceToSamplePolylines(samplePoint, obstacleSamplePolylines) >= clearanceDistance;
+}
+
+double RefineSafetyTransition(
+    tag_t curveTag,
+    double leftDistance,
+    bool leftIsSafe,
+    double rightDistance,
+    const std::vector<std::vector<std::array<double, 3> > >& obstacleSamplePolylines,
+    const std::vector<tag_t>& exactObstacleTags,
+    double clearanceDistance,
+    tag_t containmentFaceTag)
+{
+    const double refinementTolerance = 0.0005;
+    for (int iteration = 0;
+         iteration < 32 && rightDistance - leftDistance > refinementTolerance;
+         ++iteration)
+    {
+        const double middleDistance = (leftDistance + rightDistance) * 0.5;
+        const bool middleIsSafe = IsCurvePointSafe(
+            curveTag,
+            middleDistance,
+            obstacleSamplePolylines,
+            exactObstacleTags,
+            clearanceDistance,
+            containmentFaceTag);
+        if (middleIsSafe == leftIsSafe)
+        {
+            leftDistance = middleDistance;
+        }
+        else
+        {
+            rightDistance = middleDistance;
+        }
+    }
+
+    return leftIsSafe ? leftDistance : rightDistance;
+}
+
 double AskMinDistanceToBoundarySamples(
     const std::array<double, 3>& point,
     const std::vector<std::array<double, 3> >& boundarySamples)
@@ -1960,13 +2077,14 @@ PreparedCurveSet TrimCurvesBySamplePolylines(
     const std::vector<tag_t>& curveTags,
     const std::vector<std::vector<std::array<double, 3> > >& obstacleSamplePolylines,
     double clearanceDistance,
-    tag_t containmentFaceTag = NULL_TAG)
+    tag_t containmentFaceTag = NULL_TAG,
+    const std::vector<tag_t>& exactObstacleTags = std::vector<tag_t>())
 {
     PreparedCurveSet result;
     result.curves = curveTags;
 
     if (curveTags.empty() || clearanceDistance <= 0.0 ||
-        (obstacleSamplePolylines.empty() && containmentFaceTag == NULL_TAG))
+        (obstacleSamplePolylines.empty() && exactObstacleTags.empty() && containmentFaceTag == NULL_TAG))
     {
         return result;
     }
@@ -1993,27 +2111,13 @@ PreparedCurveSet TrimCurvesBySamplePolylines(
 
         for (int sampleIndex = 0; sampleIndex <= sampleCount; ++sampleIndex)
         {
-            const double distanceAlongCurve = step * static_cast<double>(sampleIndex);
-            double point[3] = {0.0, 0.0, 0.0};
-            if (!AskCurvePointAtDistance(curveTag, distanceAlongCurve, point))
-            {
-                continue;
-            }
-
-            bool isInsideFace = true;
-            if (containmentFaceTag != NULL_TAG)
-            {
-                int containmentStatus = 0;
-                isInsideFace =
-                    UF_MODL_ask_point_containment(point, containmentFaceTag, &containmentStatus) == 0 &&
-                    containmentStatus != 2;
-            }
-
-            const std::array<double, 3> samplePoint = {point[0], point[1], point[2]};
-            const bool hasBoundaryClearance =
-                obstacleSamplePolylines.empty() ||
-                AskMinDistanceToSamplePolylines(samplePoint, obstacleSamplePolylines) >= (clearanceDistance - 0.02);
-            safeSamples[static_cast<std::size_t>(sampleIndex)] = isInsideFace && hasBoundaryClearance;
+            safeSamples[static_cast<std::size_t>(sampleIndex)] = IsCurvePointSafe(
+                curveTag,
+                step * static_cast<double>(sampleIndex),
+                obstacleSamplePolylines,
+                exactObstacleTags,
+                clearanceDistance,
+                containmentFaceTag);
         }
 
         if (std::find(safeSamples.begin(), safeSamples.end(), true) == safeSamples.end())
@@ -2047,8 +2151,32 @@ PreparedCurveSet TrimCurvesBySamplePolylines(
                 ++sampleIndex;
             }
             const int lastSafeSample = sampleIndex - 1;
-            const double startDistance = step * static_cast<double>(firstSafeSample);
-            const double endDistance = step * static_cast<double>(lastSafeSample);
+            double startDistance = step * static_cast<double>(firstSafeSample);
+            double endDistance = step * static_cast<double>(lastSafeSample);
+            if (firstSafeSample > 0)
+            {
+                startDistance = RefineSafetyTransition(
+                    curveTag,
+                    step * static_cast<double>(firstSafeSample - 1),
+                    false,
+                    startDistance,
+                    obstacleSamplePolylines,
+                    exactObstacleTags,
+                    clearanceDistance,
+                    containmentFaceTag);
+            }
+            if (lastSafeSample < sampleCount)
+            {
+                endDistance = RefineSafetyTransition(
+                    curveTag,
+                    endDistance,
+                    true,
+                    step * static_cast<double>(lastSafeSample + 1),
+                    obstacleSamplePolylines,
+                    exactObstacleTags,
+                    clearanceDistance,
+                    containmentFaceTag);
+            }
             if (endDistance - startDistance <= kCurveLengthTolerance)
             {
                 continue;
@@ -2113,7 +2241,8 @@ PreparedCurveSet TrimCurvesNearFaceBoundary(
         curveTags,
         boundarySamplePolylines,
         clearanceDistance,
-        targetFaceTag);
+        targetFaceTag,
+        boundaryEdges);
 }
 
 std::vector<std::vector<std::array<double, 3> > > BuildFaceBoundarySamplePolylines(tag_t targetFaceTag)
@@ -2237,6 +2366,7 @@ PreparedCurveSet TrimCurveEndpointsNearOtherGroups(
     for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
     {
         std::vector<std::vector<std::array<double, 3> > > obstacleSamples;
+        std::vector<tag_t> exactObstacleTags;
         for (std::size_t otherGroupIndex = 0; otherGroupIndex < groups.size(); ++otherGroupIndex)
         {
             if (otherGroupIndex == groupIndex)
@@ -2248,6 +2378,10 @@ PreparedCurveSet TrimCurveEndpointsNearOtherGroups(
                 obstacleSamples.end(),
                 groupSamples[otherGroupIndex].begin(),
                 groupSamples[otherGroupIndex].end());
+            exactObstacleTags.insert(
+                exactObstacleTags.end(),
+                groups[otherGroupIndex].begin(),
+                groups[otherGroupIndex].end());
         }
 
         if (obstacleSamples.empty())
@@ -2257,7 +2391,12 @@ PreparedCurveSet TrimCurveEndpointsNearOtherGroups(
         }
 
         PreparedCurveSet trimmedGroup =
-            TrimCurvesBySamplePolylines(groups[groupIndex], obstacleSamples, clearanceDistance);
+            TrimCurvesBySamplePolylines(
+                groups[groupIndex],
+                obstacleSamples,
+                clearanceDistance,
+                NULL_TAG,
+                exactObstacleTags);
         result.curves.insert(result.curves.end(), trimmedGroup.curves.begin(), trimmedGroup.curves.end());
         result.retiredCurves.insert(
             result.retiredCurves.end(),
@@ -2281,6 +2420,7 @@ PreparedCurveSet TrimCurveGroupsByCombinedSafety(
 
     const std::vector<std::vector<std::array<double, 3> > > boundarySamplePolylines =
         BuildFaceBoundarySamplePolylines(targetFaceTag);
+    const std::vector<tag_t> boundaryEdges = AskFaceEdges(targetFaceTag);
 
     std::vector<std::vector<std::vector<std::array<double, 3> > > > groupSamples(groups.size());
     for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
@@ -2291,6 +2431,7 @@ PreparedCurveSet TrimCurveGroupsByCombinedSafety(
     for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
     {
         std::vector<std::vector<std::array<double, 3> > > obstacleSamples = boundarySamplePolylines;
+        std::vector<tag_t> exactObstacleTags = boundaryEdges;
         for (std::size_t otherGroupIndex = 0; otherGroupIndex < groups.size(); ++otherGroupIndex)
         {
             if (otherGroupIndex == groupIndex)
@@ -2302,6 +2443,10 @@ PreparedCurveSet TrimCurveGroupsByCombinedSafety(
                 obstacleSamples.end(),
                 groupSamples[otherGroupIndex].begin(),
                 groupSamples[otherGroupIndex].end());
+            exactObstacleTags.insert(
+                exactObstacleTags.end(),
+                groups[otherGroupIndex].begin(),
+                groups[otherGroupIndex].end());
         }
 
         PreparedCurveSet trimmedGroup =
@@ -2309,7 +2454,8 @@ PreparedCurveSet TrimCurveGroupsByCombinedSafety(
                 groups[groupIndex],
                 obstacleSamples,
                 clearanceDistance,
-                targetFaceTag);
+                targetFaceTag,
+                exactObstacleTags);
         result.curves.insert(result.curves.end(), trimmedGroup.curves.begin(), trimmedGroup.curves.end());
         result.retiredCurves.insert(
             result.retiredCurves.end(),
@@ -2335,6 +2481,7 @@ PreparedCurveGroupSet TrimCurveGroupsByCombinedSafetyPreserveGroups(
 
     const std::vector<std::vector<std::array<double, 3> > > boundarySamplePolylines =
         BuildFaceBoundarySamplePolylines(targetFaceTag);
+    const std::vector<tag_t> boundaryEdges = AskFaceEdges(targetFaceTag);
 
     std::vector<std::vector<std::vector<std::array<double, 3> > > > groupSamples(groups.size());
     for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
@@ -2347,6 +2494,7 @@ PreparedCurveGroupSet TrimCurveGroupsByCombinedSafetyPreserveGroups(
     for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
     {
         std::vector<std::vector<std::array<double, 3> > > obstacleSamples = boundarySamplePolylines;
+        std::vector<tag_t> exactObstacleTags = boundaryEdges;
         for (std::size_t otherGroupIndex = 0; otherGroupIndex < groups.size(); ++otherGroupIndex)
         {
             if (otherGroupIndex == groupIndex)
@@ -2358,6 +2506,10 @@ PreparedCurveGroupSet TrimCurveGroupsByCombinedSafetyPreserveGroups(
                 obstacleSamples.end(),
                 groupSamples[otherGroupIndex].begin(),
                 groupSamples[otherGroupIndex].end());
+            exactObstacleTags.insert(
+                exactObstacleTags.end(),
+                groups[otherGroupIndex].begin(),
+                groups[otherGroupIndex].end());
         }
 
         PreparedCurveSet trimmedGroup;
@@ -2365,7 +2517,8 @@ PreparedCurveGroupSet TrimCurveGroupsByCombinedSafetyPreserveGroups(
             groups[groupIndex],
             obstacleSamples,
             clearanceDistance,
-            targetFaceTag);
+            targetFaceTag,
+            exactObstacleTags);
 
         result.groups.push_back(trimmedGroup.curves);
         result.curves.insert(result.curves.end(), trimmedGroup.curves.begin(), trimmedGroup.curves.end());
@@ -5722,10 +5875,39 @@ std::vector<tag_t> ProjectSelectedEdgesToFace(Part* workPart, const std::vector<
 
     std::sort(projectedCurves.begin(), projectedCurves.end());
     projectedCurves.erase(std::unique(projectedCurves.begin(), projectedCurves.end()), projectedCurves.end());
-    if (projectedCurves.empty() && match.distance <= kContactTolerance)
+    if (projectedCurves.empty() && match.distance <= kEdgePlanePairTolerance)
     {
-        projectedCurves.swap(helperCurves);
-        DebugLog("ProjectSelectedEdgesToFace fallback: using helper curves because contact faces are coincident");
+        const double translation[3] = {
+            match.targetPoint[0] - match.sourcePoint[0],
+            match.targetPoint[1] - match.sourcePoint[1],
+            match.targetPoint[2] - match.sourcePoint[2]};
+        const double translationLengthSquared =
+            translation[0] * translation[0] +
+            translation[1] * translation[1] +
+            translation[2] * translation[2];
+        if (translationLengthSquared > 1.0e-16)
+        {
+            std::vector<tag_t> translatedCurves = TranslateCurveCopies(helperCurves, translation);
+            if (!translatedCurves.empty())
+            {
+                DeleteObjects(helperCurves);
+                projectedCurves.swap(translatedCurves);
+                DebugLog(
+                    "ProjectSelectedEdgesToFace fallback: translated helper curves onto target face, translation=" +
+                    DebugPoint(translation));
+            }
+        }
+        else
+        {
+            projectedCurves.swap(helperCurves);
+            DebugLog("ProjectSelectedEdgesToFace fallback: using helper curves because contact faces are coincident");
+        }
+
+        if (projectedCurves.empty())
+        {
+            DeleteObjects(helperCurves);
+            DebugLog("ProjectSelectedEdgesToFace fallback failed: helper curves could not be moved onto target face");
+        }
     }
     else
     {
@@ -6550,6 +6732,7 @@ int BiaoJiXian_BJ::apply_cb()
             {
                 const std::vector<EdgePlaneGroup> edgePlaneGroups =
                     BuildEdgePlaneGroups(selectedEdges, workPart->Tag());
+                DebugLog("Edge mode groups=" + std::to_string(edgePlaneGroups.size()));
 
                 for (std::size_t groupIndex = 0; groupIndex < edgePlaneGroups.size(); ++groupIndex)
                 {
@@ -6558,6 +6741,17 @@ int BiaoJiXian_BJ::apply_cb()
                     double minCandidateDistance = DBL_MAX;
                     const bool hasMatch =
                         FindBestEdgePlaneContact(edgePlaneGroup, workPart->Tag(), match, minCandidateDistance);
+
+                    {
+                        std::ostringstream log;
+                        log << "Edge mode match: group=" << groupIndex
+                            << ", edges=" << edgePlaneGroup.edges.size()
+                            << ", hasMatch=" << hasMatch
+                            << ", minCandidateDistance=" << minCandidateDistance
+                            << ", targetBody=" << DebugTag(match.targetBody)
+                            << ", targetFace=" << DebugTag(match.targetFace);
+                        DebugLog(log.str());
+                    }
 
                     if (!hasMatch)
                     {
@@ -6585,6 +6779,14 @@ int BiaoJiXian_BJ::apply_cb()
 
                     const PreparedCurveGroupSet preparedCurves =
                         ApplyPreSegmentRulesToGroups(workPart, projectedCurveGroupsForTarget, match);
+                    {
+                        std::ostringstream log;
+                        log << "Edge mode prepared: projected=" << projectedCurvesForTarget.size()
+                            << ", groups=" << preparedCurves.groups.size()
+                            << ", curves=" << preparedCurves.curves.size()
+                            << ", retired=" << preparedCurves.retiredCurves.size();
+                        DebugLog(log.str());
+                    }
                     if (kDebugStopAfterPreSegment)
                     {
                         applyCurveOutputStyle(preparedCurves.curves, match.targetBody);
@@ -6594,6 +6796,7 @@ int BiaoJiXian_BJ::apply_cb()
                     const std::vector<std::vector<tag_t> > finalCurveGroups =
                         BuildSegmentedMarkCurveGroups(preparedCurves.groups, segmentParameters);
                     const std::vector<tag_t> finalCurves = FlattenCurveGroups(finalCurveGroups);
+                    DebugLog("Edge mode final curves=" + std::to_string(finalCurves.size()));
                     applyCurveOutputStyle(finalCurves, match.targetBody);
                     if (kDebugStopAfterSegmentation)
                     {
@@ -6662,7 +6865,34 @@ int BiaoJiXian_BJ::update_cb(NXOpen::BlockStyler::UIBlock* block)
     {
         NormalizeFaceSelection();
     }
-    if (block == MarkLineMode || block == MarkOutputMode || block == CurveLayerModeOption)
+    if (block == MarkLineMode)
+    {
+        RefreshUiState();
+        try
+        {
+            NXOpen::BlockStyler::UIBlock* selectionBlock =
+                GetEnumerationValue(MarkLineMode) == 2
+                    ? static_cast<NXOpen::BlockStyler::UIBlock*>(SourceEdges)
+                    : static_cast<NXOpen::BlockStyler::UIBlock*>(SourceBody);
+            if (selectionBlock != NULL)
+            {
+                selectionBlock->Focus();
+            }
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            DebugLog(
+                std::string("MarkLineMode selection focus failed: code=") +
+                std::to_string(ex.ErrorCode()) +
+                ", message=" +
+                (ex.Message() != NULL ? ex.Message() : "<null>"));
+        }
+        catch (...)
+        {
+            DebugLog("MarkLineMode selection focus failed: unknown exception");
+        }
+    }
+    else if (block == MarkOutputMode || block == CurveLayerModeOption)
     {
         RefreshUiState();
     }

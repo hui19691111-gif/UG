@@ -66,9 +66,6 @@
       <AdditionalLibraryDirectories>$(UGIIRoot);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>libufun.lib;libugopenint.lib;libnxopencpp.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_gateway.lib;libnxopencpp_modlutils.lib;libnxopencpp_drawings.lib;libnxopencpp_drafting.lib;libnxopencpp_preferences.lib;libnxopencpp_sheetmetal.lib;libnxopenuicpp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)BiaoJIXIan.dlx" "$(OutDir)BiaoJIXIan.dlx"</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -99,9 +96,6 @@
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <SetChecksum>true</SetChecksum>
     </Link>
-    <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)BiaoJIXIan.dlx" "$(OutDir)BiaoJIXIan.dlx"</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="BiaoJiXian_BJ.cpp" />

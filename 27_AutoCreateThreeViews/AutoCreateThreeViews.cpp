@@ -5037,7 +5037,11 @@ std::string NormalizeFrontDirectionMode(const std::string& value)
     {
         return "absoluteCoordinate";
     }
-    return "overallBoxMaxArea";
+    if (mode == "overallboxmaxarea" || mode == "overallbox" || mode == "boundingbox")
+    {
+        return "overallBoxMaxArea";
+    }
+    return "largestFaceLongestEdge";
 }
 
 std::string FrontDirectionFailureMessage(const std::string& mode)
@@ -5078,9 +5082,12 @@ AutoViewDirection ComputeFrontDirection(NXOpen::Part* part, const RequestValues&
         return result;
     }
 
-    if (!TryComputeAutoFrontDirectionFromOverallBoundingBox(part, result))
+    if (!TryComputeAutoFrontDirectionFromLargestPlanarFace(part, result))
     {
-        TryComputeAutoFrontDirectionFromLargestPlanarFace(part, result);
+        WriteLine(
+            nullptr,
+            "AutoCreateThreeViews: largest planar face with a straight edge not found; fallback to overall bounding box.");
+        TryComputeAutoFrontDirectionFromOverallBoundingBox(part, result);
     }
     return result;
 }
@@ -18152,10 +18159,16 @@ void CreateFlatPatternNoteBelowView(
             builder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
             builder->Origin()->SetInferRelativeToGeometry(false);
             builder->Style()->LetteringStyle()->SetGeneralTextLineSpaceFactor(1.5);
-            const int noteFont = LoadChineseDraftNoteFont(session, workPart);
-            if (noteFont > 0)
+            // When template drafting preferences are enabled, the note builder
+            // already carries the lettering preferences inherited from that
+            // template.  Do not overwrite its font with the program fallback.
+            if (!request.inheritDraftingPreferences)
             {
-                builder->Style()->LetteringStyle()->SetGeneralTextFont(noteFont);
+                const int noteFont = LoadChineseDraftNoteFont(session, workPart);
+                if (noteFont > 0)
+                {
+                    builder->Style()->LetteringStyle()->SetGeneralTextFont(noteFont);
+                }
             }
             const std::string displayNoteText = "\xE5\xB1\x95\xE5\xBC\x80\xE5\x9B\xBE\n" + noteText;
             builder->Text()->TextBlock()->SetText(BuildDraftNoteLines(displayNoteText));
@@ -18238,10 +18251,13 @@ void CreateLayerGroupNote(
         builder->Origin()->Plane()->SetPlaneMethod(NXOpen::Annotations::PlaneBuilder::PlaneMethodTypeXyPlane);
         builder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
         builder->Origin()->SetInferRelativeToGeometry(false);
-        const int noteFont = LoadChineseDraftNoteFont(session, workPart);
-        if (noteFont > 0)
+        if (!request.inheritDraftingPreferences)
         {
-            builder->Style()->LetteringStyle()->SetGeneralTextFont(noteFont);
+            const int noteFont = LoadChineseDraftNoteFont(session, workPart);
+            if (noteFont > 0)
+            {
+                builder->Style()->LetteringStyle()->SetGeneralTextFont(noteFont);
+            }
         }
         const std::string noteText = BuildLayerGroupNoteText(workPart, request.targetLayer);
         if (noteText.empty())
@@ -18343,10 +18359,13 @@ void CreateTechnicalRequirementNote(
         builder->Origin()->SetAnchor(TechnicalRequirementAnchor(request.technicalRequirementCorner));
         builder->Origin()->SetInferRelativeToGeometry(false);
         builder->Style()->LetteringStyle()->SetGeneralTextLineSpaceFactor(1.35);
-        const int noteFont = LoadChineseDraftNoteFont(session, workPart);
-        if (noteFont > 0)
+        if (!request.inheritDraftingPreferences)
         {
-            builder->Style()->LetteringStyle()->SetGeneralTextFont(noteFont);
+            const int noteFont = LoadChineseDraftNoteFont(session, workPart);
+            if (noteFont > 0)
+            {
+                builder->Style()->LetteringStyle()->SetGeneralTextFont(noteFont);
+            }
         }
         builder->Text()->TextBlock()->SetText(BuildDraftNoteLines(noteText, false));
 
@@ -19498,6 +19517,10 @@ int AutoCreateThreeViewsDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 const std::filesystem::path templateDirectory = CurrentModuleDirectory().parent_path() / "DATA";
                 ShellExecuteW(nullptr, L"open", templateDirectory.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             }
+            else if (blockId == "assemblyListMode")
+            {
+                PopulateNativeAssemblyList();
+            }
             else if (blockId == "openLayerNoteConfig")
             {
                 if (!OpenLayerGroupNoteConfigFile())
@@ -19663,6 +19686,7 @@ void AutoCreateThreeViewsDialog::LoadNativeDialogSettings()
     };
 
     SetString("drawingTargetMode", text("drawingTargetMode", u8"按部件/组件出图"));
+    SetString("assemblyListMode", text("assemblyListMode", u8"唯一部件清单"));
     SetString("layerRange", text("layerRange", "1-256"));
     SetString("layersPerSheet", text("layersPerSheet", "1"));
     SetString("templateName", text("templateName", u8"自动匹配模板"));
@@ -19756,6 +19780,7 @@ void AutoCreateThreeViewsDialog::SaveNativeDialogSettings() const
     const DialogValues values = ReadDialogValues();
     const auto boolean = [](bool value) { return value ? "true" : "false"; };
     output << "drawingTargetMode=" << ReadString("drawingTargetMode", u8"按部件/组件出图") << "\n"
+           << "assemblyListMode=" << ReadString("assemblyListMode", u8"唯一部件清单") << "\n"
            << "layerRange=" << ReadString("layerRange", "1-256") << "\n"
            << "layersPerSheet=" << ReadString("layersPerSheet", "1") << "\n"
            << "templateName=" << values.templateName << "\n"
@@ -19824,7 +19849,8 @@ void AutoCreateThreeViewsDialog::InitializeNativeAssemblyList()
     tree->InsertColumn(2, NXOpen::NXString(u8"图号", NXOpen::NXString::UTF8), 150);
     tree->InsertColumn(3, NXOpen::NXString(u8"类型", NXOpen::NXString::UTF8), 90);
     tree->InsertColumn(4, NXOpen::NXString(u8"材料", NXOpen::NXString::UTF8), 140);
-    tree->InsertColumn(5, NXOpen::NXString(u8"状态", NXOpen::NXString::UTF8), 110);
+    tree->InsertColumn(5, NXOpen::NXString(u8"引用数", NXOpen::NXString::UTF8), 75);
+    tree->InsertColumn(6, NXOpen::NXString(u8"状态", NXOpen::NXString::UTF8), 110);
     tree->SetColumnResizePolicy(1, NXOpen::BlockStyler::Tree::ColumnResizePolicyResizeWithTree);
     tree->SetSortRootNodes(false);
     tree->SetOnStateChangeHandler(
@@ -19837,6 +19863,19 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
     if (assemblyTree_ == nullptr)
         return;
 
+    const bool hadExistingRows = !assemblyNodes_.empty();
+    std::set<tag_t> previouslySelectedPrototypes;
+    for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
+    {
+        if (node == nullptr || node->GetState() != 2)
+            continue;
+        const auto found = assemblyNodeOccurrences_.find(node);
+        if (found == assemblyNodeOccurrences_.end() || found->second == NULL_TAG)
+            continue;
+        const tag_t prototype = UF_ASSEM_ask_prototype_of_occ(found->second);
+        previouslySelectedPrototypes.insert(prototype != NULL_TAG ? prototype : found->second);
+    }
+
     assemblyStateUpdateInProgress_ = true;
     assemblyTree_->Redraw(false);
     while (assemblyTree_->RootNode() != nullptr)
@@ -19848,20 +19887,52 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
     const tag_t rootOccurrence = displayPart != NULL_TAG
         ? UF_ASSEM_ask_root_part_occ(displayPart)
         : NULL_TAG;
+    const bool uniquePartMode =
+        ReadString("assemblyListMode", u8"唯一部件清单").find(u8"唯一") != std::string::npos;
+    std::map<tag_t, int> prototypeReferenceCounts;
+    std::function<void(tag_t)> countOccurrence;
+    countOccurrence = [&](tag_t occurrence)
+    {
+        if (occurrence == NULL_TAG)
+            return;
+        const tag_t prototype = UF_ASSEM_ask_prototype_of_occ(occurrence);
+        ++prototypeReferenceCounts[prototype != NULL_TAG ? prototype : occurrence];
+        tag_t* children = nullptr;
+        const int childCount = UF_ASSEM_ask_part_occ_children(occurrence, &children);
+        for (int index = 0; index < childCount; ++index)
+            countOccurrence(children[index]);
+        if (children != nullptr)
+            UF_free(children);
+    };
+    countOccurrence(rootOccurrence);
+    std::set<tag_t> displayedPrototypeParts;
     int assemblyCount = 0;
     int ordinaryPartCount = 0;
     int sheetMetalCount = 0;
     int drawingCount = 0;
     int hiddenCount = 0;
+    int maximumTreeDepth = 0;
 
-    std::function<void(tag_t, NXOpen::BlockStyler::Node*)> appendOccurrence;
-    appendOccurrence = [&](tag_t occurrence, NXOpen::BlockStyler::Node* parentNode)
+    std::function<void(tag_t, NXOpen::BlockStyler::Node*, int)> appendOccurrence;
+    appendOccurrence = [&](tag_t occurrence, NXOpen::BlockStyler::Node* parentNode, int depth)
     {
         if (occurrence == NULL_TAG)
             return;
 
+        maximumTreeDepth = (std::max)(maximumTreeDepth, depth);
+
         tag_t* children = nullptr;
         const int childCount = UF_ASSEM_ask_part_occ_children(occurrence, &children);
+        const tag_t prototypeTag = UF_ASSEM_ask_prototype_of_occ(occurrence);
+        const tag_t prototypeKey = prototypeTag != NULL_TAG ? prototypeTag : occurrence;
+        if (uniquePartMode && !displayedPrototypeParts.insert(prototypeKey).second)
+        {
+            for (int index = 0; index < childCount; ++index)
+                appendOccurrence(children[index], nullptr, 0);
+            if (children != nullptr)
+                UF_free(children);
+            return;
+        }
         const NativeAssemblyFilterMetadata metadata =
             ClassifyNativeAssemblyOccurrence(occurrence);
         assemblyCount += metadata.assembly ? 1 : 0;
@@ -19912,10 +19983,13 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
 
         NXOpen::BlockStyler::Node* node = assemblyTree_->CreateNode("");
         assemblyTree_->InsertNode(
-            node, parentNode, nullptr, NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
+            node, uniquePartMode ? nullptr : parentNode, nullptr,
+            NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
         node->SetColumnDisplayText(0, "");
         // NX 2412 renders state 2 as checked and state 1 as unchecked.
-        node->SetState(2);
+        const bool selected = !hadExistingRows ||
+            previouslySelectedPrototypes.find(prototypeKey) != previouslySelectedPrototypes.end();
+        node->SetState(selected ? 2 : 1);
         node->SetColumnDisplayText(1, NXOpen::NXString(name, NXOpen::NXString::UTF8));
         node->SetColumnDisplayText(2, NXOpen::NXString(
             NativeAssemblyDrawingNumber(metadata), NXOpen::NXString::UTF8));
@@ -19928,22 +20002,31 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
         if (metadata.hidden)
             status += u8"隐藏 ";
         status += metadata.hasDrawing ? u8"已出图" : u8"未出图";
-        node->SetColumnDisplayText(5, NXOpen::NXString(status, NXOpen::NXString::UTF8));
+        node->SetColumnDisplayText(5, std::to_string(prototypeReferenceCounts[prototypeKey]));
+        node->SetColumnDisplayText(6, NXOpen::NXString(status, NXOpen::NXString::UTF8));
         assemblyNodes_.push_back(node);
         assemblyNodeOccurrences_[node] = occurrence;
 
         for (int index = 0; index < childCount; ++index)
-            appendOccurrence(children[index], node);
+            appendOccurrence(
+                children[index], uniquePartMode ? nullptr : node,
+                uniquePartMode ? 0 : depth + 1);
         if (children != nullptr)
             UF_free(children);
     };
 
     if (rootOccurrence != NULL_TAG)
-        appendOccurrence(rootOccurrence, nullptr);
+        appendOccurrence(rootOccurrence, nullptr, 0);
 
     for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
         node->Expand(NXOpen::BlockStyler::Node::ExpandOptionExpand);
 
+    // NX indents a node's state icon inside column zero.  The old flat list
+    // fit in 55 pixels, but a real assembly hierarchy pushes leaf checkboxes
+    // beyond that fixed width and clips them.  Size the state column for the
+    // deepest row actually present.
+    const int stateColumnWidth = uniquePartMode ? 55 : 55 + maximumTreeDepth * 18;
+    assemblyTree_->SetColumnWidth(0, stateColumnWidth);
     assemblyTree_->Redraw(true);
     assemblyStateUpdateInProgress_ = false;
     if (!assemblyNodes_.empty())
@@ -19953,17 +20036,23 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
     SetBlockString("assemblyFilterStatus", "Label",
         assemblyNodes_.empty()
             ? std::string(u8"过滤结果：当前部件不是装配，按当前工作部件出图")
-            : std::string(u8"过滤结果：已加载 ") + std::to_string(assemblyNodes_.size()) +
-                u8" 个：装配 " + std::to_string(assemblyCount) +
+            : std::string(uniquePartMode ? u8"唯一部件清单：" : u8"装配结构：") +
+                u8"已加载 " + std::to_string(assemblyNodes_.size()) +
+                u8" 行；装配 " + std::to_string(assemblyCount) +
                 u8"，普通零件 " + std::to_string(ordinaryPartCount) +
-                u8"，钣金 " + std::to_string(sheetMetalCount) + u8"；默认全部勾选");
+                u8"，钣金 " + std::to_string(sheetMetalCount) +
+                u8"；预计出图 " +
+                std::to_string(SelectedNativeOccurrenceTags().size()) + u8" 份");
     WriteLine(session_, "AutoCreateThreeViews: native assembly list populated, rows=" +
         std::to_string(assemblyNodes_.size()) +
         ", assemblies=" + std::to_string(assemblyCount) +
         ", ordinaryParts=" + std::to_string(ordinaryPartCount) +
         ", sheetMetal=" + std::to_string(sheetMetalCount) +
         ", withDrawing=" + std::to_string(drawingCount) +
-        ", hidden=" + std::to_string(hiddenCount) + ".");
+        ", hidden=" + std::to_string(hiddenCount) +
+        ", mode=" + (uniquePartMode ? "unique-parts" : "assembly-tree") +
+        ", maximumTreeDepth=" + std::to_string(maximumTreeDepth) +
+        ", stateColumnWidth=" + std::to_string(stateColumnWidth) + ".");
 }
 
 void AutoCreateThreeViewsDialog::OnNativeAssemblyStateChange(
@@ -19973,17 +20062,42 @@ void AutoCreateThreeViewsDialog::OnNativeAssemblyStateChange(
 {
     if (node == nullptr || assemblyStateUpdateInProgress_)
         return;
-    node->SetState(node->GetState() == 2 ? 1 : 2);
-    int checked = 0;
+    const int targetState = node->GetState() == 2 ? 1 : 2;
+    tag_t targetPrototype = NULL_TAG;
+    const auto selectedOccurrence = assemblyNodeOccurrences_.find(node);
+    if (selectedOccurrence != assemblyNodeOccurrences_.end())
+    {
+        targetPrototype = UF_ASSEM_ask_prototype_of_occ(selectedOccurrence->second);
+        if (targetPrototype == NULL_TAG)
+            targetPrototype = selectedOccurrence->second;
+    }
+    assemblyStateUpdateInProgress_ = true;
+    assemblyTree_->Redraw(false);
     for (NXOpen::BlockStyler::Node* row : assemblyNodes_)
-        checked += row != nullptr && row->GetState() == 2 ? 1 : 0;
+    {
+        if (row == nullptr)
+            continue;
+        const auto occurrence = assemblyNodeOccurrences_.find(row);
+        if (occurrence == assemblyNodeOccurrences_.end())
+            continue;
+        tag_t prototype = UF_ASSEM_ask_prototype_of_occ(occurrence->second);
+        if (prototype == NULL_TAG)
+            prototype = occurrence->second;
+        if (prototype == targetPrototype)
+            row->SetState(targetState);
+    }
+    assemblyTree_->Redraw(true);
+    assemblyStateUpdateInProgress_ = false;
+    const size_t checked = SelectedNativeOccurrenceTags().size();
     SetBlockString("assemblyFilterStatus", "Label",
-        std::string(u8"过滤结果：已勾选 ") + std::to_string(checked) + u8" 个出图组件");
+        std::string(u8"已选择 ") + std::to_string(checked) +
+        u8" 个唯一部件，预计生成 " + std::to_string(checked) + u8" 份图纸");
 }
 
 std::vector<tag_t> AutoCreateThreeViewsDialog::SelectedNativeOccurrenceTags() const
 {
     std::vector<tag_t> tags;
+    std::set<tag_t> selectedPrototypeParts;
     if (assemblyTree_ == nullptr)
         return tags;
     for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
@@ -19991,8 +20105,12 @@ std::vector<tag_t> AutoCreateThreeViewsDialog::SelectedNativeOccurrenceTags() co
         if (node == nullptr || node->GetState() != 2)
             continue;
         const auto found = assemblyNodeOccurrences_.find(node);
-        if (found != assemblyNodeOccurrences_.end() && found->second != NULL_TAG &&
-            std::find(tags.begin(), tags.end(), found->second) == tags.end())
+        if (found == assemblyNodeOccurrences_.end() || found->second == NULL_TAG)
+            continue;
+        tag_t prototype = UF_ASSEM_ask_prototype_of_occ(found->second);
+        if (prototype == NULL_TAG)
+            prototype = found->second;
+        if (selectedPrototypeParts.insert(prototype).second)
             tags.push_back(found->second);
     }
     return tags;
@@ -20078,9 +20196,11 @@ void AutoCreateThreeViewsDialog::ApplyNativeAssemblyFilters()
         }
         assemblyTree_->Redraw(true);
         assemblyStateUpdateInProgress_ = false;
+        const size_t uniqueSelected = SelectedNativeOccurrenceTags().size();
         SetBlockString("assemblyFilterStatus", "Label",
             std::string(u8"过滤结果：未选择过滤条件，已恢复全部 ") +
-                std::to_string(restored) + u8" 个出图勾选");
+                std::to_string(restored) + u8" 行勾选；预计出图 " +
+                std::to_string(uniqueSelected) + u8" 份");
         WriteLine(session_, "AutoCreateThreeViews: no native assembly filter selected; restored all " +
             std::to_string(restored) + " rows.");
         return;
@@ -20162,9 +20282,11 @@ void AutoCreateThreeViewsDialog::ApplyNativeAssemblyFilters()
     }
     assemblyTree_->Redraw(true);
     assemblyStateUpdateInProgress_ = false;
+    const size_t uniqueSelected = SelectedNativeOccurrenceTags().size();
     SetBlockString("assemblyFilterStatus", "Label",
         std::string(u8"过滤结果：按 ") + std::to_string(ruleCount) + u8" 项条件取消 " +
-        std::to_string(removed) + u8" 个，勾选 " + std::to_string(kept) + u8" 个出图组件");
+        std::to_string(removed) + u8" 行，保留 " + std::to_string(kept) +
+        u8" 行；预计出图 " + std::to_string(uniqueSelected) + u8" 份");
     WriteLine(session_, "AutoCreateThreeViews: native assembly filters removed=" +
         std::to_string(removed) + ", kept=" + std::to_string(kept) +
         ", withDrawing=" + std::to_string(detectedWithDrawing) +
@@ -20672,6 +20794,7 @@ void AutoCreateThreeViewsDialog::ConfigureNativeEnums() const
     };
 
     configure("drawingTargetMode", {u8"按部件/组件出图", u8"按部件内图层出图"}, u8"按部件/组件出图", false);
+    configure("assemblyListMode", {u8"唯一部件清单", u8"装配结构"}, u8"唯一部件清单", true);
 
     std::vector<std::string> templateMembers = {u8"自动匹配模板"};
     const std::filesystem::path templateDirectory =
@@ -21315,9 +21438,19 @@ int AutoCreateThreeViewsDialog::ExecuteCreateDrawing()
             {
                 templatePath.clear();
             }
-            else if (!templatePath.empty() && !std::filesystem::path(templatePath).is_absolute())
+            else if (!templatePath.empty())
             {
-                templatePath = (CurrentModuleDirectory().parent_path() / "DATA" / templatePath).string();
+                // Block Styler enumeration values are UTF-8.  Constructing a
+                // Windows filesystem::path directly from the narrow string can
+                // invoke the active multibyte code page and throw for a manual
+                // template name containing Chinese or other Unicode text.
+                std::filesystem::path selectedTemplatePath = PathFromUtf8(templatePath);
+                if (!selectedTemplatePath.is_absolute())
+                {
+                    selectedTemplatePath =
+                        CurrentModuleDirectory().parent_path() / "DATA" / selectedTemplatePath;
+                }
+                templatePath = selectedTemplatePath.u8string();
             }
             std::string frontDirectionMode = Trim(nativeValues.mainViewDirection);
             if (frontDirectionMode.find(u8"最大平面") != std::string::npos)
@@ -21760,13 +21893,16 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         }
         else
         {
-            if (!TryComputeAutoFrontDirectionFromOverallBoundingBox(workPart, frontDirection))
+            if (!TryComputeAutoFrontDirectionFromLeafAssemblyBodies(workPart, frontDirection))
             {
-                TryComputeAutoFrontDirectionFromLeafAssemblyBodies(workPart, frontDirection);
+                WriteLine(
+                    session,
+                    "AutoCreateThreeViews: assembly largest planar face with a straight edge not found; fallback to overall bounding box.");
+                TryComputeAutoFrontDirectionFromOverallBoundingBox(workPart, frontDirection);
             }
             if (!frontDirection.valid)
             {
-                WriteLine(session, "AutoCreateThreeViews: assembly leaf front direction not found; fallback to Top model view as front view.");
+                WriteLine(session, "AutoCreateThreeViews: assembly front direction not found after planar-face and bounding-box attempts; fallback to Top model view as front view.");
             }
         }
         WriteTimingLine(session, partLabel, "model_bounds_and_front_direction", stageStarted);

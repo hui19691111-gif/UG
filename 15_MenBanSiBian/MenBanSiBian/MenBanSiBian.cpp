@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <cstdio>
+#include <cstdarg>
 #include <limits>
 #include <string>
 #include <utility>
@@ -131,6 +132,95 @@ MenBanSiBian::~MenBanSiBian()
 #define NOMINMAX
 #endif
 #include <windows.h>
+
+static SRWLOCK g_menBanSiBianLogLock = SRWLOCK_INIT;
+
+static std::wstring GetMenBanSiBianLogPath()
+{
+    wchar_t modulePath[MAX_PATH] = { 0 };
+    HMODULE selfModule = NULL;
+    if (GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&GetMenBanSiBianLogPath),
+        &selfModule))
+    {
+        DWORD length = GetModuleFileNameW(selfModule, modulePath, MAX_PATH);
+        if (length > 0 && length < MAX_PATH)
+        {
+            std::wstring path(modulePath, length);
+            size_t applicationSlash = path.find_last_of(L"\\/");
+            if (applicationSlash != std::wstring::npos)
+            {
+                path.resize(applicationSlash);
+                size_t rootSlash = path.find_last_of(L"\\/");
+                if (rootSlash != std::wstring::npos)
+                {
+                    std::wstring logDirectory = path.substr(0, rootSlash) + L"\\logs";
+                    CreateDirectoryW(logDirectory.c_str(), NULL);
+                    return logDirectory + L"\\MenBanSiBian_debug.log";
+                }
+            }
+        }
+    }
+
+    CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
+    return L"D:\\UG智辉钣金插件\\logs\\MenBanSiBian_debug.log";
+}
+
+static void MenBanSiBianDebugLog(const char* format, ...)
+{
+    if (format == NULL)
+    {
+        return;
+    }
+
+    char message[2048] = { 0 };
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(message, sizeof(message), format, arguments);
+    va_end(arguments);
+
+    SYSTEMTIME time = {};
+    GetLocalTime(&time);
+    char line[2304] = { 0 };
+    int lineLength = snprintf(
+        line,
+        sizeof(line),
+        "%04u-%02u-%02u %02u:%02u:%02u.%03u [PID:%lu TID:%lu] %s\r\n",
+        time.wYear,
+        time.wMonth,
+        time.wDay,
+        time.wHour,
+        time.wMinute,
+        time.wSecond,
+        time.wMilliseconds,
+        static_cast<unsigned long>(GetCurrentProcessId()),
+        static_cast<unsigned long>(GetCurrentThreadId()),
+        message);
+    if (lineLength <= 0)
+    {
+        return;
+    }
+    DWORD bytesToWrite = static_cast<DWORD>(std::min(lineLength, static_cast<int>(sizeof(line) - 1)));
+
+    AcquireSRWLockExclusive(&g_menBanSiBianLogLock);
+    std::wstring logPath = GetMenBanSiBianLogPath();
+    HANDLE file = CreateFileW(
+        logPath.c_str(),
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL);
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        DWORD bytesWritten = 0;
+        WriteFile(file, line, bytesToWrite, &bytesWritten, NULL);
+        CloseHandle(file);
+    }
+    ReleaseSRWLockExclusive(&g_menBanSiBianLogLock);
+}
 
 namespace zhihui_license_guard
 {
@@ -339,10 +429,13 @@ HMODULE module = LoadProtectedLicenseGate();
 }
 extern "C" DllExport void  ufusr(char *param, int *retcod, int param_len)
 {
+    MenBanSiBianDebugLog("module: invoked build=protected-release diagnosticLog=enabled");
     if (!zhihui_license_guard::EnsureAuthorized(L"ZHIHUI.MENBANSIBIAN", L"MenBanSiBian"))
     {
+        MenBanSiBianDebugLog("module: authorization or integrity check failed");
         return;
     }
+    MenBanSiBianDebugLog("module: authorization and integrity check passed");
 
     MenBanSiBian *theMenBanSiBian = NULL;
     try
@@ -353,6 +446,7 @@ extern "C" DllExport void  ufusr(char *param, int *retcod, int param_len)
     }
     catch(exception& ex)
     {
+        MenBanSiBianDebugLog("module: unhandled launch exception message=%s", ex.what());
         //---- Enter your exception handling code here -----
         MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
@@ -519,7 +613,7 @@ void MenBanSiBian::initialize_cb()
         ShowBlockStylerError(ex);
     }
 }
-//��ʼ��
+//初始化
 NXOpen::Session* theSession = NXOpen::Session::GetSession();
 NXOpen::Part* workPart(theSession->Parts()->Work());
 NXOpen::Part* displayPart(theSession->Parts()->Display());
@@ -589,6 +683,55 @@ static double GetDoubleBlockValue(NXOpen::BlockStyler::DoubleBlock* block, doubl
         }
         return defaultValue;
     }
+}
+
+static void LogCreatedContainmentReference(
+    const char* containmentType,
+    size_t cornerIndex,
+    const char* triggerCondition,
+    NXOpen::NXObject* object)
+{
+    unsigned long long featureTag = static_cast<unsigned long long>(object != NULL ? object->Tag() : 0);
+    unsigned long long bodyTag = 0;
+    NXOpen::Features::Feature* feature = dynamic_cast<NXOpen::Features::Feature*>(object);
+    if (feature != NULL)
+    {
+        vector<NXOpen::Body*> bodies = feature->GetBodies();
+        if (!bodies.empty() && bodies[0] != NULL)
+        {
+            bodyTag = static_cast<unsigned long long>(bodies[0]->Tag());
+        }
+    }
+
+    MenBanSiBianDebugLog(
+        "containment: corner=%llu type=%s featureTag=%llu bodyTag=%llu trigger=%s",
+        static_cast<unsigned long long>(cornerIndex),
+        containmentType != NULL ? containmentType : "unknown",
+        featureTag,
+        bodyTag,
+        triggerCondition != NULL ? triggerCondition : "unspecified");
+}
+
+static void LogCreatedContainmentGeometry(
+    const char* containmentType,
+    NXOpen::NXObject* object,
+    const vector<NXOpen::Body*>& bodies,
+    const NXOpen::Point3d& center,
+    double xLength,
+    double yLength,
+    double zLength)
+{
+    MenBanSiBianDebugLog(
+        "containment-geometry: type=%s featureTag=%llu bodyTag=%llu center=(%.6f,%.6f,%.6f) size=(X=%.6f,Y=%.6f,Z=%.6f)",
+        containmentType != NULL ? containmentType : "unknown",
+        static_cast<unsigned long long>(object != NULL ? object->Tag() : 0),
+        static_cast<unsigned long long>(!bodies.empty() && bodies[0] != NULL ? bodies[0]->Tag() : 0),
+        center.X,
+        center.Y,
+        center.Z,
+        xLength,
+        yLength,
+        zLength);
 }
 
 static void LoadMenBanSiBianDialogMemory(
@@ -805,8 +948,8 @@ static bool IsSingleCornerMode(NXOpen::BlockStyler::Enumeration* createModeBlock
 
         const char* utf8Text = createModeValue.GetUTF8Text();
         const char* localeText = createModeValue.GetLocaleText();
-        return (utf8Text != NULL && strstr(utf8Text, "��") != NULL) ||
-            (localeText != NULL && strstr(localeText, "��") != NULL);
+        return (utf8Text != NULL && strstr(utf8Text, "单") != NULL) ||
+            (localeText != NULL && strstr(localeText, "单") != NULL);
     }
     catch (exception&)
     {
@@ -993,6 +1136,17 @@ static double DotVector(const NXOpen::Point3d& vector1, const NXOpen::Point3d& v
     return vector1.X * vector2.X + vector1.Y * vector2.Y + vector1.Z * vector2.Z;
 }
 
+static bool GetParallelLargeFaceThickness(
+    NXOpen::Face* baseFace,
+    const vector<NXOpen::Face*>& faces,
+    double minOverlapRatio,
+    double& thickness,
+    double& baseArea,
+    double& matchedFaceArea,
+    double& matchedOverlapRatio,
+    int& qualifiedFaceCount,
+    NXOpen::Face*& matchedFace);
+
 static bool GetPlanarFaceNormal(NXOpen::Face* face, NXOpen::Point3d& normal)
 {
     if (face == NULL || face->SolidFaceType() != NXOpen::Face::FaceTypePlanar)
@@ -1100,48 +1254,15 @@ static void AddUniquePoint(vector<NXOpen::Point3d>& points, const NXOpen::Point3
     points.push_back(point);
 }
 
-static bool GetBodyVertexCenter(NXOpen::Body* body, NXOpen::Point3d& center)
-{
-    if (body == NULL)
-    {
-        return false;
-    }
-
-    vector<NXOpen::Point3d> points;
-    vector<NXOpen::Edge*> edges = body->GetEdges();
-    for (size_t i = 0; i < edges.size(); i++)
-    {
-        if (edges[i] == NULL)
-        {
-            continue;
-        }
-
-        NXOpen::Point3d point1;
-        NXOpen::Point3d point2;
-        edges[i]->GetVertices(&point1, &point2);
-        AddUniquePoint(points, point1);
-        AddUniquePoint(points, point2);
-    }
-
-    if (points.empty())
-    {
-        return false;
-    }
-
-    center = { 0.0, 0.0, 0.0 };
-    for (size_t i = 0; i < points.size(); i++)
-    {
-        center.X += points[i].X;
-        center.Y += points[i].Y;
-        center.Z += points[i].Z;
-    }
-    center.X /= static_cast<double>(points.size());
-    center.Y /= static_cast<double>(points.size());
-    center.Z /= static_cast<double>(points.size());
-    return true;
-}
-
-static NXOpen::Xform* CreateFaceEdgeAlignedXform(NXOpen::Face* face, NXOpen::Body* body, NXOpen::Part* part)
+static NXOpen::Xform* CreateFaceEdgeAlignedXform(
+    NXOpen::Face* face,
+    NXOpen::Body* body,
+    NXOpen::Part* part,
+    double& thickness,
+    double& baseArea,
+    double& matchedFaceArea,
+    double& matchedOverlapRatio,
+    int& qualifiedFaceCount)
 {
     if (face == NULL || part == NULL || face->SolidFaceType() != NXOpen::Face::FaceTypePlanar)
     {
@@ -1151,8 +1272,12 @@ static NXOpen::Xform* CreateFaceEdgeAlignedXform(NXOpen::Face* face, NXOpen::Bod
     NXOpen::Point3d normal;
     if (!GetPlanarFaceNormal(face, normal))
     {
+        MenBanSiBianDebugLog("normal: face=%llu failed to calculate initial planar normal",
+            static_cast<unsigned long long>(face != NULL ? face->Tag() : 0));
         return NULL;
     }
+    MenBanSiBianDebugLog("normal: face=%llu initial=(%.6f,%.6f,%.6f)",
+        static_cast<unsigned long long>(face->Tag()), normal.X, normal.Y, normal.Z);
 
     vector<NXOpen::Edge*> edges = face->GetEdges();
     vector<NXOpen::Point3d> facePoints;
@@ -1218,21 +1343,68 @@ static NXOpen::Xform* CreateFaceEdgeAlignedXform(NXOpen::Face* face, NXOpen::Bod
     origin.Y /= static_cast<double>(facePoints.size());
     origin.Z /= static_cast<double>(facePoints.size());
 
-    NXOpen::Point3d bodyCenter;
-    if (GetBodyVertexCenter(body, bodyCenter))
+    NXOpen::Face* matchedFace = NULL;
+    vector<NXOpen::Face*> bodyFaces = body != NULL ? body->GetFaces() : vector<NXOpen::Face*>();
+    if (!GetParallelLargeFaceThickness(
+        face,
+        bodyFaces,
+        0.60,
+        thickness,
+        baseArea,
+        matchedFaceArea,
+        matchedOverlapRatio,
+        qualifiedFaceCount,
+        matchedFace) || matchedFace == NULL)
     {
-        NXOpen::Point3d faceToBody = {
-            bodyCenter.X - origin.X,
-            bodyCenter.Y - origin.Y,
-            bodyCenter.Z - origin.Z
-        };
-        if (DotVector(faceToBody, normal) > 0.0)
+        MenBanSiBianDebugLog("normal: face=%llu no qualified thickness mate, cannot orient outward",
+            static_cast<unsigned long long>(face->Tag()));
+        return NULL;
+    }
+
+    vector<NXOpen::Edge*> matchedEdges = matchedFace->GetEdges();
+    NXOpen::Point3d matchedPoint;
+    bool hasMatchedPoint = false;
+    for (size_t i = 0; i < matchedEdges.size(); i++)
+    {
+        if (matchedEdges[i] != NULL)
         {
-            normal.X = -normal.X;
-            normal.Y = -normal.Y;
-            normal.Z = -normal.Z;
+            NXOpen::Point3d unusedPoint;
+            matchedEdges[i]->GetVertices(&matchedPoint, &unusedPoint);
+            hasMatchedPoint = true;
+            break;
         }
     }
+    if (!hasMatchedPoint)
+    {
+        MenBanSiBianDebugLog("normal: matched face=%llu has no usable vertex",
+            static_cast<unsigned long long>(matchedFace->Tag()));
+        return NULL;
+    }
+
+    NXOpen::Point3d faceToMatchedFace = {
+        matchedPoint.X - origin.X,
+        matchedPoint.Y - origin.Y,
+        matchedPoint.Z - origin.Z
+    };
+    double directionDot = DotVector(faceToMatchedFace, normal);
+    bool flippedNormal = directionDot > 0.0;
+    if (flippedNormal)
+    {
+        normal.X = -normal.X;
+        normal.Y = -normal.Y;
+        normal.Z = -normal.Z;
+    }
+    MenBanSiBianDebugLog(
+        "normal: face=%llu mate=%llu thickness=%.6f overlap=%.2f%% directionDot=%.6f flipped=%d final=(%.6f,%.6f,%.6f)",
+        static_cast<unsigned long long>(face->Tag()),
+        static_cast<unsigned long long>(matchedFace->Tag()),
+        thickness,
+        matchedOverlapRatio * 100.0,
+        directionDot,
+        flippedNormal ? 1 : 0,
+        normal.X,
+        normal.Y,
+        normal.Z);
 
     NXOpen::Point3d yAxis = {
         normal.Y * xAxis.Z - normal.Z * xAxis.Y,
@@ -1874,6 +2046,166 @@ static bool GetPlanarFaceHullArea(NXOpen::Face* face, double& area)
     return area > 0.001;
 }
 
+static double GetProjectedPolygonArea(const vector<ProjectedPoint>& polygon)
+{
+    if (polygon.size() < 3)
+    {
+        return 0.0;
+    }
+
+    double signedArea = 0.0;
+    for (size_t i = 0; i < polygon.size(); i++)
+    {
+        const ProjectedPoint& current = polygon[i];
+        const ProjectedPoint& next = polygon[(i + 1) % polygon.size()];
+        signedArea += current.x * next.y - current.y * next.x;
+    }
+    return fabs(signedArea) * 0.5;
+}
+
+static bool GetFaceProjectedConvexHull(
+    NXOpen::Face* face,
+    const NXOpen::Point3d& origin,
+    const NXOpen::Point3d& axisU,
+    const NXOpen::Point3d& axisV,
+    vector<ProjectedPoint>& hull)
+{
+    hull.clear();
+    if (face == NULL || face->SolidFaceType() != NXOpen::Face::FaceTypePlanar)
+    {
+        return false;
+    }
+
+    vector<NXOpen::Point3d> points;
+    vector<NXOpen::Edge*> edges = face->GetEdges();
+    for (size_t i = 0; i < edges.size(); i++)
+    {
+        if (edges[i] == NULL)
+        {
+            continue;
+        }
+        NXOpen::Point3d point1;
+        NXOpen::Point3d point2;
+        edges[i]->GetVertices(&point1, &point2);
+        AddUniquePoint(points, point1);
+        AddUniquePoint(points, point2);
+    }
+    if (points.size() < 3)
+    {
+        return false;
+    }
+
+    vector<ProjectedPoint> projectedPoints;
+    for (size_t i = 0; i < points.size(); i++)
+    {
+        NXOpen::Point3d offset = {
+            points[i].X - origin.X,
+            points[i].Y - origin.Y,
+            points[i].Z - origin.Z
+        };
+        ProjectedPoint projectedPoint = {
+            DotVector(offset, axisU),
+            DotVector(offset, axisV)
+        };
+        projectedPoints.push_back(projectedPoint);
+    }
+
+    std::sort(projectedPoints.begin(), projectedPoints.end(), [](const ProjectedPoint& point1, const ProjectedPoint& point2) {
+        if (fabs(point1.x - point2.x) > 0.001)
+        {
+            return point1.x < point2.x;
+        }
+        return point1.y < point2.y;
+    });
+
+    for (size_t i = 0; i < projectedPoints.size(); i++)
+    {
+        while (hull.size() >= 2 && Cross2D(hull[hull.size() - 2], hull[hull.size() - 1], projectedPoints[i]) <= 0.000001)
+        {
+            hull.pop_back();
+        }
+        hull.push_back(projectedPoints[i]);
+    }
+    size_t lowerHullSize = hull.size();
+    for (size_t i = projectedPoints.size(); i > 0; i--)
+    {
+        const ProjectedPoint& point = projectedPoints[i - 1];
+        while (hull.size() > lowerHullSize && Cross2D(hull[hull.size() - 2], hull[hull.size() - 1], point) <= 0.000001)
+        {
+            hull.pop_back();
+        }
+        hull.push_back(point);
+    }
+    if (!hull.empty())
+    {
+        hull.pop_back();
+    }
+    return hull.size() >= 3 && GetProjectedPolygonArea(hull) > 0.001;
+}
+
+static ProjectedPoint IntersectProjectedLines(
+    const ProjectedPoint& segmentStart,
+    const ProjectedPoint& segmentEnd,
+    const ProjectedPoint& clipStart,
+    const ProjectedPoint& clipEnd)
+{
+    double segmentX = segmentEnd.x - segmentStart.x;
+    double segmentY = segmentEnd.y - segmentStart.y;
+    double clipX = clipEnd.x - clipStart.x;
+    double clipY = clipEnd.y - clipStart.y;
+    double denominator = segmentX * clipY - segmentY * clipX;
+    if (fabs(denominator) < 0.000000001)
+    {
+        return segmentEnd;
+    }
+
+    double startToClipX = clipStart.x - segmentStart.x;
+    double startToClipY = clipStart.y - segmentStart.y;
+    double ratio = (startToClipX * clipY - startToClipY * clipX) / denominator;
+    ProjectedPoint intersection = {
+        segmentStart.x + segmentX * ratio,
+        segmentStart.y + segmentY * ratio
+    };
+    return intersection;
+}
+
+static double GetProjectedConvexOverlapArea(
+    const vector<ProjectedPoint>& subjectPolygon,
+    const vector<ProjectedPoint>& clipPolygon)
+{
+    vector<ProjectedPoint> output = subjectPolygon;
+    for (size_t clipIndex = 0; clipIndex < clipPolygon.size() && !output.empty(); clipIndex++)
+    {
+        const ProjectedPoint& clipStart = clipPolygon[clipIndex];
+        const ProjectedPoint& clipEnd = clipPolygon[(clipIndex + 1) % clipPolygon.size()];
+        vector<ProjectedPoint> input = output;
+        output.clear();
+
+        ProjectedPoint segmentStart = input.back();
+        bool startInside = Cross2D(clipStart, clipEnd, segmentStart) >= -0.000001;
+        for (size_t i = 0; i < input.size(); i++)
+        {
+            ProjectedPoint segmentEnd = input[i];
+            bool endInside = Cross2D(clipStart, clipEnd, segmentEnd) >= -0.000001;
+            if (endInside)
+            {
+                if (!startInside)
+                {
+                    output.push_back(IntersectProjectedLines(segmentStart, segmentEnd, clipStart, clipEnd));
+                }
+                output.push_back(segmentEnd);
+            }
+            else if (startInside)
+            {
+                output.push_back(IntersectProjectedLines(segmentStart, segmentEnd, clipStart, clipEnd));
+            }
+            segmentStart = segmentEnd;
+            startInside = endInside;
+        }
+    }
+    return GetProjectedPolygonArea(output);
+}
+
 static bool IsBodyMaxBoundaryFace(NXOpen::Face* selectedFace, NXOpen::Body* body)
 {
     double selectedArea = 0.0;
@@ -2044,28 +2376,105 @@ static bool GetFaceTrueArea(NXOpen::Face* face, double& area)
 static bool GetParallelLargeFaceThickness(
     NXOpen::Face* baseFace,
     const vector<NXOpen::Face*>& faces,
-    double minAreaRatio,
+    double minOverlapRatio,
     double& thickness,
     double& baseArea,
     double& matchedFaceArea,
-    int& qualifiedFaceCount)
+    double& matchedOverlapRatio,
+    int& qualifiedFaceCount,
+    NXOpen::Face*& matchedFace)
 {
     thickness = 0.0;
     baseArea = 0.0;
     matchedFaceArea = 0.0;
+    matchedOverlapRatio = 0.0;
     qualifiedFaceCount = 0;
+    matchedFace = NULL;
     if (baseFace == NULL || workPart == NULL)
     {
+        MenBanSiBianDebugLog("thickness: invalid input baseFace=%p workPart=%p",
+            static_cast<void*>(baseFace), static_cast<void*>(workPart));
         return false;
     }
 
     NXOpen::Point3d baseNormal;
     if (!GetPlanarFaceNormal(baseFace, baseNormal) || !GetFaceTrueArea(baseFace, baseArea))
     {
+        MenBanSiBianDebugLog("thickness: base face=%llu failed normal or true-area calculation",
+            static_cast<unsigned long long>(baseFace->Tag()));
+        return false;
+    }
+    MenBanSiBianDebugLog(
+        "thickness: begin baseFace=%llu candidates=%llu minOverlap=%.2f%% baseTrueArea=%.6f normal=(%.6f,%.6f,%.6f)",
+        static_cast<unsigned long long>(baseFace->Tag()),
+        static_cast<unsigned long long>(faces.size()),
+        minOverlapRatio * 100.0,
+        baseArea,
+        baseNormal.X,
+        baseNormal.Y,
+        baseNormal.Z);
+
+    vector<NXOpen::Edge*> baseEdges = baseFace->GetEdges();
+    vector<NXOpen::Point3d> basePoints;
+    for (size_t i = 0; i < baseEdges.size(); i++)
+    {
+        if (baseEdges[i] == NULL)
+        {
+            continue;
+        }
+        NXOpen::Point3d point1;
+        NXOpen::Point3d point2;
+        baseEdges[i]->GetVertices(&point1, &point2);
+        AddUniquePoint(basePoints, point1);
+        AddUniquePoint(basePoints, point2);
+    }
+    if (basePoints.size() < 3)
+    {
+        return false;
+    }
+
+    NXOpen::Point3d projectionOrigin = basePoints[0];
+    NXOpen::Point3d axisU = { 0.0, 0.0, 0.0 };
+    for (size_t i = 1; i < basePoints.size(); i++)
+    {
+        axisU.X = basePoints[i].X - projectionOrigin.X;
+        axisU.Y = basePoints[i].Y - projectionOrigin.Y;
+        axisU.Z = basePoints[i].Z - projectionOrigin.Z;
+        if (NormalizeVector(axisU))
+        {
+            break;
+        }
+    }
+    if (!NormalizeVector(axisU))
+    {
+        return false;
+    }
+
+    NXOpen::Point3d axisV = {
+        baseNormal.Y * axisU.Z - baseNormal.Z * axisU.Y,
+        baseNormal.Z * axisU.X - baseNormal.X * axisU.Z,
+        baseNormal.X * axisU.Y - baseNormal.Y * axisU.X
+    };
+    if (!NormalizeVector(axisV))
+    {
+        return false;
+    }
+
+    vector<ProjectedPoint> baseHull;
+    if (!GetFaceProjectedConvexHull(baseFace, projectionOrigin, axisU, axisV, baseHull))
+    {
+        MenBanSiBianDebugLog("thickness: base face=%llu failed projected hull",
+            static_cast<unsigned long long>(baseFace->Tag()));
+        return false;
+    }
+    double baseProjectedArea = GetProjectedPolygonArea(baseHull);
+    if (baseProjectedArea <= 0.001)
+    {
         return false;
     }
 
     double minDistance = std::numeric_limits<double>::max();
+    double bestOverlapRatio = 0.0;
     for (size_t i = 0; i < faces.size(); i++)
     {
         NXOpen::Face* candidateFace = faces[i];
@@ -2073,61 +2482,116 @@ static bool GetParallelLargeFaceThickness(
         {
             continue;
         }
+        unsigned long long candidateTag = static_cast<unsigned long long>(candidateFace->Tag());
 
         NXOpen::Point3d candidateNormal;
         if (!GetPlanarFaceNormal(candidateFace, candidateNormal))
         {
+            MenBanSiBianDebugLog("thickness: candidate=%llu rejected reason=not-planar-or-no-normal", candidateTag);
             continue;
         }
 
-        if (fabs(DotVector(baseNormal, candidateNormal)) < 0.95)
+        double parallelDot = fabs(DotVector(baseNormal, candidateNormal));
+        if (parallelDot < 0.999)
         {
+            MenBanSiBianDebugLog("thickness: candidate=%llu rejected reason=not-parallel parallelDot=%.6f", candidateTag, parallelDot);
             continue;
         }
 
         double candidateArea = 0.0;
-        if (!GetFaceTrueArea(candidateFace, candidateArea) ||
-            candidateArea <= baseArea * minAreaRatio)
+        if (!GetFaceTrueArea(candidateFace, candidateArea))
         {
+            MenBanSiBianDebugLog("thickness: candidate=%llu rejected reason=true-area-failed", candidateTag);
             continue;
         }
 
-        MeasureDistance* measureDistance = NULL;
-        try
+        vector<ProjectedPoint> candidateHull;
+        if (!GetFaceProjectedConvexHull(candidateFace, projectionOrigin, axisU, axisV, candidateHull))
         {
-            measureDistance = workPart->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, baseFace, candidateFace);
-            double distance = measureDistance->Value();
-            delete measureDistance;
-            measureDistance = NULL;
-            if (distance <= 0.01)
-            {
-                continue;
-            }
+            MenBanSiBianDebugLog("thickness: candidate=%llu rejected reason=projected-hull-failed", candidateTag);
+            continue;
+        }
+        double overlapArea = GetProjectedConvexOverlapArea(baseHull, candidateHull);
+        double overlapRatio = overlapArea / baseProjectedArea;
+        if (overlapRatio + 0.000001 < minOverlapRatio)
+        {
+            MenBanSiBianDebugLog(
+                "thickness: candidate=%llu rejected reason=overlap-below-limit parallelDot=%.6f trueArea=%.6f overlapArea=%.6f overlap=%.2f%%",
+                candidateTag,
+                parallelDot,
+                candidateArea,
+                overlapArea,
+                overlapRatio * 100.0);
+            continue;
+        }
 
-            qualifiedFaceCount++;
-
-            if (distance < minDistance)
+        vector<NXOpen::Edge*> candidateEdges = candidateFace->GetEdges();
+        NXOpen::Point3d candidatePoint;
+        bool hasCandidatePoint = false;
+        for (size_t edgeIndex = 0; edgeIndex < candidateEdges.size(); edgeIndex++)
+        {
+            if (candidateEdges[edgeIndex] != NULL)
             {
-                minDistance = distance;
-                matchedFaceArea = candidateArea;
+                NXOpen::Point3d unusedPoint;
+                candidateEdges[edgeIndex]->GetVertices(&candidatePoint, &unusedPoint);
+                hasCandidatePoint = true;
+                break;
             }
         }
-        catch (exception&)
+        if (!hasCandidatePoint)
         {
-            if (measureDistance != NULL)
-            {
-                delete measureDistance;
-                measureDistance = NULL;
-            }
+            MenBanSiBianDebugLog("thickness: candidate=%llu rejected reason=no-vertex", candidateTag);
+            continue;
+        }
+
+        NXOpen::Point3d planeOffset = {
+            candidatePoint.X - projectionOrigin.X,
+            candidatePoint.Y - projectionOrigin.Y,
+            candidatePoint.Z - projectionOrigin.Z
+        };
+        double distance = fabs(DotVector(planeOffset, baseNormal));
+        if (distance <= 0.01)
+        {
+            MenBanSiBianDebugLog("thickness: candidate=%llu rejected reason=coplanar distance=%.6f overlap=%.2f%%",
+                candidateTag, distance, overlapRatio * 100.0);
+            continue;
+        }
+
+        qualifiedFaceCount++;
+        MenBanSiBianDebugLog(
+            "thickness: candidate=%llu qualified parallelDot=%.6f trueArea=%.6f overlapArea=%.6f overlap=%.2f%% distance=%.6f",
+            candidateTag,
+            parallelDot,
+            candidateArea,
+            overlapArea,
+            overlapRatio * 100.0,
+            distance);
+        if (distance < minDistance - 0.001 ||
+            (fabs(distance - minDistance) <= 0.001 && overlapRatio > bestOverlapRatio))
+        {
+            minDistance = distance;
+            bestOverlapRatio = overlapRatio;
+            matchedFaceArea = candidateArea;
+            matchedOverlapRatio = overlapRatio;
+            matchedFace = candidateFace;
         }
     }
 
     if (minDistance == std::numeric_limits<double>::max())
     {
+        MenBanSiBianDebugLog("thickness: baseFace=%llu result=no-qualified-mate",
+            static_cast<unsigned long long>(baseFace->Tag()));
         return false;
     }
 
     thickness = minDistance;
+    MenBanSiBianDebugLog(
+        "thickness: selected baseFace=%llu matchedFace=%llu thickness=%.6f overlap=%.2f%% qualifiedCount=%d",
+        static_cast<unsigned long long>(baseFace->Tag()),
+        static_cast<unsigned long long>(matchedFace != NULL ? matchedFace->Tag() : 0),
+        thickness,
+        matchedOverlapRatio * 100.0,
+        qualifiedFaceCount);
     return true;
 }
 
@@ -2466,6 +2930,7 @@ static void CreateSkirtInnerConnectedEdgeBox(
         nXObject = toolingBoxBuilder->Commit();
         vector<Body*> createdBodies = toolingBoxBuilder->GetFeature()->GetBodies();
         AddFirstCreatedBody(createdBodies);
+        LogCreatedContainmentGeometry("裙边内连接包容体", nXObject, createdBodies, position, xLength, yLength, zLength);
         toolingBoxBuilder->Destroy();
     }
     catch (exception& ex)
@@ -2761,17 +3226,17 @@ static const char* GetCornerTypeCreateSummary(int cornerType)
     switch (cornerType)
     {
     case 1:
-        return "�����Ǳ߰����� + ����/�Խǻ�ֱ�ǲ���(�����߷�ʽ)";
+        return "创建角边包容体 + 顶点/对角或直角补充(按包边方式)";
     case 2:
-        return "�����Ǳ߰����� + ���������";
+        return "创建角边包容体 + 顶点包容体";
     case 3:
-        return "��ǰ��ͣ������type3����";
+        return "当前暂停，不按type3创建";
     case 4:
-        return "����1���ᴩ�Ǳ߰����� + ��������壬���������߰�����";
+        return "创建1个贯穿角边包容体 + 顶点包容体，不创建单边包容体";
     case 5:
-        return "�����߷�ʽ����1���ᴩ�Ǳ߰����� + ��������壬����������/�Խ�/ֱ�ǲ���";
+        return "按包边方式创建1个贯穿角边包容体 + 顶点包容体，不创建单边/对角/直角补充";
     default:
-        return "������������";
+        return "不创建包容体";
     }
 }
 
@@ -2909,6 +3374,10 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
             const bool singleCornerEdgeMode = singleCornerMode &&
                 ((block == selectionEdge && selectionEdge != NULL) ||
                 (block == selection0 && selectionEdge == NULL));
+            MenBanSiBianDebugLog("update: selection begin singleCornerMode=%d singleCornerEdgeMode=%d block=%s",
+                singleCornerMode ? 1 : 0,
+                singleCornerEdgeMode ? 1 : 0,
+                block == selectionEdge ? "selectionEdge" : "selection0");
             if (block == selection0 && singleCornerMode && selectionEdge != NULL)
             {
                 return 0;
@@ -2952,7 +3421,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 if (!IsStraightEdge(selectedSingleCornerEdge))
                 {
                     ClearSelection(activeSelection);
-                    MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, "��ѡ��ֱ�߱ߡ�");
+                    MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, "请选择直线边。");
                     UF_terminate();
                     ufInitialized = false;
                     return 0;
@@ -2968,7 +3437,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 if (face1 == NULL)
                 {
                     ClearSelection(activeSelection);
-                    MenBanSiBian::theUI->NXMessageBox()->Show("�����н�", NXOpen::NXMessageBox::DialogTypeWarning, "���ҵ�������ʵ�壬��û���ҵ���ֱѡ���ҵ�ѡ�߾���Ϊ0�Ļ�׼ƽ�档");
+                    MenBanSiBian::theUI->NXMessageBox()->Show("单角切角", NXOpen::NXMessageBox::DialogTypeWarning, "已找到边所在实体，但没有找到垂直选边且到选边距离为0的基准平面。");
                     UF_terminate();
                     ufInitialized = false;
                     return 0;
@@ -3005,6 +3474,12 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
             }
             double selectedFaceArea = 0.0;
             bool validBaseFace = GetPlanarFaceHullArea(face1, selectedFaceArea);
+            MenBanSiBianDebugLog(
+                "update: selected face=%llu body=%llu hullArea=%.6f valid=%d",
+                static_cast<unsigned long long>(face1 != NULL ? face1->Tag() : 0),
+                static_cast<unsigned long long>(Body1 != NULL ? Body1->Tag() : 0),
+                selectedFaceArea,
+                validBaseFace ? 1 : 0);
             if (!validBaseFace)
             {
                 if (singleCornerEdgeMode)
@@ -3015,13 +3490,19 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 {
                     ClearSelection(selection0);
                 }
-                MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, "��ѡ�治��ƽ����޷�ȡ����������������ѡ��");
+                MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, "所选面不是平面或无法取得外轮廓，请重新选择。");
                 UF_terminate();
                 ufInitialized = false;
                 return 0;
             }
             bool selectedFaceIsMaxBoundary = singleCornerEdgeMode ? true : IsBodyMaxBoundaryFace(face1, Body1);
             vector<Face*>Vface = Body1->GetFaces();
+            double BanHou = 0.0;
+            double banHouBaseArea = 0.0;
+            double banHouMatchedArea = 0.0;
+            double banHouOverlapRatio = 0.0;
+            int banHouQualifiedFaceCount = 0;
+            bool usedParallelLargeFaceThickness = false;
             baselineCoordinateSystems = CollectCoordinateSystemTags(workPart);
             NXOpen::Xform* xform1;
             if (singleCornerEdgeMode)
@@ -3032,7 +3513,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 {
                     RestoreWcsAndDeleteTemporary(workPart, previousWcs, wcsChanged, baselineCoordinateSystems);
                     ClearSelection(selectionEdge != NULL ? selectionEdge : selection0);
-                    MenBanSiBian::theUI->NXMessageBox()->Show("�����н�", NXOpen::NXMessageBox::DialogTypeWarning, "δ�ܸ��ݵ���˵��ҵ��������ഹֱ�Ļ���ߣ����ѡ��������ĽǱ߶˵㡣");
+                    MenBanSiBian::theUI->NXMessageBox()->Show("单角切角", NXOpen::NXMessageBox::DialogTypeWarning, "未能根据点击端找到与基准面法向垂直的基准边，请选择靠近角边端点。");
                     UF_terminate();
                     ufInitialized = false;
                     return 0;
@@ -3040,11 +3521,29 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
             }
             else
             {
-                createdFaceXform = CreateFaceEdgeAlignedXform(face1, Body1, workPart);
+                createdFaceXform = CreateFaceEdgeAlignedXform(
+                    face1,
+                    Body1,
+                    workPart,
+                    BanHou,
+                    banHouBaseArea,
+                    banHouMatchedArea,
+                    banHouOverlapRatio,
+                    banHouQualifiedFaceCount);
                 if (createdFaceXform == NULL)
                 {
-                    createdFaceXform = workPart->Xforms()->CreateXform(face1, NXOpen::SmartObject::UpdateOptionAfterModeling);
+                    MenBanSiBianDebugLog("update: face=%llu outward-normal creation failed",
+                        static_cast<unsigned long long>(face1->Tag()));
+                    ClearSelection(selection0);
+                    MenBanSiBian::theUI->NXMessageBox()->Show(
+                        "Block Styler",
+                        NXOpen::NXMessageBox::DialogTypeWarning,
+                        "没有找到与所选面平行、垂直投影重叠率不小于60%的板厚对应面，无法可靠确定外法向。");
+                    UF_terminate();
+                    ufInitialized = false;
+                    return 0;
                 }
+                usedParallelLargeFaceThickness = true;
             }
             xform1 = createdFaceXform;
             NXOpen::CartesianCoordinateSystem* cartesianCoordinateSystem1;
@@ -3106,28 +3605,30 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     return 0;
                 }
             }
-            double BanHou = 0.0;
-            double banHouBaseArea = 0.0;
-            double banHouMatchedArea = 0.0;
-            int banHouQualifiedFaceCount = 0;
-            std::string banHouSource = "ƽ������ʵ���/������ʵ���>0.5��ȡ��С����";
-            bool usedParallelLargeFaceThickness = GetParallelLargeFaceThickness(
-                face1,
-                Vface,
-                0.5,
-                BanHou,
-                banHouBaseArea,
-                banHouMatchedArea,
-                banHouQualifiedFaceCount);
+            std::string banHouSource = "平行面垂直投影重叠率>=60%后取最近对应面距离";
+            if (!usedParallelLargeFaceThickness)
+            {
+                NXOpen::Face* banHouMatchedFace = NULL;
+                usedParallelLargeFaceThickness = GetParallelLargeFaceThickness(
+                    face1,
+                    Vface,
+                    0.60,
+                    BanHou,
+                    banHouBaseArea,
+                    banHouMatchedArea,
+                    banHouOverlapRatio,
+                    banHouQualifiedFaceCount,
+                    banHouMatchedFace);
+            }
             double Mindistance1 = std::numeric_limits<double>::max();
             if (!usedParallelLargeFaceThickness)
             {
-                banHouSource = "�ɲ�ඵ��(sqrt(distance^2/3))";
+                banHouSource = "旧测距兜底(sqrt(distance^2/3))";
                 for (size_t i = 0; i < Vface.size(); i++)
                 {
                     MeasureDistance* measureDistance1;
                     measureDistance1 = workPart->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, Vface[i], point_1);
-                    double distance1 = measureDistance1->Value();//��ȡ������ֵ
+                    double distance1 = measureDistance1->Value();//获取测量的值
                     delete measureDistance1;
                     measureDistance1 = NULL;
                     if (Mindistance1> distance1&& distance1>0.01)
@@ -3146,8 +3647,16 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     ufInitialized = false;
                     return 0;
                 }
-                BanHou = sqrt(pow(Mindistance1, 2)/3);//���ɶ���
+                BanHou = sqrt(pow(Mindistance1, 2)/3);//勾股定理
             }
+            MenBanSiBianDebugLog(
+                "update: thickness result source=%s thickness=%.6f baseArea=%.6f matchedArea=%.6f overlap=%.2f%% qualifiedCount=%d",
+                banHouSource.c_str(),
+                BanHou,
+                banHouBaseArea,
+                banHouMatchedArea,
+                banHouOverlapRatio * 100.0,
+                banHouQualifiedFaceCount);
             double bendInnerRValue = GetDoubleBlockValue(bendInnerR, 0.2);
             if (bendInnerRValue < 0.0)
             {
@@ -3220,7 +3729,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     createdFaceXform = NULL;
                     UF_terminate();
                     ufInitialized = false;
-                    MenBanSiBian::theUI->NXMessageBox()->Show("�����н�", NXOpen::NXMessageBox::DialogTypeWarning, "�޷����ݵ��λ��ȷ���Ǳ߶˵㡣");
+                    MenBanSiBian::theUI->NXMessageBox()->Show("单角切角", NXOpen::NXMessageBox::DialogTypeWarning, "请选择垂直于基准面的角边。");
                     return 0;
                 }
 
@@ -3235,7 +3744,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     createdFaceXform = NULL;
                     UF_terminate();
                     ufInitialized = false;
-                    MenBanSiBian::theUI->NXMessageBox()->Show("�����н�", NXOpen::NXMessageBox::DialogTypeWarning, "����˵�δ�����»��渽�������ѡ��������ĽǱ߶˵㡣");
+                    MenBanSiBian::theUI->NXMessageBox()->Show("单角切角", NXOpen::NXMessageBox::DialogTypeWarning, "所选边没有匹配到基准面的4个顶点，请选择角边。");
                     return 0;
                 }
 
@@ -3300,22 +3809,31 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
                 if (JiaoEdge == NULL || ReiJiaoEdge == NULL)
                 {
+                    MenBanSiBianDebugLog(
+                        "corner[%d]: skipped missing edge jiao=%llu inner=%llu targetXY=(%.6f,%.6f) searchDistance=(%.6f,%.6f)",
+                        ii,
+                        static_cast<unsigned long long>(JiaoEdge != NULL ? JiaoEdge->Tag() : 0),
+                        static_cast<unsigned long long>(ReiJiaoEdge != NULL ? ReiJiaoEdge->Tag() : 0),
+                        DinDian[ii][0],
+                        DinDian[ii][1],
+                        jiaoBestDistance,
+                        reiBestDistance);
                     continue;
                     continue;
                 }
 
                 double edgeLengthDiff = fabs(JiaoEdge->GetLength() - ReiJiaoEdge->GetLength());
-                std::string cornerTypeSource = "δ�����κδ���֧·";
+                std::string cornerTypeSource = "未命中任何创建支路";
                 if (selectedFaceIsMaxBoundary && fabs(edgeLengthDiff - BanHou * 2) < 0.001)
                 {
                     cornerType = 1;
-                    cornerTypeSource = "��������� �� �Ǳ�-���ڱ�=2�����";
+                    cornerTypeSource = "最大外轮廓 且 角边-角内边=2倍板厚";
 
                 }
                 if (selectedFaceIsMaxBoundary && fabs(edgeLengthDiff - BanHou) < 0.001)
                 {
                     cornerType = 2;
-                    cornerTypeSource = "��������� �� �Ǳ�-���ڱ�=1�����";
+                    cornerTypeSource = "最大外轮廓 且 角边-角内边=1倍板厚";
 
                 }
                 int connectedThicknessDirection = 0;
@@ -3355,13 +3873,13 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     if (connectedThicknessDirection != 0)
                     {
                         cornerType = 4;
-                        cornerTypeSource = cornerHasXSkirt ? "ȹ��֧·: �ý�ֻ��X������ȹ��" : "ȹ��֧·: �ý�ֻ��Y������ȹ��";
+                        cornerTypeSource = cornerHasXSkirt ? "裙边支路: 该角只有X侧相邻裙边" : "裙边支路: 该角只有Y侧相邻裙边";
                     }
                 }
                 else if (cornerSkirtCount == 2)
                 {
                     cornerType = 5;
-                    cornerTypeSource = "ȹ��֧·: �ý�X/Y���඼������ȹ��";
+                    cornerTypeSource = "裙边支路: 该角X/Y两侧都有相邻裙边";
                 }
                 else if (selectedFaceIsMaxBoundary && JiaoEdge->GetLength() > ReiJiaoEdge->GetLength() + 0.001)
                 {
@@ -3369,18 +3887,34 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     if (connectedThicknessDirection != 0 && cornerType == 0)
                     {
                         cornerType = 4;
-                        cornerTypeSource = "����֧·: �Ǳߴ��ڽ��ڱߣ��Ǳ���һ�����Ӱ���";
+                        cornerTypeSource = "新增支路: 角边大于角内边，角边另一端连接板厚边";
                     }
                 }
+                MenBanSiBianDebugLog(
+                    "corner[%d]: point=(%.6f,%.6f,%.6f) jiaoEdge=%llu length=%.6f innerEdge=%llu length=%.6f diff=%.6f plate=%.6f maxBoundary=%d skirtCount=%d cornerType=%d source=%s",
+                    ii,
+                    DinDian[ii][0],
+                    DinDian[ii][1],
+                    DinDian[ii][2],
+                    static_cast<unsigned long long>(JiaoEdge->Tag()),
+                    JiaoEdge->GetLength(),
+                    static_cast<unsigned long long>(ReiJiaoEdge->Tag()),
+                    ReiJiaoEdge->GetLength(),
+                    edgeLengthDiff,
+                    BanHou,
+                    selectedFaceIsMaxBoundary ? 1 : 0,
+                    cornerSkirtCount,
+                    cornerType,
+                    cornerTypeSource.c_str());
                 if (cornerType!=0)
                 {
                     double output_point1[3];
                     double point1[3];
 
-                    //���߷�ʽ
+                    //包边方式
                     bool shortWrapLong = IsShortWrapLongMode(enum01);
                     int singleSideDirection = 0; // 1: X-thin box, 2: Y-thin box
-                    std::string singleSideDirectionSource = "δ�ҵ����߷��򣬺��������߷�ʽ����";
+                    std::string singleSideDirectionSource = "未找到板厚边方向，后续按包边方式兜底";
                     if (cornerType != 2 && cornerType != 5)
                     {
                         Point3d checkJiaoPoint1;
@@ -3430,28 +3964,35 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                             if (xSingleSide)
                             {
                                 singleSideDirection = 1;
-                                singleSideDirectionSource = "��������ж�: X������� -> X��/Y�� -> ��Y����";
+                                singleSideDirectionSource = "最近板厚边判定: X方向板厚边 -> X薄/Y长 -> 切Y方向";
                             }
                             else if (ySingleSide)
                             {
                                 singleSideDirection = 2;
-                                singleSideDirectionSource = "��������ж�: Y������� -> Y��/X�� -> ��X����";
+                                singleSideDirectionSource = "最近板厚边判定: Y方向板厚边 -> Y薄/X长 -> 切X方向";
                             }
                         }
                     }
                     else
                     {
-                        singleSideDirectionSource = "cornerTypeΪ2��5������������߷����жϣ����������߷�ʽ����";
+                        singleSideDirectionSource = "cornerType为2或5，跳过最近板厚边方向判断，后续按包边方式兜底";
                     }
                     if (connectedThicknessDirection != 0 && IsThroughHeightCornerType(cornerType))
                     {
                         singleSideDirection = connectedThicknessDirection;
                         singleSideDirectionSource = connectedThicknessDirection == 1 ?
-                            "֧·ǿ�Ʒ���: X��/Y�� -> ��Y����" :
-                            "֧·ǿ�Ʒ���: Y��/X�� -> ��X����";
+                            "支路强制方向: X薄/Y长 -> 切Y方向" :
+                            "支路强制方向: Y薄/X长 -> 切X方向";
                     }
                     bool useXDirectionForJiaoBian = singleSideDirection == 1 ||
                         (singleSideDirection == 0 && shortWrapLong);
+                    MenBanSiBianDebugLog(
+                        "corner[%d]: cutDirection=%s singleSideDirection=%d shortWrapLong=%d directionSource=%s",
+                        ii,
+                        useXDirectionForJiaoBian ? "X" : "Y",
+                        singleSideDirection,
+                        shortWrapLong ? 1 : 0,
+                        singleSideDirectionSource.c_str());
                     double cutThroughSideLength = 0.0;
                     bool forceThroughHeightForJiaoBian = IsThroughHeightCornerType(cornerType);
                     if (cornerType!=3)
@@ -3552,28 +4093,24 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     UF_CSYS_map_point(UF_CSYS_ROOT_WCS_COORDS, point1, UF_CSYS_WORK_COORDS, output_point1);
                     Point3d position1 = { output_point1[0],output_point1[1],output_point1[2] };
                     Create_JiaoBian_Box(position1, BanHou, JiaoEdge, cartesianCoordinateSystem1, cornerType, singleSideDirection, tearGapValue, nXObject1, forceThroughHeightForJiaoBian ? cutThroughHeight : 0.0, cutThroughSideLength);
+                    char mainBoxTrigger[512];
+                    sprintf_s(mainBoxTrigger, sizeof(mainBoxTrigger),
+                        "cornerType=%d != 0; source=%s; thinAxis=%s",
+                        cornerType,
+                        cornerTypeSource.c_str(),
+                        useXDirectionForJiaoBian ? "X" : "Y");
+                    LogCreatedContainmentReference("角边包容体", ii, mainBoxTrigger, nXObject1);
                     TrackCreatedObject(nXObject1);
-                    if (hasSkirtInnerConnectedBranch)
-                    {
-                        NXObject* nXObjectSkirtInner = NULL;
-                        CreateSkirtInnerConnectedEdgeBox(
-                            skirtInnerConnectedEdge,
-                            BanHou,
-                            skirtInnerForceDirection,
-                            tearGapValue,
-                            cartesianCoordinateSystem1,
-                            nXObjectSkirtInner);
-                        TrackCreatedObject(nXObjectSkirtInner);
-                    }
 
                     NXObject* nXObject2 = NULL;
                     NXObject* nXObject3 = NULL;
+                    bool createdSingleSideContainment = false;
 
                     Point3d Ver_Point3d1;
                     Point3d Ver_Point3d2;
                     ask_edge_wcs_Vertices(JiaoEdge, Ver_Point3d1, Ver_Point3d2);
 
-                    //���߷�ʽ
+                    //包边方式
                     bool diagonalJoint = IsDiagonalJointMode(enum0);
 
                     Point3d DuanDian1;
@@ -3611,7 +4148,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                         {
                             MeasureDistance* measureDistance1;
                             measureDistance1 = workPart->MeasureManager()->NewDistance(NULL, MeasureManager::MeasureTypeMinimum, BanHouEdge[i], JiaoEdge);
-                            double distance1 = measureDistance1->Value();//��ȡ������ֵ
+                            double distance1 = measureDistance1->Value();//获取测量的值
                             delete measureDistance1;
                             measureDistance1 = NULL;
                             if (distance1 < doublemin)
@@ -3632,9 +4169,39 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                         if (aaa == 1 && cornerType != 2 && cornerType != 4 && cornerType != 5)
                         {
                             Create_DanBian_Box(JiaoEdge, BanHouEdge[bb], tearGapValue, nXObject2);
+                            LogCreatedContainmentReference(
+                                "单边包容体",
+                                ii,
+                                "aaa=1 and cornerType not in {2,4,5}",
+                                nXObject2);
                             TrackCreatedObject(nXObject2);
+                            createdSingleSideContainment = nXObject2 != NULL;
                         }
 
+                    }
+
+                    if (hasSkirtInnerConnectedBranch && !createdSingleSideContainment)
+                    {
+                        NXObject* nXObjectSkirtInner = NULL;
+                        CreateSkirtInnerConnectedEdgeBox(
+                            skirtInnerConnectedEdge,
+                            BanHou,
+                            skirtInnerForceDirection,
+                            tearGapValue,
+                            cartesianCoordinateSystem1,
+                            nXObjectSkirtInner);
+                        LogCreatedContainmentReference(
+                            "裙边内连接包容体",
+                            ii,
+                            "hasSkirtInnerConnectedBranch=true and no single-side containment was created",
+                            nXObjectSkirtInner);
+                        TrackCreatedObject(nXObjectSkirtInner);
+                    }
+                    else if (hasSkirtInnerConnectedBranch && createdSingleSideContainment)
+                    {
+                        MenBanSiBianDebugLog(
+                            "containment-skipped: corner=%llu type=裙边内连接包容体 reason=单边包容体已成功创建，普通角逻辑优先",
+                            static_cast<unsigned long long>(ii));
                     }
 
                     if (cornerType == 1)
@@ -3645,6 +4212,8 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                             {
                                 Create_DinDian_Box(DuanDian1, BanHou, bendInnerRValue, cartesianCoordinateSystem1, nXObject2);
                                 Create_DinDian_Box(DuanDian2, BanHou, bendInnerRValue, cartesianCoordinateSystem1, nXObject3);
+                                LogCreatedContainmentReference("顶点包容体-端点1", ii, "cornerType=1, diagonalJoint=true, aaa=0", nXObject2);
+                                LogCreatedContainmentReference("顶点包容体-端点2", ii, "cornerType=1, diagonalJoint=true, aaa=0", nXObject3);
                                 TrackCreatedObject(nXObject2);
                                 TrackCreatedObject(nXObject3);
                             }
@@ -3652,6 +4221,8 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                             {
                                 Create_DinDian_Box(DuanDian1, BanHou, bendInnerRValue, cartesianCoordinateSystem1, nXObject2);
                                 Create_DinDian_Box(DuanDian2, BanHou, bendInnerRValue, cartesianCoordinateSystem1, nXObject3);
+                                LogCreatedContainmentReference("顶点包容体-端点1", ii, "cornerType=1, diagonalJoint=true, aaa=0", nXObject2);
+                                LogCreatedContainmentReference("顶点包容体-端点2", ii, "cornerType=1, diagonalJoint=true, aaa=0", nXObject3);
                                 TrackCreatedObject(nXObject2);
                                 TrackCreatedObject(nXObject3);
                             }
@@ -3663,11 +4234,13 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                             {
 
                                 Create_DinDian_Box(DuanDian1, BanHou, bendInnerRValue, cartesianCoordinateSystem1, nXObject2);
+                                LogCreatedContainmentReference("顶点包容体", ii, "cornerType=1, not(diagonalJoint and aaa=0), first mapped endpoint at Z=0", nXObject2);
                                 TrackCreatedObject(nXObject2);
                             }
                             else
                             {
                                 Create_DinDian_Box(DuanDian2, BanHou, bendInnerRValue, cartesianCoordinateSystem1, nXObject2);
+                                LogCreatedContainmentReference("顶点包容体", ii, "cornerType=1, not(diagonalJoint and aaa=0), second mapped endpoint selected", nXObject2);
                                 TrackCreatedObject(nXObject2);
                             }
                         }
@@ -3678,11 +4251,13 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                         if (fabs(Ver_Point3d1.Z)< 0.001)
                         {
                             Create_DinDian_Box(DuanDian1, BanHou, bendInnerRValue, cartesianCoordinateSystem1, nXObject2);
+                            LogCreatedContainmentReference("顶点包容体", ii, "cornerType!=1, first mapped endpoint at Z=0", nXObject2);
                             TrackCreatedObject(nXObject2);
                         }
                         else
                         {
                             Create_DinDian_Box(DuanDian2, BanHou, bendInnerRValue, cartesianCoordinateSystem1, nXObject2);
+                            LogCreatedContainmentReference("顶点包容体", ii, "cornerType!=1, second mapped endpoint selected", nXObject2);
                             TrackCreatedObject(nXObject2);
                         }
                     }
@@ -3699,18 +4274,21 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                         JiaoEdge->GetVertices(&JiaoBianPoint1, &JiaoBianPoint2);
                         NXObject* nXObject1 = NULL;
                         NXObject* nXObject2 = NULL;
-                        //���߷�ʽ
+                        //包边方式
                         bool diagonalJoint = IsDiagonalJointMode(enum0);
 
-                        if (diagonalJoint)
-                        {
+                            if (diagonalJoint)
+                            {
                                 Create_DuiJiao_Box(JiaoEdge,BanHouEdge[bb], tearGapValue, nXObject1);
+                                LogCreatedContainmentReference("对角补充包容体", ii, "cornerType=1, aaa=0, BanHouEdge not empty, diagonalJoint=true", nXObject1);
                                 TrackCreatedObject(nXObject1);
                         }
                         else
                         {
 
                                 Create_ZiJiao_Box(JiaoEdge, BanHouEdge[bb], tearGapValue, nXObject1, nXObject2);
+                                LogCreatedContainmentReference("直角补充包容体-1", ii, "cornerType=1, aaa=0, BanHouEdge not empty, diagonalJoint=false", nXObject1);
+                                LogCreatedContainmentReference("直角补充包容体-2", ii, "cornerType=1, aaa=0, BanHouEdge not empty, diagonalJoint=false", nXObject2);
                                 TrackCreatedObject(nXObject1);
                                 TrackCreatedObject(nXObject2);
                         }
@@ -3734,6 +4312,8 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     booleanBuilder1->SetToolBodyCollector(scCollector2);
                     booleanBuilder1->Commit();
                     singleCornerCreated = true;
+                    MenBanSiBianDebugLog("corner[%d]: boolean subtract committed toolBodyCount=%llu",
+                        ii, static_cast<unsigned long long>(VBody1.size()));
                     booleanBuilder1->Destroy();
                     scCollector2->Destroy();
                 }
@@ -3742,7 +4322,8 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
             }
             if (singleCornerEdgeMode && !singleCornerCreated)
             {
-                MenBanSiBian::theUI->NXMessageBox()->Show("�����н�", NXOpen::NXMessageBox::DialogTypeWarning, "δ�ҵ��ɴ������н�֧·����ȷ��ѡ����ǽǱߡ�");
+                MenBanSiBianDebugLog("update: single-corner result=no-created-branch");
+                MenBanSiBian::theUI->NXMessageBox()->Show("单角切角", NXOpen::NXMessageBox::DialogTypeWarning, "未找到可创建的切角支路，请确认选择的是角边。");
             }
             RestoreWcsAndDeleteTemporary(workPart, previousWcs, wcsChanged, baselineCoordinateSystems);
             createdFaceCsys = NULL;
@@ -3750,6 +4331,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
             createdFaceXform = NULL;
             UF_terminate();
             ufInitialized = false;
+            MenBanSiBianDebugLog("update: selection completed successfully");
         }
 
         else if (block == enum0 || block == enum01 || block == bendInnerR || block == tearGap)
@@ -3771,6 +4353,7 @@ int MenBanSiBian::update_cb(NXOpen::BlockStyler::UIBlock* block)
     }
     catch (exception& ex)
     {
+        MenBanSiBianDebugLog("update: exception phase=%s message=%s", phase, ex.what());
         RestoreWcsAndDeleteTemporary(workPart, previousWcs, wcsChanged, baselineCoordinateSystems);
         createdFaceCsys = NULL;
         DeleteTemporaryObject(createdFaceXform);
@@ -3837,7 +4420,7 @@ PropertyList* MenBanSiBian::GetBlockProperties(const char *blockID)
 {
     return theDialog->GetBlockProperties(blockID);
 }
-//�����Ű�ķ��۱߷ָ���
+//创建门板的反折边分割体
 void MenBanSiBian::Create_DuiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double tearGap, NXObject*& nXObject)
 {
     nXObject = NULL;
@@ -3916,13 +4499,13 @@ void MenBanSiBian::Create_DuiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double t
         if (fabs(Ver_Point3d1a.Z- input_point1[2])<0.001)
         {
             DirectionX = workPart->Directions()->CreateDirection(workPart->Points()->CreatePoint(position), workPart->Points()->CreatePoint(banhouV1), NXOpen::SmartObject::UpdateOptionAfterModeling);
-            doublemin = sqrt(pow(fabs(Ver_Point3d1a.X - input_point1[0]), 2) + pow(fabs(Ver_Point3d1a.Y - input_point1[1]), 2));//���ɶ���
+            doublemin = sqrt(pow(fabs(Ver_Point3d1a.X - input_point1[0]), 2) + pow(fabs(Ver_Point3d1a.Y - input_point1[1]), 2));//勾股定理
 
         }
         else
         {
             DirectionX = workPart->Directions()->CreateDirection(workPart->Points()->CreatePoint(position), workPart->Points()->CreatePoint(banhouV2), NXOpen::SmartObject::UpdateOptionAfterModeling);
-            doublemin = sqrt(pow(fabs(Ver_Point3d2a.X - input_point1[0]), 2) + pow(fabs(Ver_Point3d2a.Y - input_point1[1]), 2));//���ɶ���
+            doublemin = sqrt(pow(fabs(Ver_Point3d2a.X - input_point1[0]), 2) + pow(fabs(Ver_Point3d2a.Y - input_point1[1]), 2));//勾股定理
         }
 
         DirectionZ = workPart->Directions()->CreateDirection(workPart->Points()->CreatePoint(JiaoV1), workPart->Points()->CreatePoint(JiaoV2), NXOpen::SmartObject::UpdateOptionAfterModeling);
@@ -3946,6 +4529,14 @@ void MenBanSiBian::Create_DuiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double t
         nXObject = toolingBoxBuilder4->Commit();
         vector<Body*> Body1a=toolingBoxBuilder4->GetFeature()->GetBodies();
         AddFirstCreatedBody(Body1a);
+        LogCreatedContainmentGeometry(
+            "对角补充包容体",
+            nXObject,
+            Body1a,
+            position,
+            doublemin * 2.0 + tearGap * 2.0,
+            tearGap,
+            BanHouEdge->GetLength() * 2.0 + tearGap * 2.0);
         toolingBoxBuilder4->Destroy();
 
 
@@ -3956,7 +4547,7 @@ void MenBanSiBian::Create_DuiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double t
         MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
 }
-//��������������
+//创建顶点立方体
 void MenBanSiBian::Create_DinDian_Box(Point3d DuanDian1, double BanHou, double bendInnerR, CartesianCoordinateSystem* cartesianCoordinateSystem1, NXObject*& nXObject)
 {
     nXObject = NULL;
@@ -3976,6 +4567,8 @@ void MenBanSiBian::Create_DinDian_Box(Point3d DuanDian1, double BanHou, double b
         nXObject = toolingBoxBuilder2->Commit();
         vector<Body*> Body1a = toolingBoxBuilder2->GetFeature()->GetBodies();
         AddFirstCreatedBody(Body1a);
+        double cubeLength = (BanHou + bendInnerR) * 2.0;
+        LogCreatedContainmentGeometry("顶点包容体", nXObject, Body1a, DuanDian1, cubeLength, cubeLength, cubeLength);
         toolingBoxBuilder2->Destroy();
     }
     catch (exception& ex)
@@ -3984,7 +4577,7 @@ void MenBanSiBian::Create_DinDian_Box(Point3d DuanDian1, double BanHou, double b
         MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
 }
-//�Ǳߴ�������
+//角边创建方体
 void MenBanSiBian::Create_JiaoBian_Box(Point3d position1, double BanHou, Edge* JiaoEdge, CartesianCoordinateSystem* cartesianCoordinateSystem1, int cornerType, int forceDirection, double tearGap, NXObject*& nXObject, double cutThroughHeight, double cutThroughSideLength)
 {
     nXObject = NULL;
@@ -3997,7 +4590,7 @@ void MenBanSiBian::Create_JiaoBian_Box(Point3d position1, double BanHou, Edge* J
 
         toolingBoxBuilder1->SetBoxMatrixAndPosition(cartesianCoordinateSystem1->Orientation()->Element(), position1);
 
-        //���߷�ʽ
+        //包边方式
         bool shortWrapLong = IsShortWrapLongMode(enum01);
         bool useXDirectionForJiaoBian = forceDirection == 1 ||
             (forceDirection == 0 && shortWrapLong);
@@ -4052,6 +4645,13 @@ void MenBanSiBian::Create_JiaoBian_Box(Point3d position1, double BanHou, Edge* J
         nXObject = toolingBoxBuilder1->Commit();
         vector<Body*> Body1a = toolingBoxBuilder1->GetFeature()->GetBodies();
         AddFirstCreatedBody(Body1a);
+        double zLength = cutThroughHeight > 0.001 ? cutThroughHeight :
+            (cornerType != 3 ? JiaoEdge->GetLength() : JiaoEdge->GetLength() + 40.0);
+        double xLength = cornerType == 3 ? (useXDirectionForJiaoBian ? tearGap : 200.0) :
+            (useXDirectionForJiaoBian ? tearGap : sideLength);
+        double yLength = cornerType == 3 ? (useXDirectionForJiaoBian ? 200.0 : tearGap) :
+            (useXDirectionForJiaoBian ? sideLength : tearGap);
+        LogCreatedContainmentGeometry("角边包容体", nXObject, Body1a, position1, xLength, yLength, zLength);
         toolingBoxBuilder1->Destroy();
     }
     catch (exception& ex)
@@ -4060,7 +4660,7 @@ void MenBanSiBian::Create_JiaoBian_Box(Point3d position1, double BanHou, Edge* J
         MenBanSiBian::theUI->NXMessageBox()->Show("Block Styler", NXOpen::NXMessageBox::DialogTypeError, ex.what());
     }
 }
-//�����Ű�ķ��۱�ֱ�Ƿָ���
+//创建门板的反折边直角分割体
 void MenBanSiBian::Create_ZiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double tearGap, NXObject*& nXObject, NXObject*& nXObject1)
 {
     nXObject = NULL;
@@ -4075,7 +4675,7 @@ void MenBanSiBian::Create_ZiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double te
         Point3d Ver_Point3d2a;
         ask_edge_wcs_Vertices(BanHouEdge, Ver_Point3d1a, Ver_Point3d2a);
 
-        //���߷�ʽ
+        //包边方式
         bool shortWrapLong = IsShortWrapLongMode(enum01);
         double tearGapHalf = tearGap / 2.0;
 
@@ -4184,6 +4784,15 @@ void MenBanSiBian::Create_ZiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double te
             nXObject = toolingBoxBuilder4->Commit();
             vector<Body*> Body1a = toolingBoxBuilder4->GetFeature()->GetBodies();
             AddFirstCreatedBody(Body1a);
+            LogCreatedContainmentGeometry(
+                "直角补充包容体-1",
+                nXObject,
+                Body1a,
+                position1,
+                tearGap,
+                shortWrapLong ? fabs(Ver_Point3d1.Y - Ver_Point3d1a.Y) :
+                    fabs(Ver_Point3d1.Y - Ver_Point3d1a.Y) - BanHouEdge->GetLength(),
+                BanHouEdge->GetLength() * 2.0 + tearGap * 2.0);
             toolingBoxBuilder4->Destroy();        
 
             NXOpen::Features::ToolingBoxBuilder* toolingBoxBuilder5;
@@ -4216,6 +4825,15 @@ void MenBanSiBian::Create_ZiJiao_Box(Edge* JiaoEdge, Edge* BanHouEdge, double te
             nXObject1 = toolingBoxBuilder5->Commit();
             vector<Body*> Body1b = toolingBoxBuilder5->GetFeature()->GetBodies();
             AddFirstCreatedBody(Body1b);
+            LogCreatedContainmentGeometry(
+                "直角补充包容体-2",
+                nXObject1,
+                Body1b,
+                position2,
+                shortWrapLong ? fabs(Ver_Point3d1.X - Ver_Point3d1a.X) - BanHouEdge->GetLength() :
+                    fabs(Ver_Point3d1.X - Ver_Point3d1a.X),
+                tearGap,
+                BanHouEdge->GetLength() * 2.0 + tearGap * 2.0);
             toolingBoxBuilder5->Destroy();
     }
     catch (exception& ex)
@@ -4349,6 +4967,15 @@ void MenBanSiBian::Create_DanBian_Box(Edge* JiaoEdge, Edge* BanHouEdge, double t
         nXObject = toolingBoxBuilder4->Commit();
         vector<Body*> Body1a = toolingBoxBuilder4->GetFeature()->GetBodies();
         AddFirstCreatedBody(Body1a);
+        bool xThin = fabs(fabs(Ver_Point3d1.X - Ver_Point3d1a.X) - BanHouEdge->GetLength()) < 0.001;
+        LogCreatedContainmentGeometry(
+            "单边包容体",
+            nXObject,
+            Body1a,
+            position1,
+            xThin ? tearGap : fabs(Ver_Point3d1.X - Ver_Point3d1a.X),
+            xThin ? fabs(Ver_Point3d1.Y - Ver_Point3d1a.Y) : tearGap,
+            BanHouEdge->GetLength() * 2.0 + tearGap * 2.0);
         toolingBoxBuilder4->Destroy();
 
     }

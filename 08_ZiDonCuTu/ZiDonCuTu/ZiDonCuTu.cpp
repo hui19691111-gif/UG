@@ -235,6 +235,7 @@ static void ConfigureBaseViewForDrawingModel(NXOpen::Drawings::BaseViewBuilder* 
 namespace
 {
 static const char* kDefaultBodyNoteFormat = "{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D} {\xE7\xBC\x96\xE5\x8F\xB7=}{\xE6\x9D\x90\xE6\x96\x99} T={\xE5\x8E\x9A\xE5\xBA\xA6} {\xE6\x95\xB0\xE9\x87\x8F}PCS{\xE9\x95\x9C\xE5\x83\x8F}";
+static const char* kBodyNoteConfigHelpMarker = "# \xE4\xBB\xBB\xE6\x84\x8F\xE5\xAE\x9E\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7\xE5\xBC\x95\xE7\x94\xA8\xEF\xBC\x9A";
 static std::string DecodeConfigEscapes(const std::string& text);
 static std::string EncodeConfigEscapes(const std::string& text);
 static std::string RemoveUtf8Bom(const std::string& text);
@@ -289,11 +290,39 @@ std::wstring DialogStateConfigFilePath()
 	return L"D:\\UG智辉钣金插件\\config\\ZiDonCuTu_dialog_state.ini";
 }
 
+static void WriteBodyNoteConfigHelp(std::ostream& file)
+{
+	file
+		<< "# \xE8\x87\xAA\xE5\x8A\xA8\xE5\x87\xBA\xE5\x9B\xBE\xE5\xB1\x95\xE5\xBC\x80\xE5\x9B\xBE\xE6\xB3\xA8\xE9\x87\x8A\xE9\x85\x8D\xE7\xBD\xAE\xE4\xBD\xBF\xE7\x94\xA8\xE8\xAF\xB4\xE6\x98\x8E\r\n"
+		<< "# \xE5\x86\x85\xE7\xBD\xAE\xE5\x8D\xA0\xE4\xBD\x8D\xE7\xAC\xA6\xEF\xBC\x9A{\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D}\xE3\x80\x81{\xE7\xBC\x96\xE5\x8F\xB7}\xE3\x80\x81{\xE7\xBC\x96\xE5\x8F\xB7=}\xE3\x80\x81{\xE6\x9D\x90\xE6\x96\x99}\xE3\x80\x81{\xE5\x8E\x9A\xE5\xBA\xA6}\xE3\x80\x81{\xE6\x95\xB0\xE9\x87\x8F}\xE3\x80\x81{\xE9\x95\x9C\xE5\x83\x8F}\r\n"
+		<< kBodyNoteConfigHelpMarker << "\xE9\x85\x8D\xE7\xBD\xAE\xE4\xB8\xAD\xE7\x9B\xB4\xE6\x8E\xA5\xE5\x86\x99 {\xE5\xB1\x9E\xE6\x80\xA7\xE6\xA0\x87\xE9\xA2\x98}\xEF\xBC\x8C\xE5\x8F\xAA\xE8\xA6\x81\xE5\xAE\x9E\xE4\xBD\x93\xE4\xB8\x8A\xE5\xAD\x98\xE5\x9C\xA8\xE5\x90\x8C\xE5\x90\x8D\xE5\xB1\x9E\xE6\x80\xA7\xE5\xB0\xB1\xE4\xBC\x9A\xE5\xBB\xBA\xE7\xAB\x8B\xE5\x8A\xA8\xE6\x80\x81\xE5\x85\xB3\xE8\x81\x94\xE3\x80\x82\r\n"
+		<< "# \xE7\xA4\xBA\xE4\xBE\x8B\xEF\xBC\x9A\xE6\x9D\x90\xE6\x96\x99:{cailiao} \xE8\xA1\xA8\xE9\x9D\xA2\xE5\xA4\x84\xE7\x90\x86:{\xE8\xA1\xA8\xE9\x9D\xA2\xE5\xA4\x84\xE7\x90\x86} \xE5\xAE\xA2\xE6\x88\xB7:{\xE5\xAE\xA2\xE6\x88\xB7\xE4\xBB\xA3\xE5\x8F\xB7}\r\n"
+		<< "# \xE6\x94\xAF\xE6\x8C\x81\xE5\xAD\x97\xE7\xAC\xA6\xE4\xB8\xB2\xE3\x80\x81\xE6\x95\xB4\xE6\x95\xB0\xE3\x80\x81\xE5\xAE\x9E\xE6\x95\xB0\xEF\xBC\x9B\xE5\xB1\x9E\xE6\x80\xA7\xE6\xA0\x87\xE9\xA2\x98\xE5\xBF\x85\xE9\xA1\xBB\xE5\xAE\x8C\xE5\x85\xA8\xE4\xB8\x80\xE8\x87\xB4\xEF\xBC\x88\xE5\x8C\x85\xE6\x8B\xAC\xE4\xB8\xAD\xE6\x96\x87\xE3\x80\x81\xE8\x8B\xB1\xE6\x96\x87\xE5\x92\x8C\xE5\xA4\xA7\xE5\xB0\x8F\xE5\x86\x99\xEF\xBC\x89\xE3\x80\x82\r\n"
+		<< "# \xE5\xB1\x9E\xE6\x80\xA7\xE5\xBD\x93\xE5\x89\x8D\xE4\xB8\xBA\xE7\xA9\xBA\xE4\xBB\x8D\xE4\xBC\x9A\xE4\xBF\x9D\xE7\x95\x99\xE5\x85\xB3\xE8\x81\x94\xEF\xBC\x9B\xE5\xAE\x9E\xE4\xBD\x93\xE4\xB8\x8A\xE4\xB8\x8D\xE5\xAD\x98\xE5\x9C\xA8\xE8\xAF\xA5\xE5\xB1\x9E\xE6\x80\xA7\xE6\x97\xB6\xE6\x98\xBE\xE7\xA4\xBA\xE4\xB8\xBA\xE7\xA9\xBA\xEF\xBC\x8C\xE5\xB9\xB6\xE5\x9C\xA8\xE5\x87\xBA\xE5\x9B\xBE\xE6\x97\xA5\xE5\xBF\x97\xE4\xB8\xAD\xE8\xAE\xB0\xE5\xBD\x95\xE3\x80\x82\r\n"
+		<< "# \xE5\xA4\x9A\xE8\xA1\x8C\xE6\xB3\xA8\xE9\x87\x8A\xE4\xBD\xBF\xE7\x94\xA8 \\n\xEF\xBC\x8C\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A\xE7\xBC\x96\xE5\x8F\xB7:{\xE7\xBC\x96\xE5\x8F\xB7}\\n\xE6\x9D\x90\xE6\x96\x99:{\xE6\x9D\x90\xE6\x96\x99}\\n\xE6\x95\xB0\xE9\x87\x8F:{\xE6\x95\xB0\xE9\x87\x8F}PCS\r\n\r\n";
+}
+
 void EnsureDefaultBodyNoteConfigFile(const std::wstring& path)
 {
 	const DWORD attributes = GetFileAttributesW(path.c_str());
 	if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
 	{
+		std::ifstream existingFile(path, std::ios::binary);
+		std::string existingText(
+			(std::istreambuf_iterator<char>(existingFile)),
+			std::istreambuf_iterator<char>());
+		if (existingText.find(kBodyNoteConfigHelpMarker) == std::string::npos)
+		{
+			const std::string contentWithoutBom = RemoveUtf8Bom(existingText);
+			std::ofstream updatedFile(path, std::ios::binary | std::ios::trunc);
+			if (updatedFile)
+			{
+				const unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
+				updatedFile.write(reinterpret_cast<const char*>(bom), sizeof(bom));
+				WriteBodyNoteConfigHelp(updatedFile);
+				updatedFile << contentWithoutBom;
+			}
+		}
 		return;
 	}
 
@@ -305,11 +334,8 @@ void EnsureDefaultBodyNoteConfigFile(const std::wstring& path)
 
 	const unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
 	file.write(reinterpret_cast<const char*>(bom), sizeof(bom));
-	file
-		<< "# ZiDonCuTu note format configuration\r\n"
-		<< "# 可用占位符：{文件名}、{编号}、{编号=}、{材料}、{厚度}、{数量}、{镜像}\r\n"
-		<< "# 多行标注可写 \\n，例如：编号:{编号}\\n材料:{材料}\\n数量:{数量}PCS\r\n\r\n"
-		<< "[标注注释]\r\n"
+	WriteBodyNoteConfigHelp(file);
+	file << "[\xE6\xA0\x87\xE6\xB3\xA8\xE6\xB3\xA8\xE9\x87\x8A]\r\n"
 		<< kDefaultBodyNoteFormat << "\r\n";
 }
 
@@ -1399,6 +1425,7 @@ static void SetEnumBlockUtf8Value(NXOpen::BlockStyler::Enumeration* enumBlock, c
 static void SaveZiDonCuTuDialogState(
 	NXOpen::BlockStyler::Enumeration* enumDrawingModeBlock,
 	NXOpen::BlockStyler::Enumeration* enumSheetLayoutBlock,
+	NXOpen::BlockStyler::Enumeration* dimensionAutoPositionEnumBlock,
 	NXOpen::BlockStyler::IntegerBlock* integerSheetPartCountBlock,
 	NXOpen::BlockStyler::Toggle* isoViewToggleBlock,
 	NXOpen::BlockStyler::Toggle* holeCoordinateToggleBlock,
@@ -1439,6 +1466,7 @@ static void SaveZiDonCuTuDialogState(
 		file << "[dialog]\r\n";
 		file << "drawing_mode=" << EncodeConfigEscapes(GetEnumBlockUtf8Value(enumDrawingModeBlock, "\xE8\x87\xAA\xE5\x8A\xA8")) << "\r\n";
 		file << "sheet_layout=" << EncodeConfigEscapes(GetEnumBlockUtf8Value(enumSheetLayoutBlock, "\xE9\x83\xA8\xE4\xBB\xB6\xE9\x87\x8C\xE7\x9A\x84\xE9\x9B\xB6\xE4\xBB\xB6\xE5\x9C\xA8\xE4\xB8\x80\xE5\xBC\xA0\xE5\x9B\xBE\xE7\xBA\xB8\xE9\xA1\xB5\xE9\x87\x8C")) << "\r\n";
+		file << "dimension_auto_position=" << EncodeConfigEscapes(GetEnumBlockUtf8Value(dimensionAutoPositionEnumBlock, "\xE5\x8F\xAA\xE5\xBC\x80\xE5\x90\xAF\xE7\xBA\xBF\xE6\x80\xA7\xE5\xB0\xBA\xE5\xAF\xB8")) << "\r\n";
 		file << "sheet_part_count=" << (integerSheetPartCountBlock != NULL ? integerSheetPartCountBlock->Value() : 2) << "\r\n";
 		file << "show_iso_view=" << (GetToggleBlockValue(isoViewToggleBlock, false) ? 1 : 0) << "\r\n";
 		file << "hole_coordinate=" << (GetToggleBlockValue(holeCoordinateToggleBlock, false) ? 1 : 0) << "\r\n";
@@ -1473,6 +1501,7 @@ static void SaveZiDonCuTuDialogState(
 static void RestoreZiDonCuTuDialogState(
 	NXOpen::BlockStyler::Enumeration* enumDrawingModeBlock,
 	NXOpen::BlockStyler::Enumeration* enumSheetLayoutBlock,
+	NXOpen::BlockStyler::Enumeration* dimensionAutoPositionEnumBlock,
 	NXOpen::BlockStyler::IntegerBlock* integerSheetPartCountBlock,
 	NXOpen::BlockStyler::Toggle* isoViewToggleBlock,
 	NXOpen::BlockStyler::Toggle* holeCoordinateToggleBlock,
@@ -1504,6 +1533,7 @@ static void RestoreZiDonCuTuDialogState(
 		const std::wstring path = DialogStateConfigFilePath();
 		SetEnumBlockUtf8Value(enumDrawingModeBlock, ConfigReadString(path, "drawing_mode", GetEnumBlockUtf8Value(enumDrawingModeBlock, "\xE8\x87\xAA\xE5\x8A\xA8")));
 		SetEnumBlockUtf8Value(enumSheetLayoutBlock, ConfigReadString(path, "sheet_layout", GetEnumBlockUtf8Value(enumSheetLayoutBlock, "\xE9\x83\xA8\xE4\xBB\xB6\xE9\x87\x8C\xE7\x9A\x84\xE9\x9B\xB6\xE4\xBB\xB6\xE5\x9C\xA8\xE4\xB8\x80\xE5\xBC\xA0\xE5\x9B\xBE\xE7\xBA\xB8\xE9\xA1\xB5\xE9\x87\x8C")));
+		SetEnumBlockUtf8Value(dimensionAutoPositionEnumBlock, ConfigReadString(path, "dimension_auto_position", "\xE5\x8F\xAA\xE5\xBC\x80\xE5\x90\xAF\xE7\xBA\xBF\xE6\x80\xA7\xE5\xB0\xBA\xE5\xAF\xB8"));
 		if (integerSheetPartCountBlock != NULL)
 		{
 			integerSheetPartCountBlock->SetValue(std::max(1, ConfigReadInt(path, "sheet_part_count", integerSheetPartCountBlock->Value())));
@@ -1772,6 +1802,28 @@ static bool IsCustomSheetLayout(NXOpen::BlockStyler::Enumeration* enumSheetLayou
 {
 	NXString sheetLayout = GetEnumBlockValue(enumSheetLayoutBlock, "部件里的零件在一张图纸页里");
 	return std::string(sheetLayout.GetLocaleText()) == "自定义图纸页零件数";
+}
+
+static int GetDimensionAutoPositionMode(NXOpen::BlockStyler::Enumeration* enumBlock)
+{
+	if (enumBlock == NULL)
+	{
+		return 2;
+	}
+	PropertyList* properties = enumBlock->GetProperties();
+	if (properties == NULL)
+	{
+		return 2;
+	}
+	const int mode = properties->GetEnum("Value");
+	delete properties;
+	properties = NULL;
+	return (mode >= 0 && mode <= 3) ? mode : 2;
+}
+
+static void SyncDimensionAutoPositionMode(NXOpen::BlockStyler::Enumeration* enumBlock)
+{
+	SetDimensionAutoPositionMode(GetDimensionAutoPositionMode(enumBlock));
 }
 
 static int GetAutomaticBodiesPerSheet(
@@ -3426,7 +3478,7 @@ static std::string ReadMirrorText(NXOpen::Body* body)
 	return NormalizeMirrorText(ReadAttributeText(body, "MIRR"));
 }
 
-static bool HasMirrorAttributeText(NXOpen::Body* body)
+static bool HasMirrorAttribute(NXOpen::Body* body)
 {
 	if (body == NULL)
 	{
@@ -3444,7 +3496,10 @@ static bool HasMirrorAttributeText(NXOpen::Body* body)
 		return false;
 	}
 
-	return !ReadMirrorText(body).empty();
+	// MIRR may intentionally be empty when the note is created.  Keep the
+	// attribute reference in that case so a later mirror-state change is
+	// reflected by the drafting note instead of leaving an empty literal.
+	return true;
 }
 
 static bool TryReadRealAttribute(NXOpen::NXObject* object, const char* title, double& value)
@@ -4018,6 +4073,26 @@ static std::string BuildBodyDraftNoteLiteralText(NXOpen::Part* part, NXOpen::Bod
 	ReplaceAllText(text, "{\xE5\x8E\x9A\xE5\xBA\xA6}", thickness);
 	ReplaceAllText(text, "{\xE6\x95\xB0\xE9\x87\x8F}", quantity);
 	ReplaceAllText(text, "{\xE9\x95\x9C\xE5\x83\x8F}", mirror);
+
+	// The independent-drawing fallback cannot create associative references,
+	// but it should still resolve arbitrary body-attribute placeholders.
+	for (size_t index = 0; index < text.size();)
+	{
+		const size_t open = text.find('{', index);
+		if (open == std::string::npos)
+		{
+			break;
+		}
+		const size_t close = text.find('}', open + 1);
+		if (close == std::string::npos || text.find('\n', open + 1) < close)
+		{
+			break;
+		}
+		const std::string title = text.substr(open + 1, close - open - 1);
+		const std::string value = title.empty() ? "" : ReadAttributeText(body, title.c_str());
+		text.replace(open, close - open + 1, value);
+		index = open + value.size();
+	}
 	return text;
 }
 
@@ -4130,7 +4205,7 @@ static bool ReadMirrorDraftNxString(
 	NXOpen::Body* body,
 	NXOpen::NXString& value)
 {
-	if (HasMirrorAttributeText(body) && DraftAttributeReferenceNxString(textBlock, body, "MIRR", value))
+	if (HasMirrorAttribute(body) && DraftAttributeReferenceNxString(textBlock, body, "MIRR", value))
 	{
 		return true;
 	}
@@ -4591,7 +4666,7 @@ static bool PrepareDraftNoteReferenceForToken(
 
 	if (token == "{\xE9\x95\x9C\xE5\x83\x8F}")
 	{
-		if (HasMirrorAttributeText(body))
+		if (HasMirrorAttribute(body))
 		{
 			insert.kind = DraftNoteReferenceInsert::KindAttribute;
 			insert.owner = effectiveBodyOwner;
@@ -4599,6 +4674,24 @@ static bool PrepareDraftNoteReferenceForToken(
 			return true;
 		}
 		fallbackText = ReadMirrorText(body);
+		return false;
+	}
+
+	// Any non-reserved {title} token maps directly to an attribute on the
+	// source body.  No code-side attribute whitelist is required.
+	if (token.size() > 2 && token.front() == '{' && token.back() == '}')
+	{
+		const std::string title = token.substr(1, token.size() - 2);
+		if (!title.empty() && HasAnyUserAttribute(body, title.c_str()))
+		{
+			insert.kind = DraftNoteReferenceInsert::KindAttribute;
+			insert.owner = effectiveBodyOwner;
+			insert.title = title;
+			return true;
+		}
+		fallbackText.clear();
+		AppendLayoutDebug(std::string("[展开图注释实体属性不存在] title=") + title +
+			" bodyTag=" + std::to_string(ObjectTagOrNull(body)));
 		return false;
 	}
 
@@ -4622,6 +4715,20 @@ static bool MatchDraftNoteToken(const std::string& format, size_t index, std::st
 		if (format.compare(index, current.size(), current) == 0)
 		{
 			token = current;
+			return true;
+		}
+	}
+
+	if (index < format.size() && format[index] == '{')
+	{
+		const size_t close = format.find('}', index + 1);
+		const size_t newLine = format.find('\n', index + 1);
+		if (close != std::string::npos &&
+			(newLine == std::string::npos || close < newLine) &&
+			close > index + 1 &&
+			close - index <= 256)
+		{
+			token = format.substr(index, close - index + 1);
 			return true;
 		}
 	}
@@ -7753,6 +7860,10 @@ static bool TryCreateOuterCircleDiameterForView(
 	NXOpen::Point3d assistPoint(0.0, 0.0, 0.0);
 	ApplyDefaultRapidDimensionStyle(rapidDimensionBuilder);
 	rapidDimensionBuilder->Measurement()->SetMethod(NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodDiametral);
+	rapidDimensionBuilder->Style()->DimensionStyle()->SetTextArrowPlacement(
+		IsRadialDimensionAutoPositionEnabled() ?
+		NXOpen::Annotations::TextPlacementAutomatic :
+		NXOpen::Annotations::TextPlacementManualArrowsIn);
 	rapidDimensionBuilder->FirstAssociativity()->SetValue(
 		NXOpen::InferSnapType::SnapTypeExist,
 		circleCurve,
@@ -10909,6 +11020,7 @@ void ZiDonCuTu::initialize_cb()
 
 		enumDrawingMode = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(theDialog->TopBlock()->FindBlock("enumDrawingMode"));
 		enumSheetLayout = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(theDialog->TopBlock()->FindBlock("enumSheetLayout"));
+		enumDimensionAutoPosition = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(theDialog->TopBlock()->FindBlock("enumDimensionAutoPosition"));
 		integerSheetPartCount = dynamic_cast<NXOpen::BlockStyler::IntegerBlock*>(theDialog->TopBlock()->FindBlock("integerSheetPartCount"));
 		toggle0 = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggle0"));
 		toggle01 = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggle01"));
@@ -11002,6 +11114,19 @@ void ZiDonCuTu::dialogShown_cb()
 				enumSheetLayout->SetValueAsString("部件里的零件在一张图纸页里");
 			}
 		}
+		if (enumDimensionAutoPosition != NULL)
+		{
+			std::vector<NXString> members;
+			members.push_back("全部打开");
+			members.push_back("全部关闭");
+			members.push_back("只开启线性尺寸");
+			members.push_back("只开启圆弧尺寸");
+			enumDimensionAutoPosition->SetEnumMembers(members);
+			if (std::string(GetEnumBlockValue(enumDimensionAutoPosition, "只开启线性尺寸").GetLocaleText()).empty())
+			{
+				enumDimensionAutoPosition->SetValueAsString("只开启线性尺寸");
+			}
+		}
 		if (integerSheetPartCount != NULL && integerSheetPartCount->Value() < 1)
 		{
 			integerSheetPartCount->SetValue(2);
@@ -11045,6 +11170,7 @@ void ZiDonCuTu::dialogShown_cb()
 		RestoreZiDonCuTuDialogState(
 			enumDrawingMode,
 			enumSheetLayout,
+			enumDimensionAutoPosition,
 			integerSheetPartCount,
 			toggle01,
 			toggleHoleCoordinate,
@@ -11070,6 +11196,7 @@ void ZiDonCuTu::dialogShown_cb()
 			enum01,
 			enumProjection,
 			enum0);
+		SyncDimensionAutoPositionMode(enumDimensionAutoPosition);
 		const bool hasDrawingSheet = HasAnyDrawingSheet(workPart);
 		const bool manualMode = IsManualDrawingMode(enumDrawingMode);
 		UpdateSheetLayoutControls(enumSheetLayout, integerSheetPartCount, toggle01, !manualMode);
@@ -11136,9 +11263,11 @@ int ZiDonCuTu::apply_cb()
 	ScopedPerfTimer applyPerfTimer("apply_cb");
 	try
 	{
+		SyncDimensionAutoPositionMode(enumDimensionAutoPosition);
 		SaveZiDonCuTuDialogState(
 			enumDrawingMode,
 			enumSheetLayout,
+			enumDimensionAutoPosition,
 			integerSheetPartCount,
 			toggle01,
 			toggleHoleCoordinate,
@@ -12749,6 +12878,12 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 			blockName = "enumSheetLayout";
 			phase = "enumSheetLayout";
 			UpdateSheetLayoutControls(enumSheetLayout, integerSheetPartCount, toggle01, !IsManualDrawingMode(enumDrawingMode));
+		}
+		else if (block == enumDimensionAutoPosition)
+		{
+			blockName = "enumDimensionAutoPosition";
+			phase = "enumDimensionAutoPosition";
+			SyncDimensionAutoPositionMode(enumDimensionAutoPosition);
 		}
 		else if (block == enum01)
 		{

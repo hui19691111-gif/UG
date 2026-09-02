@@ -5,6 +5,7 @@
 
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/Body.hxx>
+#include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/BodyDumbRule.hxx>
 #include <NXOpen/Callback.hxx>
 #include <NXOpen/DisplayManager.hxx>
@@ -847,6 +848,24 @@ NXOpen::Body* ResolveTargetBodyFromSelection(const std::vector<NXOpen::TaggedObj
     }
 
     return targetBody;
+}
+
+std::vector<NXOpen::Body*> CollectVisibleSolidBodies(NXOpen::Part* workPart)
+{
+    std::vector<NXOpen::Body*> bodies;
+    if (workPart == nullptr || workPart->Bodies() == nullptr)
+    {
+        return bodies;
+    }
+
+    for (NXOpen::Body* body : *workPart->Bodies())
+    {
+        if (body != nullptr && IsSolidBody(body->Tag()) && !body->IsBlanked())
+        {
+            bodies.push_back(body);
+        }
+    }
+    return bodies;
 }
 
 bool NormalizeVector(double vector[3])
@@ -2645,6 +2664,7 @@ BaoRongQieChuDialog::BaoRongQieChuDialog()
       objectSelectBlock_(nullptr),
       booleanToggleBlock_(nullptr),
       removeBlendToggleBlock_(nullptr),
+      onlyRemoveBlendToggleBlock_(nullptr),
       blendRadiusBlock_(nullptr),
       healRemovedRegionToggleBlock_(nullptr),
       offsetBlock_(nullptr),
@@ -2693,6 +2713,7 @@ void BaoRongQieChuDialog::initialize_cb()
     objectSelectBlock_ = dialog_->TopBlock()->FindBlock("object_select");
     booleanToggleBlock_ = dialog_->TopBlock()->FindBlock("boolean_subtract");
     removeBlendToggleBlock_ = dialog_->TopBlock()->FindBlock("remove_body_blend");
+    onlyRemoveBlendToggleBlock_ = dialog_->TopBlock()->FindBlock("only_remove_blend");
     blendRadiusBlock_ = dialog_->TopBlock()->FindBlock("blend_radius_value");
     healRemovedRegionToggleBlock_ = dialog_->TopBlock()->FindBlock("heal_removed_region");
     offsetBlock_ = dialog_->TopBlock()->FindBlock("offset_value");
@@ -2705,10 +2726,10 @@ void BaoRongQieChuDialog::initialize_cb()
     selectionMaskArray.emplace_back(UF_solid_type, UF_solid_body_subtype, UF_UI_SEL_FEATURE_ANY_EDGE);
     properties->SetSelectionFilter("SelectionFilter", action, selectionMaskArray);
     properties->SetLogical("AutomaticProgression", true);
+    properties->SetEnum("StepStatus", 1);
     delete properties;
 
     LoadDialogMemory();
-    SyncOptionalControls();
 }
 
 void BaoRongQieChuDialog::dialogShown_cb()
@@ -2718,7 +2739,7 @@ void BaoRongQieChuDialog::dialogShown_cb()
 
 int BaoRongQieChuDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
-    if (block == removeBlendToggleBlock_)
+    if (block == removeBlendToggleBlock_ || block == onlyRemoveBlendToggleBlock_)
     {
         SyncOptionalControls();
         return 0;
@@ -2726,6 +2747,10 @@ int BaoRongQieChuDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
     if (!isInternalUpdate_ && block == objectSelectBlock_)
     {
+        if (GetOnlyRemoveBlendEnabled())
+        {
+            return 0;
+        }
         return ExecuteImmediateCutFromSelection();
     }
 
@@ -2734,14 +2759,68 @@ int BaoRongQieChuDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
 int BaoRongQieChuDialog::apply_cb()
 {
-    SaveDialogMemory();
-    return ExecuteFromSelection();
+    WriteDebugLog("apply_callback_start");
+    try
+    {
+        SaveDialogMemory();
+        const int result = ExecuteFromSelection();
+        WriteDebugLog("apply_callback_end result=" + std::to_string(result));
+        return result;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        const char* message = ex.Message();
+        WriteDebugLog(
+            "apply_callback_exception type=NXException message=" +
+            std::string(message != nullptr ? message : ""));
+        ShowError(message != nullptr ? message : "NXOpen execution failed.");
+    }
+    catch (const std::exception& ex)
+    {
+        WriteDebugLog(
+            "apply_callback_exception type=std_exception message=" +
+            std::string(ex.what()));
+        ShowError(ex.what());
+    }
+    catch (...)
+    {
+        WriteDebugLog("apply_callback_exception type=unknown");
+        ShowError("Operation failed. Check BaoRongQieChu_debug.log.");
+    }
+    return 1;
 }
 
 int BaoRongQieChuDialog::ok_cb()
 {
-    SaveDialogMemory();
-    return ExecuteFromSelection();
+    WriteDebugLog("ok_callback_start");
+    try
+    {
+        SaveDialogMemory();
+        const int result = ExecuteFromSelection();
+        WriteDebugLog("ok_callback_end result=" + std::to_string(result));
+        return result;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        const char* message = ex.Message();
+        WriteDebugLog(
+            "ok_callback_exception type=NXException message=" +
+            std::string(message != nullptr ? message : ""));
+        ShowError(message != nullptr ? message : "NXOpen execution failed.");
+    }
+    catch (const std::exception& ex)
+    {
+        WriteDebugLog(
+            "ok_callback_exception type=std_exception message=" +
+            std::string(ex.what()));
+        ShowError(ex.what());
+    }
+    catch (...)
+    {
+        WriteDebugLog("ok_callback_exception type=unknown");
+        ShowError("Operation failed. Check BaoRongQieChu_debug.log.");
+    }
+    return 1;
 }
 
 int BaoRongQieChuDialog::cancel_cb()
@@ -2751,6 +2830,21 @@ int BaoRongQieChuDialog::cancel_cb()
 
 int BaoRongQieChuDialog::ExecuteFromSelection()
 {
+    if (GetOnlyRemoveBlendEnabled())
+    {
+        pendingBlendReplacements_.clear();
+        pendingCutFeatures_.clear();
+        ClearPendingHoleProfiles();
+        pendingConnectedFaceBodies_.clear();
+
+        int result = ExecuteOnlyBlendReplacementFromSelection();
+        if (result != 0)
+        {
+            return result;
+        }
+        return ExecutePendingConnectedFaceCreation();
+    }
+
     int result = ExecuteImmediateCutFromSelection();
     if (result != 0)
     {
@@ -2770,6 +2864,91 @@ int BaoRongQieChuDialog::ExecuteFromSelection()
     }
 
     return ExecutePendingConnectedFaceCreation();
+}
+
+int BaoRongQieChuDialog::ExecuteOnlyBlendReplacementFromSelection()
+{
+    const std::vector<NXOpen::TaggedObject*> selectedObjects = GetSelectedObjects();
+    NXOpen::Part* workPart =
+        session_ != nullptr && session_->Parts() != nullptr ?
+        session_->Parts()->Work() : nullptr;
+    if (workPart == nullptr)
+    {
+        ShowError("No active work part.");
+        return 1;
+    }
+
+    const NXOpen::Session::UndoMarkId markId =
+        session_->SetUndoMark(
+            NXOpen::Session::MarkVisibilityVisible,
+            "BaoRongQieChuOnlyReplaceBlend");
+
+    try
+    {
+        std::vector<NXOpen::Body*> targetBodies;
+        if (!selectedObjects.empty())
+        {
+            targetBodies.push_back(ResolveTargetBodyFromSelection(selectedObjects));
+        }
+        else
+        {
+            targetBodies = CollectVisibleSolidBodies(workPart);
+        }
+        if (targetBodies.empty())
+        {
+            throw std::runtime_error("No visible solid body was found in the work part.");
+        }
+
+        WriteDebugLog(
+            "only_replace_blend_visible_body_summary selected_object_count=" +
+            std::to_string(selectedObjects.size()) +
+            " target_body_count=" + std::to_string(targetBodies.size()));
+        for (NXOpen::Body* targetBody : targetBodies)
+        {
+            double sheetThickness = 0.0;
+            const bool hasSheetThickness = InferSheetThicknessFromLargestPlanarFace(
+                workPart,
+                CollectFacesFromBody(targetBody),
+                sheetThickness);
+
+            WriteDebugLog(
+                "only_replace_blend_start body_tag=" +
+                std::to_string(targetBody->Tag()) +
+                " max_radius=" + FormatDouble(GetBlendRadiusValue()) +
+                " sheet_thickness_available=" +
+                std::string(hasSheetThickness ? "1" : "0") +
+                " sheet_thickness=" + FormatDouble(sheetThickness));
+
+            ReplaceQualifyingBlendsFromOuterPlanes(
+                workPart,
+                targetBody,
+                GetBlendRadiusValue(),
+                sheetThickness,
+                hasSheetThickness);
+
+            WriteDebugLog(
+                "only_replace_blend_end body_tag=" +
+                std::to_string(targetBody->Tag()));
+
+            RememberPendingConnectedFaceBody(targetBody);
+        }
+        ClearSelection();
+        session_->DeleteUndoMark(markId, "BaoRongQieChuOnlyReplaceBlend");
+        return 0;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        const char* message = ex.Message();
+        ShowError(message != nullptr ? message : "NXOpen execution failed.");
+    }
+    catch (const std::exception& ex)
+    {
+        ShowError(ex.what());
+    }
+
+    session_->UndoToMark(markId, "BaoRongQieChuOnlyReplaceBlend");
+    session_->DeleteUndoMark(markId, "BaoRongQieChuOnlyReplaceBlend");
+    return 1;
 }
 
 int BaoRongQieChuDialog::ExecuteImmediateCutFromSelection()
@@ -3124,10 +3303,48 @@ std::vector<NXOpen::TaggedObject*> BaoRongQieChuDialog::GetSelectedObjects() con
         return {};
     }
 
-    NXOpen::BlockStyler::PropertyList* properties = objectSelectBlock_->GetProperties();
-    const std::vector<NXOpen::TaggedObject*> selectedObjects = properties->GetTaggedObjectVector("SelectedObjects");
-    delete properties;
-    return selectedObjects;
+    NXOpen::BlockStyler::PropertyList* properties = nullptr;
+    try
+    {
+        properties = objectSelectBlock_->GetProperties();
+        const std::vector<NXOpen::TaggedObject*> selectedObjects =
+            properties->GetTaggedObjectVector("SelectedObjects");
+        delete properties;
+        return selectedObjects;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        if (properties != nullptr)
+        {
+            delete properties;
+        }
+        const char* message = ex.Message();
+        WriteDebugLog(
+            "selection_read_empty_or_failed type=NXException message=" +
+            std::string(message != nullptr ? message : "") +
+            " treated_as_empty=1");
+    }
+    catch (const std::exception& ex)
+    {
+        if (properties != nullptr)
+        {
+            delete properties;
+        }
+        WriteDebugLog(
+            "selection_read_empty_or_failed type=std_exception message=" +
+            std::string(ex.what()) +
+            " treated_as_empty=1");
+    }
+    catch (...)
+    {
+        if (properties != nullptr)
+        {
+            delete properties;
+        }
+        WriteDebugLog(
+            "selection_read_empty_or_failed type=unknown treated_as_empty=1");
+    }
+    return {};
 }
 
 bool BaoRongQieChuDialog::GetBooleanSubtractEnabled() const
@@ -3151,6 +3368,20 @@ bool BaoRongQieChuDialog::GetRemoveBlendEnabled() const
     }
 
     NXOpen::BlockStyler::PropertyList* properties = removeBlendToggleBlock_->GetProperties();
+    const bool value = properties->GetLogical("Value");
+    delete properties;
+    return value;
+}
+
+bool BaoRongQieChuDialog::GetOnlyRemoveBlendEnabled() const
+{
+    if (onlyRemoveBlendToggleBlock_ == nullptr)
+    {
+        return false;
+    }
+
+    NXOpen::BlockStyler::PropertyList* properties =
+        onlyRemoveBlendToggleBlock_->GetProperties();
     const bool value = properties->GetLogical("Value");
     delete properties;
     return value;
@@ -3217,21 +3448,40 @@ void BaoRongQieChuDialog::ShowError(const std::string& message) const
 void BaoRongQieChuDialog::SyncOptionalControls()
 {
     const bool removeBlend = GetRemoveBlendEnabled();
+    const bool onlyRemoveBlend = GetOnlyRemoveBlendEnabled();
 
     if (blendRadiusBlock_ != nullptr)
     {
         NXOpen::BlockStyler::PropertyList* properties = blendRadiusBlock_->GetProperties();
-        properties->SetLogical("Show", removeBlend);
+        properties->SetLogical("Show", removeBlend || onlyRemoveBlend);
         delete properties;
     }
 
-    if (!removeBlend)
+    const std::array<NXOpen::BlockStyler::UIBlock*, 4> envelopeControls =
+    {
+        booleanToggleBlock_,
+        offsetBlock_,
+        removeBlendToggleBlock_,
+        healRemovedRegionToggleBlock_
+    };
+    for (NXOpen::BlockStyler::UIBlock* control : envelopeControls)
+    {
+        if (control == nullptr)
+        {
+            continue;
+        }
+        NXOpen::BlockStyler::PropertyList* properties = control->GetProperties();
+        properties->SetLogical("Show", !onlyRemoveBlend);
+        delete properties;
+    }
+
+    if (!removeBlend || onlyRemoveBlend)
     {
         pendingBlendReplacements_.clear();
         pendingConnectedFaceBodies_.clear();
     }
 
-    if (!GetHealRemovedRegionEnabled())
+    if (onlyRemoveBlend || !GetHealRemovedRegionEnabled())
     {
         pendingCutFeatures_.clear();
         ClearPendingHoleProfiles();
@@ -3243,6 +3493,7 @@ void BaoRongQieChuDialog::LoadDialogMemory()
     const wchar_t* fileName = L"BaoRongQieChu_state.ini";
     zhihui_dialog_memory::LoadLogical(fileName, L"booleanSubtract", booleanToggleBlock_);
     zhihui_dialog_memory::LoadLogical(fileName, L"removeBlend", removeBlendToggleBlock_);
+    zhihui_dialog_memory::LoadLogical(fileName, L"onlyRemoveBlend", onlyRemoveBlendToggleBlock_);
     zhihui_dialog_memory::LoadLogical(fileName, L"healRemovedRegion", healRemovedRegionToggleBlock_);
     zhihui_dialog_memory::LoadDouble(fileName, L"blendRadius", blendRadiusBlock_);
     zhihui_dialog_memory::LoadDouble(fileName, L"offset", offsetBlock_);
@@ -3253,6 +3504,7 @@ void BaoRongQieChuDialog::SaveDialogMemory()
     const wchar_t* fileName = L"BaoRongQieChu_state.ini";
     zhihui_dialog_memory::SaveLogical(fileName, L"booleanSubtract", booleanToggleBlock_);
     zhihui_dialog_memory::SaveLogical(fileName, L"removeBlend", removeBlendToggleBlock_);
+    zhihui_dialog_memory::SaveLogical(fileName, L"onlyRemoveBlend", onlyRemoveBlendToggleBlock_);
     zhihui_dialog_memory::SaveLogical(fileName, L"healRemovedRegion", healRemovedRegionToggleBlock_);
     zhihui_dialog_memory::SaveDouble(fileName, L"blendRadius", blendRadiusBlock_);
     zhihui_dialog_memory::SaveDouble(fileName, L"offset", offsetBlock_);

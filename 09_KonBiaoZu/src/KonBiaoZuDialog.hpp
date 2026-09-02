@@ -42,6 +42,8 @@ namespace KonBiaoZu
         int GetLengthValue() const;
         NXOpen::TaggedObject* GetSelectedCircleObject() const;
         NXOpen::TaggedObject* GetEffectiveSelectedCircleObject() const;
+        void LoadDialogMemory();
+        void SaveDialogMemory() const;
         void UpdateConditionalBlocks() const;
         void WriteStatusLine(const std::string& text) const;
         void SetStringValue(NXOpen::BlockStyler::UIBlock* block, const std::string& value) const;

@@ -37,6 +37,7 @@
 #include <NXOpen/BlockStyler_Label.hxx>
 #include <NXOpen/BlockStyler_DoubleBlock.hxx>
 #include <NXOpen/BlockStyler_Enumeration.hxx>
+#include <NXOpen/BlockStyler_Toggle.hxx>
 #include <uf_defs.h>
 #include <uf_so.h>
 #include <uf_obj.h>
@@ -148,6 +149,8 @@ public:
     int update_cb(NXOpen::BlockStyler::UIBlock* block);
     PropertyList* GetBlockProperties(const char *blockID);
     bool RecreatePreviewFromCache();
+    int CreateAutomaticSymbols();
+    void UpdateAutomaticModeBlocks();
     
 private:
     const char* theDlxFileName;
@@ -170,6 +173,8 @@ private:
     NXOpen::BlockStyler::Enumeration* attributeName;// Block type: Enumeration
     NXOpen::BlockStyler::DoubleBlock* balloonSize;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* textHeight;// Block type: Double
+    NXOpen::BlockStyler::Toggle* automaticMode;// Block type: Toggle
+    NXOpen::BlockStyler::SelectObject* draftingViewSelection;// Block type: Select Object
     NXOpen::Annotations::IdSymbolBuilder* idSymbolBuilder1;
     NXOpen::Annotations::BalloonTypes selectedBalloonType;
     NXOpen::TaggedObject* cachedLeaderTarget;

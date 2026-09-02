@@ -106,7 +106,7 @@
                   <Option name="Satisfied" value="2" />
                 </Property>
                 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="AutoCommit" mask="69632" name="AutoCommit" sname="AutoCommit" source="1" type="logical" value="False" />
-                <Property ClassID="UGS::UICOMP" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="Cue" mask="0" name="Cue" sname="Cue" source="1" type="utfstring" value="请选择同侧结束面，并把鼠标点击在靠近结束边的位置" />
+                <Property ClassID="UGS::UICOMP" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="Cue" mask="0" name="Cue" sname="Cue" source="1" type="utfstring" value="请选择一个终止面，并在靠近最终共线边的位置点击" />
                 <Property ClassID="UGS::UICOMP_selection" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="Many" mask="0" name="Many" selected="0" sname="SelectMode" source="3" type="enum">
                   <Option name="Single" value="0" />
                   <Option name="Multiple" value="1" />
@@ -136,7 +136,7 @@
                   <Option name="Yes" value="0" />
                   <Option name="No" value="1" />
                 </Property>
-                <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="Label" mask="0" name="Label" sname="LabelString" source="3" type="utfstring" value="终止面（点击同侧结束面靠近结束边的位置）" />
+                <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="Label" mask="0" name="Label" sname="LabelString" source="3" type="utfstring" value="终止面（点击靠近最终共线边）" />
                 <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="ToolTip" mask="0" name="ToolTip" sname="ToolTip" source="3" type="utfstring" value="鼠标点击同侧结束面靠近结束边的位置。" />
                 <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="CreateInterpartLink" mask="0" name="CreateInterpartLink" sname="CreateInterpartLink" source="2" type="logical" value="False" />
                 <Property ClassID="UGS::UICOMP_selection" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="InterpartSelection" mask="0" name="InterpartSelection" selected="0" sname="InterpartSelection" source="1" type="enum">

@@ -1,0 +1,4 @@
+LIBRARY "NxPartThumbnailProvider"
+EXPORTS
+    DllCanUnloadNow PRIVATE
+    DllGetClassObject PRIVATE

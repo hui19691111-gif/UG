@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>批量转钣金使用教程</title>
+  <style>
+    :root {
+      --ink: #19324d;
+      --muted: #5d6b78;
+      --line: #d9e2ea;
+      --blue: #1769aa;
+      --blue-soft: #eef6fc;
+      --green: #26734d;
+      --green-soft: #edf8f1;
+      --amber: #9b6411;
+      --amber-soft: #fff7e8;
+      --red: #a53c35;
+      --red-soft: #fff1f0;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: #f3f6f8;
+      font: 16px/1.75 "Microsoft YaHei", "Segoe UI", sans-serif;
+    }
+    header {
+      color: white;
+      background: linear-gradient(135deg, #123b61, #2277b5);
+      padding: 44px 24px 38px;
+    }
+    header .inner, main { max-width: 1080px; margin: auto; }
+    h1 { margin: 0 0 8px; font-size: 34px; }
+    header p { margin: 0; opacity: .9; }
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: rgba(255,255,255,.97);
+      border-bottom: 1px solid var(--line);
+      box-shadow: 0 2px 8px rgba(26,49,72,.06);
+    }
+    nav .inner {
+      max-width: 1080px;
+      margin: auto;
+      display: flex;
+      gap: 18px;
+      overflow-x: auto;
+      padding: 10px 20px;
+      white-space: nowrap;
+    }
+    nav a { color: #27506f; text-decoration: none; font-size: 14px; }
+    main { padding: 26px 20px 64px; }
+    section {
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      margin: 0 0 20px;
+      padding: 26px 30px;
+      box-shadow: 0 4px 18px rgba(26,49,72,.05);
+    }
+    h2 { margin: 0 0 16px; font-size: 24px; color: #174c76; }
+    h3 { margin: 24px 0 8px; font-size: 18px; color: #245b83; }
+    p { margin: 8px 0; }
+    .lead {
+      font-size: 18px;
+      color: #334e65;
+    }
+    .callout {
+      margin: 16px 0;
+      padding: 13px 16px;
+      border-left: 5px solid var(--blue);
+      background: var(--blue-soft);
+      border-radius: 6px;
+    }
+    .callout.warn { border-color: #e39a22; background: var(--amber-soft); }
+    .callout.good { border-color: #35a66f; background: var(--green-soft); }
+    .steps {
+      counter-reset: steps;
+      list-style: none;
+      padding: 0;
+      margin: 12px 0 0;
+    }
+    .steps li {
+      counter-increment: steps;
+      position: relative;
+      min-height: 42px;
+      padding: 7px 0 14px 54px;
+      border-left: 2px solid #cfe0ee;
+      margin-left: 17px;
+    }
+    .steps li:last-child { border-left-color: transparent; }
+    .steps li::before {
+      content: counter(steps);
+      position: absolute;
+      left: -18px;
+      top: 2px;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      color: white;
+      background: var(--blue);
+      text-align: center;
+      line-height: 34px;
+      font-weight: 700;
+    }
+    .shot-layout {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 28px;
+      align-items: start;
+    }
+    .shot-crop {
+      width: 334px;
+      height: 610px;
+      overflow: hidden;
+      background: #dfe5ea;
+      border: 1px solid #aebdca;
+      border-radius: 8px;
+      box-shadow: 0 8px 22px rgba(21,42,61,.15);
+    }
+    .shot-crop img {
+      display: block;
+      width: 950px;
+      max-width: none;
+      transform: translate(-142px, -219px);
+    }
+    .caption { color: var(--muted); font-size: 13px; margin-top: 8px; }
+    .real-wide {
+      display: block;
+      width: 100%;
+      height: auto;
+      margin: 12px 0 6px;
+      border: 1px solid #aebdca;
+      border-radius: 8px;
+      box-shadow: 0 8px 22px rgba(21,42,61,.12);
+    }
+    .control-list { margin: 0; padding-left: 22px; }
+    .control-list li { margin: 0 0 11px; }
+    .control-list strong { color: #174c76; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 4px;
+      font-size: 15px;
+    }
+    th, td { border: 1px solid var(--line); padding: 10px 12px; vertical-align: top; }
+    th { background: #edf3f8; color: #234c6b; text-align: left; }
+    td:first-child { font-weight: 700; color: #285879; white-space: nowrap; }
+    .recipe-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .recipe {
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 15px 17px;
+      background: #fbfcfd;
+    }
+    .recipe h3 { margin-top: 0; }
+    code {
+      font-family: Consolas, monospace;
+      background: #eef2f5;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    details {
+      border-top: 1px solid var(--line);
+      padding: 12px 2px;
+    }
+    details:first-of-type { border-top: 0; }
+    summary { cursor: pointer; color: #245b83; font-weight: 700; }
+    footer { text-align: center; color: #71808d; padding: 0 20px 34px; }
+    @media (max-width: 760px) {
+      header { padding-top: 30px; }
+      h1 { font-size: 28px; }
+      section { padding: 22px 18px; }
+      .shot-layout, .recipe-grid { grid-template-columns: 1fr; }
+      .shot-crop { margin: auto; }
+    }
+    @media print {
+      nav { display: none; }
+      body { background: white; }
+      section { box-shadow: none; break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="inner">
+      <h1>批量转钣金使用教程</h1>
+      <p>UG 智辉钣金插件 · 自动转钣金 / 批量展开</p>
+    </div>
+  </header>
+
+  <nav>
+    <div class="inner">
+      <a href="#quick">快速上手</a>
+      <a href="#dialog">真实界面</a>
+      <a href="#controls">选项说明</a>
+      <a href="#rules">规则表</a>
+      <a href="#baseface">基面规则</a>
+      <a href="#execution">代码分支</a>
+      <a href="#manual">手动选择</a>
+      <a href="#assembly">装配处理</a>
+      <a href="#recipes">常用方案</a>
+      <a href="#trouble">常见问题</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="quick">
+      <h2>一、第一次使用：照这 7 步操作</h2>
+      <p class="lead">多数零件不需要手动选面。先设好规则和筛选范围，再让程序自动转换、设置中性因子并创建展开。</p>
+      <ol class="steps">
+        <li><strong>打开模型。</strong>可以打开单个零件，也可以在装配中运行。装配环境会先让你勾选要处理的子部件。</li>
+        <li><strong>先点“规则设置…”。</strong>确认材料、板厚、折弯条件对应的中性因子规则已经正确保存。</li>
+        <li><strong>选择固定面方向。</strong>成品主要向下折就选“下折多”；主要向上折就选“上折多”。</li>
+        <li><strong>填写工艺参数。</strong>按企业工艺填写避让槽深、避让槽宽和内 R 半径；不确定时先使用验证过的默认值。</li>
+        <li><strong>限定处理范围。</strong>通常勾选“按图层范围找实体”，填写起始、结束图层，并按需要排除小实体和紧固件。</li>
+        <li><strong>决定是否自动保存。</strong>试运行建议先关闭；确认规则正确后再开启，以免批量保存不需要的结果。</li>
+        <li><strong>点击“确定”。</strong>等待处理完成。若有失败，根据颜色、高亮或结果信息定位失败体。</li>
+      </ol>
+      <div class="callout good"><strong>推荐：</strong>第一次处理一批新类型零件时，先拿 2～3 个零件试跑，确认基面方向、中性因子和展开结果，再扩大范围。</div>
+    </section>
+
+    <section id="dialog">
+      <h2>二、主对话框真实界面</h2>
+      <div class="shot-layout">
+        <div>
+          <div class="shot-crop">
+            <img src="dialog-real.png" alt="NX 中实际运行的自动转钣金对话框截图">
+          </div>
+          <p class="caption">真实运行截图。这里只用网页窗口裁掉了右侧错误框和聊天背景，控件本身没有重画或替换。</p>
+        </div>
+        <div>
+          <h3>界面从上到下分为两组</h3>
+          <ol class="control-list">
+            <li><strong>系数策略：</strong>决定怎样找基面、固定面朝向、失败后的显示方式、展开基面颜色，以及转钣金使用的基础工艺参数。</li>
+            <li><strong>高级过滤：</strong>决定哪些实体参加本次批量处理，例如图层范围、最小尺寸、是否排除螺母柱，以及是否每层只取最大实体。</li>
+          </ol>
+          <div class="callout warn"><strong>注意：</strong>截图中的红箭头是原截图已有标注，指向“规则设置…”。用户实际使用时，右侧不会出现教程中的说明文字。</div>
+          <h3>按钮的基本区别</h3>
+          <p><strong>“手动选择…”</strong>会立即进入逐个实体的人工选面流程；<strong>“确定”</strong>则按当前参数自动处理尚未手动处理的对象。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="controls">
+      <h2>三、每个选项怎么用</h2>
+      <table>
+        <thead><tr><th>界面选项</th><th>作用</th><th>什么时候使用</th></tr></thead>
+        <tbody>
+          <tr><td>按标记线找基面</td><td>当模型存在有效标记线时，优先用标记线确定所属材料侧面链，再在该面链内选展开基面。</td><td>图纸或建模规范已经用标记线表达展开朝向时开启。没有可靠标记线时关闭。</td></tr>
+          <tr><td>运行完成自动保存</td><td>批量处理结束后保存被处理的零件。</td><td>正式批处理且结果已验证时开启；测试参数时建议关闭。</td></tr>
+          <tr><td>手动选择…</td><td>人工选择一个实体的固定基面，再选择该基面上的直线边作为 X 方向。</td><td>自动基面不符合工艺要求，或个别零件必须固定特殊方向时使用。</td></tr>
+          <tr><td>固定面方向</td><td>在候选材料侧面链之间选择“下折多”或“上折多”的方向偏好。</td><td>根据零件主要折弯朝向选择。它先决定面链方向，再在该链内评分选面。</td></tr>
+          <tr><td>失败处理方式</td><td>可选“隐藏成功的体”“失败体改红色”或“高亮失败体”。</td><td>批量排查推荐失败改红或高亮；只想留下未处理对象时可隐藏成功体。</td></tr>
+          <tr><td>展开基面颜色</td><td>把最终使用的展开基面改成所选颜色，便于复查。</td><td>调试基面选择或抽检结果时开启；颜色框只有开启后才生效。</td></tr>
+          <tr><td>避让槽深 / 宽</td><td>创建转钣金特征时使用的折弯避让槽参数。</td><td>按企业工艺和当前单位输入。默认示例为 0.2000。</td></tr>
+          <tr><td>内 R 半径</td><td>创建转钣金时采用的内侧折弯半径。</td><td>有统一工艺要求时填写；不同材料或板厚应先验证。</td></tr>
+          <tr><td>跳过过小实体</td><td>启用最小长度、最小宽度过滤，小于限制的实体不参与处理。</td><td>模型里有碎体、辅助体或非常小的非产品实体时开启。</td></tr>
+          <tr><td>跳过螺母、螺柱、螺钉</td><td>识别并排除常见紧固件类实体，避免把螺母柱误当钣金体转换。</td><td>一个零件内同时存在钣金大板和紧固件实体时建议开启。</td></tr>
+          <tr><td>按图层范围找实体</td><td>只收集起始图层到结束图层之间的实体；起止填反时程序会自动按小到大处理。</td><td>按图层组织加工对象时建议常开，例如只处理 1～99 层。</td></tr>
+          <tr><td>每层只处理最大实体</td><td>同一图层有多个候选实体时，只保留包围盒体量最大的一个。</td><td>每层确实只放一件主板、其他都是附件时开启。若同层有多件都要处理，必须关闭。</td></tr>
+          <tr><td>规则设置…</td><td>打开插件内置的折弯系数规则表，维护材料、板厚、折弯类型与中性因子的对应规则。</td><td>第一次使用、材料/板厚变化，或发现展开长度不对时先检查这里。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="rules">
+      <h2>四、折弯系数表怎么设置</h2>
+      <p>在主对话框点击“规则设置…”会打开下面的真实界面。这里决定不同材料、板厚和折弯角度采用哪一列扣除值或 K 因子。</p>
+      <img class="real-wide" src="rules-real.png" alt="NX 插件实际运行的折弯系数表截图">
+      <p class="caption">真实“折弯系数表”截图。表格中的数值仅代表截图当时的数据，正式生产请使用本企业已经验证的工艺数据。</p>
+      <table>
+        <thead><tr><th>区域或控件</th><th>作用与操作方法</th></tr></thead>
+        <tbody>
+          <tr><td>选择规则</td><td>选择要维护的折弯角度区间，包括 90°、0～90°、90～180°、180～360°。每个角度区间可以分别指定普通折弯和多刀折圆使用的系数列。</td></tr>
+          <tr><td>普通折弯</td><td>指定普通折弯从“扣除1～3、K因子1～3、A1～A3”中的哪一列取值。截图中选择的是“扣除1”。</td></tr>
+          <tr><td>多刀折圆</td><td>指定多刀折圆采用的系数列。截图中选择的是“K因子3”。</td></tr>
+          <tr><td>多刀折圆最小半径</td><td>用于区分普通折弯与多刀折圆的半径门槛。大于 0 时启用；达到门槛的圆弧折弯按“多刀折圆”列取值。单位跟随当前零件单位。</td></tr>
+          <tr><td>材料分页</td><td>选择“全部”查看所有材料，或只查看某一种材料，便于在材料较多时维护。</td></tr>
+          <tr><td>新增厚度</td><td>为材料增加一个厚度规格。通常会基于当前选中行建立新行，再修改厚度和各列工艺值。</td></tr>
+          <tr><td>系数表格</td><td>双击需要修改的单元格，维护材料、厚度及扣除值/K 因子。A1～A3为预留的附加系数列，只有上方规则选中对应列时才参与计算。</td></tr>
+          <tr><td>保存</td><td>把当前规则写入配置文件。建议每次修改完成后立即保存。</td></tr>
+          <tr><td>导入/导出EXCEL数据</td><td>用于批量交换表格数据。当前实现使用 CSV 格式；导入后先核对材料、厚度和小数，再点击“保存”。</td></tr>
+          <tr><td>计算K因子</td><td>打开 K 因子计算工具，根据试折或已知展开数据辅助计算，再把结果填入相应列。</td></tr>
+          <tr><td>确定 / 取消</td><td>“确定”会保存当前修改后关闭；“取消”关闭窗口且不保留尚未保存的修改。</td></tr>
+        </tbody>
+      </table>
+      <div class="callout warn"><strong>规则选择要一致：</strong>若普通折弯选择“扣除1”，程序就读取当前材料和板厚行的“扣除1”；若多刀折圆选择“K因子3”，就读取“K因子3”。不要只修改某一列，却在上方选中了另一列。</div>
+    </section>
+
+    <section id="baseface">
+      <h2>五、程序怎样自动选择展开基面</h2>
+      <p>程序不会简单地从所有面里直接挑“面积最大面”，也不会为了算位置而逐个试展开。它先用共边及相切折弯圆柱面构造真实连续的材料侧面链；共面片只有彼此存在共边才会合并，互不相连的共面绝不会被当成同一段。</p>
+      <ol class="steps">
+        <li><strong>确定方向链。</strong>根据“上折多 / 下折多”比较候选面链的内、外折弯关系，先确定更符合方向偏好的面链。</li>
+        <li><strong>在选定面链内评分。</strong>面积、位置、相邻 R 和内环四项共同决定基面，不跨到另一条不相连面链。</li>
+        <li><strong>面积分：</strong>候选面达到本链最大面积的 70% 及以上记 3 分；30%～70% 记 2 分；低于 30% 记 1 分。</li>
+        <li><strong>位置分：</strong>先把连续面链按实际截面顺序排开。每段平面的长度取垂直于折弯轴方向的端点投影跨度，段与段之间再加上折弯圆弧长度（半径 × 折弯角）。总长的一半就是截面中心；中心落入的平面段记 3 分，与中心段直接相邻的段记 2 分，其余段记 1 分。</li>
+        <li><strong>相邻 R 分：</strong>相邻折弯圆柱面达到 3 个及以上记 3 分；2 个记 2 分；1 个记 1 分；没有记 0 分。</li>
+        <li><strong>内环分：</strong>候选面存在内环时加 1 分。</li>
+      </ol>
+      <div class="callout"><strong>封闭面链和失败回退：</strong>封闭轮廓没有天然起点时，以最窄平面段作为稳定接缝再展开顺序；若面链出现分叉、断开、折弯轴不一致或无法得到有效段长，才退回按候选面中心坐标主跨度分三档。</div>
+      <div class="callout"><strong>总分相同：</strong>再依次比较位置档、到面链中心的实际距离、面积档、实际面积、相邻 R 数，最后用面标识稳定决胜。因此“最大面”只是其中一项，不保证一定被选中。</div>
+      <div class="callout warn"><strong>方向仍不符合要求：</strong>先确认“上折多 / 下折多”是否选对；有可靠标记线时开启标记线；仍不符合时，用“手动选择…”直接指定。</div>
+    </section>
+
+    <section id="execution">
+      <h2>六、代码实际怎样处理每一个实体</h2>
+      <p class="lead">下面按当前源码的执行顺序说明。哪些条件会跳过、何时新建特征、何时只查实体自己的特征，都在这里列明。</p>
+      <ol class="steps">
+        <li><strong>先确定部件范围。</strong>零件环境只处理当前工作部件；装配环境只处理前置部件列表中勾选的原型部件，并按原型去重。程序逐个把它们设为工作部件，结束后再恢复原工作部件。</li>
+        <li><strong>实体基本过滤。</strong>对象必须仍然有效并且是实心体；若部件本身没有批处理所需属性，则实体必须有自己的材料、数量等批处理属性，否则计入“因属性过滤跳过”。</li>
+        <li><strong>图层过滤。</strong>开启时只保留起始层至结束层内的实体；关闭时不按层排除。起止值在界面读取时按小到大使用。</li>
+        <li><strong>过小实体过滤。</strong>包围盒三边按“大、中、小”排序为长度、宽度、高度。长度小于最小长度<strong>或</strong>宽度小于最小宽度就跳过；两个门槛都达到才继续。</li>
+        <li><strong>紧固件过滤。</strong>开启后再按投影轮廓、高度、外形尺寸、圆柱面和完整/半圆边等几何判断螺母、螺柱、螺钉类体；命中就跳过，不再参加“每层最大体”比较。</li>
+        <li><strong>每层最大体分支。</strong>关闭时保留同层全部候选；开启时每层只留下包围盒评分最大的实体。评分为“长度 × 宽度 × max(高度, 0.001)”，不是最大单个面的面积。</li>
+        <li><strong>部件是否需要转钣金。</strong>若本部件候选中至少有一个普通体，程序先统一提交当前避让槽、内 R 等钣金首选项；全部候选原本已是钣金体时不重复提交这一步。</li>
+        <li><strong>普通体分支。</strong>先按自动或手动方式取得固定面，然后创建 Convert to Sheet Metal。转换后直接给该新钣金体应用中性因子；因为它是本轮刚转换的，不再全局查找历史展开特征，直接按“新建 Flat Pattern”处理。</li>
+        <li><strong>原本已是钣金体分支。</strong>不再创建转钣金，只检查<strong>当前实体自己的钣金特征</strong>；只有这一分支才查找属于该实体的现有 Flat Pattern。找到时更新它，找不到时新建一个。不会对零件全部普通特征逐个尝试 FlatPatternBuilder。</li>
+        <li><strong>中性因子分支。</strong>按材料、板厚、角度区间、普通折弯/多刀折圆及规则表所选列逐个处理弯曲面；已有对应中性因子特征时更新，没有时创建。Z 厚度属性的模型更新延迟到本部件末尾统一执行。</li>
+        <li><strong>自动基面与 X 方向。</strong>自动模式在转换后重新按上折/下折面链及四项评分确定展开面；X 向边先尝试单折弯专用边，再取基面最长直线边。仍找不到可用边时，Flat Pattern 使用 NX 默认方向。</li>
+        <li><strong>手动基面与 X 方向。</strong>手选面作为固定面；完成转换后必须再选择转换后实际基面上的直线边。取消或选到不在基面上的边，本实体记失败，但之前已经提交的转钣金特征不会被对话框取消自动回滚。</li>
+        <li><strong>创建或更新展开。</strong>普通体用空 Builder 新建展开；已有钣金体用找到的本体 Flat Pattern Builder 更新，或在没有时新建。随后解析展开实体并检查实际厚度。</li>
+        <li><strong>展开厚度校验。</strong>展开实体厚度与源钣金厚度不符合时，本体记为失败，错误信息写明期望厚度和实际厚度；通过时给源体及可解析的展开体写入展开尺寸属性。</li>
+        <li><strong>失败显示分支。</strong>“隐藏成功的体”只在成功且不是纯手动处理时隐藏结果体；“失败体改红色”只给失败体设红色；“高亮失败体”只高亮失败体。三种方式都不修复失败原因。</li>
+        <li><strong>保存分支。</strong>开启自动保存且本部件确实产生结果时才保存该 PRT，并包含组件保存；关闭时模型内结果已经存在，但文件仍处于未保存状态。</li>
+      </ol>
+      <div class="callout warn"><strong>什么时候模型已经被改动：</strong>进入某个实体的处理后，Convert to Sheet Metal、中性因子和 Flat Pattern 都是真实提交的特征，不是只画预览。手动流程中途取消 X 方向，或主窗口随后取消，都不能当作 NX 撤销。</div>
+      <div class="callout"><strong>为什么现在比旧流程快：</strong>刚转换的普通体不可能已有属于本轮结果的展开，所以直接新建；只有原本已是钣金体才查它自己的展开特征。这样避免遍历零件全部历史特征，并对大量非展开特征反复创建 Builder、抛异常再跳过。</div>
+    </section>
+
+    <section id="manual">
+      <h2>七、手动选择基面和 X 方向</h2>
+      <img class="real-wide" src="manual-base-real.png" alt="NX 中实际运行的手动定义基面 X 向子对话框">
+      <p class="caption">真实“手动定义基面X向”分支界面。截图后使用“取消”返回，没有提交基面选择。</p>
+      <ol class="steps">
+        <li>在主对话框中先设置好避让槽、内 R、颜色和失败处理方式。</li>
+        <li>点击<strong>“手动选择…”</strong>，在模型上选择需要处理实体的平面作为固定基面。</li>
+        <li>按提示选择<strong>刚才基面上的直线边</strong>作为 X 方向。圆弧边或不在该面上的边不能作为有效 X 向边。</li>
+        <li>程序立即处理当前实体，然后继续等待选择下一个实体；可连续处理多个特殊零件。</li>
+        <li>不再手动处理时取消选择，返回主对话框。</li>
+        <li>若还要自动处理其他实体，再点击主对话框“确定”；已经手动处理过的实体不会重复进入本次自动处理。</li>
+      </ol>
+      <div class="callout warn"><strong>手动选择的意义：</strong>它是给少数特殊件兜底，不建议把整批零件都逐个手选，否则会失去批量处理的效率。</div>
+    </section>
+
+    <section id="assembly">
+      <h2>八、单零件与装配环境</h2>
+      <h3>单零件</h3>
+      <p>直接进入主参数对话框，程序在当前工作零件中按图层和过滤条件收集实体。</p>
+      <h3>装配</h3>
+      <p>装配环境运行时，先出现下面的真实部件选择窗口。筛选并勾选要处理的子部件，确认后才进入主参数对话框。</p>
+      <img class="real-wide" src="assembly-real.png" alt="NX 装配环境实际运行的批量转钣金部件选择窗口截图">
+      <p class="caption">真实装配零件选择界面。列表只负责决定“处理哪些部件”，具体转钣金参数在点击“确定”后的主对话框设置。</p>
+      <table>
+        <thead><tr><th>控件</th><th>使用说明</th></tr></thead>
+        <tbody>
+          <tr><td>过滤</td><td>输入部件名或列表中显示的属性关键字，列表立即缩小到匹配项。</td></tr>
+          <tr><td>层</td><td>可选择按“部件图层”或“装配图层”过滤。前者看子部件内部对象所在层，后者按组件在装配中的层判断。</td></tr>
+          <tr><td>图层范围</td><td>支持单层、逗号分隔和连续范围，例如 <code>1</code>、<code>1,20,35</code>、<code>1-20,35,40</code>。</td></tr>
+          <tr><td>清空</td><td>清除关键字、图层范围和过滤条件，恢复完整候选列表。</td></tr>
+          <tr><td>属性过滤</td><td>“有材料属性值”“有数量属性值”只保留对应属性不为空的部件；“部件不含钣金特征”只看尚未转钣金的部件；“显示的部件”只看当前可见部件。</td></tr>
+          <tr><td>部件列表</td><td>勾选第一列才表示要处理。可对照序号、部件名、材料和数量核对对象。</td></tr>
+          <tr><td>全选 / 全不选</td><td>只作用于当前过滤后列表里显示的对象。建议先过滤，再全选，避免把无关部件带入批处理。</td></tr>
+          <tr><td>确定 / 取消</td><td>“确定”接受勾选并进入主参数对话框；“取消”退出本次操作，不处理部件。</td></tr>
+        </tbody>
+      </table>
+      <p>进入主参数对话框后，每个选中部件分别判断是否已有钣金特征：</p>
+      <ul>
+        <li>不是钣金体：先创建转钣金并更新，再创建中性因子和展开。</li>
+        <li>已经是钣金体：直接查当前实体自己的钣金/展开特征，缺少展开时再创建。</li>
+        <li>完成后按“自动保存”和失败处理方式保存或标识结果。</li>
+      </ul>
+      <div class="callout warn"><strong>自动保存提醒：</strong>装配批处理时会保存被处理的子部件。正式运行前请确认文件可写，并建议保留版本或备份。</div>
+    </section>
+
+    <section id="recipes">
+      <h2>九、四种常用设置方案</h2>
+      <div class="recipe-grid">
+        <div class="recipe">
+          <h3>普通钣金零件批处理</h3>
+          <p>图层范围开启；按零件方向选择上折多/下折多；展开基面颜色开启；先关闭自动保存试跑。</p>
+        </div>
+        <div class="recipe">
+          <h3>大板与螺母柱同层</h3>
+          <p>开启“跳过螺母、螺柱、螺钉”。若该层只应处理大板，也可开启“每层只处理最大实体”。</p>
+        </div>
+        <div class="recipe">
+          <h3>同层有多件钣金都要转</h3>
+          <p>关闭“每层只处理最大实体”，否则每层只会留下一个最大候选体。</p>
+        </div>
+        <div class="recipe">
+          <h3>个别件基面方向特殊</h3>
+          <p>先用“手动选择…”处理特殊件，再返回主对话框点击确定处理剩余对象。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="trouble">
+      <h2>十、常见问题与排查</h2>
+      <details open>
+        <summary>为什么某个实体完全没有处理？</summary>
+        <p>依次检查：是否在图层范围内；是否被“过小实体”过滤；是否被识别为紧固件；是否开启了“每层只处理最大实体”；装配列表中是否勾选了对应部件。</p>
+      </details>
+      <details>
+        <summary>为什么选到的基面不是面积最大的面？</summary>
+        <p>基面先受面链方向限制，再综合面积、位置、相邻 R 和内环评分。最大面积只是评分项之一。可开启基面颜色核对，再调整上下折偏好、标记线或改用手动选择。</p>
+      </details>
+      <details>
+        <summary>为什么大板同层的螺母柱也被处理？</summary>
+        <p>检查“跳过螺母、螺柱、螺钉”是否开启；如果每层只需要主板，再开启“每层只处理最大实体”。注意“最大实体”按实体包围盒体量比较，不按单个面面积比较。</p>
+      </details>
+      <details>
+        <summary>为什么批量到后面越来越慢？</summary>
+        <p>复杂零件、历史特征较多、重复转钣金或重复展开都会增加 NX 更新成本。当前版本优先检查实体自己的特征，避免对零件所有非展开特征反复创建 Builder；仍然较慢时，先用图层和尺寸过滤减少对象，并检查零件是否存在大量历史钣金特征。</p>
+      </details>
+      <details>
+        <summary>点击“规则设置…”报 NX error code=352019 怎么办？</summary>
+        <p>当前版本使用 DLL 内置规则对话框，正常情况下不再依赖外部 DLX 路径。若仍报错，先完全退出 NX 后确认插件 DLL 已更新，再重新启动；不要在 NX 已加载旧 DLL 时直接覆盖后继续测试。</p>
+      </details>
+      <details>
+        <summary>更新插件后点击没有反应怎么办？</summary>
+        <p>先完全退出 NX，让已加载的 DLL 卸载，再启动测试。若仍无反应，检查运行目录文件与清单哈希是否一起更新，避免防篡改校验把新 DLL 判定为不一致。</p>
+      </details>
+    </section>
+  </main>
+
+  <footer>UG 智辉钣金插件 · 批量转钣金本地帮助 · 教程版本 2026-07-30-3</footer>
+</body>
+</html>

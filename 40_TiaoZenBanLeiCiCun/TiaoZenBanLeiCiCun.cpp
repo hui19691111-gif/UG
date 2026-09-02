@@ -1,4 +1,5 @@
 #include "TiaoZenBanLeiCiCun.hpp"
+#include "../../common/ZhihuiContextHelp.hpp"
 
 #ifdef CreateDialog
 #undef CreateDialog
@@ -577,6 +578,7 @@ PanelSizeDialog::PanelSizeDialog()
         "INFO",
         "创建板件调尺对话框；DLX=" + DialogPath() +
             "；日志=" + TiaoZenLogFilePath());
+    zhihui_context_help::EnsureGlobalHelpLoaded();
     dialog_ = ui_->CreateDialog(DialogPath().c_str());
     dialog_->AddInitializeHandler(
         NXOpen::make_callback(this, &PanelSizeDialog::initialize_cb));
@@ -609,8 +611,10 @@ NXOpen::BlockStyler::BlockDialog::DialogResponse PanelSizeDialog::Launch()
 
 void PanelSizeDialog::initialize_cb()
 {
-    TiaoZenWriteLog("INFO", "initialize_cb 开始。");
-    auto* top = dialog_->TopBlock();
+    try
+    {
+        TiaoZenWriteLog("INFO", "initialize_cb 开始。");
+        auto* top = dialog_->TopBlock();
     planeSelect_ = top->FindBlock("plane_select");
     swapDirection_ = top->FindBlock("swap_direction");
     currentSize_ = top->FindBlock("current_size");
@@ -670,26 +674,68 @@ void PanelSizeDialog::initialize_cb()
     properties->SetEnum("StepStatus", 0);
     delete properties;
 
-    LoadSettings();
-    RefreshModeVisibility();
-    RefreshDimensionText();
-    TiaoZenWriteLog("INFO", "initialize_cb 完成，全部 DLX 控件已找到。");
+        LoadSettings();
+        RefreshDimensionText();
+        TiaoZenWriteLog("INFO", "initialize_cb 完成，全部 DLX 控件已找到。");
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        TiaoZenWriteLog(
+            "ERROR",
+            std::string("initialize_cb 捕获 NXException：code=") +
+                std::to_string(ex.ErrorCode()) +
+                "，message=" +
+                (ex.Message() != nullptr ? ex.Message() : "<null>"));
+    }
+    catch (const std::exception& ex)
+    {
+        TiaoZenWriteLog(
+            "ERROR",
+            std::string("initialize_cb 捕获 std::exception：") + ex.what());
+    }
+    catch (...)
+    {
+        TiaoZenWriteLog("ERROR", "initialize_cb 捕获未知异常。");
+    }
 }
 
 void PanelSizeDialog::dialogShown_cb()
 {
-    TiaoZenWriteLog("INFO", "对话框已显示。");
-    // The DLX creates the native dimension manipulators with ShowHandle=true,
-    // matching feature 38. Hide them only after the dialog is fully realized;
-    // otherwise NX 2412 defers creating them until an unrelated second update.
-    HideDragHandles();
-    UF_DISP_refresh();
-    TiaoZenWriteLog(
-        "DEBUG",
-        "拖拽手柄已在对话框构建阶段完成实例化，等待选面后显示。");
-    if (planeSelect_ != nullptr)
+    try
     {
-        planeSelect_->Focus();
+        TiaoZenWriteLog("INFO", "对话框已显示。");
+        RefreshModeVisibility();
+        // The DLX creates the native dimension manipulators with ShowHandle=true,
+        // matching feature 38. Hide them only after the dialog is fully realized;
+        // otherwise NX 2412 defers creating them until an unrelated second update.
+        HideDragHandles();
+        UF_DISP_refresh();
+        TiaoZenWriteLog(
+            "DEBUG",
+            "拖拽手柄已在对话框构建阶段完成实例化，等待选面后显示。");
+        if (planeSelect_ != nullptr)
+        {
+            planeSelect_->Focus();
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        TiaoZenWriteLog(
+            "ERROR",
+            std::string("dialogShown_cb 捕获 NXException：code=") +
+                std::to_string(ex.ErrorCode()) +
+                "，message=" +
+                (ex.Message() != nullptr ? ex.Message() : "<null>"));
+    }
+    catch (const std::exception& ex)
+    {
+        TiaoZenWriteLog(
+            "ERROR",
+            std::string("dialogShown_cb 捕获 std::exception：") + ex.what());
+    }
+    catch (...)
+    {
+        TiaoZenWriteLog("ERROR", "dialogShown_cb 捕获未知异常。");
     }
 }
 
@@ -734,6 +780,17 @@ int PanelSizeDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 }
                 else
                 {
+                    if (block == planeSelect_)
+                    {
+                        // All user-entered values are dialog preferences.
+                        // Selecting another face must not erase the remembered
+                        // independent or uniform increments.
+                        targetValuesInitialized_ = true;
+                        TiaoZenWriteLog(
+                            "INFO",
+                            "重新选择板件平面，保留全部已记忆的用户输入。");
+                    }
+
                     // A focused selection block keeps NX in object-picking
                     // mode and suppresses Block Styler dimension handles.
                     // Leave selection mode as soon as the single face has
@@ -822,9 +879,11 @@ int PanelSizeDialog::apply_cb()
         TiaoZenWriteLog("INFO", "尺寸调整已提交。");
         ClearSelection();
         frame_ = PanelFrame();
-        SetLabel(currentSize_, "当前尺寸：请先选择板件平面");
-        SetLabel(resultLength_, "调整后长度：--");
-        SetLabel(resultWidth_, "调整后宽度：--");
+        SetLabel(currentSize_, "模型真实尺寸：请先选择板件平面");
+        SetLabel(targetLength_, "长度增量（原 --）");
+        SetLabel(targetWidth_, "宽度增量（原 --）");
+        SetLabel(resultLength_, "调整后尺寸：--");
+        SetLabel(resultWidth_, "尺寸变化：--");
         planeSelect_->Focus();
         return 0;
     }
@@ -1297,14 +1356,7 @@ bool PanelSizeDialog::AnalyzeSelectedFace(
             Fixed(frame_.TopSkirt()) +
             "，板厚=" + Fixed(frame_.thickness));
 
-    if (!targetValuesInitialized_)
-    {
-        changingUi_ = true;
-        SetDoubleValue(targetLength_, frame_.Length());
-        SetDoubleValue(targetWidth_, frame_.Width());
-        changingUi_ = false;
-        targetValuesInitialized_ = true;
-    }
+    targetValuesInitialized_ = true;
     return true;
 }
 
@@ -1441,35 +1493,32 @@ void PanelSizeDialog::LoadSettings()
         }
         try
         {
-            return std::stod(item->second);
+            const double value = std::stod(item->second);
+            return std::isfinite(value) ? value : fallback;
         }
         catch (...)
         {
             return fallback;
         }
     };
-
     changingUi_ = true;
     adjustTabs_->SetActivePage(
         (std::max)(0, (std::min)(2, readInt("mode", 0))));
     SetLogicalValue(
         swapDirection_, readInt("swapDirection", 0) != 0);
-    SetDoubleValue(
-        leftOffset_, readDouble("leftOffset", 0.0));
-    SetDoubleValue(
-        rightOffset_, readDouble("rightOffset", 0.0));
-    SetDoubleValue(
-        bottomOffset_, readDouble("bottomOffset", 0.0));
-    SetDoubleValue(
-        topOffset_, readDouble("topOffset", 0.0));
+    SetDoubleValue(leftOffset_, readDouble("leftOffset", 0.0));
+    SetDoubleValue(rightOffset_, readDouble("rightOffset", 0.0));
+    SetDoubleValue(bottomOffset_, readDouble("bottomOffset", 0.0));
+    SetDoubleValue(topOffset_, readDouble("topOffset", 0.0));
+    SetDoubleValue(targetLength_, readDouble("lengthIncrement", 0.0));
+    SetDoubleValue(targetWidth_, readDouble("widthIncrement", 0.0));
+    targetValuesInitialized_ = true;
     SetLogicalValue(
         roundLength_, readInt("roundLength", 1) != 0);
     SetLogicalValue(
         roundWidth_, readInt("roundWidth", 1) != 0);
-    SetDoubleValue(
-        lengthStep_, readDouble("lengthStep", 10.0));
-    SetDoubleValue(
-        widthStep_, readDouble("widthStep", 10.0));
+    SetDoubleValue(lengthStep_, readDouble("lengthStep", 1.0));
+    SetDoubleValue(widthStep_, readDouble("widthStep", 1.0));
     SetEnumValue(
         roundPolicy_,
         (std::max)(0, (std::min)(2, readInt("roundPolicy", 0))));
@@ -1479,27 +1528,19 @@ void PanelSizeDialog::LoadSettings()
     SetLogicalValue(
         livePreview_, readInt("livePreview", 1) != 0);
 
-    const bool hasTargetLength =
-        values.find("targetLength") != values.end();
-    const bool hasTargetWidth =
-        values.find("targetWidth") != values.end();
-    if (hasTargetLength && hasTargetWidth)
-    {
-        SetDoubleValue(
-            targetLength_, readDouble("targetLength", 0.0));
-        SetDoubleValue(
-            targetWidth_, readDouble("targetWidth", 0.0));
-        targetValuesInitialized_ = true;
-    }
     changingUi_ = false;
     TiaoZenWriteLog(
         "INFO",
-        "已恢复用户参数：mode=" +
+        "已恢复全部用户输入（包含数字）：mode=" +
             std::to_string(static_cast<int>(CurrentMode())) +
             "，left=" + Fixed(DoubleValue(leftOffset_)) +
             "，right=" + Fixed(DoubleValue(rightOffset_)) +
             "，bottom=" + Fixed(DoubleValue(bottomOffset_)) +
             "，top=" + Fixed(DoubleValue(topOffset_)) +
+            "，lengthIncrement=" + Fixed(DoubleValue(targetLength_)) +
+            "，widthIncrement=" + Fixed(DoubleValue(targetWidth_)) +
+            "，lengthStep=" + Fixed(DoubleValue(lengthStep_)) +
+            "，widthStep=" + Fixed(DoubleValue(widthStep_)) +
             "，settings=" + SettingsPath().string());
 }
 
@@ -1524,8 +1565,8 @@ void PanelSizeDialog::SaveSettings() const
                << "rightOffset=" << DoubleValue(rightOffset_) << "\n"
                << "bottomOffset=" << DoubleValue(bottomOffset_) << "\n"
                << "topOffset=" << DoubleValue(topOffset_) << "\n"
-               << "targetLength=" << DoubleValue(targetLength_) << "\n"
-               << "targetWidth=" << DoubleValue(targetWidth_) << "\n"
+               << "lengthIncrement=" << DoubleValue(targetLength_) << "\n"
+               << "widthIncrement=" << DoubleValue(targetWidth_) << "\n"
                << "roundLength=" << (LogicalValue(roundLength_) ? 1 : 0) << "\n"
                << "roundWidth=" << (LogicalValue(roundWidth_) ? 1 : 0) << "\n"
                << "lengthStep=" << DoubleValue(lengthStep_) << "\n"
@@ -1639,8 +1680,9 @@ PanelSizeDialog::SideOffsets PanelSizeDialog::CalculateOffsets(
         break;
 
     case AdjustMode::TargetSize:
-        TargetSizeToOffsets(DoubleValue(targetLength_),
-                            DoubleValue(targetWidth_), offsets);
+        TargetSizeToOffsets(
+            frame_.Length() + DoubleValue(targetLength_),
+            frame_.Width() + DoubleValue(targetWidth_), offsets);
         break;
 
     case AdjustMode::Round:
@@ -1836,16 +1878,156 @@ void PanelSizeDialog::ConfigureDragHandles()
             const std::vector<NXOpen::Face*> movingFaces =
                 FindBoundaryFaces(
                     body, directions[index], boundaryCoordinates[index]);
-            NXOpen::Point3d movingFaceCenter;
-            if (FacesBoxCenter(movingFaces, movingFaceCenter))
+            if (!movingFaces.empty())
             {
+                // FindBoundaryFaces returns PLANE1 first.  Keep the drag
+                // handle on that original side face even when an external
+                // skirt continues to a more remote terminal thickness face.
+                NXOpen::Point3d plane1Center;
+                const std::vector<NXOpen::Face*> plane1Only{
+                    movingFaces.front()};
+                if (FacesBoxCenter(plane1Only, plane1Center))
+                {
+                    NXOpen::Point3d planePoint;
+                    NXOpen::Vector3d planeNormal;
+                    if (FacePlaneData(
+                            movingFaces.front(),
+                            planePoint, planeNormal))
+                    {
+                        const double planeDistance = Dot(
+                            Subtract(plane1Center, planePoint),
+                            planeNormal);
+                        plane1Center = Move(
+                            plane1Center, planeNormal,
+                            -planeDistance);
+                    }
+                    origins[index] = plane1Center;
+                    TiaoZenWriteLog(
+                        "DEBUG",
+                        "拖拽手柄放在原始PLANE1中心：index=" +
+                            std::to_string(index) +
+                            "，plane1Tag=" +
+                            std::to_string(
+                                movingFaces.front()->Tag()) +
+                            "，movingFaceCount=" +
+                            std::to_string(movingFaces.size()) +
+                            "，origin=" + PointText(plane1Center));
+                    continue;
+                }
+            }
+            double outermostCoordinate =
+                -std::numeric_limits<double>::max();
+            std::vector<std::pair<NXOpen::Face*, double>> planarFaces;
+            for (NXOpen::Face* bodyFace : body->GetFaces())
+            {
+                NXOpen::Point3d planePoint;
+                NXOpen::Vector3d planeNormal;
+                if (!FacePlaneData(
+                        bodyFace, planePoint, planeNormal) ||
+                    std::abs(Dot(
+                        planeNormal, directions[index])) <
+                        kParallelTolerance)
+                {
+                    continue;
+                }
+                const double coordinate = Dot(
+                    Subtract(planePoint, frame_.origin),
+                    directions[index]);
+                planarFaces.emplace_back(bodyFace, coordinate);
+                outermostCoordinate =
+                    (std::max)(outermostCoordinate, coordinate);
+            }
+
+            const double faceTolerance = (std::max)(
+                1.0e-3,
+                (std::max)(frame_.Length(), frame_.Width()) *
+                    1.0e-6);
+            std::vector<NXOpen::Face*> outermostFaces;
+            for (const auto& candidate : planarFaces)
+            {
+                if (std::abs(
+                        candidate.second - outermostCoordinate) <=
+                    faceTolerance)
+                {
+                    outermostFaces.push_back(candidate.first);
+                }
+            }
+
+            // A stepped external skirt can share the same projected outer
+            // coordinate as the selected middle face. Among those tied
+            // outermost faces, place the handle on the face farthest from
+            // the selected plane along its normal. This selects the skirt's
+            // terminal side face rather than the original upper side face.
+            const double normalTolerance = (std::max)(
+                1.0e-3, frame_.NormalDepth() * 1.0e-5);
+            double farthestNormalDistance = -1.0;
+            std::vector<NXOpen::Face*> handleFaces;
+            for (NXOpen::Face* outermostFace : outermostFaces)
+            {
+                double minimumNormal = 0.0;
+                double maximumNormal = 0.0;
+                if (!FaceProjectionRange(
+                        outermostFace, frame_.origin, frame_.normal,
+                        minimumNormal, maximumNormal))
+                {
+                    continue;
+                }
+                const double distance = (std::max)(
+                    std::abs(minimumNormal),
+                    std::abs(maximumNormal));
+                if (distance >
+                    farthestNormalDistance + normalTolerance)
+                {
+                    farthestNormalDistance = distance;
+                    handleFaces.clear();
+                    handleFaces.push_back(outermostFace);
+                }
+                else if (std::abs(
+                             distance - farthestNormalDistance) <=
+                         normalTolerance)
+                {
+                    handleFaces.push_back(outermostFace);
+                }
+            }
+            if (handleFaces.empty())
+            {
+                handleFaces = outermostFaces;
+            }
+
+            NXOpen::Point3d movingFaceCenter;
+            if (FacesBoxCenter(handleFaces, movingFaceCenter))
+            {
+                // An axis-aligned box center can drift slightly off a
+                // rotated plane. Project it back to the representative
+                // outermost plane so the handle is visually on the face.
+                NXOpen::Point3d planePoint;
+                NXOpen::Vector3d planeNormal;
+                if (FacePlaneData(
+                        handleFaces.front(),
+                        planePoint, planeNormal))
+                {
+                    const double normalDistance = Dot(
+                        Subtract(movingFaceCenter, planePoint),
+                        planeNormal);
+                    movingFaceCenter = Move(
+                        movingFaceCenter, planeNormal,
+                        -normalDistance);
+                }
                 origins[index] = movingFaceCenter;
                 TiaoZenWriteLog(
                     "DEBUG",
-                    "拖拽手柄位于实际拉动面中心：index=" +
+                    "拖拽手柄位于最外侧面中心：index=" +
                         std::to_string(index) +
-                        "，faceCount=" +
+                        "，movingFaceCount=" +
                         std::to_string(movingFaces.size()) +
+                        "，outermostFaceCount=" +
+                        std::to_string(outermostFaces.size()) +
+                        "，handleFaceCount=" +
+                        std::to_string(handleFaces.size()) +
+                        "，outermostCoordinate=" +
+                        Fixed(outermostCoordinate) +
+                        "，farthestNormalDistance=" +
+                        Fixed(farthestNormalDistance) +
                         "，origin=" + PointText(movingFaceCenter));
             }
         }
@@ -1883,22 +2065,28 @@ void PanelSizeDialog::RefreshDimensionText()
 {
     if (!frame_.valid)
     {
-        SetLabel(currentSize_, "当前尺寸：请先选择板件平面");
-        SetLabel(resultLength_, "调整后长度：--");
-        SetLabel(resultWidth_, "调整后宽度：--");
+        SetLabel(currentSize_, "模型真实尺寸：请先选择板件平面");
+        SetLabel(targetLength_, "长度增量（原 --）");
+        SetLabel(targetWidth_, "宽度增量（原 --）");
+        SetLabel(resultLength_, "调整后尺寸：--");
+        SetLabel(resultWidth_, "尺寸变化：--");
         return;
     }
 
     SetLabel(currentSize_,
-             "当前尺寸：长 " + Fixed(frame_.Length()) +
-                 " mm    宽 " + Fixed(frame_.Width()) + " mm");
+             "模型真实尺寸：长 " + Fixed(frame_.Length()) +
+                 " mm × 宽 " + Fixed(frame_.Width()) + " mm");
+    SetLabel(targetLength_,
+             "长度增量（原 " + Fixed(frame_.Length()) + "）");
+    SetLabel(targetWidth_,
+             "宽度增量（原 " + Fixed(frame_.Width()) + "）");
 
     std::string error;
     const SideOffsets offsets = CalculateOffsets(error);
     if (!error.empty())
     {
-        SetLabel(resultLength_, "调整结果无效：" + error);
-        SetLabel(resultWidth_, "");
+        SetLabel(resultLength_, "调整后尺寸：无效（" + error + "）");
+        SetLabel(resultWidth_, "尺寸变化：--");
         return;
     }
     const double newLength =
@@ -1906,13 +2094,13 @@ void PanelSizeDialog::RefreshDimensionText()
     const double newWidth =
         frame_.Width() + offsets.bottom + offsets.top;
     SetLabel(resultLength_,
-             "调整后长度：" + Fixed(newLength) +
-                 " mm    变化 " +
-                 SignedFixed(newLength - frame_.Length()));
+             "调整后尺寸：长 " + Fixed(newLength) +
+                 " mm × 宽 " + Fixed(newWidth) + " mm");
     SetLabel(resultWidth_,
-             "调整后宽度：" + Fixed(newWidth) +
-                 " mm    变化 " +
-                 SignedFixed(newWidth - frame_.Width()));
+             "尺寸变化：长 " +
+                 SignedFixed(newLength - frame_.Length()) +
+                 " mm，宽 " +
+                 SignedFixed(newWidth - frame_.Width()) + " mm");
 }
 
 void PanelSizeDialog::RefreshPreview()
@@ -1928,10 +2116,12 @@ void PanelSizeDialog::RefreshPreview()
     }
 }
 
-std::vector<NXOpen::Face*> PanelSizeDialog::FindBoundaryFaces(
+#if 0
+std::vector<NXOpen::Face*> FindBoundaryFacesLegacy(
     NXOpen::Body* body,
     const NXOpen::Vector3d& outwardDirection,
-    double boundaryCoordinate) const
+    double boundaryCoordinate,
+    const PanelSizeDialog::PanelFrame& frame_)
 {
     std::vector<NXOpen::Face*> result;
     std::vector<std::pair<NXOpen::Face*, double>> candidates;
@@ -2022,6 +2212,121 @@ std::vector<NXOpen::Face*> PanelSizeDialog::FindBoundaryFaces(
                    : std::abs(minimum - skirtExtreme) <=
                          skirtHeightTolerance;
     };
+    const auto expandConnectedSideFaces =
+        [this, outwardDirection, sideCenterCoordinate,
+         coordinateTolerance](
+            std::vector<NXOpen::Face*>& selectedFaces)
+    {
+        std::set<tag_t> visitedTags;
+        std::set<tag_t> selectedTags;
+        std::vector<NXOpen::Face*> frontier;
+        for (NXOpen::Face* face : selectedFaces)
+        {
+            if (face != nullptr &&
+                visitedTags.insert(face->Tag()).second)
+            {
+                frontier.push_back(face);
+                selectedTags.insert(face->Tag());
+            }
+        }
+
+        int addedParallelFaces = 0;
+        for (std::size_t cursor = 0;
+             cursor < frontier.size(); ++cursor)
+        {
+            NXOpen::Face* current = frontier[cursor];
+            for (NXOpen::Edge* edge : current->GetEdges())
+            {
+                if (edge == nullptr)
+                {
+                    continue;
+                }
+                for (NXOpen::Face* adjacent : edge->GetFaces())
+                {
+                    if (adjacent == nullptr ||
+                        visitedTags.find(adjacent->Tag()) !=
+                            visitedTags.end())
+                    {
+                        continue;
+                    }
+
+                    double minimumSide = 0.0;
+                    double maximumSide = 0.0;
+                    if (!FaceProjectionRange(
+                            adjacent, frame_.origin,
+                            outwardDirection,
+                            minimumSide, maximumSide))
+                    {
+                        continue;
+                    }
+
+                    NXOpen::Point3d planePoint;
+                    NXOpen::Vector3d planeNormal;
+                    const bool planar = FacePlaneData(
+                        adjacent, planePoint, planeNormal);
+                    const bool targetParallel =
+                        planar &&
+                        std::abs(Dot(
+                            planeNormal, outwardDirection)) >=
+                            kParallelTolerance;
+                    const bool entirelyOnThisSide =
+                        minimumSide >=
+                        sideCenterCoordinate -
+                            coordinateTolerance;
+
+                    bool remoteSkirtConnector = false;
+                    if (!targetParallel)
+                    {
+                        double minimumNormal = 0.0;
+                        double maximumNormal = 0.0;
+                        if (FaceProjectionRange(
+                                adjacent, frame_.origin,
+                                frame_.normal,
+                                minimumNormal, maximumNormal))
+                        {
+                            const bool crossesMainPlane =
+                                minimumNormal <= coordinateTolerance &&
+                                maximumNormal >=
+                                    -coordinateTolerance;
+                            const double nearestNormalDistance =
+                                crossesMainPlane
+                                    ? 0.0
+                                    : (std::min)(
+                                          std::abs(minimumNormal),
+                                          std::abs(maximumNormal));
+                            remoteSkirtConnector =
+                                nearestNormalDistance >
+                                (std::max)(
+                                    coordinateTolerance,
+                                    frame_.thickness * 2.25);
+                        }
+                    }
+
+                    if (!entirelyOnThisSide &&
+                        !remoteSkirtConnector)
+                    {
+                        // Reject the selected middle panel, but allow a
+                        // remote annular skirt face to bridge across the
+                        // center. Parallel faces on the opposite side never
+                        // qualify for this exception.
+                        continue;
+                    }
+
+                    visitedTags.insert(adjacent->Tag());
+                    frontier.push_back(adjacent);
+
+                    if (targetParallel &&
+                        selectedTags.insert(
+                            adjacent->Tag()).second)
+                    {
+                        selectedFaces.push_back(adjacent);
+                        ++addedParallelFaces;
+                    }
+                }
+            }
+        }
+        return addedParallelFaces;
+    };
     TiaoZenWriteLog(
         "DEBUG",
         "开始搜索边界面：bodyTag=" + std::to_string(body->Tag()) +
@@ -2078,6 +2383,8 @@ std::vector<NXOpen::Face*> PanelSizeDialog::FindBoundaryFaces(
                 }
             }
         }
+        const int connectedSkirtFaces =
+            expandConnectedSideFaces(result);
         TiaoZenWriteLog(
             "INFO",
             "边界外侧面和内侧面匹配完成：parallelCandidates=" +
@@ -2087,6 +2394,8 @@ std::vector<NXOpen::Face*> PanelSizeDialog::FindBoundaryFaces(
                 "，selectionBand=" + Fixed(selectionBand) +
                 "，skirtTopologyFaces=" +
                 std::to_string(skirtFaceCount) +
+                "，connectedSkirtFaces=" +
+                std::to_string(connectedSkirtFaces) +
                 "，selectedCount=" + std::to_string(result.size()));
         return result;
     }
@@ -2145,6 +2454,8 @@ std::vector<NXOpen::Face*> PanelSizeDialog::FindBoundaryFaces(
             }
         }
     }
+    const int connectedSkirtFaces =
+        expandConnectedSideFaces(result);
     std::ostringstream selected;
     for (NXOpen::Face* face : result)
     {
@@ -2163,7 +2474,503 @@ std::vector<NXOpen::Face*> PanelSizeDialog::FindBoundaryFaces(
             "，selectionBand=" + Fixed(selectionBand) +
             "，skirtTopologyFaces=" +
             std::to_string(skirtFaceCount) +
+            "，connectedSkirtFaces=" +
+            std::to_string(connectedSkirtFaces) +
             "，faceTags=[" + selected.str() + "]");
+    return result;
+}
+
+#endif
+
+std::vector<NXOpen::Face*> PanelSizeDialog::FindBoundaryFaces(
+    NXOpen::Body* body,
+    const NXOpen::Vector3d& outwardDirection,
+    double boundaryCoordinate) const
+{
+    std::vector<NXOpen::Face*> result;
+    NXOpen::Face* mainFace = CachedFace();
+    if (body == nullptr || mainFace == nullptr)
+    {
+        return result;
+    }
+
+    const double modelSize =
+        (std::max)(frame_.Length(), frame_.Width());
+    const double tolerance =
+        (std::max)(1.0e-3, modelSize * 1.0e-6);
+    const double thicknessTolerance =
+        (std::max)(tolerance * 5.0,
+                   (std::max)(0.02, frame_.thickness * 0.03));
+
+    const auto readLinearEdge =
+        [](NXOpen::Edge* edge,
+           NXOpen::Point3d& first,
+           NXOpen::Point3d& second,
+           NXOpen::Point3d& middle,
+           NXOpen::Vector3d& direction) -> bool
+    {
+        if (edge == nullptr ||
+            edge->SolidEdgeType() != NXOpen::Edge::EdgeTypeLinear)
+        {
+            return false;
+        }
+        edge->GetVertices(&first, &second);
+        direction = Subtract(second, first);
+        if (!Normalize(direction))
+        {
+            return false;
+        }
+        middle = NXOpen::Point3d(
+            (first.X + second.X) * 0.5,
+            (first.Y + second.Y) * 0.5,
+            (first.Z + second.Z) * 0.5);
+        return true;
+    };
+
+    const auto findParallelEdges =
+        [&readLinearEdge, tolerance](
+            NXOpen::Face* face,
+            NXOpen::Edge* referenceEdge,
+            double& minimumDistance,
+            double& maximumDistance,
+            NXOpen::Edge*& farthestEdge) -> bool
+    {
+        minimumDistance = std::numeric_limits<double>::max();
+        maximumDistance = 0.0;
+        farthestEdge = nullptr;
+
+        NXOpen::Point3d referenceFirst;
+        NXOpen::Point3d referenceSecond;
+        NXOpen::Point3d referenceMiddle;
+        NXOpen::Vector3d referenceDirection;
+        if (!readLinearEdge(
+                referenceEdge, referenceFirst, referenceSecond,
+                referenceMiddle, referenceDirection))
+        {
+            return false;
+        }
+
+        for (NXOpen::Edge* candidate : face->GetEdges())
+        {
+            if (candidate == referenceEdge)
+            {
+                continue;
+            }
+            NXOpen::Point3d first;
+            NXOpen::Point3d second;
+            NXOpen::Point3d middle;
+            NXOpen::Vector3d direction;
+            if (!readLinearEdge(
+                    candidate, first, second, middle, direction) ||
+                std::abs(Dot(direction, referenceDirection)) <
+                    kParallelTolerance)
+            {
+                continue;
+            }
+
+            const NXOpen::Vector3d between =
+                Subtract(middle, referenceMiddle);
+            const double along =
+                Dot(between, referenceDirection);
+            const NXOpen::Vector3d perpendicular(
+                between.X - referenceDirection.X * along,
+                between.Y - referenceDirection.Y * along,
+                between.Z - referenceDirection.Z * along);
+            const double distance = Length(perpendicular);
+            if (distance <= tolerance)
+            {
+                continue;
+            }
+            minimumDistance =
+                (std::min)(minimumDistance, distance);
+            if (distance > maximumDistance)
+            {
+                maximumDistance = distance;
+                farthestEdge = candidate;
+            }
+        }
+        return farthestEdge != nullptr;
+    };
+
+    const auto otherFace =
+        [](NXOpen::Edge* edge,
+           const std::set<tag_t>& excluded) -> NXOpen::Face*
+    {
+        if (edge == nullptr)
+        {
+            return nullptr;
+        }
+        for (NXOpen::Face* face : edge->GetFaces())
+        {
+            if (face != nullptr &&
+                excluded.find(face->Tag()) == excluded.end())
+            {
+                return face;
+            }
+        }
+        return nullptr;
+    };
+
+    const auto addUnique =
+        [&result](NXOpen::Face* face) -> bool
+    {
+        if (face == nullptr)
+        {
+            return false;
+        }
+        for (NXOpen::Face* existing : result)
+        {
+            if (existing->Tag() == face->Tag())
+            {
+                return false;
+            }
+        }
+        result.push_back(face);
+        return true;
+    };
+
+    double mainMinimum = 0.0;
+    double mainMaximum = 0.0;
+    if (!FaceProjectionRange(
+            mainFace, frame_.origin, outwardDirection,
+            mainMinimum, mainMaximum))
+    {
+        return result;
+    }
+
+    std::vector<NXOpen::Edge*> outerEdges;
+    for (NXOpen::Edge* edge : mainFace->GetEdges())
+    {
+        NXOpen::Point3d first;
+        NXOpen::Point3d second;
+        NXOpen::Point3d middle;
+        NXOpen::Vector3d direction;
+        if (!readLinearEdge(
+                edge, first, second, middle, direction))
+        {
+            continue;
+        }
+        const double firstCoordinate =
+            Dot(Subtract(first, frame_.origin), outwardDirection);
+        const double secondCoordinate =
+            Dot(Subtract(second, frame_.origin), outwardDirection);
+        if (std::abs(firstCoordinate - mainMaximum) <= tolerance &&
+            std::abs(secondCoordinate - mainMaximum) <= tolerance &&
+            std::abs(Dot(direction, outwardDirection)) <=
+                1.0 - kParallelTolerance)
+        {
+            outerEdges.push_back(edge);
+        }
+    }
+
+    TiaoZenWriteLog(
+        "INFO",
+        "拓扑选面开始：bodyTag=" +
+            std::to_string(body->Tag()) +
+            "，mainFaceTag=" + std::to_string(mainFace->Tag()) +
+            "，direction=" + VectorText(outwardDirection) +
+            "，bodyBoundary=" + Fixed(boundaryCoordinate) +
+            "，mainFaceBoundary=" + Fixed(mainMaximum) +
+            "，thickness=" + Fixed(frame_.thickness) +
+            "，outerLinearEdgeCount=" +
+            std::to_string(outerEdges.size()));
+
+    int plane1Count = 0;
+    int plane2Count = 0;
+    int terminalThicknessCount = 0;
+
+    for (NXOpen::Edge* outerEdge : outerEdges)
+    {
+        NXOpen::Face* plane1 = nullptr;
+        NXOpen::Point3d plane1Point;
+        NXOpen::Vector3d plane1Normal;
+        for (NXOpen::Face* adjacent : outerEdge->GetFaces())
+        {
+            NXOpen::Point3d point;
+            NXOpen::Vector3d normal;
+            if (adjacent == nullptr ||
+                adjacent->Tag() == mainFace->Tag() ||
+                !FacePlaneData(adjacent, point, normal))
+            {
+                continue;
+            }
+            const double mainAngleCosine =
+                std::abs(Dot(normal, frame_.normal));
+            const double outwardAlignment =
+                Dot(normal, outwardDirection);
+            TiaoZenWriteLog(
+                "TRACE",
+                "PLANE1候选：edgeTag=" +
+                    std::to_string(outerEdge->Tag()) +
+                    "，faceTag=" +
+                    std::to_string(adjacent->Tag()) +
+                    "，mainAngleCos=" +
+                    Number(mainAngleCosine) +
+                    "，outwardAlignment=" +
+                    Number(outwardAlignment));
+            if (mainAngleCosine <=
+                    1.0 - kParallelTolerance &&
+                std::abs(outwardAlignment) >=
+                    kParallelTolerance)
+            {
+                plane1 = adjacent;
+                plane1Point = point;
+                plane1Normal = normal;
+                break;
+            }
+        }
+
+        if (plane1 == nullptr)
+        {
+            TiaoZenWriteLog(
+                "WARN",
+                "外轮廓直边没有找到与主平面成90度的PLANE1：edgeTag=" +
+                    std::to_string(outerEdge->Tag()));
+            continue;
+        }
+        if (addUnique(plane1))
+        {
+            ++plane1Count;
+        }
+
+        double plane1Minimum = 0.0;
+        double plane1Maximum = 0.0;
+        NXOpen::Edge* plane1FarthestEdge = nullptr;
+        if (!findParallelEdges(
+                plane1, outerEdge, plane1Minimum,
+                plane1Maximum, plane1FarthestEdge))
+        {
+            TiaoZenWriteLog(
+                "WARN",
+                "PLANE1没有找到平行于连接边的直边：faceTag=" +
+                    std::to_string(plane1->Tag()));
+            continue;
+        }
+
+        const bool plane1IsThicknessFace =
+            frame_.thickness > tolerance &&
+            std::abs(plane1Maximum - frame_.thickness) <=
+                thicknessTolerance;
+        TiaoZenWriteLog(
+            "INFO",
+            "找到PLANE1：faceTag=" +
+                std::to_string(plane1->Tag()) +
+                "，normal=" + VectorText(plane1Normal) +
+                "，平行边最小距离=" + Fixed(plane1Minimum) +
+                "，平行边最大距离=" + Fixed(plane1Maximum) +
+                "，最远边Tag=" +
+                std::to_string(plane1FarthestEdge->Tag()) +
+                "，自身是否板厚端面=" +
+                std::string(
+                    plane1IsThicknessFace ? "true" : "false"));
+
+        NXOpen::Point3d outerFirst;
+        NXOpen::Point3d outerSecond;
+        NXOpen::Point3d outerMiddle;
+        NXOpen::Vector3d outerEdgeDirection;
+        readLinearEdge(
+            outerEdge, outerFirst, outerSecond, outerMiddle,
+            outerEdgeDirection);
+
+        if (!plane1IsThicknessFace &&
+            frame_.thickness > tolerance)
+        {
+            double plane1AlongMinimum = 0.0;
+            double plane1AlongMaximum = 0.0;
+            double plane1HeightMinimum = 0.0;
+            double plane1HeightMaximum = 0.0;
+            FaceProjectionRange(
+                plane1, frame_.origin, outerEdgeDirection,
+                plane1AlongMinimum, plane1AlongMaximum);
+            FaceProjectionRange(
+                plane1, frame_.origin, frame_.normal,
+                plane1HeightMinimum, plane1HeightMaximum);
+
+            NXOpen::Face* plane2 = nullptr;
+            double bestError =
+                std::numeric_limits<double>::max();
+            double bestDistance = 0.0;
+            for (NXOpen::Face* candidate : body->GetFaces())
+            {
+                if (candidate == nullptr ||
+                    candidate->Tag() == plane1->Tag())
+                {
+                    continue;
+                }
+                NXOpen::Point3d point;
+                NXOpen::Vector3d normal;
+                if (!FacePlaneData(candidate, point, normal) ||
+                    std::abs(Dot(normal, plane1Normal)) <
+                        kParallelTolerance)
+                {
+                    continue;
+                }
+
+                const double distance = std::abs(
+                    Dot(Subtract(point, plane1Point),
+                        plane1Normal));
+                const double error =
+                    std::abs(distance - frame_.thickness);
+                if (error > thicknessTolerance ||
+                    Dot(Subtract(point, plane1Point),
+                        outwardDirection) >= -tolerance)
+                {
+                    continue;
+                }
+
+                double alongMinimum = 0.0;
+                double alongMaximum = 0.0;
+                double heightMinimum = 0.0;
+                double heightMaximum = 0.0;
+                if (!FaceProjectionRange(
+                        candidate, frame_.origin,
+                        outerEdgeDirection,
+                        alongMinimum, alongMaximum) ||
+                    !FaceProjectionRange(
+                        candidate, frame_.origin, frame_.normal,
+                        heightMinimum, heightMaximum))
+                {
+                    continue;
+                }
+                const bool alongOverlap =
+                    alongMaximum >=
+                        plane1AlongMinimum - tolerance &&
+                    alongMinimum <=
+                        plane1AlongMaximum + tolerance;
+                const bool heightOverlap =
+                    heightMaximum >=
+                        plane1HeightMinimum - tolerance &&
+                    heightMinimum <=
+                        plane1HeightMaximum + tolerance;
+                if (alongOverlap && heightOverlap &&
+                    error < bestError)
+                {
+                    plane2 = candidate;
+                    bestError = error;
+                    bestDistance = distance;
+                }
+            }
+
+            if (addUnique(plane2))
+            {
+                ++plane2Count;
+                TiaoZenWriteLog(
+                    "INFO",
+                    "找到PLANE2：plane1Tag=" +
+                        std::to_string(plane1->Tag()) +
+                        "，plane2Tag=" +
+                        std::to_string(plane2->Tag()) +
+                        "，面间距=" + Fixed(bestDistance));
+            }
+            else if (plane2 == nullptr)
+            {
+                TiaoZenWriteLog(
+                    "WARN",
+                    "PLANE1内侧未找到板厚距离的PLANE2：plane1Tag=" +
+                        std::to_string(plane1->Tag()));
+            }
+        }
+
+        if (plane1IsThicknessFace)
+        {
+            continue;
+        }
+
+        NXOpen::Edge* incomingEdge = plane1FarthestEdge;
+        std::set<tag_t> walkedFaces{
+            mainFace->Tag(), plane1->Tag()};
+        NXOpen::Face* currentFace =
+            otherFace(incomingEdge, walkedFaces);
+        for (int depth = 0;
+             depth < 16 && currentFace != nullptr;
+             ++depth)
+        {
+            if (!walkedFaces.insert(
+                    currentFace->Tag()).second)
+            {
+                break;
+            }
+
+            NXOpen::Point3d currentPoint;
+            NXOpen::Vector3d currentNormal;
+            if (!FacePlaneData(
+                    currentFace, currentPoint, currentNormal))
+            {
+                TiaoZenWriteLog(
+                    "WARN",
+                    "裙边拓扑追踪遇到非平面并停止：faceTag=" +
+                        std::to_string(currentFace->Tag()));
+                break;
+            }
+
+            double minimumDistance = 0.0;
+            double maximumDistance = 0.0;
+            NXOpen::Edge* farthestEdge = nullptr;
+            if (!findParallelEdges(
+                    currentFace, incomingEdge,
+                    minimumDistance, maximumDistance,
+                    farthestEdge))
+            {
+                break;
+            }
+
+            const bool isThicknessEnd =
+                frame_.thickness > tolerance &&
+                std::abs(
+                    minimumDistance - frame_.thickness) <=
+                    thicknessTolerance;
+            TiaoZenWriteLog(
+                "INFO",
+                "裙边拓扑追踪：depth=" +
+                    std::to_string(depth) +
+                    "，faceTag=" +
+                    std::to_string(currentFace->Tag()) +
+                    "，incomingEdgeTag=" +
+                    std::to_string(incomingEdge->Tag()) +
+                    "，平行边最小距离=" +
+                    Fixed(minimumDistance) +
+                    "，平行边最大距离=" +
+                    Fixed(maximumDistance) +
+                    "，是否板厚端面=" +
+                    std::string(
+                        isThicknessEnd ? "true" : "false"));
+
+            if (isThicknessEnd)
+            {
+                if (addUnique(currentFace))
+                {
+                    ++terminalThicknessCount;
+                }
+                break;
+            }
+            if (farthestEdge == nullptr)
+            {
+                break;
+            }
+            incomingEdge = farthestEdge;
+            currentFace =
+                otherFace(incomingEdge, walkedFaces);
+        }
+    }
+
+    std::ostringstream faceTags;
+    for (NXOpen::Face* face : result)
+    {
+        if (faceTags.tellp() > 0)
+        {
+            faceTags << ",";
+        }
+        faceTags << face->Tag();
+    }
+    TiaoZenWriteLog(
+        "INFO",
+        "拓扑选面完成：selectedCount=" +
+            std::to_string(result.size()) +
+            "，PLANE1=" + std::to_string(plane1Count) +
+            "，PLANE2=" + std::to_string(plane2Count) +
+            "，板厚端面=" +
+            std::to_string(terminalThicknessCount) +
+            "，faceTags=[" + faceTags.str() + "]");
     return result;
 }
 

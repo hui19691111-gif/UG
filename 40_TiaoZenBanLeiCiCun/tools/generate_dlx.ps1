@@ -261,7 +261,7 @@ function New-TabControl([string]$Id, [string[]]$Pages) {
 $selectionGroup = New-Group 'selection_group' '选择与方向' @(
     (New-Selection 'plane_select' '板件平面'),
     (New-Toggle 'swap_direction' '交换长度、宽度方向' $false),
-    (New-Label 'current_size' '当前尺寸：请先选择板件平面')
+    (New-Label 'current_size' '模型真实尺寸：请先选择板件平面')
 )
 
 $independentGroup = New-Group 'independent_group' '拖拽调整' @(
@@ -272,17 +272,17 @@ $independentGroup = New-Group 'independent_group' '拖拽调整' @(
     (New-Double 'top_offset' '上' 0 $false)
 )
 
-$uniformGroup = New-Group 'uniform_group' '统一调整（指定成品尺寸）' @(
-    (New-Double 'target_length' '目标长度' 0),
-    (New-Double 'target_width' '目标宽度' 0)
+$uniformGroup = New-Group 'uniform_group' '统一调整（输入尺寸增量）' @(
+    (New-Double 'target_length' '长度增量（原 --）' 0),
+    (New-Double 'target_width' '宽度增量（原 --）' 0)
 )
 
 $roundGroup = New-Group 'round_group' '取整设置' @(
     (New-Toggle 'round_length' '长度取整' $true),
-    (New-Double 'length_step' '长度步长' 10),
+    (New-Double 'length_step' '长度步长' 1),
     (New-Toggle 'round_width' '宽度取整' $true),
-    (New-Double 'width_step' '宽度步长' 10),
-    (New-Enum 'round_policy' '取整方向' @('就近', '向上', '向下') 0 $false 1)
+    (New-Double 'width_step' '宽度步长' 1),
+    (New-Enum 'round_policy' '取整方向' @('就近取整', '向上取整', '向下取整') 0 $false 10)
 )
 
 $adjustTabs = New-TabControl 'adjust_tabs' @(
@@ -301,8 +301,8 @@ $anchorGroup = New-Group 'anchor_group' '固定基准' @(
 )
 
 $resultGroup = New-Group 'result_group' '结果预览' @(
-    (New-Label 'result_length' '调整后长度：--'),
-    (New-Label 'result_width' '调整后宽度：--'),
+    (New-Label 'result_length' '调整后尺寸：--'),
+    (New-Label 'result_width' '尺寸变化：--'),
     (New-Toggle 'live_preview' '实时预览' $true)
 )
 

@@ -43,6 +43,10 @@
 #include <NXOpen/ListingWindow.hxx>
 #include <NXOpen/LogFile.hxx>
 #include <NXOpen/Update.hxx>
+#include <NXOpen/Drawings_DraftingBodyCollection.hxx>
+#include <NXOpen/Drawings_DraftingCurveCollection.hxx>
+#include <NXOpen/Drawings_DraftingCurveInfo.hxx>
+#include <NXOpen/Selection.hxx>
 #include <algorithm>
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -56,7 +60,13 @@
 #include <sstream>
 #include <set>
 #include <map>
+#include <array>
+#include <cmath>
+#include <limits>
 #include <cctype>
+#include <filesystem>
+#include <uf_draw.h>
+#include <uf_eval.h>
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
 
@@ -3237,6 +3247,880 @@ void ShowIdSymbolResults(NXOpen::Annotations::IdSymbolBuilder* builder)
 //------------------------------------------------------------------------------
 Session *(BianHao::theSession) = NULL;
 UI *(BianHao::theUI) = NULL;
+
+namespace
+{
+struct BianHao_AutoPoint2
+{
+    double x;
+    double y;
+};
+
+struct BianHao_AutoCurve
+{
+    NXOpen::Drawings::DraftingCurve* curve;
+    NXOpen::DisplayableObject* leaderTarget;
+    NXOpen::Body* body;
+    std::vector<BianHao_AutoPoint2> points;
+    double length;
+};
+
+struct BianHao_AutoBody
+{
+    NXOpen::Body* body;
+    NXOpen::NXObject* partObject;
+    NXOpen::DisplayableObject* leaderTarget;
+    NXOpen::Drawings::DraftingCurve* leaderCurve;
+    std::vector<BianHao_AutoCurve> curves;
+    BianHao_AutoPoint2 anchor;
+    BianHao_AutoPoint2 label;
+    NXOpen::Point3d modelAnchor;
+    double minX;
+    double minY;
+    double maxX;
+    double maxY;
+    double visibleArea;
+    bool raySelected;
+    bool longEdgeSelected;
+    tag_t rayHitFace;
+    std::string text;
+};
+
+double BianHao_AutoDistanceSquared(const BianHao_AutoPoint2& a, const BianHao_AutoPoint2& b)
+{
+    const double dx = a.x - b.x;
+    const double dy = a.y - b.y;
+    return dx * dx + dy * dy;
+}
+
+double BianHao_AutoPointSegmentDistanceSquared(const BianHao_AutoPoint2& p,
+    const BianHao_AutoPoint2& a,
+    const BianHao_AutoPoint2& b)
+{
+    const double dx = b.x - a.x;
+    const double dy = b.y - a.y;
+    const double lengthSquared = dx * dx + dy * dy;
+    if (lengthSquared <= 1.0e-12)
+    {
+        return BianHao_AutoDistanceSquared(p, a);
+    }
+    const double t = std::max(0.0, std::min(1.0,
+        ((p.x - a.x) * dx + (p.y - a.y) * dy) / lengthSquared));
+    const BianHao_AutoPoint2 projection = { a.x + t * dx, a.y + t * dy };
+    return BianHao_AutoDistanceSquared(p, projection);
+}
+
+double BianHao_AutoPolygonArea(const std::vector<BianHao_AutoPoint2>& polygon)
+{
+    if (polygon.size() < 3)
+    {
+        return 0.0;
+    }
+    double twiceArea = 0.0;
+    for (size_t i = 0; i < polygon.size(); ++i)
+    {
+        const BianHao_AutoPoint2& a = polygon[i];
+        const BianHao_AutoPoint2& b = polygon[(i + 1) % polygon.size()];
+        twiceArea += a.x * b.y - b.x * a.y;
+    }
+    return 0.5 * twiceArea;
+}
+
+bool BianHao_AutoPointInPolygon(const BianHao_AutoPoint2& point,
+    const std::vector<BianHao_AutoPoint2>& polygon)
+{
+    bool inside = false;
+    if (polygon.size() < 3)
+    {
+        return false;
+    }
+    for (size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++)
+    {
+        const BianHao_AutoPoint2& a = polygon[i];
+        const BianHao_AutoPoint2& b = polygon[j];
+        const bool crosses = ((a.y > point.y) != (b.y > point.y)) &&
+            (point.x < (b.x - a.x) * (point.y - a.y) /
+                ((b.y - a.y) == 0.0 ? 1.0e-30 : (b.y - a.y)) + a.x);
+        if (crosses)
+        {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+double BianHao_AutoClearanceSquared(const BianHao_AutoPoint2& point,
+    const std::vector<BianHao_AutoPoint2>& polygon)
+{
+    double result = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < polygon.size(); ++i)
+    {
+        result = std::min(result, BianHao_AutoPointSegmentDistanceSquared(
+            point, polygon[i], polygon[(i + 1) % polygon.size()]));
+    }
+    return result;
+}
+
+bool BianHao_AutoSampleCurve(NXOpen::Drawings::DraftingView* view,
+    NXOpen::Drawings::DraftingCurve* curve,
+    std::vector<BianHao_AutoPoint2>& points)
+{
+    points.clear();
+    if (view == NULL || curve == NULL)
+    {
+        return false;
+    }
+
+    UF_EVAL_p_t evaluator = NULL;
+    if (UF_EVAL_initialize(curve->Tag(), &evaluator) != 0 || evaluator == NULL)
+    {
+        return false;
+    }
+
+    double limits[2] = { 0.0, 0.0 };
+    if (UF_EVAL_ask_limits(evaluator, limits) != 0)
+    {
+        UF_EVAL_free(evaluator);
+        return false;
+    }
+
+    double curveLength = 0.0;
+    try
+    {
+        curveLength = curve->GetLength();
+    }
+    catch (...)
+    {
+    }
+    const int samples = std::max(4, std::min(48, static_cast<int>(std::ceil(curveLength / 3.0))));
+    for (int i = 0; i <= samples; ++i)
+    {
+        const double parameter = limits[0] + (limits[1] - limits[0]) *
+            static_cast<double>(i) / static_cast<double>(samples);
+        double modelPoint[3] = { 0.0, 0.0, 0.0 };
+        double derivatives[3] = { 0.0, 0.0, 0.0 };
+        double drawingPoint[2] = { 0.0, 0.0 };
+        if (UF_EVAL_evaluate(evaluator, 0, parameter, modelPoint, derivatives) == 0 &&
+            UF_VIEW_map_model_to_drawing(view->Tag(), modelPoint, drawingPoint) == 0)
+        {
+            const BianHao_AutoPoint2 point = { drawingPoint[0], drawingPoint[1] };
+            if (points.empty() || BianHao_AutoDistanceSquared(points.back(), point) > 1.0e-10)
+            {
+                points.push_back(point);
+            }
+        }
+    }
+    UF_EVAL_free(evaluator);
+    return points.size() >= 2;
+}
+
+bool BianHao_AutoCurveTarget(NXOpen::Drawings::DraftingCurve* curve,
+    NXOpen::Body*& body,
+    NXOpen::DisplayableObject*& leaderTarget)
+{
+    body = NULL;
+    leaderTarget = NULL;
+    if (curve == NULL)
+    {
+        return false;
+    }
+    try
+    {
+        NXOpen::Drawings::DraftingCurveInfo* info = curve->GetDraftingCurveInfo();
+        const std::vector<NXOpen::NXObject*> parents = info == NULL
+            ? std::vector<NXOpen::NXObject*>() : info->GetParents();
+        for (size_t i = 0; i < parents.size(); ++i)
+        {
+            NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(parents[i]);
+            if (face != NULL && face->GetBody() != NULL)
+            {
+                body = face->GetBody();
+                leaderTarget = face;
+                return true;
+            }
+            NXOpen::Edge* edge = dynamic_cast<NXOpen::Edge*>(parents[i]);
+            if (edge != NULL && edge->GetBody() != NULL)
+            {
+                body = edge->GetBody();
+                leaderTarget = edge;
+                return leaderTarget != NULL;
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    return false;
+}
+
+bool BianHao_AutoVisibleCurve(NXOpen::Drawings::DraftingCurve* curve)
+{
+    if (curve == NULL)
+    {
+        return false;
+    }
+    try
+    {
+        if (curve->IsBlanked() || curve->IsReference() ||
+            curve->LineFont() != NXOpen::DisplayableObject::ObjectFontSolid)
+        {
+            return false;
+        }
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    UF_DRAW_drafting_curve_type_t type = UF_DRAW_unknown_type;
+    if (UF_DRAW_ask_drafting_curve_type(curve->Tag(), &type) != 0)
+    {
+        return false;
+    }
+    return type == UF_DRAW_extracted_edge_type ||
+        type == UF_DRAW_silhouette_curve_type ||
+        type == UF_DRAW_section_edge_type;
+}
+
+std::vector<std::vector<BianHao_AutoPoint2> > BianHao_AutoBuildClosedLoops(
+    const std::vector<BianHao_AutoCurve>& curves,
+    double tolerance)
+{
+    std::vector<std::vector<BianHao_AutoPoint2> > loops;
+    std::vector<bool> used(curves.size(), false);
+    const double toleranceSquared = tolerance * tolerance;
+    for (size_t seed = 0; seed < curves.size(); ++seed)
+    {
+        if (used[seed] || curves[seed].points.size() < 2)
+        {
+            continue;
+        }
+        std::vector<BianHao_AutoPoint2> chain = curves[seed].points;
+        used[seed] = true;
+        bool extended = true;
+        while (extended && BianHao_AutoDistanceSquared(chain.front(), chain.back()) > toleranceSquared)
+        {
+            extended = false;
+            size_t best = curves.size();
+            bool reverse = false;
+            double bestDistance = toleranceSquared;
+            for (size_t i = 0; i < curves.size(); ++i)
+            {
+                if (used[i] || curves[i].points.size() < 2)
+                {
+                    continue;
+                }
+                const double forwardDistance = BianHao_AutoDistanceSquared(chain.back(), curves[i].points.front());
+                const double reverseDistance = BianHao_AutoDistanceSquared(chain.back(), curves[i].points.back());
+                if (forwardDistance <= bestDistance)
+                {
+                    best = i;
+                    reverse = false;
+                    bestDistance = forwardDistance;
+                }
+                if (reverseDistance <= bestDistance)
+                {
+                    best = i;
+                    reverse = true;
+                    bestDistance = reverseDistance;
+                }
+            }
+            if (best < curves.size())
+            {
+                used[best] = true;
+                if (reverse)
+                {
+                    for (std::vector<BianHao_AutoPoint2>::const_reverse_iterator it = curves[best].points.rbegin();
+                        it != curves[best].points.rend(); ++it)
+                    {
+                        chain.push_back(*it);
+                    }
+                }
+                else
+                {
+                    chain.insert(chain.end(), curves[best].points.begin(), curves[best].points.end());
+                }
+                extended = true;
+            }
+        }
+        if (chain.size() >= 4 && BianHao_AutoDistanceSquared(chain.front(), chain.back()) <= toleranceSquared)
+        {
+            chain.back() = chain.front();
+            loops.push_back(chain);
+        }
+    }
+    return loops;
+}
+
+bool BianHao_AutoFindInteriorPoint(const std::vector<BianHao_AutoPoint2>& polygon,
+    BianHao_AutoPoint2& point,
+    double& area)
+{
+    area = std::abs(BianHao_AutoPolygonArea(polygon));
+    if (polygon.size() < 4 || area <= 1.0e-6)
+    {
+        return false;
+    }
+    double minX = polygon[0].x;
+    double maxX = polygon[0].x;
+    double minY = polygon[0].y;
+    double maxY = polygon[0].y;
+    for (size_t i = 1; i < polygon.size(); ++i)
+    {
+        minX = std::min(minX, polygon[i].x);
+        maxX = std::max(maxX, polygon[i].x);
+        minY = std::min(minY, polygon[i].y);
+        maxY = std::max(maxY, polygon[i].y);
+    }
+
+    BianHao_AutoPoint2 best = { (minX + maxX) * 0.5, (minY + maxY) * 0.5 };
+    double bestClearance = -1.0;
+    double searchMinX = minX;
+    double searchMaxX = maxX;
+    double searchMinY = minY;
+    double searchMaxY = maxY;
+    for (int refinement = 0; refinement < 5; ++refinement)
+    {
+        const int divisions = 20;
+        for (int ix = 0; ix <= divisions; ++ix)
+        {
+            for (int iy = 0; iy <= divisions; ++iy)
+            {
+                const BianHao_AutoPoint2 candidate = {
+                    searchMinX + (searchMaxX - searchMinX) * ix / divisions,
+                    searchMinY + (searchMaxY - searchMinY) * iy / divisions
+                };
+                if (!BianHao_AutoPointInPolygon(candidate, polygon))
+                {
+                    continue;
+                }
+                const double clearance = BianHao_AutoClearanceSquared(candidate, polygon);
+                if (clearance > bestClearance)
+                {
+                    bestClearance = clearance;
+                    best = candidate;
+                }
+            }
+        }
+        const double halfWidth = (searchMaxX - searchMinX) / divisions;
+        const double halfHeight = (searchMaxY - searchMinY) / divisions;
+        searchMinX = best.x - halfWidth;
+        searchMaxX = best.x + halfWidth;
+        searchMinY = best.y - halfHeight;
+        searchMaxY = best.y + halfHeight;
+    }
+    if (bestClearance < 0.0)
+    {
+        return false;
+    }
+    point = best;
+    return true;
+}
+
+bool BianHao_AutoFinalizeBody(BianHao_AutoBody& body)
+{
+    if (body.curves.empty())
+    {
+        return false;
+    }
+    body.minX = body.minY = std::numeric_limits<double>::max();
+    body.maxX = body.maxY = -std::numeric_limits<double>::max();
+    body.leaderTarget = NULL;
+    body.leaderCurve = NULL;
+    double longest = -1.0;
+    for (size_t i = 0; i < body.curves.size(); ++i)
+    {
+        for (size_t p = 0; p < body.curves[i].points.size(); ++p)
+        {
+            body.minX = std::min(body.minX, body.curves[i].points[p].x);
+            body.maxX = std::max(body.maxX, body.curves[i].points[p].x);
+            body.minY = std::min(body.minY, body.curves[i].points[p].y);
+            body.maxY = std::max(body.maxY, body.curves[i].points[p].y);
+        }
+        if (body.curves[i].length > longest)
+        {
+            longest = body.curves[i].length;
+            body.leaderTarget = body.curves[i].leaderTarget;
+            body.leaderCurve = body.curves[i].curve;
+        }
+    }
+    const double diagonal = std::hypot(body.maxX - body.minX, body.maxY - body.minY);
+    const std::vector<std::vector<BianHao_AutoPoint2> > loops =
+        BianHao_AutoBuildClosedLoops(body.curves, std::max(0.05, diagonal * 0.003));
+    body.anchor = { (body.minX + body.maxX) * 0.5, (body.minY + body.maxY) * 0.5 };
+    body.modelAnchor = NXOpen::Point3d(0.0, 0.0, 0.0);
+    body.visibleArea = 0.0;
+    body.raySelected = false;
+    body.longEdgeSelected = false;
+    body.rayHitFace = NULL_TAG;
+    for (size_t i = 0; i < loops.size(); ++i)
+    {
+        BianHao_AutoPoint2 candidate = body.anchor;
+        double area = 0.0;
+        if (BianHao_AutoFindInteriorPoint(loops[i], candidate, area) && area > body.visibleArea)
+        {
+            body.visibleArea = area;
+            body.anchor = candidate;
+        }
+    }
+    if (body.visibleArea <= 0.0)
+    {
+        body.visibleArea = std::max(0.0, body.maxX - body.minX) * std::max(0.0, body.maxY - body.minY);
+    }
+    return body.leaderTarget != NULL;
+}
+
+bool BianHao_AutoCurveModelPoint(NXOpen::Drawings::DraftingCurve* curve,
+    double fraction,
+    NXOpen::Point3d& modelPoint)
+{
+    modelPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
+    if (curve == NULL)
+    {
+        return false;
+    }
+    UF_EVAL_p_t evaluator = NULL;
+    if (UF_EVAL_initialize(curve->Tag(), &evaluator) != 0 || evaluator == NULL)
+    {
+        return false;
+    }
+    double limits[2] = { 0.0, 0.0 };
+    double point[3] = { 0.0, 0.0, 0.0 };
+    double derivatives[3] = { 0.0, 0.0, 0.0 };
+    fraction = std::max(0.0, std::min(1.0, fraction));
+    const bool success = UF_EVAL_ask_limits(evaluator, limits) == 0 &&
+        UF_EVAL_evaluate(evaluator, 0, limits[0] + (limits[1] - limits[0]) * fraction,
+            point, derivatives) == 0;
+    UF_EVAL_free(evaluator);
+    if (!success)
+    {
+        return false;
+    }
+    modelPoint = NXOpen::Point3d(point[0], point[1], point[2]);
+    return true;
+}
+
+bool BianHao_AutoTraceVisiblePoint(NXOpen::Drawings::DraftingView* view,
+    const std::vector<tag_t>& allBodies,
+    tag_t targetBody,
+    const BianHao_AutoPoint2& drawingPoint,
+    const double viewNormal[3],
+    tag_t& hitFace,
+    NXOpen::Point3d& hitPoint);
+
+bool BianHao_AutoFindMiddleLongEdge(NXOpen::Drawings::DraftingView* view,
+    const std::vector<tag_t>& allBodies,
+    BianHao_AutoBody& body)
+{
+    struct Candidate
+    {
+        size_t curveIndex;
+        double length;
+        double directionX;
+        double directionY;
+        BianHao_AutoPoint2 midpoint;
+        double offset;
+    };
+
+    if (view == NULL || allBodies.empty() || body.body == NULL)
+    {
+        return false;
+    }
+    double rotation[9] = { 0.0 };
+    if (UF_VIEW_ask_rotation(view->Tag(), rotation) != 0)
+    {
+        return false;
+    }
+    double viewNormal[3] = { rotation[6], rotation[7], rotation[8] };
+    const double viewNormalLength = std::sqrt(viewNormal[0] * viewNormal[0] +
+        viewNormal[1] * viewNormal[1] + viewNormal[2] * viewNormal[2]);
+    if (viewNormalLength <= 1.0e-12)
+    {
+        return false;
+    }
+    viewNormal[0] /= viewNormalLength;
+    viewNormal[1] /= viewNormalLength;
+    viewNormal[2] /= viewNormalLength;
+
+    std::vector<Candidate> straightCurves;
+    double maximumLength = 0.0;
+    size_t dominantIndex = 0;
+    for (size_t i = 0; i < body.curves.size(); ++i)
+    {
+        const std::vector<BianHao_AutoPoint2>& points = body.curves[i].points;
+        if (points.size() < 2)
+        {
+            continue;
+        }
+        double polylineLength = 0.0;
+        for (size_t p = 1; p < points.size(); ++p)
+        {
+            polylineLength += std::sqrt(BianHao_AutoDistanceSquared(points[p - 1], points[p]));
+        }
+        const double chordLength = std::sqrt(BianHao_AutoDistanceSquared(points.front(), points.back()));
+        if (polylineLength <= 1.0e-6 || chordLength / polylineLength < 0.985)
+        {
+            continue;
+        }
+        Candidate candidate;
+        candidate.curveIndex = i;
+        candidate.length = polylineLength;
+        candidate.directionX = (points.back().x - points.front().x) / chordLength;
+        candidate.directionY = (points.back().y - points.front().y) / chordLength;
+        candidate.midpoint = {
+            (points.front().x + points.back().x) * 0.5,
+            (points.front().y + points.back().y) * 0.5
+        };
+        candidate.offset = 0.0;
+        straightCurves.push_back(candidate);
+        if (polylineLength > maximumLength)
+        {
+            maximumLength = polylineLength;
+            dominantIndex = straightCurves.size() - 1;
+        }
+    }
+    if (straightCurves.empty() || maximumLength <= 1.0e-6)
+    {
+        return false;
+    }
+
+    const double dominantX = straightCurves[dominantIndex].directionX;
+    const double dominantY = straightCurves[dominantIndex].directionY;
+    const double normalX = -dominantY;
+    const double normalY = dominantX;
+    const double parallelThreshold = std::cos(10.0 * 3.14159265358979323846 / 180.0);
+    std::vector<Candidate> longEdges;
+    for (size_t i = 0; i < straightCurves.size(); ++i)
+    {
+        const double parallelism = std::abs(straightCurves[i].directionX * dominantX +
+            straightCurves[i].directionY * dominantY);
+        if (straightCurves[i].length >= maximumLength * 0.55 && parallelism >= parallelThreshold)
+        {
+            straightCurves[i].offset = straightCurves[i].midpoint.x * normalX +
+                straightCurves[i].midpoint.y * normalY;
+            longEdges.push_back(straightCurves[i]);
+        }
+    }
+    if (longEdges.empty())
+    {
+        return false;
+    }
+    const BianHao_AutoPoint2 regionCenter = {
+        (body.minX + body.maxX) * 0.5,
+        (body.minY + body.maxY) * 0.5
+    };
+    size_t selectedIndex = 0;
+    double selectedFraction = 0.5;
+    BianHao_AutoPoint2 selectedPoint = longEdges[0].midpoint;
+    double bestDistanceSquared = std::numeric_limits<double>::max();
+    tag_t selectedHitFace = NULL_TAG;
+    for (size_t i = 0; i < longEdges.size(); ++i)
+    {
+        const std::vector<BianHao_AutoPoint2>& points = body.curves[longEdges[i].curveIndex].points;
+        const BianHao_AutoPoint2& start = points.front();
+        const BianHao_AutoPoint2& end = points.back();
+        const double dx = end.x - start.x;
+        const double dy = end.y - start.y;
+        const double lengthSquared = dx * dx + dy * dy;
+        if (lengthSquared <= 1.0e-12)
+        {
+            continue;
+        }
+        const double idealFraction = std::max(0.0, std::min(1.0,
+            ((regionCenter.x - start.x) * dx + (regionCenter.y - start.y) * dy) / lengthSquared));
+        const int sampleCount = 65;
+        for (int sample = -1; sample < sampleCount; ++sample)
+        {
+            const double fraction = sample < 0 ? idealFraction :
+                (static_cast<double>(sample) + 0.5) / static_cast<double>(sampleCount);
+            const BianHao_AutoPoint2 point = {
+                start.x + fraction * dx,
+                start.y + fraction * dy
+            };
+            tag_t hitFace = NULL_TAG;
+            NXOpen::Point3d hitPoint(0.0, 0.0, 0.0);
+            if (!BianHao_AutoTraceVisiblePoint(view, allBodies, body.body->Tag(),
+                point, viewNormal, hitFace, hitPoint))
+            {
+                continue;
+            }
+            const double distanceSquared = BianHao_AutoDistanceSquared(regionCenter, point);
+            if (distanceSquared < bestDistanceSquared - 1.0e-9 ||
+                (std::fabs(distanceSquared - bestDistanceSquared) <= 1.0e-9 &&
+                    longEdges[i].length > longEdges[selectedIndex].length))
+            {
+                bestDistanceSquared = distanceSquared;
+                selectedIndex = i;
+                selectedFraction = fraction;
+                selectedPoint = point;
+                selectedHitFace = hitFace;
+            }
+        }
+    }
+
+    if (bestDistanceSquared == std::numeric_limits<double>::max())
+    {
+        return false;
+    }
+
+    const Candidate& selected = longEdges[selectedIndex];
+    NXOpen::Point3d modelPoint;
+    if (!BianHao_AutoCurveModelPoint(body.curves[selected.curveIndex].curve,
+        selectedFraction, modelPoint))
+    {
+        return false;
+    }
+    body.anchor = selectedPoint;
+    body.modelAnchor = modelPoint;
+    body.visibleArea = selected.length;
+    body.raySelected = false;
+    body.longEdgeSelected = true;
+    body.rayHitFace = selectedHitFace;
+    body.leaderCurve = body.curves[selected.curveIndex].curve;
+    body.leaderTarget = body.curves[selected.curveIndex].leaderTarget;
+    return body.leaderTarget != NULL;
+}
+
+bool BianHao_AutoTraceVisiblePoint(NXOpen::Drawings::DraftingView* view,
+    const std::vector<tag_t>& allBodies,
+    tag_t targetBody,
+    const BianHao_AutoPoint2& drawingPoint,
+    const double viewNormal[3],
+    tag_t& hitFace,
+    NXOpen::Point3d& hitPoint)
+{
+    hitFace = NULL_TAG;
+    hitPoint = NXOpen::Point3d(0.0, 0.0, 0.0);
+    if (view == NULL || allBodies.empty() || targetBody == NULL_TAG)
+    {
+        return false;
+    }
+
+    double drawing[2] = { drawingPoint.x, drawingPoint.y };
+    double modelPoint[3] = { 0.0, 0.0, 0.0 };
+    if (UF_VIEW_map_drawing_to_model(view->Tag(), drawing, modelPoint) != 0)
+    {
+        return false;
+    }
+
+    const double rayDistance = 1000000.0;
+    double origin[3] = {
+        modelPoint[0] + viewNormal[0] * rayDistance,
+        modelPoint[1] + viewNormal[1] * rayDistance,
+        modelPoint[2] + viewNormal[2] * rayDistance
+    };
+    double direction[3] = { -viewNormal[0], -viewNormal[1], -viewNormal[2] };
+    double transform[16] = {
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    };
+    int resultCount = 0;
+    UF_MODL_ray_hit_point_info_p_t hits = NULL;
+    const int error = UF_MODL_trace_a_ray(static_cast<int>(allBodies.size()),
+        const_cast<tag_t*>(&allBodies[0]), origin, direction, transform, 1, &resultCount, &hits);
+    if (error != 0 || resultCount <= 0 || hits == NULL)
+    {
+        if (hits != NULL)
+        {
+            UF_free(hits);
+        }
+        return false;
+    }
+
+    const bool matches = hits[0].hit_body == targetBody;
+    if (matches)
+    {
+        hitFace = hits[0].hit_face;
+        hitPoint = NXOpen::Point3d(hits[0].hit_point[0], hits[0].hit_point[1], hits[0].hit_point[2]);
+    }
+    UF_free(hits);
+    return matches;
+}
+
+bool BianHao_AutoFindRayVisibleAnchor(NXOpen::Drawings::DraftingView* view,
+    const std::vector<tag_t>& allBodies,
+    BianHao_AutoBody& body)
+{
+    if (view == NULL || body.body == NULL || allBodies.empty())
+    {
+        return false;
+    }
+
+    double rotation[9] = { 0.0 };
+    if (UF_VIEW_ask_rotation(view->Tag(), rotation) != 0)
+    {
+        return false;
+    }
+    double normal[3] = { rotation[6], rotation[7], rotation[8] };
+    const double normalLength = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+    if (normalLength <= 1.0e-12)
+    {
+        return false;
+    }
+    normal[0] /= normalLength;
+    normal[1] /= normalLength;
+    normal[2] /= normalLength;
+
+    const double width = std::max(0.0, body.maxX - body.minX);
+    const double height = std::max(0.0, body.maxY - body.minY);
+    const double longestSide = std::max(width, height);
+    if (width <= 1.0e-6 || height <= 1.0e-6 || longestSide <= 1.0e-6)
+    {
+        return false;
+    }
+
+    const double nominalStep = longestSide / 56.0;
+    const int columns = std::max(12, std::min(64, static_cast<int>(std::ceil(width / nominalStep))));
+    const int rows = std::max(12, std::min(64, static_cast<int>(std::ceil(height / nominalStep))));
+    const double stepX = width / static_cast<double>(columns);
+    const double stepY = height / static_cast<double>(rows);
+    const int cellCount = columns * rows;
+    std::vector<unsigned char> visible(cellCount, 0);
+    std::vector<tag_t> hitFaces(cellCount, NULL_TAG);
+    std::vector<NXOpen::Point3d> hitPoints(cellCount, NXOpen::Point3d(0.0, 0.0, 0.0));
+
+    for (int row = 0; row < rows; ++row)
+    {
+        for (int column = 0; column < columns; ++column)
+        {
+            const int index = row * columns + column;
+            const BianHao_AutoPoint2 point = {
+                body.minX + (static_cast<double>(column) + 0.5) * stepX,
+                body.minY + (static_cast<double>(row) + 0.5) * stepY
+            };
+            tag_t hitFace = NULL_TAG;
+            NXOpen::Point3d hitPoint(0.0, 0.0, 0.0);
+            if (BianHao_AutoTraceVisiblePoint(view, allBodies, body.body->Tag(), point, normal, hitFace, hitPoint))
+            {
+                visible[index] = 1;
+                hitFaces[index] = hitFace;
+                hitPoints[index] = hitPoint;
+            }
+        }
+    }
+
+    std::vector<int> component(cellCount, -1);
+    int largestComponent = -1;
+    int largestCount = 0;
+    int componentNumber = 0;
+    const int neighborX[8] = { -1, 0, 1, -1, 1, -1, 0, 1 };
+    const int neighborY[8] = { -1, -1, -1, 0, 0, 1, 1, 1 };
+    for (int seed = 0; seed < cellCount; ++seed)
+    {
+        if (!visible[seed] || component[seed] >= 0)
+        {
+            continue;
+        }
+        std::vector<int> pending(1, seed);
+        component[seed] = componentNumber;
+        int count = 0;
+        while (!pending.empty())
+        {
+            const int current = pending.back();
+            pending.pop_back();
+            ++count;
+            const int x = current % columns;
+            const int y = current / columns;
+            for (int n = 0; n < 8; ++n)
+            {
+                const int nextX = x + neighborX[n];
+                const int nextY = y + neighborY[n];
+                if (nextX < 0 || nextX >= columns || nextY < 0 || nextY >= rows)
+                {
+                    continue;
+                }
+                const int next = nextY * columns + nextX;
+                if (visible[next] && component[next] < 0)
+                {
+                    component[next] = componentNumber;
+                    pending.push_back(next);
+                }
+            }
+        }
+        if (count > largestCount)
+        {
+            largestCount = count;
+            largestComponent = componentNumber;
+        }
+        ++componentNumber;
+    }
+    if (largestComponent < 0 || largestCount <= 0)
+    {
+        return false;
+    }
+
+    std::vector<int> outside;
+    outside.reserve(cellCount - largestCount);
+    for (int i = 0; i < cellCount; ++i)
+    {
+        if (component[i] != largestComponent)
+        {
+            outside.push_back(i);
+        }
+    }
+
+    double bestClearance = -1.0;
+    int bestCell = -1;
+    for (int i = 0; i < cellCount; ++i)
+    {
+        if (component[i] != largestComponent)
+        {
+            continue;
+        }
+        const int x = i % columns;
+        const int y = i / columns;
+        double clearance = std::min(
+            std::min((static_cast<double>(x) + 0.5) * stepX,
+                (static_cast<double>(columns - x) - 0.5) * stepX),
+            std::min((static_cast<double>(y) + 0.5) * stepY,
+                (static_cast<double>(rows - y) - 0.5) * stepY));
+        for (size_t outsideIndex = 0; outsideIndex < outside.size(); ++outsideIndex)
+        {
+            const int other = outside[outsideIndex];
+            const double dx = static_cast<double>((other % columns) - x) * stepX;
+            const double dy = static_cast<double>((other / columns) - y) * stepY;
+            clearance = std::min(clearance, std::sqrt(dx * dx + dy * dy));
+        }
+        if (clearance > bestClearance)
+        {
+            bestClearance = clearance;
+            bestCell = i;
+        }
+    }
+    if (bestCell < 0 || hitFaces[bestCell] == NULL_TAG)
+    {
+        return false;
+    }
+
+    const int bestX = bestCell % columns;
+    const int bestY = bestCell / columns;
+    body.anchor = {
+        body.minX + (static_cast<double>(bestX) + 0.5) * stepX,
+        body.minY + (static_cast<double>(bestY) + 0.5) * stepY
+    };
+    body.visibleArea = static_cast<double>(largestCount) * stepX * stepY;
+    body.raySelected = true;
+    body.rayHitFace = hitFaces[bestCell];
+    body.modelAnchor = hitPoints[bestCell];
+    try
+    {
+        NXOpen::DisplayableObject* target = dynamic_cast<NXOpen::DisplayableObject*>(
+            NXOpen::NXObjectManager::Get(body.rayHitFace));
+        if (target != NULL)
+        {
+            body.leaderTarget = target;
+            body.leaderCurve = NULL;
+        }
+    }
+    catch (...)
+    {
+    }
+    return body.leaderTarget != NULL;
+}
+}
+
 std::string BianHao_GetApplicationDirectory()
 {
     HMODULE selfModule = NULL;
@@ -3262,6 +4146,76 @@ std::string BianHao_GetApplicationDirectory()
     char utf8Path[MAX_PATH * 3] = { 0 };
     WideCharToMultiByte(CP_UTF8, 0, modulePath, -1, utf8Path, sizeof(utf8Path), NULL, NULL);
     return std::string(utf8Path);
+}
+
+std::string BianHao_GetAutoLayoutLogPath()
+{
+    std::string appDirectory = BianHao_GetApplicationDirectory();
+    while (!appDirectory.empty() &&
+        (appDirectory[appDirectory.size() - 1] == '\\' || appDirectory[appDirectory.size() - 1] == '/'))
+    {
+        appDirectory.erase(appDirectory.size() - 1);
+    }
+    const size_t separator = appDirectory.find_last_of("\\/");
+    const std::string installDirectory = separator == std::string::npos
+        ? appDirectory : appDirectory.substr(0, separator);
+    const std::string logDirectory = installDirectory.empty()
+        ? std::string("logs") : installDirectory + "\\logs";
+    try
+    {
+        const std::filesystem::path directoryPath = std::filesystem::u8path(logDirectory);
+        std::filesystem::create_directories(directoryPath);
+        return (directoryPath / "BianHao_auto_layout.log").u8string();
+    }
+    catch (...)
+    {
+        return "BianHao_auto_layout.log";
+    }
+}
+
+void BianHao_WriteAutoLayoutLog(NXOpen::Drawings::DraftingView* view,
+    const std::vector<BianHao_AutoBody>& candidates,
+    double viewMinX,
+    double viewMinY,
+    double viewMaxX,
+    double viewMaxY)
+{
+    std::ofstream output(std::filesystem::u8path(BianHao_GetAutoLayoutLogPath()),
+        std::ios::out | std::ios::app | std::ios::binary);
+    if (!output)
+    {
+        return;
+    }
+
+    SYSTEMTIME time;
+    GetLocalTime(&time);
+    output << "=== run "
+        << time.wYear << "-" << time.wMonth << "-" << time.wDay << " "
+        << time.wHour << ":" << time.wMinute << ":" << time.wSecond
+        << " viewTag=" << static_cast<unsigned long long>(view != NULL ? view->Tag() : NULL_TAG)
+        << " viewBounds=(" << viewMinX << "," << viewMinY << ")-(" << viewMaxX << "," << viewMaxY << ")"
+        << " count=" << candidates.size() << " ===\r\n";
+    output.precision(15);
+    for (size_t i = 0; i < candidates.size(); ++i)
+    {
+        const BianHao_AutoBody& item = candidates[i];
+        output << "text=" << item.text
+            << " method=" << (item.longEdgeSelected ? "ray-validated-long-edge" :
+                (item.raySelected ? "ray" : "curve"))
+            << " bodyTag=" << static_cast<unsigned long long>(item.body != NULL ? item.body->Tag() : NULL_TAG)
+            << " partTag=" << static_cast<unsigned long long>(item.partObject != NULL ? item.partObject->Tag() : NULL_TAG)
+            << " leaderCurveTag=" << static_cast<unsigned long long>(item.leaderCurve != NULL ? item.leaderCurve->Tag() : NULL_TAG)
+            << " leaderTargetTag=" << static_cast<unsigned long long>(item.leaderTarget != NULL ? item.leaderTarget->Tag() : NULL_TAG)
+            << " rayHitFaceTag=" << static_cast<unsigned long long>(item.rayHitFace)
+            << " curves=" << item.curves.size()
+            << " visibleArea=" << item.visibleArea
+            << " anchor=(" << item.anchor.x << "," << item.anchor.y << ")"
+            << " modelAnchor=(" << item.modelAnchor.X << "," << item.modelAnchor.Y << "," << item.modelAnchor.Z << ")"
+            << " label=(" << item.label.x << "," << item.label.y << ")"
+            << " bodyBounds=(" << item.minX << "," << item.minY << ")-(" << item.maxX << "," << item.maxY << ")"
+            << "\r\n";
+    }
+    output << "=== end ===\r\n";
 }
 
 void BianHao_SetButtonBitmap(NXOpen::BlockStyler::Button* button, const std::string& appDir,
@@ -3401,6 +4355,325 @@ bool BianHao::RecreatePreviewFromCache()
     return true;
 }
 
+void BianHao::UpdateAutomaticModeBlocks()
+{
+    const bool automatic = automaticMode != NULL && automaticMode->Value();
+    BianHao_SetBlockVisible(draftingViewSelection, automatic);
+    BianHao_SetBlockVisible(point0, !automatic);
+    BianHao_SetBlockVisible(point01, !automatic);
+    if (automatic)
+    {
+        DestroyIdSymbolBuilder(idSymbolBuilder1);
+        hasPreviewCache = false;
+        hasSecondPointCache = false;
+        cachedLeaderTarget = NULL;
+        cachedLeaderView = NULL;
+        cachedCommittedSymbol = NULL;
+    }
+}
+
+int BianHao::CreateAutomaticSymbols()
+{
+    if (draftingViewSelection == NULL)
+    {
+        throw std::runtime_error("自动标注序号视图选择控件未加载。");
+    }
+    const std::vector<NXOpen::TaggedObject*> selected = draftingViewSelection->GetSelectedObjects();
+    if (selected.size() != 1)
+    {
+        throw std::runtime_error("请选择一个工程图视图。");
+    }
+    NXOpen::Drawings::DraftingView* view = dynamic_cast<NXOpen::Drawings::DraftingView*>(selected[0]);
+    if (view == NULL)
+    {
+        throw std::runtime_error("选择的对象不是工程图视图。");
+    }
+    NXOpen::Part* workPart = theSession != NULL ? theSession->Parts()->Work() : NULL;
+    if (workPart == NULL)
+    {
+        throw std::runtime_error("没有找到当前工作部件。");
+    }
+
+    view->Update();
+    std::map<tag_t, BianHao_AutoBody> bodiesByTag;
+    NXOpen::Drawings::DraftingBodyCollection* draftingBodies = view->DraftingBodies();
+    if (draftingBodies == NULL)
+    {
+        throw std::runtime_error("所选视图没有可用的工程图体。");
+    }
+    for (NXOpen::Drawings::DraftingBodyCollection::iterator bodyIt = draftingBodies->begin();
+        bodyIt != draftingBodies->end(); ++bodyIt)
+    {
+        NXOpen::Drawings::DraftingBody* draftingBody = *bodyIt;
+        if (draftingBody == NULL || draftingBody->DraftingCurves() == NULL)
+        {
+            continue;
+        }
+        for (NXOpen::Drawings::DraftingCurveCollection::iterator curveIt = draftingBody->DraftingCurves()->begin();
+            curveIt != draftingBody->DraftingCurves()->end(); ++curveIt)
+        {
+            NXOpen::Drawings::DraftingCurve* curve = *curveIt;
+            if (!BianHao_AutoVisibleCurve(curve))
+            {
+                continue;
+            }
+            NXOpen::Body* modelBody = NULL;
+            NXOpen::DisplayableObject* leaderTarget = NULL;
+            if (!BianHao_AutoCurveTarget(curve, modelBody, leaderTarget) || modelBody == NULL)
+            {
+                continue;
+            }
+            BianHao_AutoCurve curveData;
+            curveData.curve = curve;
+            curveData.leaderTarget = leaderTarget;
+            curveData.body = modelBody;
+            curveData.length = 0.0;
+            try { curveData.length = curve->GetLength(); } catch (...) {}
+            if (!BianHao_AutoSampleCurve(view, curve, curveData.points))
+            {
+                continue;
+            }
+            BianHao_AutoBody& bodyData = bodiesByTag[modelBody->Tag()];
+            bodyData.body = modelBody;
+            bodyData.partObject = dynamic_cast<NXOpen::NXObject*>(modelBody->OwningPart());
+            bodyData.curves.push_back(curveData);
+        }
+    }
+
+    std::vector<tag_t> rayBodies;
+    rayBodies.reserve(bodiesByTag.size());
+    for (std::map<tag_t, BianHao_AutoBody>::const_iterator it = bodiesByTag.begin();
+        it != bodiesByTag.end(); ++it)
+    {
+        if (it->second.body != NULL)
+        {
+            rayBodies.push_back(it->second.body->Tag());
+        }
+    }
+
+    std::vector<BianHao_AutoBody> candidates;
+    int noTableMatchCount = 0;
+    for (std::map<tag_t, BianHao_AutoBody>::iterator it = bodiesByTag.begin(); it != bodiesByTag.end(); ++it)
+    {
+        if (!BianHao_AutoFinalizeBody(it->second))
+        {
+            continue;
+        }
+        if (!BianHao_AutoFindMiddleLongEdge(view, rayBodies, it->second))
+        {
+            BianHao_AutoFindRayVisibleAnchor(view, rayBodies, it->second);
+        }
+        try
+        {
+            it->second.text = BianHao_NxStringToUtf8(
+                BianHao_GetAttributeValueText(textSource, attributeName,
+                    it->second.partObject, it->second.body));
+            if (!it->second.text.empty())
+            {
+                candidates.push_back(it->second);
+            }
+        }
+        catch (...)
+        {
+            ++noTableMatchCount;
+        }
+    }
+    if (candidates.empty())
+    {
+        throw std::runtime_error("所选视图中没有找到能与明细表匹配的可见体。");
+    }
+
+    std::map<std::string, BianHao_AutoBody> uniqueByText;
+    for (size_t i = 0; i < candidates.size(); ++i)
+    {
+        std::map<std::string, BianHao_AutoBody>::iterator found = uniqueByText.find(candidates[i].text);
+        if (found == uniqueByText.end() || candidates[i].visibleArea > found->second.visibleArea)
+        {
+            uniqueByText[candidates[i].text] = candidates[i];
+        }
+    }
+    candidates.clear();
+    for (std::map<std::string, BianHao_AutoBody>::const_iterator it = uniqueByText.begin();
+        it != uniqueByText.end(); ++it)
+    {
+        candidates.push_back(it->second);
+    }
+
+    double borders[4] = { 0.0, 0.0, 0.0, 0.0 };
+    if (UF_DRAW_ask_view_borders(view->Tag(), borders) != 0)
+    {
+        NXOpen::Point3d minimumPoint;
+        NXOpen::Point3d maximumPoint;
+        view->CalculateMinMaxBox(&minimumPoint, &maximumPoint);
+        borders[0] = minimumPoint.X;
+        borders[1] = minimumPoint.Y;
+        borders[2] = maximumPoint.X;
+        borders[3] = maximumPoint.Y;
+    }
+    const double minX = std::min(borders[0], borders[2]);
+    const double maxX = std::max(borders[0], borders[2]);
+    const double minY = std::min(borders[1], borders[3]);
+    const double maxY = std::max(borders[1], borders[3]);
+    const double centerX = (minX + maxX) * 0.5;
+    const double size = GetSelectedBalloonSize(balloonSize);
+    const double margin = std::max(8.0, size * 0.8);
+    const double pitch = std::max(size * 1.15, GetSelectedTextHeight(textHeight) * 2.0);
+
+    std::vector<size_t> left;
+    std::vector<size_t> right;
+    for (size_t i = 0; i < candidates.size(); ++i)
+    {
+        (candidates[i].anchor.x <= centerX ? left : right).push_back(i);
+    }
+    const auto arrangeSide = [&](std::vector<size_t>& indices, double x) {
+        std::stable_sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+            const double deltaY = candidates[a].anchor.y - candidates[b].anchor.y;
+            if (std::fabs(deltaY) > 1.0e-6)
+            {
+                return deltaY < 0.0;
+            }
+            const double deltaX = candidates[a].anchor.x - candidates[b].anchor.x;
+            if (std::fabs(deltaX) > 1.0e-6)
+            {
+                return deltaX < 0.0;
+            }
+            return candidates[a].text < candidates[b].text;
+        });
+
+        if (indices.empty())
+        {
+            return;
+        }
+
+        // Match the vertical order of the labels to the vertical order of the
+        // leader anchors.  With both ends in the same order, leaders on the
+        // same side cannot cross.  Choose the column start that minimizes the
+        // total vertical leader offset while retaining the required pitch.
+        double startY = 0.0;
+        for (size_t n = 0; n < indices.size(); ++n)
+        {
+            startY += candidates[indices[n]].anchor.y - static_cast<double>(n) * pitch;
+        }
+        startY /= static_cast<double>(indices.size());
+
+        const double requiredSpan = static_cast<double>(indices.size() - 1) * pitch;
+        if (requiredSpan <= maxY - minY)
+        {
+            startY = std::max(minY, std::min(startY, maxY - requiredSpan));
+        }
+        else
+        {
+            // Preserve spacing and order when the view is too short.  Extending
+            // equally above and below is preferable to compressing or reversing
+            // the labels, either of which can create overlaps/crossings.
+            startY = (minY + maxY - requiredSpan) * 0.5;
+        }
+
+        for (size_t n = 0; n < indices.size(); ++n)
+        {
+            BianHao_AutoBody& item = candidates[indices[n]];
+            item.label.x = x;
+            item.label.y = startY + static_cast<double>(n) * pitch;
+        }
+    };
+    arrangeSide(left, minX - margin);
+    arrangeSide(right, maxX + margin);
+    BianHao_WriteAutoLayoutLog(view, candidates, minX, minY, maxX, maxY);
+
+    const std::string viewTagText =
+        std::to_string(static_cast<unsigned long long>(view->Tag()));
+    std::vector<NXOpen::TaggedObject*> oldAutomaticSymbols;
+    NXOpen::Annotations::IdSymbolCollection* idSymbols = workPart->Annotations()->IdSymbols();
+    for (NXOpen::Annotations::IdSymbolCollection::iterator it = idSymbols->begin();
+        it != idSymbols->end(); ++it)
+    {
+        NXOpen::Annotations::IdSymbol* symbol = *it;
+        try
+        {
+            if (symbol != NULL &&
+                symbol->HasUserAttribute("ZH_AUTO_BIANHAO_VIEW", NXOpen::NXObject::AttributeTypeString, -1) &&
+                BianHao_NxStringToUtf8(symbol->GetStringUserAttribute("ZH_AUTO_BIANHAO_VIEW", -1)) == viewTagText)
+            {
+                oldAutomaticSymbols.push_back(symbol);
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    const NXOpen::Session::UndoMarkId undoMark =
+        theSession->SetUndoMark(NXOpen::Session::MarkVisibilityVisible, "BianHao automatic symbols");
+    int createdCount = 0;
+    for (size_t i = 0; i < candidates.size(); ++i)
+    {
+        NXOpen::Annotations::IdSymbolBuilder* builder = NULL;
+        try
+        {
+            builder = workPart->Annotations()->IdSymbols()->CreateIdSymbolBuilder(NULL);
+            ApplyIdSymbolStyle(builder, selectedBalloonType, balloonSize, textHeight);
+            builder->SetUpperText(BianHao_Utf8ToNxString(candidates[i].text));
+            builder->SetLowerText("");
+            builder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
+            builder->Origin()->Plane()->SetPlaneMethod(NXOpen::Annotations::PlaneBuilder::PlaneMethodTypeXyPlane);
+            builder->Origin()->SetInferRelativeToGeometry(true);
+
+            NXOpen::Annotations::LeaderData* leader = workPart->Annotations()->CreateLeaderData();
+            builder->Leader()->Leaders()->Append(leader);
+            leader->SetStubSide(candidates[i].label.x < centerX
+                ? NXOpen::Annotations::LeaderSideRight : NXOpen::Annotations::LeaderSideLeft);
+            const NXOpen::Point3d drawingAnchor(candidates[i].anchor.x, candidates[i].anchor.y, 0.0);
+            const NXOpen::Point3d leaderAnchor = (candidates[i].raySelected || candidates[i].longEdgeSelected)
+                ? candidates[i].modelAnchor : drawingAnchor;
+            NXOpen::View* nullView = NULL;
+            const NXOpen::InferSnapType::SnapType snapType =
+                candidates[i].longEdgeSelected && dynamic_cast<NXOpen::Edge*>(candidates[i].leaderTarget) != NULL
+                ? NXOpen::InferSnapType::SnapTypeCurve : NXOpen::InferSnapType::SnapTypeSurf;
+            leader->Leader()->SetValue(snapType,
+                candidates[i].leaderTarget, view, leaderAnchor, NULL, nullView, leaderAnchor);
+            const NXOpen::Point3d label(candidates[i].label.x, candidates[i].label.y, 0.0);
+            builder->Origin()->Origin()->SetValue(NULL, nullView, label);
+            NXOpen::NXObject* committed = builder->Commit();
+            if (committed != NULL)
+            {
+                committed->SetUserAttribute("ZH_AUTO_BIANHAO", -1, "1", NXOpen::Update::OptionLater);
+                committed->SetUserAttribute("ZH_AUTO_BIANHAO_VIEW", -1,
+                    viewTagText.c_str(), NXOpen::Update::OptionLater);
+                committed->SetUserAttribute("ZH_AUTO_BIANHAO_TEXT", -1,
+                    candidates[i].text.c_str(), NXOpen::Update::OptionLater);
+                ++createdCount;
+            }
+            builder->Destroy();
+            builder = NULL;
+        }
+        catch (...)
+        {
+            if (builder != NULL)
+            {
+                try { builder->Destroy(); } catch (...) {}
+            }
+        }
+    }
+    if (createdCount == 0)
+    {
+        throw std::runtime_error("找到了可见体，但编号引线创建失败。");
+    }
+    if (!oldAutomaticSymbols.empty())
+    {
+        theSession->UpdateManager()->AddObjectsToDeleteList(oldAutomaticSymbols);
+    }
+    theSession->UpdateManager()->DoUpdate(undoMark);
+
+    std::ostringstream summary;
+    summary << "已创建 " << createdCount << " 个自动编号。";
+    if (noTableMatchCount > 0)
+    {
+        summary << "\n有 " << noTableMatchCount << " 个可见体未匹配到明细表，已跳过。";
+    }
+    theUI->NXMessageBox()->Show("自动标注序号", NXOpen::NXMessageBox::DialogTypeInformation, summary.str().c_str());
+    return 0;
+}
+
 //------------------------------------------------------------------------------
 // Constructor for NX Styler class
 //------------------------------------------------------------------------------
@@ -3425,6 +4698,8 @@ BianHao::BianHao() :
     attributeName(NULL),
     balloonSize(NULL),
     textHeight(NULL),
+    automaticMode(NULL),
+    draftingViewSelection(NULL),
     idSymbolBuilder1(NULL),
     selectedBalloonType(NXOpen::Annotations::BalloonTypesRoundedBox),
     cachedLeaderTarget(NULL),
@@ -3700,8 +4975,18 @@ void BianHao::initialize_cb()
         attributeName = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(theDialog->TopBlock()->FindBlock("attributeName"));
         balloonSize = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("balloonSize"));
         textHeight = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("textHeight"));
+        automaticMode = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("automaticMode"));
+        draftingViewSelection = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("draftingViewSelection"));
         point0 = dynamic_cast<NXOpen::BlockStyler::SpecifyPoint*>(theDialog->TopBlock()->FindBlock("point0"));
         point01 = dynamic_cast<NXOpen::BlockStyler::SpecifyPoint*>(theDialog->TopBlock()->FindBlock("point01"));
+        if (draftingViewSelection != NULL)
+        {
+            std::vector<NXOpen::Selection::MaskTriple> masks(1);
+            masks[0] = NXOpen::Selection::MaskTriple(UF_view_type, UF_all_subtype, UF_all_subtype);
+            draftingViewSelection->SetSelectionFilter(
+                NXOpen::Selection::SelectionActionClearAndEnableSpecific, masks);
+            draftingViewSelection->SetAutomaticProgression(false);
+        }
         BianHao_EnableAssemblyPointSelection(point0, 0x400);
         BianHao_EnableAssemblyPointSelection(point01, 0);
         BianHao_LoadSettings(selectedBalloonType, balloonSize, textHeight, &rememberedTextSourceValue, &rememberedAttributeName);
@@ -3718,6 +5003,7 @@ void BianHao::initialize_cb()
         rememberedTextSourceValue = BianHao_GetEnumValue(textSource, rememberedTextSourceValue);
         rememberedAttributeName = BianHao_GetSelectedAttributeName(attributeName);
         BianHao_UpdateStyleButtonSelection(styleCircleBar, styleTriangleDownBar, styleHexagonBar, styleRoundedBoxBar, styleUnderlineBar, styleNoSymbolBar, selectedBalloonType);
+        UpdateAutomaticModeBlocks();
 
     }
     catch(exception& ex)
@@ -3752,6 +5038,10 @@ int BianHao::apply_cb()
     int errorCode = 0;
     try
     {
+        if (automaticMode != NULL && automaticMode->Value())
+        {
+            return CreateAutomaticSymbols();
+        }
         rememberedTextSourceValue = BianHao_GetEnumValue(textSource, rememberedTextSourceValue);
         if (rememberedTextSourceValue == 1 || rememberedTextSourceValue == 2)
         {
@@ -3820,6 +5110,15 @@ int BianHao::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
         const bool isAttributeNameBlock =
             block == attributeName || blockName == "attributeName";
+
+        const bool isAutomaticModeBlock =
+            block == automaticMode || blockName == "automaticMode";
+
+        if (isAutomaticModeBlock)
+        {
+            UpdateAutomaticModeBlocks();
+            return 0;
+        }
 
         if (isStyleBlock)
         {

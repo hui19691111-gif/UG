@@ -257,6 +257,7 @@ private:
     NXOpen::BlockStyler::BlockDialog* theDialog;
     NXOpen::BlockStyler::Enumeration* enumDrawingMode;// Block type: Enumeration
     NXOpen::BlockStyler::Enumeration* enumSheetLayout;// Block type: Enumeration
+    NXOpen::BlockStyler::Enumeration* enumDimensionAutoPosition;// Block type: Enumeration
     NXOpen::BlockStyler::IntegerBlock* integerSheetPartCount;// Block type: Integer
     NXOpen::BlockStyler::Toggle* toggle0;// Block type: Toggle
     NXOpen::BlockStyler::Toggle* toggle01;// Block type: Toggle

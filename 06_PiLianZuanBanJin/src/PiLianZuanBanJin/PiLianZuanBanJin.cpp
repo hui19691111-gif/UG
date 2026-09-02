@@ -2544,6 +2544,29 @@ namespace
         return utf8;
     }
 
+    std::string Utf8PathToAnsi(const std::string& text)
+    {
+        const std::wstring wide = PathTextToWide(text);
+        if (wide.empty())
+        {
+            return std::string();
+        }
+
+        const int length = WideCharToMultiByte(CP_ACP, 0, wide.c_str(), -1, NULL, 0, NULL, NULL);
+        if (length <= 0)
+        {
+            return std::string();
+        }
+
+        std::string ansi(static_cast<size_t>(length), '\0');
+        WideCharToMultiByte(CP_ACP, 0, wide.c_str(), -1, &ansi[0], length, NULL, NULL);
+        if (!ansi.empty() && ansi[ansi.size() - 1] == '\0')
+        {
+            ansi.resize(ansi.size() - 1);
+        }
+        return ansi;
+    }
+
     std::string ReadAllText(const std::string& path)
     {
         std::wstring widePath = PathTextToWide(path);
@@ -2610,14 +2633,14 @@ namespace
 
     std::string ModuleDirectory()
     {
-        char path[MAX_PATH] = { 0 };
+        wchar_t path[MAX_PATH] = { 0 };
         HMODULE module = NULL;
-        GetModuleHandleExA(
+        GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCSTR>(&ModuleDirectory),
+            reinterpret_cast<LPCWSTR>(&ModuleDirectory),
             &module);
-        GetModuleFileNameA(module, path, MAX_PATH);
-        std::string fullPath(path);
+        GetModuleFileNameW(module, path, MAX_PATH);
+        std::string fullPath = WidePathToUtf8(path);
         size_t slash = fullPath.find_last_of("\\/");
         return slash == std::string::npos ? std::string(".") : fullPath.substr(0, slash);
     }
@@ -12486,7 +12509,10 @@ PiLianZuanBanJinDialog::PiLianZuanBanJinDialog()
       selectedAssemblyParts(),
       runAfterDialog_(false),
       pendingOptions_(),
-      manualButtonProcessedBodyTags_()
+      manualButtonProcessedBodyTags_(),
+      helpMapLoaded_(false),
+      helpUfInitialized_(false),
+      helpMapPath_()
 {
     PiLianZuanBanJinDialog::theSession = Session::GetSession();
     PiLianZuanBanJinDialog::theUI = UI::GetUI();
@@ -12497,6 +12523,7 @@ PiLianZuanBanJinDialog::PiLianZuanBanJinDialog()
     {
         throw std::runtime_error("Embedded DLX resource missing: PiLianZuanBanJin.dlx");
     }
+    InitializeContextHelp();
     theDialog = theUI->CreateDialog(dlxPath.c_str());
     theDialog->AddInitializeHandler(make_callback(this, &PiLianZuanBanJinDialog::initialize_cb));
     theDialog->AddUpdateHandler(make_callback(this, &PiLianZuanBanJinDialog::update_cb));
@@ -12511,6 +12538,79 @@ PiLianZuanBanJinDialog::~PiLianZuanBanJinDialog()
         delete theDialog;
         theDialog = NULL;
     }
+    if (helpMapLoaded_ && !helpMapPath_.empty())
+    {
+        const std::string ansiMapPath = Utf8PathToAnsi(helpMapPath_);
+        std::vector<char> mapPath(ansiMapPath.begin(), ansiMapPath.end());
+        mapPath.push_back('\0');
+        UF_HELP_unload_map_file(mapPath.data());
+        helpMapLoaded_ = false;
+    }
+    if (helpUfInitialized_)
+    {
+        UF_terminate();
+        helpUfInitialized_ = false;
+    }
+}
+
+void PiLianZuanBanJinDialog::InitializeContextHelp()
+{
+    const std::string helpDir = CombinePath(ModuleDirectory(), "PiLianZuanBanJinHelp");
+    const std::string helpIndex = CombinePath(helpDir, "index.html");
+    helpMapPath_ = CombinePath(helpDir, "PiLianZuanBanJin.map");
+    if (!FileExists(helpIndex) || !FileExists(helpMapPath_))
+    {
+        std::ostringstream missingLog;
+        missingLog << "context help init failed"
+                   << " reason=missing-file"
+                   << " index=[" << helpIndex << "]"
+                   << " indexExists=" << (FileExists(helpIndex) ? 1 : 0)
+                   << " map=[" << helpMapPath_ << "]"
+                   << " mapExists=" << (FileExists(helpMapPath_) ? 1 : 0);
+        AppendMarkerLineDebugLog(missingLog.str());
+        helpMapPath_.clear();
+        return;
+    }
+
+    const int ufInitStatus = UF_initialize();
+    if (ufInitStatus != 0)
+    {
+        std::ostringstream initLog;
+        initLog << "context help init failed"
+                << " reason=uf-initialize"
+                << " status=" << ufInitStatus;
+        AppendMarkerLineDebugLog(initLog.str());
+        helpMapPath_.clear();
+        return;
+    }
+    helpUfInitialized_ = true;
+
+    std::string helpPathValue = helpDir;
+    std::replace(helpPathValue.begin(), helpPathValue.end(), '\\', '/');
+    if (!helpPathValue.empty() && helpPathValue[helpPathValue.size() - 1] != '/')
+    {
+        helpPathValue.push_back('/');
+    }
+    helpPathValue = "file:/" + helpPathValue;
+    const std::wstring wideHelpPathValue = PathTextToWide(helpPathValue);
+    if (!wideHelpPathValue.empty())
+    {
+        SetEnvironmentVariableW(L"ZHIHUI_PILIAN_HELP_PATH", wideHelpPathValue.c_str());
+    }
+
+    const std::string ansiMapPath = Utf8PathToAnsi(helpMapPath_);
+    std::vector<char> mapPath(ansiMapPath.begin(), ansiMapPath.end());
+    mapPath.push_back('\0');
+    const int helpLoadStatus = UF_HELP_load_map_file(mapPath.data());
+    helpMapLoaded_ = helpLoadStatus == 0;
+
+    std::ostringstream helpLog;
+    helpLog << "context help init"
+            << " map=[" << helpMapPath_ << "]"
+            << " urlBase=[" << helpPathValue << "]"
+            << " ufInitStatus=" << ufInitStatus
+            << " loadStatus=" << helpLoadStatus;
+    AppendMarkerLineDebugLog(helpLog.str());
 }
 
 int PiLianZuanBanJinDialog::Show()
@@ -12561,6 +12661,7 @@ int PiLianZuanBanJinDialog::Show()
 
 void PiLianZuanBanJinDialog::initialize_cb()
 {
+    TrySetBlockString(theDialog->TopBlock(), "HelpTag", "Zhihui_PiLianZuanBanJin");
     strategyGroup = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("strategyGroup"));
     advancedGroup = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("advancedGroup"));
     markerLineFaceUpToggle = dynamic_cast<Toggle*>(theDialog->TopBlock()->FindBlock("markerLineFaceUpToggle"));

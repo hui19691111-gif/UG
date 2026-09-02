@@ -122,6 +122,8 @@
       <Command>setlocal
 "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E copy_if_different G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/ZheWanBiRangCao.dlx G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/Debug/ZheWanBiRangCao.dlx
 if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E copy_if_different G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/CustomFeatureConfiguration.xml G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/Debug/CustomFeatureConfiguration.xml
+if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 :cmErrorLevel
@@ -158,14 +160,14 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <SupportJustMyCode></SupportJustMyCode>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level4</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;UNICODE;_UNICODE;NOMINMAX;CMAKE_INTDIR="Release";ZheWanBiRangCao_EXPORTS</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;UNICODE;_UNICODE;NOMINMAX;ZH_PROTECTED_BUILD=1;CMAKE_INTDIR="Release";ZheWanBiRangCao_EXPORTS</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <DebugInformationFormat>
       </DebugInformationFormat>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;UNICODE;_UNICODE;NOMINMAX;CMAKE_INTDIR=\"Release\";ZheWanBiRangCao_EXPORTS</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;UNICODE;_UNICODE;NOMINMAX;ZH_PROTECTED_BUILD=1;CMAKE_INTDIR=\"Release\";ZheWanBiRangCao_EXPORTS</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>D:\Program Files\Siemens\NX2412\UGOPEN;G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\18_ZheWanBiRangCao;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
@@ -181,6 +183,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Command>setlocal
 "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E copy_if_different G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/ZheWanBiRangCao.dlx G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/Release/ZheWanBiRangCao.dlx
 if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E copy_if_different G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/CustomFeatureConfiguration.xml G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/Release/CustomFeatureConfiguration.xml
+if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 :cmErrorLevel
@@ -192,10 +196,13 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <AdditionalDependencies>libugopenint.lib;libnxopencpp.lib;libnxopencpp_features.lib;libnxopencpp_gateway.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_modlutils.lib;libnxopencpp_tooling.lib;libnxopenuicpp.lib;libufun.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
       <AdditionalLibraryDirectories>D:/Program Files/Siemens/NX2412/UGOPEN;D:/Program Files/Siemens/NX2412/UGOPEN/$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+      <DataExecutionPrevention>true</DataExecutionPrevention>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImportLibrary>G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/Release/ZheWanBiRangCao.lib</ImportLibrary>
       <ProgramDataBaseFile>G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/Release/ZheWanBiRangCao.pdb</ProgramDataBaseFile>
+      <RandomizedBaseAddress>true</RandomizedBaseAddress>
+      <SetChecksum>true</SetChecksum>
       <SubSystem>Console</SubSystem>
     </Link>
     <ProjectReference>
@@ -239,6 +246,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Message></Message>
       <Command>setlocal
 "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E copy_if_different G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/ZheWanBiRangCao.dlx G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/MinSizeRel/ZheWanBiRangCao.dlx
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E copy_if_different G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/CustomFeatureConfiguration.xml G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/MinSizeRel/CustomFeatureConfiguration.xml
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -297,6 +306,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Message></Message>
       <Command>setlocal
 "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E copy_if_different G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/ZheWanBiRangCao.dlx G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/RelWithDebInfo/ZheWanBiRangCao.dlx
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E copy_if_different G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/CustomFeatureConfiguration.xml G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/RelWithDebInfo/CustomFeatureConfiguration.xml
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone

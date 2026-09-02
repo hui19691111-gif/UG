@@ -28,6 +28,8 @@
 #include <NXOpen/Features_CustomFeatureData.hxx>
 #include <NXOpen/Features_CustomFeatureDataCollection.hxx>
 #include <NXOpen/Features_CustomTagAttribute.hxx>
+#include <NXOpen/Features_DatumCsys.hxx>
+#include <NXOpen/Features_DatumCsysBuilder.hxx>
 #include <NXOpen/Features_BooleanFeature.hxx>
 #include <NXOpen/Features_ExtrudeBuilder.hxx>
 #include <NXOpen/Features_Feature.hxx>
@@ -65,6 +67,7 @@
 #include <uf.h>
 #include <uf_curve.h>
 #include <uf_modl.h>
+#include <uf_modl_datum_features.h>
 #include <uf_modl_sweep.h>
 #include <uf_modl_udf.h>
 #include <uf_mtx.h>
@@ -145,7 +148,7 @@ public:
                 std::to_wstring(GetTickCount64());
             directory_ = std::filesystem::temp_directory_path() / uniqueName;
             std::filesystem::create_directories(directory_);
-            file_ = directory_ / L"ZW_BiLanCao.prt";
+            file_ = directory_ / L"ZW_BiLanCao1.prt";
 
             std::ofstream output(file_, std::ios::binary | std::ios::trunc);
             output.write(static_cast<const char*>(bytes), byteCount);
@@ -208,7 +211,8 @@ bool ReportSlotFailure(const std::string& stage, int errorCode = 0)
 
 bool AllocateUdfExpressionValues(UF_MODL_udf_exp_data_t& expressionData,
                                  double slotDepth,
-                                 double slotWidth)
+                                 double slotWidth,
+                                 double thickness)
 {
     if (expressionData.num_exps <= 0)
     {
@@ -228,7 +232,15 @@ bool AllocateUdfExpressionValues(UF_MODL_udf_exp_data_t& expressionData,
 
     for (int index = 0; index < expressionData.num_exps; ++index)
     {
-        double numericValue = index == 0 ? slotDepth : slotWidth;
+        double numericValue = slotDepth;
+        if (index == 1)
+        {
+            numericValue = slotWidth;
+        }
+        else if (index == 2)
+        {
+            numericValue = thickness;
+        }
 
         const std::string value = FormatDouble(numericValue);
         char* stored = static_cast<char*>(UF_allocate_memory(
@@ -1594,7 +1606,7 @@ bool ZheWanBiRangCaoDialog::CommitEditableCustomFeature(
             {
                 // Editing can defer the CustomFeature's internal-feature
                 // callbacks until the next model update. Those callbacks edit
-                // the existing UDF and Move Object parameters in place.
+                // the existing UDF and placement feature in place.
                 ForceModelUpdate();
             }
         }
@@ -1736,25 +1748,70 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
                                                                     &expressionData,
                                                                     &referenceData);
     if (initUdfResult != 0 ||
-        expressionData.num_exps != 2 ||
-        !AllocateUdfExpressionValues(expressionData, slotDepth, slotWidth))
+        expressionData.num_exps != 3 ||
+        !AllocateUdfExpressionValues(expressionData, slotDepth, slotWidth, thickness))
     {
-        const bool expressionCountMismatch = expressionData.num_exps != 2;
+        const bool expressionCountMismatch = expressionData.num_exps != 3;
         UF_MODL_udf_free_exp_data(&expressionData);
         UF_MODL_udf_free_ref_data(&referenceData);
         closeTemplate();
         return ReportSlotFailure(
-            expressionCountMismatch ? "UDF template must contain exactly two expressions"
+            expressionCountMismatch ? "UDF template must contain exactly three expressions"
                                     : "initialize UDF insertion data",
             initUdfResult);
     }
 
-    // The source UDF has one point parent.  It is first created at absolute
-    // zero and then its entire feature (including the point parent) is mapped
-    // from the template XYZ system to the requested end-local system.
-    NXOpen::Point* placementPoint = workPart->Points()->CreatePoint(NXOpen::Point3d(0.0, 0.0, 0.0));
-    placementPoint->Blank();
-    const tag_t placementPointTag = placementPoint->Tag();
+    // The revised UDF is positioned by the XZ datum plane, X datum axis and
+    // origin point of a target Datum CSYS.  This gives the UDF its final
+    // coordinates at creation time and removes the extra Move Object feature.
+    tag_t datumCsysTag = NULL_TAG;
+    tag_t smartCsysTag = NULL_TAG;
+    tag_t datumOriginTag = NULL_TAG;
+    tag_t datumAxes[3] = {NULL_TAG, NULL_TAG, NULL_TAG};
+    tag_t datumPlanes[3] = {NULL_TAG, NULL_TAG, NULL_TAG};
+    NXOpen::Features::DatumCsysBuilder* datumBuilder = nullptr;
+    try
+    {
+        NXOpen::CartesianCoordinateSystem* targetCsys =
+            workPart->CoordinateSystems()->CreateCoordinateSystem(
+                origin, xDirection, yDirection);
+        if (targetCsys == nullptr)
+        {
+            throw NXOpen::NXException::Create(1, "Failed to create the target coordinate system.");
+        }
+        datumBuilder = workPart->Features()->CreateDatumCsysBuilder(nullptr);
+        datumBuilder->SetCsys(targetCsys);
+        NXOpen::Features::Feature* datumFeature = datumBuilder->CommitFeature();
+        datumBuilder->Destroy();
+        datumBuilder = nullptr;
+        datumCsysTag = datumFeature != nullptr ? datumFeature->Tag() : NULL_TAG;
+        if (datumCsysTag == NULL_TAG)
+        {
+            throw NXOpen::NXException::Create(1, "Datum CSYS returned no feature.");
+        }
+        UF_MODL_ask_datum_csys_components(
+            datumCsysTag, &smartCsysTag, &datumOriginTag, datumAxes, datumPlanes);
+        if (datumOriginTag == NULL_TAG || datumAxes[0] == NULL_TAG ||
+            datumPlanes[0] == NULL_TAG)
+        {
+            throw NXOpen::NXException::Create(1, "Datum CSYS components are unavailable.");
+        }
+        static_cast<void>(UF_MODL_set_datum_csys_visibility(datumCsysTag, FALSE));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        if (datumBuilder != nullptr)
+        {
+            datumBuilder->Destroy();
+        }
+        DeleteObjectIfAlive(datumCsysTag);
+        UF_MODL_udf_free_exp_data(&expressionData);
+        UF_MODL_udf_free_ref_data(&referenceData);
+        closeTemplate();
+        return ReportSlotFailure("create UDF placement coordinate system: " +
+                                     std::string(ex.Message()),
+                                 ex.ErrorCode());
+    }
 
     int allocationError = 0;
     referenceData.new_refs = static_cast<tag_t*>(UF_allocate_memory(
@@ -1766,25 +1823,27 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
             static_cast<unsigned int>(sizeof(UF_MODL_udf_reverse_dir_t) * referenceData.num_refs),
             &allocationError));
     }
-    int parentType = 0;
-    int parentSubtype = 0;
-    const bool pointParent = referenceData.num_refs == 1 &&
-                             referenceData.old_refs != nullptr &&
-                             UF_OBJ_ask_type_and_subtype(referenceData.old_refs[0],
-                                                        &parentType,
-                                                        &parentSubtype) == 0 &&
-                             parentType == UF_point_type;
-    if (!pointParent || allocationError != 0 ||
+    const bool referenceCountMismatch = referenceData.num_refs != 3;
+    if (referenceCountMismatch || allocationError != 0 ||
         referenceData.new_refs == nullptr || referenceData.reverse_refs_dir == nullptr)
     {
         UF_MODL_udf_free_exp_data(&expressionData);
         UF_MODL_udf_free_ref_data(&referenceData);
         closeTemplate();
-        DeleteObjectIfAlive(placementPointTag);
-        return ReportSlotFailure("resolve the UDF point parent", allocationError);
+        DeleteObjectIfAlive(datumCsysTag);
+        return ReportSlotFailure(
+            referenceCountMismatch
+                ? "UDF template must contain exactly three coordinate references"
+                : "allocate the UDF coordinate references",
+            allocationError);
     }
-    referenceData.new_refs[0] = placementPointTag;
-    referenceData.reverse_refs_dir[0] = UF_MODL_UDF_KEEP_DIR;
+    referenceData.new_refs[0] = datumPlanes[0];
+    referenceData.new_refs[1] = datumAxes[0];
+    referenceData.new_refs[2] = datumOriginTag;
+    for (int index = 0; index < referenceData.num_refs; ++index)
+    {
+        referenceData.reverse_refs_dir[index] = UF_MODL_UDF_KEEP_DIR;
+    }
 
     tag_t udfTag = NULL_TAG;
     const int createResult = UF_MODL_create_instantiated_udf1(
@@ -1795,7 +1854,7 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
     if (createResult != 0 || udfTag == NULL_TAG)
     {
         DeleteObjectIfAlive(udfTag);
-        DeleteObjectIfAlive(placementPointTag);
+        DeleteObjectIfAlive(datumCsysTag);
         return ReportSlotFailure("instantiate UDF", createResult);
     }
 
@@ -1815,89 +1874,13 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
             DeleteObjectIfAlive(toolBodyTag);
         }
         DeleteObjectIfAlive(udfTag);
-        DeleteObjectIfAlive(placementPointTag);
+        DeleteObjectIfAlive(datumCsysTag);
         return ReportSlotFailure("find the single tool body created by the UDF");
     }
-
-    // Create an associative Move Object feature for the complete placement
-    // matrix.  A one-shot UF_MODL_transform_entities operation looks correct
-    // in preview but has no history record, so an adopted CustomFeature would
-    // replay the UDF at its original template coordinates.
     tag_t transformedToolBodyTag = toolBodyTags.front();
-    tag_t moveFeatureTag = NULL_TAG;
-    tag_t sourceCsysTag = NULL_TAG;
-    tag_t targetCsysTag = NULL_TAG;
-    NXOpen::Features::MoveObjectBuilder* moveBuilder = nullptr;
-    try
-    {
-        NXOpen::Body* sourceToolBody = dynamic_cast<NXOpen::Body*>(
-            NXOpen::NXObjectManager::Get(transformedToolBodyTag));
-        if (sourceToolBody == nullptr)
-        {
-            throw NXOpen::NXException::Create(1, "The source UDF body is unavailable.");
-        }
 
-        const NXOpen::Matrix3x3 sourceOrientation(
-            1.0, 0.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 0.0, 1.0);
-        const NXOpen::Matrix3x3 targetOrientation(
-            xDirection.X, xDirection.Y, xDirection.Z,
-            yDirection.X, yDirection.Y, yDirection.Z,
-            outwardNormal.X, outwardNormal.Y, outwardNormal.Z);
-        NXOpen::CartesianCoordinateSystem* sourceCsys =
-            workPart->CoordinateSystems()->CreateCoordinateSystem(
-                NXOpen::Point3d(0.0, 0.0, 0.0), sourceOrientation, true);
-        NXOpen::CartesianCoordinateSystem* targetCsys =
-            workPart->CoordinateSystems()->CreateCoordinateSystem(
-                origin, targetOrientation, true);
-        if (sourceCsys == nullptr || targetCsys == nullptr)
-        {
-            throw NXOpen::NXException::Create(1,
-                                               "Failed to create placement coordinate systems.");
-        }
-        sourceCsysTag = sourceCsys->Tag();
-        targetCsysTag = targetCsys->Tag();
-
-        moveBuilder = workPart->BaseFeatures()->CreateMoveObjectBuilder(nullptr);
-        moveBuilder->SetMoveObjectResult(
-            NXOpen::Features::MoveObjectBuilder::MoveObjectResultOptionsMoveOriginal);
-        moveBuilder->SetMoveParents(false);
-        moveBuilder->SetAssociative(true);
-        moveBuilder->ObjectToMoveObject()->Add(sourceToolBody);
-        moveBuilder->TransformMotion()->SetOption(
-            NXOpen::GeometricUtilities::ModlMotion::OptionsCsysToCsys);
-        moveBuilder->TransformMotion()->SetFromCsys(sourceCsys);
-        moveBuilder->TransformMotion()->SetToCsys(targetCsys);
-        NXOpen::NXObject* moveResult = moveBuilder->Commit();
-        moveFeatureTag = moveResult != nullptr ? moveResult->Tag() : NULL_TAG;
-        moveBuilder->Destroy();
-        moveBuilder = nullptr;
-        if (moveFeatureTag == NULL_TAG)
-        {
-            throw NXOpen::NXException::Create(1, "Move Object returned no feature.");
-        }
-    }
-    catch (const NXOpen::NXException& ex)
-    {
-        if (moveBuilder != nullptr)
-        {
-            moveBuilder->Destroy();
-        }
-        DeleteObjectIfAlive(transformedToolBodyTag);
-        DeleteObjectIfAlive(targetCsysTag);
-        DeleteObjectIfAlive(sourceCsysTag);
-        DeleteObjectIfAlive(udfTag);
-        DeleteObjectIfAlive(placementPointTag);
-        return ReportSlotFailure("create associative tool-body placement: " +
-                                     std::string(ex.Message()),
-                                 ex.ErrorCode());
-    }
-    toolBodyTags[0] = transformedToolBodyTag;
-
-    // The transformed UDF can already be displayed at the requested position,
-    // while modeling queries still see its pre-transform cached geometry.  Make
-    // the transform current before asking for its box or running interference.
+    // Make the directly positioned UDF current before querying its body or
+    // performing the separate Boolean subtract.
     try
     {
         ForceModelUpdate();
@@ -1905,8 +1888,8 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
     catch (const NXOpen::NXException& ex)
     {
         DeleteObjectIfAlive(udfTag);
-        DeleteObjectIfAlive(placementPointTag);
-        return ReportSlotFailure("update transformed UDF before interference: " +
+        DeleteObjectIfAlive(datumCsysTag);
+        return ReportSlotFailure("update positioned UDF before interference: " +
                                      std::string(ex.Message()),
                                  ex.ErrorCode());
     }
@@ -1925,7 +1908,7 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
     if (updatedToolBodyTags.size() != 1)
     {
         DeleteObjectIfAlive(udfTag);
-        DeleteObjectIfAlive(placementPointTag);
+        DeleteObjectIfAlive(datumCsysTag);
         return ReportSlotFailure("find the updated tool body created by the UDF");
     }
     transformedToolBodyTag = updatedToolBodyTags.front();
@@ -1933,9 +1916,8 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
 
     if (previewToolOnly)
     {
-        previewFeatureTags_.push_back(placementPointTag);
+        previewFeatureTags_.push_back(datumCsysTag);
         previewFeatureTags_.push_back(udfTag);
-        previewFeatureTags_.push_back(moveFeatureTag);
         ForceModelUpdate();
         gLastSlotFailure.clear();
         return true;
@@ -1985,6 +1967,7 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
     if (interferenceCheckResult != 0 || interferenceCleanupResult != 0)
     {
         DeleteObjectIfAlive(udfTag);
+        DeleteObjectIfAlive(datumCsysTag);
         return ReportSlotFailure(interferenceCheckResult != 0
                                      ? "solid-body interference check"
                                      : "clean up solid-body interference check",
@@ -1996,6 +1979,7 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
     if (interferenceStatus != 1)
     {
         DeleteObjectIfAlive(udfTag);
+        DeleteObjectIfAlive(datumCsysTag);
         const char* reason =
             interferenceStatus == 3
                 ? "tool body only touches the target; custom feature deleted"
@@ -2010,7 +1994,8 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
     if (toolBody == nullptr)
     {
         DeleteObjectIfAlive(udfTag);
-        return ReportSlotFailure("the transformed UDF tool body is unavailable");
+        DeleteObjectIfAlive(datumCsysTag);
+        return ReportSlotFailure("the positioned UDF tool body is unavailable");
     }
 
     std::vector<tag_t> booleanFeatureTags;
@@ -2049,6 +2034,7 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
             }
         }
         DeleteObjectIfAlive(udfTag);
+        DeleteObjectIfAlive(datumCsysTag);
         return ReportSlotFailure("Boolean subtract: " + std::string(ex.Message()), ex.ErrorCode());
     }
     catch (const std::exception& ex)
@@ -2064,6 +2050,7 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
             }
         }
         DeleteObjectIfAlive(udfTag);
+        DeleteObjectIfAlive(datumCsysTag);
         return ReportSlotFailure("Boolean subtract: " + std::string(ex.what()));
     }
     catch (...)
@@ -2079,12 +2066,12 @@ bool ZheWanBiRangCaoDialog::CreateSlotCustomFeatureAtEnd(
             }
         }
         DeleteObjectIfAlive(udfTag);
+        DeleteObjectIfAlive(datumCsysTag);
         return ReportSlotFailure("Boolean subtract: unknown failure");
     }
 
-    previewFeatureTags_.push_back(placementPointTag);
+    previewFeatureTags_.push_back(datumCsysTag);
     previewFeatureTags_.push_back(udfTag);
-    previewFeatureTags_.push_back(moveFeatureTag);
     previewFeatureTags_.insert(previewFeatureTags_.end(),
                                booleanFeatureTags.begin(),
                                booleanFeatureTags.end());

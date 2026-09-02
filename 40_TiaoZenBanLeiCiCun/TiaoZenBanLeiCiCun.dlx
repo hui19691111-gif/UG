@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version='1.0' encoding='UTF-8'?>
 <Dialog NX="2412" id="Dialog" icon="TiaoZenBanLeiCiCun.bmp" name="Dialog" type="uicomp" title="板件调尺" creator="Zhihui" version="1.0.0" Expanded="1" languageInfo="Language and Codeset: simplified chinese 936" ContainerItems="5">
 <item Expanded="1" class="UGS::UICOMP_group" icon="styler_block.bmp" id="selection_group" name="selection_group" presentation="Group" type="uicomp">
   <PropertyList id="id" mode="0">
@@ -49,7 +49,7 @@
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True"/>
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False"/>
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True"/>
-      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="当前尺寸：请先选择板件平面"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="模型真实尺寸：请先选择板件平面"/>
       <Property ClassID="UGS::UICOMP_label" group="Block Specific::" hierarchy="UGS::UICOMP_label" id="DisplayBitmapLabel" mask="0" name="DisplayBitmapLabel" sname="DisplayBitmapLabel" source="1" type="logical" value="True"/>
     </PropertyList>
   </item>
@@ -202,7 +202,7 @@
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True"/>
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False"/>
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True"/>
-      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="目标长度"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="长度增量（原 --）"/>
       <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="Value" mask="0" name="Value" sname="Value" source="4" type="double" value="0"/>
       <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="MinimumValue" mask="0" name="MinimumValue" sname="MinimumValue" source="1" type="double" value="-1000000"/>
       <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="MaximumValue" mask="0" name="MaximumValue" sname="MaximumValue" source="1" type="double" value="1000000"/>
@@ -219,7 +219,7 @@
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True"/>
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False"/>
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True"/>
-      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="目标宽度"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="宽度增量（原 --）"/>
       <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="Value" mask="0" name="Value" sname="Value" source="4" type="double" value="0"/>
       <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="MinimumValue" mask="0" name="MinimumValue" sname="MinimumValue" source="1" type="double" value="-1000000"/>
       <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="MaximumValue" mask="0" name="MaximumValue" sname="MaximumValue" source="1" type="double" value="1000000"/>
@@ -234,7 +234,7 @@
     <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_group" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True"/>
     <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_group" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True"/>
     <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_group" id="Expanded" mask="0" name="Expanded" sname="Expanded" source="2" type="logical" value="True"/>
-    <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_group" id="Title" mask="257" name="Title" sname="Label" source="1" type="utfstring" value="统一调整（指定成品尺寸）"/>
+    <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_group" id="Title" mask="257" name="Title" sname="Label" source="1" type="utfstring" value="统一调整（输入尺寸增量）"/>
     <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_group" id="Group" mask="4100" name="Group" sname="Group" source="1" type="logical" value="True"/>
     <Property ClassID="UGS::UICOMP_group" group="Block Specific::" hierarchy="UGS::UICOMP_group" id="Column" mask="16384" name="Column" sname="Column" source="1" type="integer" value="1"/>
   </PropertyList>
@@ -278,7 +278,7 @@
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False"/>
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True"/>
       <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="长度步长"/>
-      <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="Value" mask="0" name="Value" sname="Value" source="4" type="double" value="10"/>
+      <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="Value" mask="0" name="Value" sname="Value" source="4" type="double" value="1"/>
       <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="MinimumValue" mask="0" name="MinimumValue" sname="MinimumValue" source="1" type="double" value="-1000000"/>
       <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="MaximumValue" mask="0" name="MaximumValue" sname="MaximumValue" source="1" type="double" value="1000000"/>
       <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="Increment" mask="0" name="Increment" sname="Increment" source="1" type="double" value="1"/>
@@ -308,7 +308,7 @@
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False"/>
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True"/>
       <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_double" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="宽度步长"/>
-      <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="Value" mask="0" name="Value" sname="Value" source="4" type="double" value="10"/>
+      <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="Value" mask="0" name="Value" sname="Value" source="4" type="double" value="1"/>
       <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="MinimumValue" mask="0" name="MinimumValue" sname="MinimumValue" source="1" type="double" value="-1000000"/>
       <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="MaximumValue" mask="0" name="MaximumValue" sname="MaximumValue" source="1" type="double" value="1000000"/>
       <Property ClassID="UGS::UICOMP_double" group="Block Specific::" hierarchy="UGS::UICOMP_double" id="Increment" mask="0" name="Increment" sname="Increment" source="1" type="double" value="1"/>
@@ -329,12 +329,12 @@
         <Option name="Option Menu" value="0"/><Option name="Radio Box" value="1"/><Option name="Pulldown" value="2"/>
       </Property>
       <Property ClassID="UGS::UICOMP_enum" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="Titles_1" mask="256" name="Titles_1" selected="0" sname="Value" source="4" type="enum">
-        <Option name="就近" value="0"/><Option name="向上" value="1"/><Option name="向下" value="2"/>
+        <Option name="就近取整" value="0"/><Option name="向上取整" value="1"/><Option name="向下取整" value="2"/>
       </Property>
       <Property ClassID="UGS::UICOMP_enum" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="RadioOrientation" mask="16386" name="RadioOrientation" selected="1" sname="Layout" source="1" type="enum">
         <Option name="Vertical" value="0"/><Option name="Horizontal" value="1"/>
       </Property>
-      <Property ClassID="UGS::UICOMP_enum" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="Width" mask="16386" name="Width" sname="NumberOfColumns" source="1" type="integer" value="1"/>
+      <Property ClassID="UGS::UICOMP_enum" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="Width" mask="16386" name="Width" sname="NumberOfColumns" source="1" type="integer" value="10"/>
     </PropertyList>
   </item>
 </Property>
@@ -435,7 +435,7 @@
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True"/>
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False"/>
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True"/>
-      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="调整后长度：--"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="调整后尺寸：--"/>
       <Property ClassID="UGS::UICOMP_label" group="Block Specific::" hierarchy="UGS::UICOMP_label" id="DisplayBitmapLabel" mask="0" name="DisplayBitmapLabel" sname="DisplayBitmapLabel" source="1" type="logical" value="True"/>
     </PropertyList>
   </item>
@@ -448,7 +448,7 @@
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True"/>
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False"/>
 <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True"/>
-      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="调整后宽度：--"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_label" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="尺寸变化：--"/>
       <Property ClassID="UGS::UICOMP_label" group="Block Specific::" hierarchy="UGS::UICOMP_label" id="DisplayBitmapLabel" mask="0" name="DisplayBitmapLabel" sname="DisplayBitmapLabel" source="1" type="logical" value="True"/>
     </PropertyList>
   </item>
@@ -566,5 +566,5 @@
   <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True"/>
   <Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="HideApply" mask="4096" name="HideApply" sname="HideApply" source="3" type="logical" value="False"/>
   <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="板件调尺"/>
-</PropertyList>
+<Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="HelpTag" mask="4096" name="HelpTag" sname="HelpTag" source="3" type="string" value="Zhihui_TiaoZenBanLeiCiCun"/></PropertyList>
 </Dialog>

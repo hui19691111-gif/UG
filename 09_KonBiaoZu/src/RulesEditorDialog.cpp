@@ -429,7 +429,7 @@ namespace
     std::string FormatDouble(double value)
     {
         std::ostringstream out;
-        out << std::fixed << std::setprecision(2) << value;
+        out << std::fixed << std::setprecision(3) << value;
         return out.str();
     }
 
@@ -517,7 +517,7 @@ namespace
         output << "size=" << EscapeIni(normalized.size) << "\n";
         output << "threadSpec=" << EscapeIni(normalized.threadSpec) << "\n";
         output << "lengthText=" << EscapeIni(normalized.lengthText) << "\n";
-        output << "bottomHole=" << std::fixed << std::setprecision(2) << normalized.bottomHole << "\n";
+        output << "bottomHole=" << std::fixed << std::setprecision(3) << normalized.bottomHole << "\n";
         output << "displayText=" << EscapeIni(normalized.displayText) << "\n";
         output << "standardComment=" << EscapeIni(normalized.standardComment) << "\n";
         output << "note=" << EscapeIni(normalized.note) << "\n\n";
@@ -1999,7 +1999,7 @@ namespace
                        << EscapeCsv(NormalizeTextEncoding(rule.size)) << ','
                        << EscapeCsv(NormalizeTextEncoding(rule.threadSpec)) << ','
                        << EscapeCsv(NormalizeTextEncoding(rule.lengthText)) << ','
-                       << std::fixed << std::setprecision(2) << rule.bottomHole << ','
+                       << std::fixed << std::setprecision(3) << rule.bottomHole << ','
                        << EscapeCsv(NormalizeTextEncoding(rule.displayText)) << ','
                        << EscapeCsv(NormalizeTextEncoding(rule.standardComment)) << ','
                        << EscapeCsv(NormalizeTextEncoding(rule.note)) << "\n";

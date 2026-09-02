@@ -4876,23 +4876,30 @@ int BanJjinCaiBian::apply_cb()
         }
 
         std::vector<NXOpen::TaggedObject*> selectedObjects = selection0->GetSelectedObjects();
+        if (selectedObjects.empty())
+        {
+            throw NXOpen::NXException::Create(1, "Please select at least one edge.");
+        }
+
+        // update_cb creates the result as a live preview as soon as the edge or
+        // a parameter changes. Re-running ProcessEdgeSelection here attempts
+        // the same booleans against geometry that has already been modified and
+        // makes Apply fail (or creates the cut twice). Applying only needs to
+        // detach the completed preview from the cleanup bookkeeping.
+        createdFeatureTags.clear();
+        edgeFeatureTags.clear();
+        lastProcessedTag = NULL_TAG;
+        lastSelectionSignature.clear();
+        lastEnumValue = -1;
+
+        // Start the next Apply operation with a fresh selection. Clear the
+        // bookkeeping first because SetTaggedObjectVector invokes update_cb.
         NXOpen::BlockStyler::PropertyList* selectionProps = selection0->GetProperties();
-        const NXOpen::Point3d selectionPickPoint = selectionProps->GetPoint("PickPoint");
+        selectionProps->SetTaggedObjectVector(
+            "SelectedObjects",
+            std::vector<NXOpen::TaggedObject*>());
         delete selectionProps;
         selectionProps = NULL;
-
-        const double cutGapValue = ClampCutGap(GetDoubleBlockValue(cutGap, 0.2));
-        const double bendInnerRValue = ClampBendInnerR(GetDoubleBlockValue(bendInnerR, 0.2));
-
-        for (NXOpen::TaggedObject* selectedObject : selectedObjects)
-        {
-            NXOpen::Edge *selectedEdge = dynamic_cast<NXOpen::Edge*>(selectedObject);
-            if (selectedEdge != NULL)
-            {
-                ProcessEdgeSelection(workPart, theSession, enum0, selectedEdge, &selectionPickPoint, cutGapValue, bendInnerRValue, &createdFeatureTags);
-                continue;
-            }
-        }
     }
     catch(exception& ex)
     {

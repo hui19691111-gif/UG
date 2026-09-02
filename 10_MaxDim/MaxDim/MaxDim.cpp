@@ -42,6 +42,8 @@
 #include <string>
 #include <cmath>
 #include <vector>
+#include <limits>
+#include <NXOpen/DisplayableObject.hxx>
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
 
@@ -460,6 +462,331 @@ static bool CreateOverallDimensionForView(
 		return false;
 	}
 }
+
+// Keep the standalone MaxDim command consistent with the overall-dimension
+// implementation used by AutoCreateThreeViews.  In particular, dimensions are
+// based on all visible solid drafting curves instead of line-only bounds.
+struct VisibleCurveExtent
+{
+	NXOpen::Drawings::DraftingCurve* curve;
+	tag_t tag;
+	LayoutRect bounds;
+	bool initialized;
+
+	VisibleCurveExtent()
+		: curve(NULL), tag(NULL_TAG), bounds{ 0.0, 0.0, 0.0, 0.0 }, initialized(false)
+	{
+	}
+};
+
+static void AccumulateDrawingPoint(
+	LayoutRect& bounds,
+	double x,
+	double y,
+	bool& initialized)
+{
+	if (!initialized)
+	{
+		bounds.minX = bounds.maxX = x;
+		bounds.minY = bounds.maxY = y;
+		initialized = true;
+		return;
+	}
+
+	bounds.minX = std::min(bounds.minX, x);
+	bounds.minY = std::min(bounds.minY, y);
+	bounds.maxX = std::max(bounds.maxX, x);
+	bounds.maxY = std::max(bounds.maxY, y);
+}
+
+static bool IsVisibleDimensionCurve(NXOpen::Drawings::DraftingCurve* curve)
+{
+	NXOpen::DisplayableObject* displayable =
+		dynamic_cast<NXOpen::DisplayableObject*>(curve);
+	if (displayable == NULL || displayable->IsBlanked())
+	{
+		return false;
+	}
+
+	try
+	{
+		return displayable->LineFont() == NXOpen::DisplayableObject::ObjectFontSolid;
+	}
+	catch (...)
+	{
+		return false;
+	}
+}
+
+static bool EvaluateDrawingPoint(
+	UF_EVAL_p_t evaluator,
+	tag_t viewTag,
+	double parameter,
+	double modelPoint[3],
+	double drawingPoint[2])
+{
+	double derivatives[3] = { 0.0, 0.0, 0.0 };
+	return evaluator != NULL &&
+		viewTag != NULL_TAG &&
+		UF_EVAL_evaluate(evaluator, 0, parameter, modelPoint, derivatives) == 0 &&
+		UF_VIEW_map_model_to_drawing(viewTag, modelPoint, drawingPoint) == 0;
+}
+
+static std::vector<VisibleCurveExtent> CollectVisibleCurveExtents(
+	NXOpen::Drawings::DraftingView* view,
+	const std::vector<NXOpen::Drawings::DraftingCurve*>& curves)
+{
+	std::vector<VisibleCurveExtent> extents;
+	if (view == NULL)
+	{
+		return extents;
+	}
+
+	for (size_t i = 0; i < curves.size(); ++i)
+	{
+		NXOpen::Drawings::DraftingCurve* curve = curves[i];
+		if (!IsVisibleDimensionCurve(curve))
+		{
+			continue;
+		}
+
+		UF_EVAL_p_t evaluator = NULL;
+		if (UF_EVAL_initialize(curve->Tag(), &evaluator) != 0 || evaluator == NULL)
+		{
+			continue;
+		}
+
+		VisibleCurveExtent extent;
+		extent.curve = curve;
+		extent.tag = curve->Tag();
+		double limits[2] = { 0.0, 0.0 };
+		if (UF_EVAL_ask_limits(evaluator, limits) == 0)
+		{
+			for (int endpoint = 0; endpoint < 2; ++endpoint)
+			{
+				double modelPoint[3] = { 0.0, 0.0, 0.0 };
+				double drawingPoint[2] = { 0.0, 0.0 };
+				if (EvaluateDrawingPoint(
+						evaluator,
+						view->Tag(),
+						limits[endpoint],
+						modelPoint,
+						drawingPoint))
+				{
+					AccumulateDrawingPoint(
+						extent.bounds,
+						drawingPoint[0],
+						drawingPoint[1],
+						extent.initialized);
+				}
+			}
+		}
+		UF_EVAL_free(evaluator);
+
+		if (extent.initialized)
+		{
+			extents.push_back(extent);
+		}
+	}
+	return extents;
+}
+
+static bool BuildVisibleCurveBounds(
+	const std::vector<VisibleCurveExtent>& extents,
+	LayoutRect& bounds)
+{
+	bool initialized = false;
+	for (size_t i = 0; i < extents.size(); ++i)
+	{
+		if (!extents[i].initialized)
+		{
+			continue;
+		}
+		AccumulateDrawingPoint(
+			bounds,
+			extents[i].bounds.minX,
+			extents[i].bounds.minY,
+			initialized);
+		AccumulateDrawingPoint(
+			bounds,
+			extents[i].bounds.maxX,
+			extents[i].bounds.maxY,
+			initialized);
+	}
+	return initialized;
+}
+
+static bool SelectVisibleOverallDimensionCurves(
+	NXOpen::Drawings::DraftingView* view,
+	const std::vector<VisibleCurveExtent>& extents,
+	const LayoutRect& bounds,
+	bool horizontalDimension,
+	double preferredCrossCoordinate,
+	CurveAssocCandidate& first,
+	CurveAssocCandidate& second)
+{
+	if (view == NULL || view->Tag() == NULL_TAG)
+	{
+		return false;
+	}
+
+	const double width = std::max(1.0, bounds.maxX - bounds.minX);
+	const double height = std::max(1.0, bounds.maxY - bounds.minY);
+	const double tolerance = std::max(0.05, std::max(width, height) * 0.002);
+	const double firstTarget = horizontalDimension ? bounds.maxX : bounds.maxY;
+	const double secondTarget = horizontalDimension ? bounds.minX : bounds.minY;
+	bool firstFound = false;
+	bool secondFound = false;
+	double firstScore = std::numeric_limits<double>::max();
+	double secondScore = std::numeric_limits<double>::max();
+
+	for (size_t i = 0; i < extents.size(); ++i)
+	{
+		UF_EVAL_p_t evaluator = NULL;
+		if (UF_EVAL_initialize(extents[i].tag, &evaluator) != 0 || evaluator == NULL)
+		{
+			continue;
+		}
+
+		double limits[2] = { 0.0, 0.0 };
+		if (UF_EVAL_ask_limits(evaluator, limits) == 0)
+		{
+			for (int endpoint = 0; endpoint < 2; ++endpoint)
+			{
+				double modelPoint[3] = { 0.0, 0.0, 0.0 };
+				double drawingPoint[2] = { 0.0, 0.0 };
+				if (!EvaluateDrawingPoint(
+						evaluator,
+						view->Tag(),
+						limits[endpoint],
+						modelPoint,
+						drawingPoint))
+				{
+					continue;
+				}
+
+				const double coordinate =
+					horizontalDimension ? drawingPoint[0] : drawingPoint[1];
+				const double crossCoordinate =
+					horizontalDimension ? drawingPoint[1] : drawingPoint[0];
+				const NXOpen::InferSnapType::SnapType snapType =
+					endpoint == 0 ?
+					NXOpen::InferSnapType::SnapTypeStart :
+					NXOpen::InferSnapType::SnapTypeEnd;
+
+				const double firstDistance = fabs(coordinate - firstTarget);
+				const double firstCandidateScore =
+					firstDistance * 100000.0 + fabs(crossCoordinate - preferredCrossCoordinate);
+				if (firstDistance <= tolerance &&
+					(!firstFound || firstCandidateScore < firstScore))
+				{
+					firstFound = true;
+					firstScore = firstCandidateScore;
+					first.curve = extents[i].curve;
+					first.snapType = snapType;
+					first.modelPoint = NXOpen::Point3d(
+						modelPoint[0], modelPoint[1], modelPoint[2]);
+				}
+
+				const double secondDistance = fabs(coordinate - secondTarget);
+				const double secondCandidateScore =
+					secondDistance * 100000.0 + fabs(crossCoordinate - preferredCrossCoordinate);
+				if (secondDistance <= tolerance &&
+					(!secondFound || secondCandidateScore < secondScore))
+				{
+					secondFound = true;
+					secondScore = secondCandidateScore;
+					second.curve = extents[i].curve;
+					second.snapType = snapType;
+					second.modelPoint = NXOpen::Point3d(
+						modelPoint[0], modelPoint[1], modelPoint[2]);
+				}
+			}
+		}
+		UF_EVAL_free(evaluator);
+	}
+
+	return firstFound && secondFound && first.curve != NULL && second.curve != NULL;
+}
+
+static bool CreateVisibleOverallDimension(
+	NXOpen::Part* workPart,
+	NXOpen::Drawings::DraftingView* view,
+	const std::vector<VisibleCurveExtent>& extents,
+	const LayoutRect& bounds,
+	bool horizontalDimension,
+	double offset)
+{
+	const double dimensionValue = horizontalDimension ?
+		bounds.maxX - bounds.minX :
+		bounds.maxY - bounds.minY;
+	if (workPart == NULL || view == NULL || fabs(dimensionValue) <= 0.01)
+	{
+		return false;
+	}
+
+	const double preferredCrossCoordinate = horizontalDimension ?
+		bounds.maxY + offset :
+		bounds.minX - offset;
+	CurveAssocCandidate first =
+		{ NULL, NXOpen::InferSnapType::SnapTypeStart, NXOpen::Point3d(0.0, 0.0, 0.0) };
+	CurveAssocCandidate second =
+		{ NULL, NXOpen::InferSnapType::SnapTypeEnd, NXOpen::Point3d(0.0, 0.0, 0.0) };
+	if (!SelectVisibleOverallDimensionCurves(
+			view,
+			extents,
+			bounds,
+			horizontalDimension,
+			preferredCrossCoordinate,
+			first,
+			second))
+	{
+		return false;
+	}
+
+	NXOpen::Annotations::Dimension* nullDimension = NULL;
+	NXOpen::Annotations::RapidDimensionBuilder* builder =
+		workPart->Dimensions()->CreateRapidDimensionBuilder(nullDimension);
+	if (builder == NULL)
+	{
+		return false;
+	}
+
+	try
+	{
+		NXOpen::View* nullView = NULL;
+		NXOpen::Point3d assistPoint(0.0, 0.0, 0.0);
+		builder->FirstAssociativity()->SetValue(
+			first.snapType, first.curve, view, first.modelPoint, NULL, nullView, assistPoint);
+		builder->SecondAssociativity()->SetValue(
+			second.snapType, second.curve, view, second.modelPoint, NULL, nullView, assistPoint);
+		builder->Style()->DimensionStyle()->SetTextCentered(true);
+		builder->Style()->DimensionStyle()->SetNarrowDisplayType(
+			NXOpen::Annotations::NarrowDisplayOptionNone);
+		builder->Measurement()->SetMethod(
+			horizontalDimension ?
+			NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodHorizontal :
+			NXOpen::Annotations::DimensionMeasurementBuilder::MeasurementMethodVertical);
+		const NXOpen::Point3d origin = horizontalDimension ?
+			NXOpen::Point3d(
+				(bounds.minX + bounds.maxX) * 0.5,
+				preferredCrossCoordinate,
+				0.0) :
+			NXOpen::Point3d(
+				preferredCrossCoordinate,
+				(bounds.minY + bounds.maxY) * 0.5,
+				0.0);
+		builder->Origin()->Origin()->SetValue(NULL, nullView, origin);
+		builder->Commit();
+		builder->Destroy();
+		return true;
+	}
+	catch (...)
+	{
+		builder->Destroy();
+		return false;
+	}
+}
 }
 //------------------------------------------------------------------------------
 // Constructor for NX Styler class
@@ -836,11 +1163,16 @@ int MaxDim::update_cb(NXOpen::BlockStyler::UIBlock* block)
 					DraftingCurvevector.push_back(DraftingCurve);
 				}
 			}
+			const std::vector<VisibleCurveExtent> visibleExtents =
+				CollectVisibleCurveExtents(draftingView1, DraftingCurvevector);
 			LayoutRect viewRect = { 0.0, 0.0, 0.0, 0.0 };
-			if (AskLineCurveRect(draftingView1, DraftingCurvevector, viewRect))
+			if (BuildVisibleCurveBounds(visibleExtents, viewRect))
 			{
-				CreateOverallDimensionForView(workPart, draftingView1, DraftingCurvevector, viewRect, true);
-				CreateOverallDimensionForView(workPart, draftingView1, DraftingCurvevector, viewRect, false);
+				const double offset = 8.0;
+				CreateVisibleOverallDimension(
+					workPart, draftingView1, visibleExtents, viewRect, true, offset);
+				CreateVisibleOverallDimension(
+					workPart, draftingView1, visibleExtents, viewRect, false, offset);
 			}
 			UF_terminate();
 

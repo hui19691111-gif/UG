@@ -178,6 +178,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Project>{96331081-1A33-307A-A393-70A68E54D75C}</Project>
       <Name>ZheWanBiRangCao</Name>
     </ProjectReference>
+    <ProjectReference Include="G:\UG智辉钣金插件_源码精简_20260605_最终精简\features\18_ZheWanBiRangCao\build-codex\ZheWanBiRangCaoCore.vcxproj">
+      <Project>{BA941998-44F7-3CD6-AE1E-5CCBC783C6F8}</Project>
+      <Name>ZheWanBiRangCaoCore</Name>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

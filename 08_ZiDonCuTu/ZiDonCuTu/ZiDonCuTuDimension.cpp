@@ -1741,6 +1741,33 @@ NXOpen::Annotations::RapidDimensionBuilder* CreateRapidDimensionBuilder()
 	return workPart->Dimensions()->CreateRapidDimensionBuilder(nullDimension);
 }
 
+namespace
+{
+int g_dimensionAutoPositionMode = 2;
+
+NXOpen::Annotations::TextPlacement DimensionTextPlacement(bool automatic)
+{
+	return automatic ?
+		NXOpen::Annotations::TextPlacementAutomatic :
+		NXOpen::Annotations::TextPlacementManualArrowsIn;
+}
+}
+
+void SetDimensionAutoPositionMode(int mode)
+{
+	g_dimensionAutoPositionMode = (mode >= 0 && mode <= 3) ? mode : 2;
+}
+
+bool IsLinearDimensionAutoPositionEnabled()
+{
+	return g_dimensionAutoPositionMode == 0 || g_dimensionAutoPositionMode == 2;
+}
+
+bool IsRadialDimensionAutoPositionEnabled()
+{
+	return g_dimensionAutoPositionMode == 0 || g_dimensionAutoPositionMode == 3;
+}
+
 void RegisterAngularDimensionObstacle(
 	NXOpen::Drawings::BaseView* baseView,
 	const double intersection[2],
@@ -1881,6 +1908,8 @@ bool CreateCurvePairAngleDimensionFromModelPoint(
 	builder->Origin()->Plane()->SetPlaneMethod(NXOpen::Annotations::PlaneBuilder::PlaneMethodTypeXyPlane);
 	builder->Origin()->SetInferRelativeToGeometry(false);
 	builder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
+	builder->Style()->DimensionStyle()->SetTextArrowPlacement(
+		DimensionTextPlacement(g_dimensionAutoPositionMode == 0));
 	builder->Style()->DimensionStyle()->SetDimensionReferenceIncludeType(NXOpen::Annotations::ReferenceIncludeTypeOnlyValue);
 	builder->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
 	builder->Style()->DimensionStyle()->SetTextCentered(true);
@@ -1945,7 +1974,8 @@ void ApplyDefaultRapidDimensionStyle(NXOpen::Annotations::RapidDimensionBuilder*
 	builder->Origin()->SetInferRelativeToGeometry(false);
 	builder->Origin()->SetInferRelativeToGeometryFromLeader(false);
 	builder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
-	builder->Style()->DimensionStyle()->SetTextArrowPlacement(NXOpen::Annotations::TextPlacementAutomatic);
+	builder->Style()->DimensionStyle()->SetTextArrowPlacement(
+		DimensionTextPlacement(IsLinearDimensionAutoPositionEnabled()));
 	builder->Style()->DimensionStyle()->SetTextCentered(true);
 	builder->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
 }
@@ -2709,6 +2739,8 @@ bool CreateRadialDimensionAtDrawingPoint(
 
 	NXOpen::Point3d point(drawingPoint[0], drawingPoint[1], 0.0);
 	builder->FirstAssociativity()->SetValue(faceCurve, baseView, point);
+	builder->Style()->DimensionStyle()->SetTextArrowPlacement(
+		DimensionTextPlacement(IsRadialDimensionAutoPositionEnabled()));
 	NXOpen::Point3d originPoint;
 	if (TryBuildRadialDimensionOrigin(baseView, face, drawingPoint, originPoint))
 	{
@@ -4493,6 +4525,8 @@ bool CreateFlatPatternHoleAttributeDimension(
 	builder->FirstAssociativity()->SetValue(circleCurve, baseView, associativityPoint);
 	builder->Origin()->Plane()->SetPlaneMethod(NXOpen::Annotations::PlaneBuilder::PlaneMethodTypeXyPlane);
 	builder->Origin()->SetInferRelativeToGeometry(false);
+	builder->Style()->DimensionStyle()->SetTextArrowPlacement(
+		DimensionTextPlacement(IsRadialDimensionAutoPositionEnabled()));
 	builder->Origin()->SetOriginPoint(drawingPoint);
 	builder->Style()->LetteringStyle()->SetGeneralTextSize(3.0);
 	builder->Style()->DimensionStyle()->SetDimensionReferenceIncludeType(
@@ -5145,6 +5179,8 @@ NXOpen::Annotations::OrdinateDimensionBuilder* CreateHoleCoordinateOrdinateBuild
 	builder->Origin()->Plane()->SetPlaneMethod(NXOpen::Annotations::PlaneBuilder::PlaneMethodTypeXyPlane);
 	builder->Origin()->SetInferRelativeToGeometry(false);
 	builder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
+	builder->Style()->DimensionStyle()->SetTextArrowPlacement(
+		DimensionTextPlacement(IsLinearDimensionAutoPositionEnabled()));
 	builder->Style()->DimensionStyle()->SetDimensionReferenceIncludeType(NXOpen::Annotations::ReferenceIncludeTypeOnlyValue);
 	builder->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
 	builder->Style()->OrdinateStyle()->SetMarginFirstOffset(5.0);

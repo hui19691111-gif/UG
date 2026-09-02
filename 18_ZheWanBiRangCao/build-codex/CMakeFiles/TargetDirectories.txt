@@ -1,3 +1,4 @@
 G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/CMakeFiles/ZheWanBiRangCao.dir
+G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/CMakeFiles/ZheWanBiRangCaoCore.dir
 G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/CMakeFiles/ALL_BUILD.dir
 G:/UG智辉钣金插件_源码精简_20260605_最终精简/features/18_ZheWanBiRangCao/build-codex/CMakeFiles/ZERO_CHECK.dir

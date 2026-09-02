@@ -182,6 +182,7 @@ private:
         NXOpen::Face* face;
         tag_t incomingEdgeTag;
         tag_t outgoingEdgeTag;
+        bool manualEndSupplement;
     };
 
     struct RightAngleFacePair
@@ -195,7 +196,9 @@ private:
 
     std::vector<RecognizedFaceRegion> CollectContinuousBendFaces(
         NXOpen::Face* seedFace,
-        NXOpen::Face* stopFace) const;
+        NXOpen::Face* stopFace,
+        tag_t startBendEdgeTag = NULL_TAG,
+        tag_t terminalBoundaryReferenceTag = NULL_TAG) const;
     FaceInfo QueryFaceInfo(tag_t faceTag) const;
     TraversalContext BuildTraversalContext(NXOpen::Face* seedFace) const;
     std::vector<tag_t> UfListToTags(uf_list_p_t list) const;
@@ -231,12 +234,22 @@ private:
         const double referenceDirection[3],
         double thickness,
         tag_t incomingEdgeTag) const;
+    std::vector<tag_t> CollectCollinearOuterFaceEdges(
+        tag_t faceTag,
+        tag_t referenceEdgeTag) const;
+    bool ExpandTerminalEdgeWithConnectedBoundaryEdges(
+        tag_t faceTag,
+        tag_t terminalEdgeTag,
+        double endpoints[2][3],
+        double* combinedLength,
+        std::size_t* connectedEdgeCount) const;
     tag_t FindTerminalOuterBoundaryEdge(
         tag_t faceTag,
         tag_t adjacentBendEdgeTag,
         bool chooseFarthest) const;
     void CompleteTrimBoundaryEdges(
-        std::vector<RecognizedFaceRegion>& faceRegions) const;
+        std::vector<RecognizedFaceRegion>& faceRegions,
+        tag_t endBoundaryPickFaceTag = NULL_TAG) const;
     void CompleteSharedBendEdges(
         std::vector<RecognizedFaceRegion>& faceRegions) const;
     bool TrimExtractedFaceToInnerBand(
@@ -247,7 +260,20 @@ private:
     bool TrimExtractedFaceBetweenBendEndpoints(
         tag_t sourceFaceTag,
         tag_t extractedSheetBodyTag,
-        tag_t bendEdgeTag) const;
+        tag_t bendEdgeTag,
+        const double expandedBoundaryEndpoints[2][3]) const;
+    bool TryGetCollinearFaceChainEdgeSpan(
+        const std::vector<RecognizedFaceRegion>& faceRegions,
+        tag_t referenceEdgeTag,
+        double endpoints[2][3],
+        double* spanLength,
+        std::size_t* collinearEdgeCount) const;
+    bool TryGetCollinearLoopEdgeSpan(
+        tag_t faceTag,
+        tag_t referenceEdgeTag,
+        double endpoints[2][3],
+        double* spanLength,
+        std::size_t* collinearEdgeCount) const;
     bool AreDirectionsParallel(const double lhs[3], const double rhs[3], double toleranceDegrees) const;
     double ComputeSideScore(const FaceInfo& faceInfo, const double bodyCenter[3]) const;
     double EstimateThickness(NXOpen::Face* seedFace) const;
@@ -422,6 +448,7 @@ private:
     NXOpen::Point3d selectedEndPickPoint;
     NXOpen::Face* selectedFace;
     NXOpen::Face* selectedEndFace;
+    std::vector<NXOpen::Face*> selectedEndFaces;
     NXOpen::Body* selectedBody;
     bool useRandomPartColors;
     int selectedSplitMethod;

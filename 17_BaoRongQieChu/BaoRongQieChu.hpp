@@ -47,12 +47,14 @@ private:
 
     int ExecuteFromSelection();
     int ExecuteImmediateCutFromSelection();
+    int ExecuteOnlyBlendReplacementFromSelection();
     int ExecutePendingBlendReplacement();
     int ExecutePendingCutFaceRemoval();
     int ExecutePendingConnectedFaceCreation();
     std::vector<NXOpen::TaggedObject*> GetSelectedObjects() const;
     bool GetBooleanSubtractEnabled() const;
     bool GetRemoveBlendEnabled() const;
+    bool GetOnlyRemoveBlendEnabled() const;
     bool GetHealRemovedRegionEnabled() const;
     double GetOffsetValue() const;
     double GetBlendRadiusValue() const;
@@ -80,6 +82,7 @@ private:
     NXOpen::BlockStyler::UIBlock* objectSelectBlock_;
     NXOpen::BlockStyler::UIBlock* booleanToggleBlock_;
     NXOpen::BlockStyler::UIBlock* removeBlendToggleBlock_;
+    NXOpen::BlockStyler::UIBlock* onlyRemoveBlendToggleBlock_;
     NXOpen::BlockStyler::UIBlock* blendRadiusBlock_;
     NXOpen::BlockStyler::UIBlock* healRemovedRegionToggleBlock_;
     NXOpen::BlockStyler::UIBlock* offsetBlock_;

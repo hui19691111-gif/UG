@@ -1,6 +1,7 @@
 #include "CaiR1.hpp"
 #include "CaiR1CustomFeatureShared.hpp"
 #include "../../common/ZhihuiDialogMemory.hpp"
+#include "../../common/ZhihuiContextHelp.hpp"
 
 #ifdef CreateDialog
 #undef CreateDialog
@@ -44,6 +45,7 @@
 #include <NXOpen/GeometricUtilities_Limits.hxx>
 #include <NXOpen/GeometricUtilities_ModlMotion.hxx>
 #include <NXOpen/GeometricUtilities_SmartVolumeProfileBuilder.hxx>
+#include <NXOpen/LogFile.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObject.hxx>
@@ -73,6 +75,7 @@
 #include <uf_eval.h>
 #include <uf_disp.h>
 #include <uf_modl.h>
+#include <uf_modl_legacy.h>
 #include <uf_obj.h>
 #include <uf_object_types.h>
 #include <uf_ui_types.h>
@@ -170,6 +173,12 @@ std::string DialogPath()
     return "CaiR1.dlx";
 }
 
+std::string DialogPathWithHelp()
+{
+    zhihui_context_help::EnsureGlobalHelpLoaded();
+    return DialogPath();
+}
+
 bool FacePlaneData(NXOpen::Face* face,
                    NXOpen::Point3d& point,
                    NXOpen::Vector3d& outwardNormal)
@@ -252,6 +261,47 @@ bool PointInsideBody(NXOpen::Body* body, const NXOpen::Point3d& point)
            UF_MODL_ask_point_containment(
                coordinates, body->Tag(), &status) == 0 &&
            status == 1;
+}
+
+bool BodyVolume(NXOpen::Body* body, double& volume)
+{
+    volume = 0.0;
+    if (body == nullptr || body->Tag() == NULL_TAG)
+    {
+        return false;
+    }
+    tag_t bodyTag = body->Tag();
+    double accuracyValues[11] = {};
+    accuracyValues[0] = 0.99;
+    double massProperties[47] = {};
+    double statistics[13] = {};
+    if (UF_MODL_ask_mass_props_3d(
+            &bodyTag, 1, 1, 4, 0.0, 1,
+            accuracyValues, massProperties, statistics) != 0)
+    {
+        return false;
+    }
+    volume = std::fabs(massProperties[1]);
+    return std::isfinite(volume) && volume > 0.0;
+}
+
+bool CopiedBodyVolume(NXOpen::Body* body, double& volume)
+{
+    volume = 0.0;
+    if (body == nullptr || body->Tag() == NULL_TAG)
+    {
+        return false;
+    }
+    tag_t sourceTag = body->Tag();
+    tag_t copiedTag = NULL_TAG;
+    uf6511(&sourceTag, &copiedTag);
+    if (copiedTag == NULL_TAG)
+    {
+        return false;
+    }
+    NXOpen::Body* copiedBody = dynamic_cast<NXOpen::Body*>(
+        NXOpen::NXObjectManager::Get(copiedTag));
+    return BodyVolume(copiedBody, volume);
 }
 
 bool PlaneCutsBody(NXOpen::Body* body,
@@ -347,6 +397,42 @@ double DistanceToEdge(NXOpen::Edge* edge, const NXOpen::Point3d& point)
     return result;
 }
 
+bool EdgePointAtFraction(NXOpen::Edge* edge, double fraction,
+                         NXOpen::Point3d& point)
+{
+    if (edge == nullptr)
+    {
+        return false;
+    }
+
+    UF_EVAL_p_t evaluator = nullptr;
+    if (UF_EVAL_initialize(edge->Tag(), &evaluator) != 0 ||
+        evaluator == nullptr)
+    {
+        return false;
+    }
+
+    bool succeeded = false;
+    double limits[2] = {};
+    if (UF_EVAL_ask_limits(evaluator, limits) == 0)
+    {
+        const double boundedFraction =
+            (std::max)(0.0, (std::min)(1.0, fraction));
+        const double parameter =
+            limits[0] + (limits[1] - limits[0]) * boundedFraction;
+        double coordinates[3] = {};
+        if (UF_EVAL_evaluate(evaluator, 0, parameter,
+                             coordinates, nullptr) == 0)
+        {
+            point = NXOpen::Point3d(coordinates[0], coordinates[1],
+                                    coordinates[2]);
+            succeeded = true;
+        }
+    }
+    UF_EVAL_free(evaluator);
+    return succeeded;
+}
+
 NXOpen::Face* AdjacentPlanarFace(NXOpen::Edge* edge,
                                  NXOpen::Face* excludedFace,
                                  NXOpen::Body* body)
@@ -391,7 +477,7 @@ bool EdgeTouchesPoint(NXOpen::Edge* edge, const NXOpen::Point3d& point)
 CaiR1Dialog::CaiR1Dialog()
     : ui_(NXOpen::UI::GetUI()),
       session_(NXOpen::Session::GetSession()),
-      dialog_(ui_->CreateDialog(DialogPath().c_str())),
+      dialog_(ui_->CreateDialog(DialogPathWithHelp().c_str())),
       faceSelect_(nullptr),
       extensionLengthInput_(nullptr),
       gapInput_(nullptr),
@@ -1701,11 +1787,110 @@ bool CaiR1Dialog::BuildSplitCorner(
         error = "无法在 P1 处计算圆柱径向。";
         return false;
     }
-    const double innerSign =
-        -static_cast<double>(cylinderNormalDirection);
-    cylinderInnerNormal.X *= innerSign;
-    cylinderInnerNormal.Y *= innerSign;
-    cylinderInnerNormal.Z *= innerSign;
+
+    // Do not trust UF's face-normal flag for the material side.  Probe 0.05
+    // from the cylindrical face along both radial directions: the point that
+    // lies inside the source body identifies the cylinder's inward normal.
+    constexpr double cylinderNormalProbeDistance = 0.05;
+    bool radialPlusInside = PointInsideBody(
+        sourceBody,
+        Move(p1, cylinderInnerNormal, cylinderNormalProbeDistance));
+    bool radialMinusInside = PointInsideBody(
+        sourceBody,
+        Move(p1, cylinderInnerNormal, -cylinderNormalProbeDistance));
+
+    // P1 can lie exactly on an axial boundary.  If NX classifies both probes
+    // alike there, move the base point slightly to either side of that
+    // boundary and repeat the same radial 0.05 containment test.
+    if (radialPlusInside == radialMinusInside)
+    {
+        const double axialProbeDistance =
+            (std::max)(0.001,
+                       (std::min)(0.05, (thickness + gap) * 0.25));
+        for (double axialSign : {1.0, -1.0})
+        {
+            const NXOpen::Point3d probeBase =
+                Move(p1, extrusionDirection,
+                     axialSign * axialProbeDistance);
+            radialPlusInside = PointInsideBody(
+                sourceBody,
+                Move(probeBase, cylinderInnerNormal,
+                     cylinderNormalProbeDistance));
+            radialMinusInside = PointInsideBody(
+                sourceBody,
+                Move(probeBase, cylinderInnerNormal,
+                     -cylinderNormalProbeDistance));
+            if (radialPlusInside != radialMinusInside)
+            {
+                break;
+            }
+        }
+    }
+    if (radialPlusInside == radialMinusInside)
+    {
+        error = "无法用圆柱面法向偏置 0.05 判断实体内侧。";
+        return false;
+    }
+
+    const double inwardRadialSign = radialPlusInside ? 1.0 : -1.0;
+    cylinderInnerNormal.X *= inwardRadialSign;
+    cylinderInnerNormal.Y *= inwardRadialSign;
+    cylinderInnerNormal.Z *= inwardRadialSign;
+
+    // The circular edge also lies on the adjacent planar face.  Its extrusion
+    // direction must enter the source solid through that plane.  The UF face
+    // normal flag is not reliable enough for this trimmed sheet-metal corner:
+    // offset a point slightly toward the already-confirmed cylindrical
+    // material side first, then probe both planar-normal directions.
+    NXOpen::Point3d arcMiddlePoint;
+    if (!EdgePointAtFraction(arcEdge, 0.5, arcMiddlePoint))
+    {
+        error = "无法取得圆弧边中点以判断拉伸方向。";
+        return false;
+    }
+    const NXOpen::Vector3d middleFromAxis =
+        Subtract(arcMiddlePoint, cylinderOrigin);
+    const NXOpen::Point3d middleOnAxis =
+        Move(cylinderOrigin, cylinderAxis,
+             Dot(middleFromAxis, cylinderAxis));
+    NXOpen::Vector3d middleInwardNormal =
+        Subtract(arcMiddlePoint, middleOnAxis);
+    if (!Normalize(middleInwardNormal))
+    {
+        error = "无法在圆弧边中点计算圆柱径向。";
+        return false;
+    }
+    middleInwardNormal.X *= inwardRadialSign;
+    middleInwardNormal.Y *= inwardRadialSign;
+    middleInwardNormal.Z *= inwardRadialSign;
+
+    const double radialInset =
+        (std::max)(0.001,
+                   (std::min)(cylinderNormalProbeDistance,
+                              thickness * 0.25));
+    const NXOpen::Point3d planarProbeBase =
+        Move(arcMiddlePoint, middleInwardNormal, radialInset);
+    const double planarProbeDistance =
+        (std::max)(0.001,
+                   (std::min)(0.05, thickness * 0.25));
+    const bool planarPlusInside = PointInsideBody(
+        sourceBody,
+        Move(planarProbeBase, arcPlaneOutward,
+             planarProbeDistance));
+    const bool planarMinusInside = PointInsideBody(
+        sourceBody,
+        Move(planarProbeBase, arcPlaneOutward,
+             -planarProbeDistance));
+    if (planarPlusInside == planarMinusInside)
+    {
+        error = "无法用圆弧边连接平面的法向判断拉伸内侧。";
+        return false;
+    }
+    const double planarInwardSign = planarPlusInside ? 1.0 : -1.0;
+    extrusionDirection = NXOpen::Vector3d(
+        arcPlaneOutward.X * planarInwardSign,
+        arcPlaneOutward.Y * planarInwardSign,
+        arcPlaneOutward.Z * planarInwardSign);
 
     const double extrusionDistance = thickness + gap;
     const double offsetDistance = thickness + bendRadius;
@@ -1810,8 +1995,9 @@ bool CaiR1Dialog::BuildSplitCorner(
     try
     {
         // NX decides an open section's offset sign from curve orientation.
-        // Build with + first, inspect the result against the cylinder's
-        // material-side normal, then undo and retry with - when required.
+        // Build with + first, then test a point 0.05 toward the confirmed
+        // cylinder material side at the arc midpoint.  This avoids using a
+        // body's bounding-box center, which is unreliable on curved sections.
         const NXOpen::Session::UndoMarkId signMark =
             session_->SetUndoMark(
                 NXOpen::Session::MarkVisibilityInvisible,
@@ -1820,18 +2006,26 @@ bool CaiR1Dialog::BuildSplitCorner(
         bool created =
             createExtrude(offsetDistance, 0.0,
                           extrudeFeature, toolBody);
-        bool positiveIsInward = false;
-        if (created && toolBody != nullptr)
+        const auto toolContainsExpectedInwardProbe =
+            [&](NXOpen::Body* candidateBody) -> bool
         {
-            const NXOpen::Point3d bodyCenter = BodyBoxCenter(toolBody);
-            positiveIsInward =
-                Dot(Subtract(bodyCenter,
-                             NXOpen::Point3d(
-                                 (p1.X + p2.X) * 0.5,
-                                 (p1.Y + p2.Y) * 0.5,
-                                 (p1.Z + p2.Z) * 0.5)),
-                    cylinderInnerNormal) > 0.0;
-        }
+            if (candidateBody == nullptr)
+            {
+                return false;
+            }
+            const double offsetProbeDistance =
+                (std::min)(cylinderNormalProbeDistance,
+                           offsetDistance * 0.5);
+            NXOpen::Point3d offsetProbe =
+                Move(arcMiddlePoint, extrusionDirection,
+                     extrusionDistance * 0.5);
+            offsetProbe =
+                Move(offsetProbe, middleInwardNormal,
+                     offsetProbeDistance);
+            return PointInsideBody(candidateBody, offsetProbe);
+        };
+        const bool positiveIsInward =
+            created && toolContainsExpectedInwardProbe(toolBody);
         if (!created || !positiveIsInward)
         {
             session_->UndoToMark(signMark,
@@ -1844,6 +2038,11 @@ bool CaiR1Dialog::BuildSplitCorner(
             {
                 throw std::runtime_error(
                     "正、负偏置均未能创建拉伸实体。");
+            }
+            if (!toolContainsExpectedInwardProbe(toolBody))
+            {
+                throw std::runtime_error(
+                    "正、负偏置均未落在圆柱面的实体内侧。");
             }
         }
         if (session_->DoesUndoMarkExist(
@@ -2328,14 +2527,20 @@ bool CaiR1Dialog::BuildSplitCorner(
         const bool minusIsInside = PointInsideBody(
             sourceBody,
             Move(probeOrigin, straightPlaneOutward, -probeDistance));
-        if (plusIsInside != minusIsInside)
+        if (plusIsInside == minusIsInside)
         {
-            const double sign = plusIsInside ? 1.0 : -1.0;
-            straightPlaneInward =
-                NXOpen::Vector3d(straightPlaneOutward.X * sign,
-                                 straightPlaneOutward.Y * sign,
-                                 straightPlaneOutward.Z * sign);
+            throw std::runtime_error(
+                "无法用 P1 连接平面正、负法向取样确定实体内侧。");
         }
+        const double sign = plusIsInside ? 1.0 : -1.0;
+        straightPlaneInward =
+            NXOpen::Vector3d(straightPlaneOutward.X * sign,
+                             straightPlaneOutward.Y * sign,
+                             straightPlaneOutward.Z * sign);
+        straightPlaneOutward =
+            NXOpen::Vector3d(-straightPlaneInward.X,
+                             -straightPlaneInward.Y,
+                             -straightPlaneInward.Z);
 
         const NXOpen::Point3d trimPlaneOrigin =
             Move(p1, straightPlaneInward,
@@ -2361,6 +2566,7 @@ bool CaiR1Dialog::BuildSplitCorner(
                 NXOpen::SmartObject::UpdateOptionWithinModeling);
 
         stage = "用偏置平面修剪拉伸体";
+
         NXOpen::Features::TrimBody2Builder* trim =
             workPart->Features()->CreateTrimBody2Builder(nullptr);
         NXOpen::SelectionIntentRuleOptions* targetOptions =
@@ -2380,23 +2586,295 @@ bool CaiR1Dialog::BuildSplitCorner(
         trim->BooleanTool()->SetToolOption(
             NXOpen::GeometricUtilities::BooleanToolBuilder::
                 BooleanToolTypeNewPlane);
-        trim->BooleanTool()->FacePlaneTool()->
-            SetToolPlane(trimPlane);
-        // TrimBody's default side is opposite the plane normal.
-        // Reverse keeps the requested original-plane outward side.
-        trim->BooleanTool()->SetReverseDirection(true);
-        trim->SetTolerance(0.001);
-        NXOpen::Features::Feature* trimFeature =
-            trim->CommitFeature();
-        trim->Destroy();
-        if (trimFeature == nullptr ||
-            trimFeature->GetBodies().empty())
+        trim->BooleanTool()->FacePlaneTool()->SetToolPlane(trimPlane);
+
+        // The required trim direction is the P1 adjacent plane's confirmed
+        // inward normal.  Validate the actual tool-plane normal before any
+        // flip, flip only when needed, then validate it again.
+        NXOpen::Plane* configuredTrimPlane =
+            trim->BooleanTool()->FacePlaneTool()->ToolPlane();
+        NXOpen::Vector3d trimDirection = configuredTrimPlane->Normal();
+        if (!Normalize(trimDirection))
         {
+            trim->Destroy();
+            throw std::runtime_error("无法获取修剪体默认方向。");
+        }
+        const double directionDotBefore =
+            Dot(trimDirection, straightPlaneInward);
+        bool flippedToolPlane = false;
+        if (directionDotBefore < 1.0 - 1.0e-6)
+        {
+            configuredTrimPlane->SetFlip(!configuredTrimPlane->Flip());
+            configuredTrimPlane->Evaluate();
+            flippedToolPlane = true;
+        }
+
+        trimDirection = configuredTrimPlane->Normal();
+        if (!Normalize(trimDirection))
+        {
+            trim->Destroy();
+            throw std::runtime_error("翻转后无法获取修剪平面方向。");
+        }
+        const double directionDotAfter =
+            Dot(trimDirection, straightPlaneInward);
+        if (directionDotAfter < 1.0 - 1.0e-6)
+        {
+            trim->Destroy();
             throw std::runtime_error(
-                "NX 未返回修剪后的拉伸实体。");
+                "修剪平面方向未能与 P1 连接平面内法向一致。");
+        }
+
+        trim->BooleanTool()->SetReverseDirection(false);
+        trim->SetTolerance(0.0001);
+
+        {
+            std::ostringstream directionLog;
+            directionLog << "CaiR1 trim direction validation: dotBefore="
+                         << directionDotBefore << ", flipped="
+                         << (flippedToolPlane ? "true" : "false")
+                         << ", dotAfter=" << directionDotAfter;
+            session_->LogFile()->WriteLine(directionLog.str().c_str());
+        }
+
+        NXOpen::Features::Feature* trimFeature = trim->CommitFeature();
+        trim->Destroy();
+        if (trimFeature == nullptr || trimFeature->GetBodies().empty())
+        {
+            throw std::runtime_error("NX 未返回修剪后的拉伸实体。");
         }
         createdFeatures.push_back(trimFeature->Tag());
         return true;
+
+#if 0
+
+        // Find an interior point of the current tool body on the requested
+        // keep side (the original plane's outward-normal side).  Sampling the
+        // known arc/extrusion/offset volume is more reliable than inferring a
+        // side from a bounding-box center.
+        NXOpen::Point3d trimTargetProbe;
+        bool trimKeepProbeFound = false;
+        double bestKeepSideDistance =
+            -(std::numeric_limits<double>::max)();
+        const double trimProbeRadialDistance =
+            (std::min)(0.05, offsetDistance * 0.25);
+        for (double fraction :
+             {0.01, 0.025, 0.05, 0.10, 0.20, 0.30,
+              0.70, 0.80, 0.90, 0.95, 0.975, 0.99})
+        {
+            NXOpen::Point3d arcProbePoint;
+            if (!EdgePointAtFraction(arcEdge, fraction,
+                                     arcProbePoint))
+            {
+                continue;
+            }
+            const NXOpen::Vector3d probeFromAxis =
+                Subtract(arcProbePoint, cylinderOrigin);
+            const NXOpen::Point3d probeOnAxis =
+                Move(cylinderOrigin, cylinderAxis,
+                     Dot(probeFromAxis, cylinderAxis));
+            NXOpen::Vector3d probeInwardNormal =
+                Subtract(arcProbePoint, probeOnAxis);
+            if (!Normalize(probeInwardNormal))
+            {
+                continue;
+            }
+            probeInwardNormal.X *= inwardRadialSign;
+            probeInwardNormal.Y *= inwardRadialSign;
+            probeInwardNormal.Z *= inwardRadialSign;
+
+            NXOpen::Point3d candidateProbe =
+                Move(arcProbePoint, extrusionDirection,
+                     extrusionDistance * 0.5);
+            candidateProbe =
+                Move(candidateProbe, probeInwardNormal,
+                     trimProbeRadialDistance);
+            const double keepSideDistance =
+                Dot(Subtract(candidateProbe, trimPlaneOrigin),
+                    straightPlaneOutward);
+            if (keepSideDistance > bestKeepSideDistance &&
+                PointInsideBody(toolBody, candidateProbe))
+            {
+                trimTargetProbe = candidateProbe;
+                trimKeepProbeFound = true;
+                bestKeepSideDistance = keepSideDistance;
+            }
+        }
+        const double trimProbeSideMargin =
+            (std::max)(0.01, trimIntersectionTolerance * 10.0);
+        if (!trimKeepProbeFound ||
+            bestKeepSideDistance <= trimProbeSideMargin)
+        {
+            throw std::runtime_error(
+                "未能在远离修剪平面的外法向侧找到拉伸体内部取样点。");
+        }
+
+        // Trial both keep directions and compare the actual resulting solid
+        // volumes.  The final feature always keeps the smaller side, so this
+        // is independent of face-normal and ReverseDirection conventions.
+        const auto resolveCurrentTrimTarget = [&]() -> NXOpen::Body*
+        {
+            for (NXOpen::BodyCollection::iterator iterator =
+                     workPart->Bodies()->begin();
+                 iterator != workPart->Bodies()->end(); ++iterator)
+            {
+                NXOpen::Body* candidate = *iterator;
+                if (candidate != nullptr && candidate != sourceBody &&
+                    candidate->Tag() != NULL_TAG &&
+                    UF_OBJ_ask_status(candidate->Tag()) == UF_OBJ_ALIVE &&
+                    PointInsideBody(candidate, trimTargetProbe))
+                {
+                    return candidate;
+                }
+            }
+            return nullptr;
+        };
+
+        const auto createTrim =
+            [&](bool reverseDirection,
+                NXOpen::Features::Feature*& feature,
+                NXOpen::Body*& resultBody) -> bool
+        {
+            NXOpen::Features::TrimBody2Builder* trim = nullptr;
+            try
+            {
+                NXOpen::Body* currentTarget =
+                    resolveCurrentTrimTarget();
+                if (currentTarget == nullptr)
+                {
+                    return false;
+                }
+                trim = workPart->Features()->
+                    CreateTrimBody2Builder(nullptr);
+                NXOpen::SelectionIntentRuleOptions* targetOptions =
+                    workPart->ScRuleFactory()->CreateRuleOptions();
+                targetOptions->SetSelectedFromInactive(false);
+                NXOpen::BodyDumbRule* targetRule =
+                    workPart->ScRuleFactory()->CreateRuleBodyDumb(
+                        std::vector<NXOpen::Body*>{currentTarget}, true,
+                        targetOptions);
+                delete targetOptions;
+                NXOpen::ScCollector* targetCollector =
+                    workPart->ScCollectors()->CreateCollector();
+                targetCollector->ReplaceRules(
+                    std::vector<NXOpen::SelectionIntentRule*>{
+                        targetRule},
+                    false);
+                trim->SetTargetBodyCollector(targetCollector);
+                trim->BooleanTool()->SetToolOption(
+                    NXOpen::GeometricUtilities::BooleanToolBuilder::
+                        BooleanToolTypeNewPlane);
+                NXOpen::Plane* directionPlane = trimPlane;
+                if (reverseDirection)
+                {
+                    const NXOpen::Vector3d reversedPlaneNormal(
+                        -straightPlaneOutward.X,
+                        -straightPlaneOutward.Y,
+                        -straightPlaneOutward.Z);
+                    directionPlane = workPart->Planes()->CreatePlane(
+                        trimPlaneOrigin, reversedPlaneNormal,
+                        NXOpen::SmartObject::UpdateOptionWithinModeling);
+                }
+                trim->BooleanTool()->FacePlaneTool()->
+                    SetToolPlane(directionPlane);
+                // NX 2412 can return the same result for both values of
+                // BooleanTool.ReverseDirection with an on-the-fly plane.
+                // Keep this false and reverse the actual plane normal above.
+                trim->BooleanTool()->SetReverseDirection(false);
+                trim->SetTolerance(0.001);
+                feature = trim->CommitFeature();
+                trim->Destroy();
+                trim = nullptr;
+                if (feature == nullptr || feature->GetBodies().empty())
+                {
+                    return false;
+                }
+                // Read the body produced by the trim feature.  currentTarget
+                // may remain alive as a historical body and reports the same
+                // pre-trim volume for both keep directions.
+                resultBody = feature->GetBodies().front();
+                return resultBody != nullptr &&
+                       resultBody->Tag() != NULL_TAG &&
+                       UF_OBJ_ask_status(resultBody->Tag()) == UF_OBJ_ALIVE;
+            }
+            catch (...)
+            {
+                if (trim != nullptr)
+                {
+                    trim->Destroy();
+                }
+                return false;
+            }
+        };
+
+        double defaultVolume = 0.0;
+        double reverseVolume = 0.0;
+        bool defaultVolumeValid = false;
+        bool reverseVolumeValid = false;
+        const auto measureTrimVolume =
+            [&](bool reverseDirection, double& volume) -> bool
+        {
+            const NXOpen::Session::UndoMarkId trialMark =
+                session_->SetUndoMark(
+                    NXOpen::Session::MarkVisibilityInvisible,
+                    reverseDirection ? "修剪体积比较-反向"
+                                     : "修剪体积比较-正向");
+            NXOpen::Features::Feature* trialFeature = nullptr;
+            NXOpen::Body* trialBody = nullptr;
+            const bool valid =
+                createTrim(reverseDirection, trialFeature, trialBody) &&
+                CopiedBodyVolume(trialBody, volume);
+            session_->UndoToMark(
+                trialMark,
+                reverseDirection ? "修剪体积比较-反向"
+                                 : "修剪体积比较-正向");
+            return valid;
+        };
+        defaultVolumeValid = measureTrimVolume(false, defaultVolume);
+        reverseVolumeValid = measureTrimVolume(true, reverseVolume);
+
+        if (!defaultVolumeValid && !reverseVolumeValid)
+        {
+            throw std::runtime_error(
+                "正、反两个修剪方向均未能取得有效体积。");
+        }
+        const bool keepReverseDirection =
+            reverseVolumeValid &&
+            (!defaultVolumeValid || reverseVolume < defaultVolume);
+        {
+            std::ostringstream volumeLog;
+            volumeLog << "CaiR1 trim volume compare: default=";
+            if (defaultVolumeValid)
+            {
+                volumeLog << defaultVolume;
+            }
+            else
+            {
+                volumeLog << "invalid";
+            }
+            volumeLog << ", reverse=";
+            if (reverseVolumeValid)
+            {
+                volumeLog << reverseVolume;
+            }
+            else
+            {
+                volumeLog << "invalid";
+            }
+            volumeLog << ", keepReverse="
+                      << (keepReverseDirection ? "true" : "false");
+            session_->LogFile()->WriteLine(volumeLog.str().c_str());
+        }
+        NXOpen::Features::Feature* trimFeature = nullptr;
+        NXOpen::Body* trimmedBody = nullptr;
+        if (!createTrim(keepReverseDirection,
+                        trimFeature, trimmedBody))
+        {
+            throw std::runtime_error(
+                "未能按较小体积方向创建最终修剪体。");
+        }
+        createdFeatures.push_back(trimFeature->Tag());
+        return true;
+#endif
     }
     catch (const NXOpen::NXException& ex)
     {

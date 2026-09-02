@@ -2960,6 +2960,7 @@ tag_t QinLiGuanJian::TrimBodyWithExtractedSheets(tag_t targetBodyTag, const std:
             builder->Destroy();
             const std::string message = ex.what() != NULL ? ex.what() : "";
             if (ex.ErrorCode() == 670028 ||
+                ex.ErrorCode() == 670033 ||
                 ex.ErrorCode() == 670362 ||
                 message.find("Tool body completely outside target body") != std::string::npos)
             {

@@ -90,6 +90,9 @@ public:
 private:
     const char* theDlxFileName;
     NXOpen::BlockStyler::BlockDialog* theDialog;
+    bool helpMapLoaded_;
+    bool helpUfInitialized_;
+    std::wstring helpMapPath_;
     NXOpen::BlockStyler::Enumeration* enum0;// Block type: Enumeration
     NXOpen::BlockStyler::StringBlock* string0;// Block type: String
     NXOpen::BlockStyler::StringBlock* string01;// Block type: String
@@ -99,6 +102,8 @@ private:
     NXOpen::BlockStyler::StringBlock* string03;// Block type: String
     NXOpen::BlockStyler::Toggle* toggleManualQuantity;// Block type: Toggle
     NXOpen::BlockStyler::Button* openConfigButton;// Block type: Button
+
+    void InitializeContextHelp();
     
 };
 #endif //WRITE_PRAT_ATTR_H_INCLUDED

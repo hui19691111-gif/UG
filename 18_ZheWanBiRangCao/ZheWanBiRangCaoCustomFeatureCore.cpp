@@ -19,6 +19,8 @@
 #include <NXOpen/Features_CustomFeatureInternalFeaturePreUpdateEvent.hxx>
 #include <NXOpen/Features_CustomFeaturePreUpdateEvent.hxx>
 #include <NXOpen/Features_CustomTagAttribute.hxx>
+#include <NXOpen/Features_DatumCsys.hxx>
+#include <NXOpen/Features_DatumCsysBuilder.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
 #include <NXOpen/Features_MoveObject.hxx>
@@ -36,6 +38,7 @@
 #include <uf.h>
 #include <uf_curve.h>
 #include <uf_modl.h>
+#include <uf_modl_datum_features.h>
 #include <uf_modl_udf.h>
 #include <uf_mtx.h>
 #include <uf_obj.h>
@@ -113,7 +116,7 @@ public:
                      (L"ZW_BiLanCaoCore_" + std::to_wstring(GetCurrentProcessId()) + L"_" +
                       std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(directory_);
-        file_ = directory_ / L"ZW_BiLanCao.prt";
+        file_ = directory_ / L"ZW_BiLanCao1.prt";
         std::ofstream output(file_, std::ios::binary | std::ios::trunc);
         output.write(static_cast<const char*>(bytes), size);
         output.close();
@@ -160,7 +163,10 @@ std::string Number(double value)
     return stream.str();
 }
 
-bool AllocateExpressionValues(UF_MODL_udf_exp_data_t& data, double depth, double width)
+bool AllocateExpressionValues(UF_MODL_udf_exp_data_t& data,
+                              double depth,
+                              double width,
+                              double thickness)
 {
     int error = 0;
     data.new_exp_values = static_cast<char**>(UF_allocate_memory(
@@ -172,7 +178,16 @@ bool AllocateExpressionValues(UF_MODL_udf_exp_data_t& data, double depth, double
     std::memset(data.new_exp_values, 0, sizeof(char*) * data.num_exps);
     for (int index = 0; index < data.num_exps; ++index)
     {
-        const std::string text = Number(index == 0 ? depth : width);
+        double numericValue = depth;
+        if (index == 1)
+        {
+            numericValue = width;
+        }
+        else if (index == 2)
+        {
+            numericValue = thickness;
+        }
+        const std::string text = Number(numericValue);
         char* value = static_cast<char*>(UF_allocate_memory(
             static_cast<unsigned int>(text.size() + 1), &error));
         if (error != 0 || value == nullptr)
@@ -199,15 +214,15 @@ void DeleteIfAlive(tag_t tag)
 
 struct ToolResult
 {
+    tag_t datumCsys = NULL_TAG;
     tag_t udf = NULL_TAG;
-    tag_t move = NULL_TAG;
-    tag_t point = NULL_TAG;
     tag_t body = NULL_TAG;
 };
 
 bool CreateUdfTool(tag_t definition,
                    double width,
                    double depth,
+                   double thickness,
                    const double* transformValues,
                    ToolResult& result)
 {
@@ -226,41 +241,94 @@ bool CreateUdfTool(tag_t definition,
         }
     }
 
-    Point* placementPoint = workPart->Points()->CreatePoint(Point3d(0.0, 0.0, 0.0));
-    placementPoint->Blank();
-    result.point = placementPoint->Tag();
+    Features::DatumCsysBuilder* datumBuilder = nullptr;
+    try
+    {
+        CartesianCoordinateSystem* placementCsys =
+            workPart->CoordinateSystems()->CreateCoordinateSystem(
+                Point3d(transformValues[0], transformValues[1], transformValues[2]),
+                Vector3d(transformValues[3], transformValues[4], transformValues[5]),
+                Vector3d(transformValues[6], transformValues[7], transformValues[8]));
+        if (placementCsys == nullptr)
+        {
+            throw NXException::Create(1, "Failed to create the UDF placement coordinate system.");
+        }
+        datumBuilder = workPart->Features()->CreateDatumCsysBuilder(nullptr);
+        datumBuilder->SetCsys(placementCsys);
+        Features::Feature* datumFeature = datumBuilder->CommitFeature();
+        datumBuilder->Destroy();
+        datumBuilder = nullptr;
+        result.datumCsys = datumFeature != nullptr ? datumFeature->Tag() : NULL_TAG;
+        if (result.datumCsys == NULL_TAG)
+        {
+            throw NXException::Create(1, "Datum CSYS returned no feature.");
+        }
+        static_cast<void>(UF_MODL_set_datum_csys_visibility(result.datumCsys, FALSE));
+    }
+    catch (...)
+    {
+        if (datumBuilder != nullptr)
+        {
+            datumBuilder->Destroy();
+        }
+        DeleteIfAlive(result.datumCsys);
+        return false;
+    }
+
+    tag_t smartCsys = NULL_TAG;
+    tag_t datumOrigin = NULL_TAG;
+    tag_t datumAxes[3] = {NULL_TAG, NULL_TAG, NULL_TAG};
+    tag_t datumPlanes[3] = {NULL_TAG, NULL_TAG, NULL_TAG};
+    UF_MODL_ask_datum_csys_components(
+        result.datumCsys, &smartCsys, &datumOrigin, datumAxes, datumPlanes);
+    if (datumOrigin == NULL_TAG || datumAxes[0] == NULL_TAG ||
+        datumPlanes[0] == NULL_TAG)
+    {
+        DeleteIfAlive(result.datumCsys);
+        return false;
+    }
 
     UF_MODL_udf_exp_data_t expressionData;
     UF_MODL_udf_ref_data_t referenceData;
     UF_MODL_udf_init_exp_data(&expressionData);
     UF_MODL_udf_init_ref_data(&referenceData);
     int error = UF_MODL_udf_init_insert_data_from_def(definition, &expressionData, &referenceData);
-    if (error != 0 || expressionData.num_exps != 2 || referenceData.num_refs != 1 ||
-        !AllocateExpressionValues(expressionData, depth, width))
+    if (error != 0 || expressionData.num_exps != 3 || referenceData.num_refs != 3 ||
+        !AllocateExpressionValues(expressionData, depth, width, thickness))
     {
         UF_MODL_udf_free_exp_data(&expressionData);
         UF_MODL_udf_free_ref_data(&referenceData);
-        DeleteIfAlive(result.point);
+        DeleteIfAlive(result.datumCsys);
         return false;
     }
 
     int allocationError = 0;
-    referenceData.new_refs = static_cast<tag_t*>(UF_allocate_memory(sizeof(tag_t), &allocationError));
+    referenceData.new_refs = static_cast<tag_t*>(UF_allocate_memory(
+        static_cast<unsigned int>(sizeof(tag_t) * referenceData.num_refs),
+        &allocationError));
     if (referenceData.reverse_refs_dir == nullptr)
     {
         referenceData.reverse_refs_dir = static_cast<UF_MODL_udf_reverse_dir_t*>(
-            UF_allocate_memory(sizeof(UF_MODL_udf_reverse_dir_t), &allocationError));
+            UF_allocate_memory(
+                static_cast<unsigned int>(
+                    sizeof(UF_MODL_udf_reverse_dir_t) * referenceData.num_refs),
+                &allocationError));
     }
     if (allocationError != 0 || referenceData.new_refs == nullptr ||
         referenceData.reverse_refs_dir == nullptr)
     {
         UF_MODL_udf_free_exp_data(&expressionData);
         UF_MODL_udf_free_ref_data(&referenceData);
-        DeleteIfAlive(result.point);
+        DeleteIfAlive(result.datumCsys);
         return false;
     }
-    referenceData.new_refs[0] = result.point;
-    referenceData.reverse_refs_dir[0] = UF_MODL_UDF_KEEP_DIR;
+    referenceData.new_refs[0] = datumPlanes[0];
+    referenceData.new_refs[1] = datumAxes[0];
+    referenceData.new_refs[2] = datumOrigin;
+    for (int index = 0; index < referenceData.num_refs; ++index)
+    {
+        referenceData.reverse_refs_dir[index] = UF_MODL_UDF_KEEP_DIR;
+    }
 
     error = UF_MODL_create_instantiated_udf1(definition,
                                               &expressionData,
@@ -270,7 +338,15 @@ bool CreateUdfTool(tag_t definition,
     UF_MODL_udf_free_ref_data(&referenceData);
     if (error != 0 || result.udf == NULL_TAG)
     {
-        DeleteIfAlive(result.point);
+        DeleteIfAlive(result.udf);
+        DeleteIfAlive(result.datumCsys);
+        return false;
+    }
+
+    if (UF_MODL_update() != 0)
+    {
+        DeleteIfAlive(result.udf);
+        DeleteIfAlive(result.datumCsys);
         return false;
     }
 
@@ -281,7 +357,7 @@ bool CreateUdfTool(tag_t definition,
             if (result.body != NULL_TAG)
             {
                 DeleteIfAlive(result.udf);
-                DeleteIfAlive(result.point);
+                DeleteIfAlive(result.datumCsys);
                 return false;
             }
             result.body = body->Tag();
@@ -290,61 +366,7 @@ bool CreateUdfTool(tag_t definition,
     if (result.body == NULL_TAG)
     {
         DeleteIfAlive(result.udf);
-        DeleteIfAlive(result.point);
-        return false;
-    }
-
-    Features::MoveObjectBuilder* moveBuilder = nullptr;
-    try
-    {
-        Body* sourceBody = dynamic_cast<Body*>(NXObjectManager::Get(result.body));
-        const Matrix3x3 sourceOrientation(1.0, 0.0, 0.0,
-                                          0.0, 1.0, 0.0,
-                                          0.0, 0.0, 1.0);
-        const Matrix3x3 targetOrientation(
-            transformValues[3], transformValues[4], transformValues[5],
-            transformValues[6], transformValues[7], transformValues[8],
-            transformValues[9], transformValues[10], transformValues[11]);
-        CartesianCoordinateSystem* sourceCsys =
-            workPart->CoordinateSystems()->CreateCoordinateSystem(
-                Point3d(0.0, 0.0, 0.0), sourceOrientation, true);
-        CartesianCoordinateSystem* targetCsys =
-            workPart->CoordinateSystems()->CreateCoordinateSystem(
-                Point3d(transformValues[0], transformValues[1], transformValues[2]),
-                targetOrientation,
-                true);
-        if (sourceBody == nullptr || sourceCsys == nullptr || targetCsys == nullptr)
-        {
-            throw NXException::Create(1, "Invalid UDF placement inputs.");
-        }
-        moveBuilder = workPart->BaseFeatures()->CreateMoveObjectBuilder(nullptr);
-        moveBuilder->SetMoveObjectResult(
-            Features::MoveObjectBuilder::MoveObjectResultOptionsMoveOriginal);
-        moveBuilder->SetMoveParents(false);
-        moveBuilder->SetAssociative(true);
-        moveBuilder->ObjectToMoveObject()->Add(sourceBody);
-        moveBuilder->TransformMotion()->SetOption(
-            GeometricUtilities::ModlMotion::OptionsCsysToCsys);
-        moveBuilder->TransformMotion()->SetFromCsys(sourceCsys);
-        moveBuilder->TransformMotion()->SetToCsys(targetCsys);
-        NXObject* moveResult = moveBuilder->Commit();
-        result.move = moveResult != nullptr ? moveResult->Tag() : NULL_TAG;
-        moveBuilder->Destroy();
-        moveBuilder = nullptr;
-        if (result.move == NULL_TAG || UF_MODL_update() != 0)
-        {
-            throw NXException::Create(1, "Failed to create the UDF placement feature.");
-        }
-    }
-    catch (...)
-    {
-        if (moveBuilder != nullptr)
-        {
-            moveBuilder->Destroy();
-        }
-        DeleteIfAlive(result.move);
-        DeleteIfAlive(result.udf);
-        DeleteIfAlive(result.point);
+        DeleteIfAlive(result.datumCsys);
         return false;
     }
     return true;
@@ -373,7 +395,8 @@ std::string FeatureType(Features::Feature* feature)
 
 int UpdateInstantiatedUdf(Features::Feature* feature,
                           double width,
-                          double depth)
+                          double depth,
+                          double thickness)
 {
     if (feature == nullptr)
     {
@@ -387,11 +410,13 @@ int UpdateInstantiatedUdf(Features::Feature* feature,
 
     int error = UF_MODL_ask_instantiated_udf(
         feature->Tag(), &expressionData, &referenceData);
-    if (error == 0 && expressionData.num_exps != 2)
+    if (error == 0 && expressionData.num_exps != 2 &&
+        expressionData.num_exps != 3)
     {
         error = 1;
     }
-    if (error == 0 && !AllocateExpressionValues(expressionData, depth, width))
+    if (error == 0 &&
+        !AllocateExpressionValues(expressionData, depth, width, thickness))
     {
         error = 1;
     }
@@ -491,6 +516,101 @@ bool UpdateMovePlacement(Features::MoveObject* move,
     }
 }
 
+bool UpdateDatumCsysPlacement(Features::DatumCsys* datumCsys,
+                              const std::vector<double>& transforms)
+{
+    Part* workPart = Session::GetSession()->Parts()->Work();
+    if (datumCsys == nullptr || workPart == nullptr || transforms.empty() ||
+        transforms.size() % zhihui_zhewan_birangcao::kTransformValueCount != 0)
+    {
+        return false;
+    }
+
+    Features::DatumCsysBuilder* builder = nullptr;
+    try
+    {
+        builder = workPart->Features()->CreateDatumCsysBuilder(datumCsys);
+        CartesianCoordinateSystem* csys = builder->Csys();
+        if (csys == nullptr)
+        {
+            builder->Destroy();
+            return false;
+        }
+
+        const Point3d currentOrigin = csys->Origin();
+        size_t bestOffset = 0;
+        double bestDistanceSquared = std::numeric_limits<double>::max();
+        for (size_t offset = 0; offset < transforms.size();
+             offset += zhihui_zhewan_birangcao::kTransformValueCount)
+        {
+            const double dx = currentOrigin.X - transforms[offset];
+            const double dy = currentOrigin.Y - transforms[offset + 1];
+            const double dz = currentOrigin.Z - transforms[offset + 2];
+            const double distanceSquared = dx * dx + dy * dy + dz * dz;
+            if (distanceSquared < bestDistanceSquared)
+            {
+                bestDistanceSquared = distanceSquared;
+                bestOffset = offset;
+            }
+        }
+
+        csys->SetOrigin(Point3d(transforms[bestOffset],
+                                transforms[bestOffset + 1],
+                                transforms[bestOffset + 2]));
+        csys->SetDirections(
+            Vector3d(transforms[bestOffset + 3],
+                     transforms[bestOffset + 4],
+                     transforms[bestOffset + 5]),
+            Vector3d(transforms[bestOffset + 6],
+                     transforms[bestOffset + 7],
+                     transforms[bestOffset + 8]));
+        builder->Commit();
+        builder->Destroy();
+        return true;
+    }
+    catch (...)
+    {
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        return false;
+    }
+}
+
+bool AskDatumCsysOrigin(Features::Feature* feature, Point3d& origin)
+{
+    Features::DatumCsys* datumCsys = dynamic_cast<Features::DatumCsys*>(feature);
+    Part* workPart = Session::GetSession()->Parts()->Work();
+    if (datumCsys == nullptr || workPart == nullptr)
+    {
+        return false;
+    }
+
+    Features::DatumCsysBuilder* builder = nullptr;
+    try
+    {
+        builder = workPart->Features()->CreateDatumCsysBuilder(datumCsys);
+        CartesianCoordinateSystem* csys = builder->Csys();
+        if (csys == nullptr)
+        {
+            builder->Destroy();
+            return false;
+        }
+        origin = csys->Origin();
+        builder->Destroy();
+        return true;
+    }
+    catch (...)
+    {
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        return false;
+    }
+}
+
 bool AskMoveOrigin(Features::Feature* feature, Point3d& origin)
 {
     Features::MoveObject* move = dynamic_cast<Features::MoveObject*>(feature);
@@ -538,11 +658,14 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
         data->CustomTagAttributeByName(zhihui_zhewan_birangcao::kAttrTargetBody)->Value());
     const double width = DoubleValue(data, zhihui_zhewan_birangcao::kAttrSlotWidth);
     const double depth = DoubleValue(data, zhihui_zhewan_birangcao::kAttrSlotDepth);
+    const double thickness =
+        DoubleValue(data, zhihui_zhewan_birangcao::kAttrThickness);
     const std::vector<double> transforms =
         data->CustomDoubleArrayAttributeByName(
                 zhihui_zhewan_birangcao::kAttrToolTransforms)
             ->GetValues();
-    if (targetBody == nullptr || width <= 0.0 || depth <= 0.0 || transforms.empty() ||
+    if (targetBody == nullptr || width <= 0.0 || depth <= 0.0 ||
+        thickness <= 0.0 || transforms.empty() ||
         transforms.size() % zhihui_zhewan_birangcao::kTransformValueCount != 0)
     {
         return 1;
@@ -558,11 +681,12 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
 
     if (!existingConstruction.empty())
     {
-        // Every relief tool is stored as one UDF + one Move Object + one
-        // Boolean construction feature.  Existing groups are edited in place.
+        // New relief tools are stored as one Datum CSYS + one UDF + one
+        // separate Boolean construction feature.  Legacy groups stored as
+        // UDF + Move Object + Boolean remain editable for compatibility.
         // When changing Multi Cut to Single Cut, retaining the earliest group
-        // avoids breaking the target-body history; its Move Object is then
-        // repositioned to the sole stored transform by the internal callback.
+        // avoids breaking the target-body history; its placement feature is
+        // then repositioned to the sole transform by the internal callback.
         if (existingConstruction.size() % 3 != 0)
         {
             event->SetConstructionFeatures(existingConstruction);
@@ -591,17 +715,20 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
             constructionFeatures[index]->SetShowInGraphicView(index % 3 == 2);
         }
 
-        // Match each retained Move Object to its nearest new transform.  Only
-        // create the transforms that are not already represented.
+        // Match each retained placement feature to its nearest new transform.
+        // Only create transforms that are not already represented.
         std::vector<bool> covered(desiredToolCount, false);
         for (size_t group = 0; group < existingToolCount; ++group)
         {
             Point3d currentOrigin(0.0, 0.0, 0.0);
-            Features::Feature* moveFeature =
+            Features::Feature* placementFeature =
+                existingConstruction[group * 3]->GetFeature();
+            Features::Feature* legacyMoveFeature =
                 existingConstruction[group * 3 + 1]->GetFeature();
             size_t bestIndex = desiredToolCount;
             double bestDistanceSquared = std::numeric_limits<double>::max();
-            if (AskMoveOrigin(moveFeature, currentOrigin))
+            if (AskDatumCsysOrigin(placementFeature, currentOrigin) ||
+                AskMoveOrigin(legacyMoveFeature, currentOrigin))
             {
                 for (size_t index = 0; index < desiredToolCount; ++index)
                 {
@@ -684,6 +811,7 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
         if (!CreateUdfTool(definition,
                            width,
                            depth,
+                           thickness,
                            transforms.data() + index *
                                zhihui_zhewan_birangcao::kTransformValueCount,
                            tool))
@@ -698,16 +826,15 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
         static_cast<void>(UF_MODL_update());
         if (checkError != 0 || interferenceStatus != 1)
         {
-            DeleteIfAlive(tool.move);
             DeleteIfAlive(tool.udf);
-            DeleteIfAlive(tool.point);
+            DeleteIfAlive(tool.datumCsys);
             continue;
         }
 
+        Features::Feature* datumFeature = dynamic_cast<Features::Feature*>(
+            NXObjectManager::Get(tool.datumCsys));
         Features::Feature* udfFeature = dynamic_cast<Features::Feature*>(
             NXObjectManager::Get(tool.udf));
-        Features::Feature* moveFeature = dynamic_cast<Features::Feature*>(
-            NXObjectManager::Get(tool.move));
         Features::BooleanBuilder* booleanBuilder = nullptr;
         try
         {
@@ -725,17 +852,17 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
             booleanBuilder->Destroy();
             booleanBuilder = nullptr;
 
+            if (datumFeature != nullptr)
+            {
+                Features::ConstructionFeatureData* item =
+                    event->CreateConstructionFeatureData(datumFeature);
+                item->SetShowInGraphicView(false);
+                constructionFeatures.push_back(item);
+            }
             if (udfFeature != nullptr)
             {
                 Features::ConstructionFeatureData* item =
                     event->CreateConstructionFeatureData(udfFeature);
-                item->SetShowInGraphicView(false);
-                constructionFeatures.push_back(item);
-            }
-            if (moveFeature != nullptr)
-            {
-                Features::ConstructionFeatureData* item =
-                    event->CreateConstructionFeatureData(moveFeature);
                 item->SetShowInGraphicView(false);
                 constructionFeatures.push_back(item);
             }
@@ -754,9 +881,8 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
             {
                 booleanBuilder->Destroy();
             }
-            DeleteIfAlive(tool.move);
             DeleteIfAlive(tool.udf);
-            DeleteIfAlive(tool.point);
+            DeleteIfAlive(tool.datumCsys);
         }
     }
     UF_PART_close(templatePart, 0, 1);
@@ -796,8 +922,10 @@ int InternalFeaturePreUpdateCallback(
             DoubleValue(data, zhihui_zhewan_birangcao::kAttrSlotWidth);
         const double depth =
             DoubleValue(data, zhihui_zhewan_birangcao::kAttrSlotDepth);
+        const double thickness =
+            DoubleValue(data, zhihui_zhewan_birangcao::kAttrThickness);
         const int udfEditError =
-            UpdateInstantiatedUdf(internalFeature, width, depth);
+            UpdateInstantiatedUdf(internalFeature, width, depth, thickness);
         if (udfEditError != 0)
         {
             customFeature->LogDiagnostic(
@@ -805,6 +933,22 @@ int InternalFeaturePreUpdateCallback(
                 "The relief UDF instance parameters could not be edited.",
                 Features::Feature::DiagnosticTypeWarning);
             return udfEditError;
+        }
+    }
+    else if (dynamic_cast<Features::DatumCsys*>(internalFeature) != nullptr)
+    {
+        const std::vector<double> transforms =
+            data->CustomDoubleArrayAttributeByName(
+                    zhihui_zhewan_birangcao::kAttrToolTransforms)
+                ->GetValues();
+        if (!UpdateDatumCsysPlacement(
+                dynamic_cast<Features::DatumCsys*>(internalFeature), transforms))
+        {
+            customFeature->LogDiagnostic(
+                12,
+                "The relief UDF datum coordinate system could not be updated.",
+                Features::Feature::DiagnosticTypeWarning);
+            return 1;
         }
     }
     else if (dynamic_cast<Features::MoveObject*>(internalFeature) != nullptr)
@@ -824,7 +968,7 @@ int InternalFeaturePreUpdateCallback(
         }
     }
     // Boolean construction features have no editable input here; they update
-    // downstream from the modified UDF and Move Object features.
+    // downstream from the modified UDF and its placement feature.
     return 0;
 }
 

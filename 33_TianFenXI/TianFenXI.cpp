@@ -427,6 +427,14 @@ bool AskCylinderFaceData(tag_t faceTag, double axisPoint[3], double axisDirectio
 tag_t ResolveCurrentFaceTag(tag_t faceTag);
 bool IsModelObjectAlive(tag_t objectTag);
 void ResetDebugLogForRun();
+std::vector<DisconnectedCoaxialCylinderPair>
+FindDisconnectedCoaxialPairsIntersectingGapBoundingTool(
+    tag_t bodyTag,
+    double thickness,
+    tag_t boundingToolBody);
+bool DisconnectedCoaxialPairGeometryMatches(
+    const DisconnectedCoaxialCylinderPair& first,
+    const DisconnectedCoaxialCylinderPair& second);
 
 std::map<tag_t, tag_t> replacedFaceTagMap;
 std::set<tag_t> gInnerLoopHoleFaces;
@@ -441,6 +449,8 @@ int gLastGapDeleteSucceededGroups = 0;
 std::vector<tag_t> gLastGapDeleteFailedGroupIndexes;
 PreviewAnalysisCache gPreviewAnalysisCache = {};
 TianFenXI* gActiveTianFenXIDialog = NULL;
+std::vector<DisconnectedCoaxialCylinderPair>
+    gQualifiedDisconnectedCoaxialCylinderPairs;
 
 std::vector<tag_t> CaptureCurrentFeatureTags()
 {
@@ -6937,6 +6947,12 @@ bool DeleteGapGroupWithBoundingTool(
         ExtractIntersectingInnerLoopFaceChainsBeforeSubtract(
             toolBodyTags.front(),
             pendingHolePatches);
+    const std::vector<DisconnectedCoaxialCylinderPair>
+        intersectingDisconnectedCylinderPairs =
+            FindDisconnectedCoaxialPairsIntersectingGapBoundingTool(
+                bodyTag,
+                thickness,
+                toolBodyTags.front());
 
     const bool subtracted = SubtractGapToolBodiesByGroup(bodyTag, toolBodyTags, subtractFeatureTag);
     for (std::size_t toolIndex = 0; toolIndex < toolBodyTags.size(); ++toolIndex)
@@ -6965,6 +6981,33 @@ bool DeleteGapGroupWithBoundingTool(
         newHolePatches[index].subtractFeatureTag = subtractFeatureTag;
         pendingHolePatches.push_back(newHolePatches[index]);
     }
+    for (std::size_t pairIndex = 0;
+         pairIndex < intersectingDisconnectedCylinderPairs.size();
+         ++pairIndex)
+    {
+        bool duplicateGeometry = false;
+        for (std::size_t qualifiedIndex = 0;
+             qualifiedIndex < gQualifiedDisconnectedCoaxialCylinderPairs.size();
+             ++qualifiedIndex)
+        {
+            if (DisconnectedCoaxialPairGeometryMatches(
+                    gQualifiedDisconnectedCoaxialCylinderPairs[qualifiedIndex],
+                    intersectingDisconnectedCylinderPairs[pairIndex]))
+            {
+                duplicateGeometry = true;
+                break;
+            }
+        }
+        if (!duplicateGeometry)
+        {
+            gQualifiedDisconnectedCoaxialCylinderPairs.push_back(
+                intersectingDisconnectedCylinderPairs[pairIndex]);
+        }
+    }
+    DebugLog("  disconnected coaxial pairs qualified by successful gap bounding subtract: current=" +
+        FormatTag(static_cast<tag_t>(intersectingDisconnectedCylinderPairs.size())) +
+        ", totalUnique=" + FormatTag(static_cast<tag_t>(
+            gQualifiedDisconnectedCoaxialCylinderPairs.size())));
 
     DebugLog("  gap bounding fallback result: boxFeatures=[" +
         FormatTagList(boxFeatureTags) +
@@ -8342,6 +8385,188 @@ bool TryBuildDisconnectedCoaxialCylinderPair(
     return true;
 }
 
+bool DisconnectedCoaxialPairGeometryMatches(
+    const DisconnectedCoaxialCylinderPair& first,
+    const DisconnectedCoaxialCylinderPair& second)
+{
+    const double tolerance = 0.02;
+    if (std::fabs(first.diameter - second.diameter) > tolerance ||
+        std::fabs(first.height - second.height) > tolerance ||
+        std::fabs(Dot3(first.direction, second.direction)) < 0.999)
+    {
+        return false;
+    }
+
+    double firstEnd[3] =
+    {
+        first.origin[0] + first.direction[0] * first.height,
+        first.origin[1] + first.direction[1] * first.height,
+        first.origin[2] + first.direction[2] * first.height
+    };
+    double secondEnd[3] =
+    {
+        second.origin[0] + second.direction[0] * second.height,
+        second.origin[1] + second.direction[1] * second.height,
+        second.origin[2] + second.direction[2] * second.height
+    };
+    const bool direct =
+        Distance3(first.origin, second.origin) <= tolerance &&
+        Distance3(firstEnd, secondEnd) <= tolerance;
+    const bool reversed =
+        Distance3(first.origin, secondEnd) <= tolerance &&
+        Distance3(firstEnd, second.origin) <= tolerance;
+    return direct || reversed;
+}
+
+bool CylinderFaceIntersectsGapBoundingTool(
+    tag_t cylinderFace,
+    tag_t boundingToolBody,
+    const DisconnectedCoaxialCylinderPair& pair,
+    double& minimumDistance,
+    int& containmentStatus)
+{
+    minimumDistance = DBL_MAX;
+    containmentStatus = 0;
+    if (cylinderFace == NULL_TAG || boundingToolBody == NULL_TAG)
+    {
+        return false;
+    }
+
+    double guess[3] =
+    {
+        pair.origin[0] + pair.direction[0] * pair.height * 0.5,
+        pair.origin[1] + pair.direction[1] * pair.height * 0.5,
+        pair.origin[2] + pair.direction[2] * pair.height * 0.5
+    };
+    if (AskMinimumDistance(
+            boundingToolBody,
+            cylinderFace,
+            guess,
+            guess,
+            minimumDistance) &&
+        minimumDistance <= 0.001)
+    {
+        return true;
+    }
+
+    // A cylindrical face can lie completely inside a solid tooling box while
+    // its distance to the box boundary stays positive. Project the axis
+    // midpoint onto the real face and test that face point for containment.
+    double parameters[2] = {0.0, 0.0};
+    double facePoint[3] = {0.0, 0.0, 0.0};
+    return UF_MODL_ask_face_parm_2(
+               cylinderFace,
+               guess,
+               parameters,
+               facePoint) == 0 &&
+        UF_MODL_ask_point_containment(
+               facePoint,
+               boundingToolBody,
+               &containmentStatus) == 0 &&
+        (containmentStatus == 1 || containmentStatus == 3);
+}
+
+std::vector<DisconnectedCoaxialCylinderPair>
+FindDisconnectedCoaxialPairsIntersectingGapBoundingTool(
+    tag_t bodyTag,
+    double thickness,
+    tag_t boundingToolBody)
+{
+    std::vector<DisconnectedCoaxialCylinderPair> matchedPairs;
+    if (bodyTag == NULL_TAG || boundingToolBody == NULL_TAG ||
+        thickness <= kMinThickness)
+    {
+        return matchedPairs;
+    }
+
+    std::vector<InnerThicknessCylinderSegment> segments;
+    const std::vector<tag_t> bodyFaces = AskBodyFaces(bodyTag);
+    for (std::size_t faceIndex = 0; faceIndex < bodyFaces.size(); ++faceIndex)
+    {
+        InnerThicknessCylinderSegment segment = {};
+        if (CollectInnerThicknessCylinderSegment(
+                bodyFaces[faceIndex],
+                thickness,
+                segment))
+        {
+            segments.push_back(segment);
+        }
+    }
+
+    for (std::size_t firstIndex = 0; firstIndex < segments.size(); ++firstIndex)
+    {
+        for (std::size_t secondIndex = firstIndex + 1;
+             secondIndex < segments.size();
+             ++secondIndex)
+        {
+            DisconnectedCoaxialCylinderPair pair = {};
+            if (!TryBuildDisconnectedCoaxialCylinderPair(
+                    segments[firstIndex],
+                    segments[secondIndex],
+                    thickness,
+                    pair))
+            {
+                continue;
+            }
+
+            double firstDistance = DBL_MAX;
+            double secondDistance = DBL_MAX;
+            int firstContainment = 0;
+            int secondContainment = 0;
+            const bool firstIntersects = CylinderFaceIntersectsGapBoundingTool(
+                pair.firstFace,
+                boundingToolBody,
+                pair,
+                firstDistance,
+                firstContainment);
+            const bool secondIntersects = CylinderFaceIntersectsGapBoundingTool(
+                pair.secondFace,
+                boundingToolBody,
+                pair,
+                secondDistance,
+                secondContainment);
+            DebugLog("  disconnected coaxial pair/gap bounding tool check: face1=" +
+                FormatTag(pair.firstFace) +
+                ", face2=" + FormatTag(pair.secondFace) +
+                ", diameter=" + FormatDouble(pair.diameter) +
+                ", boundingTool=" + FormatTag(boundingToolBody) +
+                ", face1Distance=" + FormatDouble(firstDistance) +
+                ", face1Containment=" +
+                    FormatTag(static_cast<tag_t>(firstContainment)) +
+                ", face1Intersects=" +
+                    FormatTag(static_cast<tag_t>(firstIntersects ? 1 : 0)) +
+                ", face2Distance=" + FormatDouble(secondDistance) +
+                ", face2Containment=" +
+                    FormatTag(static_cast<tag_t>(secondContainment)) +
+                ", face2Intersects=" +
+                    FormatTag(static_cast<tag_t>(secondIntersects ? 1 : 0)));
+            if (!firstIntersects && !secondIntersects)
+            {
+                continue;
+            }
+
+            bool duplicateGeometry = false;
+            for (std::size_t matchIndex = 0;
+                 matchIndex < matchedPairs.size();
+                 ++matchIndex)
+            {
+                if (DisconnectedCoaxialPairGeometryMatches(
+                        matchedPairs[matchIndex],
+                        pair))
+                {
+                    duplicateGeometry = true;
+                    break;
+                }
+            }
+            if (!duplicateGeometry)
+            {
+                matchedPairs.push_back(pair);
+            }
+        }
+    }
+    return matchedPairs;
+}
+
 bool FindDisconnectedCoaxialInnerCylinderPair(
     tag_t bodyTag,
     double thickness,
@@ -8579,6 +8804,94 @@ bool NormalizeDisconnectedCoaxialInnerCylindersBeforeGapAnalysis(
     return committedCount > 0;
 }
 
+void ProcessDisconnectedCoaxialPairsQualifiedByGapBoundingTools(
+    tag_t bodyTag,
+    double thickness,
+    std::vector<PendingDisconnectedHoleCylinderTool>& pendingCylinderTools)
+{
+    int committedCount = 0;
+    int missingCount = 0;
+    DebugLog("Process disconnected coaxial pairs qualified by gap bounding tools: qualified=" +
+        FormatTag(static_cast<tag_t>(
+            gQualifiedDisconnectedCoaxialCylinderPairs.size())) +
+        ", thickness=" + FormatDouble(thickness));
+    if (bodyTag == NULL_TAG || thickness <= kMinThickness)
+    {
+        gQualifiedDisconnectedCoaxialCylinderPairs.clear();
+        return;
+    }
+
+    for (std::size_t qualifiedIndex = 0;
+         qualifiedIndex < gQualifiedDisconnectedCoaxialCylinderPairs.size();
+         ++qualifiedIndex)
+    {
+        const DisconnectedCoaxialCylinderPair& qualifiedPair =
+            gQualifiedDisconnectedCoaxialCylinderPairs[qualifiedIndex];
+        std::vector<InnerThicknessCylinderSegment> segments;
+        const std::vector<tag_t> bodyFaces = AskBodyFaces(bodyTag);
+        for (std::size_t faceIndex = 0; faceIndex < bodyFaces.size(); ++faceIndex)
+        {
+            InnerThicknessCylinderSegment segment = {};
+            if (CollectInnerThicknessCylinderSegment(
+                    bodyFaces[faceIndex],
+                    thickness,
+                    segment))
+            {
+                segments.push_back(segment);
+            }
+        }
+
+        bool foundCurrentPair = false;
+        DisconnectedCoaxialCylinderPair currentPair = {};
+        for (std::size_t firstIndex = 0;
+             firstIndex < segments.size() && !foundCurrentPair;
+             ++firstIndex)
+        {
+            for (std::size_t secondIndex = firstIndex + 1;
+                 secondIndex < segments.size();
+                 ++secondIndex)
+            {
+                DisconnectedCoaxialCylinderPair candidatePair = {};
+                if (TryBuildDisconnectedCoaxialCylinderPair(
+                        segments[firstIndex],
+                        segments[secondIndex],
+                        thickness,
+                        candidatePair) &&
+                    DisconnectedCoaxialPairGeometryMatches(
+                        qualifiedPair,
+                        candidatePair))
+                {
+                    currentPair = candidatePair;
+                    foundCurrentPair = true;
+                    break;
+                }
+            }
+        }
+
+        if (!foundCurrentPair)
+        {
+            ++missingCount;
+            DebugLog("  qualified disconnected coaxial pair skipped at workflow end: no current matching pair, diameter=" +
+                FormatDouble(qualifiedPair.diameter) +
+                ", origin=" + FormatVector3(qualifiedPair.origin) +
+                ", direction=" + FormatVector3(qualifiedPair.direction));
+            continue;
+        }
+
+        if (ProcessDisconnectedCoaxialInnerCylinderPair(
+                bodyTag,
+                currentPair,
+                pendingCylinderTools))
+        {
+            ++committedCount;
+        }
+    }
+    DebugLog("Process disconnected coaxial pairs qualified by gap bounding tools result: committed=" +
+        FormatTag(static_cast<tag_t>(committedCount)) +
+        ", missing=" + FormatTag(static_cast<tag_t>(missingCount)));
+    gQualifiedDisconnectedCoaxialCylinderPairs.clear();
+}
+
 bool SubtractPendingDisconnectedHoleCylinderToolsAtWorkflowEnd(
     tag_t bodyTag,
     std::vector<PendingDisconnectedHoleCylinderTool>& pendingCylinderTools)
@@ -8621,8 +8934,10 @@ bool SubtractPendingDisconnectedHoleCylinderToolsAtWorkflowEnd(
 
 void FinalizeTargetBodyAtWorkflowEnd(
     tag_t bodyTag,
+    double thickness,
     std::vector<PendingDisconnectedHoleCylinderTool>& pendingCylinderTools)
 {
+    static_cast<void>(thickness);
     const bool cylinderSubtractSucceeded =
         SubtractPendingDisconnectedHoleCylinderToolsAtWorkflowEnd(
             bodyTag,
@@ -9950,7 +10265,8 @@ void DeleteGapGroupsWithMiddlePlanes(
     tag_t bodyTag,
     double thickness,
     bool deleteREnabled,
-    double maxRadius)
+    double maxRadius,
+    std::vector<PendingDisconnectedHoleCylinderTool>& pendingCylinderTools)
 {
     int createdCount = 0;
     int deletedCount = 0;
@@ -10098,6 +10414,10 @@ void DeleteGapGroupsWithMiddlePlanes(
         FormatTag(static_cast<tag_t>(pendingSubtractFeatureTags.size())) +
         ", featureTags=[" + FormatTagList(pendingSubtractFeatureTags) + "]" +
         ", pendingCleanups=" + FormatTag(static_cast<tag_t>(pendingSubtractCleanups.size())));
+    ProcessDisconnectedCoaxialPairsQualifiedByGapBoundingTools(
+        bodyTag,
+        thickness,
+        pendingCylinderTools);
     DebugLog("Delete small R after all gap groups before deferred cleanup");
     DeleteSmallRadiusFacesIfRequested(bodyTag, thickness, deleteREnabled, maxRadius);
     if (!pendingSubtractCleanups.empty())
@@ -11298,45 +11618,8 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
     std::vector<PendingDisconnectedHoleCylinderTool> pendingDisconnectedHoleCylinderTools;
     if (createMiddlePlanes)
     {
-        double preprocessingThickness = 0.0;
-        bool preprocessingThicknessKnown = false;
-        const bool cacheMatchesCurrentBody =
-            gPreviewAnalysisCache.valid &&
-            gPreviewAnalysisCache.bodyTag == bodyTag &&
-            gPreviewAnalysisCache.selectedFaceTag == selectedFaceTag &&
-            gPreviewAnalysisCache.bodyFaceTags == bodyFaceTags;
-        if (cacheMatchesCurrentBody && gPreviewAnalysisCache.hasThickness)
-        {
-            preprocessingThickness = gPreviewAnalysisCache.thickness;
-            preprocessingThicknessKnown = preprocessingThickness > kMinThickness;
-        }
-        else
-        {
-            double preprocessingInwardNormal[3] = {0.0, 0.0, 0.0};
-            preprocessingThicknessKnown = AskSheetThickness(
-                bodyTag,
-                selectedFaceTag,
-                selectedPoint,
-                selectedNormal,
-                preprocessingThickness,
-                preprocessingInwardNormal);
-        }
-
-        DebugLog("Apply pre-gap disconnected coaxial inner-cylinder scan: thicknessKnown=" +
-            FormatTag(static_cast<tag_t>(preprocessingThicknessKnown ? 1 : 0)) +
-            ", thickness=" + FormatDouble(preprocessingThickness));
-        if (preprocessingThicknessKnown &&
-            NormalizeDisconnectedCoaxialInnerCylindersBeforeGapAnalysis(
-                bodyTag,
-                preprocessingThickness,
-                pendingDisconnectedHoleCylinderTools))
-        {
-            gPreviewAnalysisCache.valid = false;
-            bodyFaceTags = AskBodyFaces(bodyTag);
-            std::sort(bodyFaceTags.begin(), bodyFaceTags.end());
-            DebugLog("Apply pre-gap disconnected coaxial inner-cylinder normalization changed body: invalidate analysis cache, bodyFaces=" +
-                FormatTag(static_cast<tag_t>(bodyFaceTags.size())));
-        }
+        gQualifiedDisconnectedCoaxialCylinderPairs.clear();
+        DebugLog("Apply disconnected coaxial inner-cylinder processing deferred until a successful gap bounding tool intersects at least one source face");
     }
     const bool previewCacheHit =
         gPreviewAnalysisCache.valid &&
@@ -11383,9 +11666,11 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
                 bodyTag,
                 previewThickness,
                 toggle0 != NULL && toggle0->Value(),
-                ReadPositiveStringValue(string01, 5.0));
+                ReadPositiveStringValue(string01, 5.0),
+                pendingDisconnectedHoleCylinderTools);
             FinalizeTargetBodyAtWorkflowEnd(
                 bodyTag,
+                previewThickness,
                 pendingDisconnectedHoleCylinderTools);
         }
         else
@@ -11442,6 +11727,7 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
             {
                 FinalizeTargetBodyAtWorkflowEnd(
                     bodyTag,
+                    thickness,
                     pendingDisconnectedHoleCylinderTools);
             }
             RefreshDisplay();
@@ -11486,9 +11772,11 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
                 bodyTag,
                 thickness,
                 toggle0 != NULL && toggle0->Value(),
-                ReadPositiveStringValue(string01, 5.0));
+                ReadPositiveStringValue(string01, 5.0),
+                pendingDisconnectedHoleCylinderTools);
             FinalizeTargetBodyAtWorkflowEnd(
                 bodyTag,
+                thickness,
                 pendingDisconnectedHoleCylinderTools);
         }
         else
@@ -11542,6 +11830,7 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
         {
             FinalizeTargetBodyAtWorkflowEnd(
                 bodyTag,
+                thickness,
                 pendingDisconnectedHoleCylinderTools);
         }
         RefreshDisplay();
@@ -11586,9 +11875,11 @@ void TianFenXI::PreviewSelectedFaceChain(bool createMiddlePlanes)
             bodyTag,
             thickness,
             toggle0 != NULL && toggle0->Value(),
-            ReadPositiveStringValue(string01, 5.0));
+            ReadPositiveStringValue(string01, 5.0),
+            pendingDisconnectedHoleCylinderTools);
         FinalizeTargetBodyAtWorkflowEnd(
             bodyTag,
+            thickness,
             pendingDisconnectedHoleCylinderTools);
     }
     else

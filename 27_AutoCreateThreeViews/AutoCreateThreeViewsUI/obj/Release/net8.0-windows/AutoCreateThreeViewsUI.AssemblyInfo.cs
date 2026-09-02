@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("AutoCreateThreeViewsUI")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+b24966bbe384347031f7ab5ecd4f96a5189800fa")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+ffdac3e47ef1a562e0240a5b03e7aed46c099ca1")]
 [assembly: System.Reflection.AssemblyProductAttribute("AutoCreateThreeViewsUI")]
 [assembly: System.Reflection.AssemblyTitleAttribute("AutoCreateThreeViewsUI")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

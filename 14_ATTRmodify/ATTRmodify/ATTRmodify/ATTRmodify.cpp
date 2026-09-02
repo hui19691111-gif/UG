@@ -308,7 +308,6 @@ namespace
     };
 
     NXOpen::Body* selectedBody = NULL;
-    NXOpen::Features::FlatPattern* selectedFlatPattern = NULL;
 
     NXOpen::Part* CurrentWorkPart()
     {
@@ -341,6 +340,35 @@ namespace
         {
             currentSheet->Open();
         }
+    }
+
+    void UpdateAssociativeAnnotations(NXOpen::Part* workPart)
+    {
+        if (workPart == NULL)
+        {
+            return;
+        }
+
+        const int ufError = UF_MODL_update();
+        if (ufError != 0)
+        {
+            throw std::runtime_error("NX 模型更新失败。");
+        }
+
+        NXOpen::Session* session = NXOpen::Session::GetSession();
+        NXOpen::Session::UndoMarkId updateMark = session->SetUndoMark(
+            NXOpen::Session::MarkVisibilityInvisible,
+            "ATTRmodify associative annotation update");
+        const int updateErrors = session->UpdateManager()->DoUpdate(updateMark);
+        session->DeleteUndoMark(updateMark, NULL);
+        if (updateErrors != 0)
+        {
+            throw std::runtime_error("NX 关联注释更新失败。");
+        }
+
+        RefreshAllDrawingSheetViews(workPart);
+        UF_DISP_make_display_up_to_date();
+        session->DisplayManager()->MakeUpToDate();
     }
 
     NXOpen::Expression* FindExpression(NXOpen::Part* workPart, const char* name)
@@ -379,30 +407,6 @@ namespace
         expression->SetName(name);
     }
 
-    class FlatPatternBuilderGuard
-    {
-    public:
-        explicit FlatPatternBuilderGuard(NXOpen::Features::SheetMetal::FlatPatternBuilder* builder)
-            : builder_(builder)
-        {
-        }
-
-        ~FlatPatternBuilderGuard()
-        {
-            if (builder_ != NULL)
-            {
-                builder_->Destroy();
-            }
-        }
-
-        NXOpen::Features::SheetMetal::FlatPatternBuilder* Get() const
-        {
-            return builder_;
-        }
-
-    private:
-        NXOpen::Features::SheetMetal::FlatPatternBuilder* builder_;
-    };
 }
 
 //------------------------------------------------------------------------------
@@ -674,13 +678,10 @@ void ATTRmodify::initialize_cb()
         selection0 = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("selection0"));
         group4 = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("group4"));
         string0 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string0"));
+        string06 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string06"));
         string04 = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(theDialog->TopBlock()->FindBlock("string04"));
         string05 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string05"));
         toggle02 = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggle02"));
-        group2 = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("group2"));
-        string01 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string01"));
-        string02 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string02"));
-        string03 = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("string03"));
         ApplyMaterialItems(string04, LoadMaterialConfig());
         //------------------------------------------------------------------------------
         //Registration of StringBlock specific callbacks
@@ -739,16 +740,17 @@ int ATTRmodify::apply_cb()
         {
             throw std::runtime_error("请先选择一个实体。");
         }
-        if (selectedFlatPattern == NULL)
-        {
-            throw std::runtime_error("未找到所选实体对应的展开特征。");
-        }
-
         //获取零件编号
         PropertyList* string0Props = string0->GetProperties();
         NXString Thestring0 = string0Props->GetString("Value");
         delete string0Props;
         string0Props = NULL;
+
+        //获取名称
+        PropertyList* string06Props = string06->GetProperties();
+        NXString Thestring06 = string06Props->GetString("Value");
+        delete string06Props;
+        string06Props = NULL;
 
         //获取材料
         NXString Thestring04 = GetMaterialValue(string04);
@@ -759,13 +761,8 @@ int ATTRmodify::apply_cb()
         delete string05Props;
         string05Props = NULL;
 
-        //获取数量
-        PropertyList* string03Props = string03->GetProperties();
-        NXString Thestring03 = string03Props->GetString("Value");
-        delete string03Props;
-        string03Props = NULL;
-
-        UF_OBJ_set_name(selectedBody->Tag(), Thestring0.GetLocaleText());
+        SetStringAttributeUtf8(selectedBody, "\xE5\x90\x8D\xE7\xA7\xB0", Thestring06.GetUTF8Text());
+        UF_OBJ_set_name(selectedBody->Tag(), Thestring06.GetLocaleText());
 
         //设置材料属性
         UF_ATTR_value_t value;
@@ -778,9 +775,6 @@ int ATTRmodify::apply_cb()
         value.value.string = (char*)(Thestring0.GetLocaleText());
         UF_ATTR_assign(selectedBody->Tag(), "bianhao", value);
 
-        value.type = UF_ATTR_string;
-        value.value.string = (char*)(Thestring03.GetLocaleText());
-        UF_ATTR_assign(selectedBody->Tag(), "Z", value);
         value.type = UF_ATTR_integer;
         //设置数量属性
         value.value.integer = atoi((char*)(Thestring05.GetLocaleText()));//char*转int
@@ -804,10 +798,6 @@ int ATTRmodify::apply_cb()
         int Body1ID = 0;
         //Body1->GetReferenceAttribute("BodyID");
 
-        char ExName1Y[256];
-        char ExName1YY[256];
-        char ExName1X[256];
-        char ExName1XX[256];
         char SuLian[256];
         char ZSuLian[256];
         vector <NXObject::AttributeInformation> AADD = selectedBody->GetUserAttributes();
@@ -817,10 +807,6 @@ int ATTRmodify::apply_cb()
             {
                 Body1ID = selectedBody->GetIntegerAttribute("BodyID");
 
-                sprintf(ExName1Y, "Y_%d", Body1ID);
-                sprintf(ExName1YY, "YY_%d", Body1ID);
-                sprintf(ExName1X, "X_%d", Body1ID);
-                sprintf(ExName1XX, "XX_%d", Body1ID);
                 sprintf(SuLian, "SuLian_%d", Body1ID);
                 sprintf(ZSuLian, "ZSuLian_%d", Body1ID);
             }
@@ -845,38 +831,19 @@ int ATTRmodify::apply_cb()
             attributePropertiesBuilder1->Destroy();
 
         }
-        NXOpen::Expression* expression1Y;
-        NXOpen::Expression* expression1YY;
-        NXOpen::Expression* expression1X;
-        NXOpen::Expression* expression1XX;
         NXOpen::Expression* expsuLian;
         NXOpen::Expression* expZsuLian;
         NXOpen::Unit* nullNXOpen_Unit(NULL);
-        char formulaYY[256];
-        char formulaXX[256];
         char formulaZSuLian[256];
 
-        sprintf(ExName1Y, "Y_%d", Body1ID);
-        sprintf(ExName1YY, "YY_%d", Body1ID);
-        sprintf(ExName1X, "X_%d", Body1ID);
-        sprintf(ExName1XX, "XX_%d", Body1ID);
         sprintf(SuLian, "SuLian_%d", Body1ID);
 
-        expression1Y = workPart->Expressions()->GetAttributeExpression(selectedFlatPattern, "Minimum Y", NXOpen::NXObject::AttributeTypeReal, -1);
-        NameExpressionIfAvailable(workPart, expression1Y, ExName1Y);
-        sprintf(formulaYY, "ROUND(%s)", ExName1Y);
-        expression1YY = CreateOrUpdateExpression(workPart, "Integer", ExName1YY, formulaYY, nullNXOpen_Unit);
-
-        expression1X = workPart->Expressions()->GetAttributeExpression(selectedFlatPattern, "Minimum X", NXOpen::NXObject::AttributeTypeReal, -1);
-        NameExpressionIfAvailable(workPart, expression1X, ExName1X);
-        sprintf(formulaXX, "ROUND(%s)", ExName1X);
-        expression1XX = CreateOrUpdateExpression(workPart, "Integer", ExName1XX, formulaXX, nullNXOpen_Unit);
         expsuLian = workPart->Expressions()->GetAttributeExpression(selectedBody, "sulian", NXOpen::NXObject::AttributeTypeInteger, -1);
         NameExpressionIfAvailable(workPart, expsuLian, SuLian);
         sprintf(formulaZSuLian, "数量*%s", SuLian);
         sprintf(ZSuLian, "ZSuLian_%d", Body1ID);
         expZsuLian = CreateOrUpdateExpression(workPart, "Integer", ZSuLian, formulaZSuLian, nullNXOpen_Unit);
-        RefreshAllDrawingSheetViews(workPart);
+        UpdateAssociativeAnnotations(workPart);
 
     }
     catch(exception& ex)
@@ -900,7 +867,6 @@ int ATTRmodify::update_cb(NXOpen::BlockStyler::UIBlock* block)
             UfSessionGuard ufGuard;
             NXOpen::Part* workPart = CurrentWorkPart();
             selectedBody = NULL;
-            selectedFlatPattern = NULL;
             if (workPart == NULL)
             {
                 throw std::runtime_error("请先打开一个工作部件。");
@@ -950,76 +916,40 @@ int ATTRmodify::update_cb(NXOpen::BlockStyler::UIBlock* block)
                     }
                 }
             }
-            NXString Name1 = selectedBody->Name();
+            NXString Name1("");
+            if (selectedBody->HasUserAttribute("bianhao", NXOpen::NXObject::AttributeTypeString, -1))
+            {
+                Name1 = selectedBody->GetUserAttribute(
+                    "bianhao",
+                    NXOpen::NXObject::AttributeTypeString,
+                    -1).StringValue;
+            }
             PropertyList* string0Props = string0->GetProperties();
             string0Props->SetString("Value", Name1);
             delete string0Props;
             string0Props = NULL;
 
-
-            double x = 0.0;
-            double y = 0.0;
-            bool foundFlatPattern = false;
-            vector<Features::Feature*> Feature01 = workPart->Features()->GetFeatures();
-            for (size_t i = 0; i < Feature01.size(); i++)
+            NXString bodyNameAttribute("");
+            const NXString bodyNameTitle = Utf8NxString("\xE5\x90\x8D\xE7\xA7\xB0");
+            if (selectedBody->HasUserAttribute(bodyNameTitle, NXOpen::NXObject::AttributeTypeString, -1))
             {
-                if (strcmp(Feature01[i]->FeatureType().GetLocaleText(), "FLAT_PATTERN") == 0)
-                {
-
-                    NXOpen::Features::FlatPattern* convertToSheetmetal1=(dynamic_cast<NXOpen::Features::FlatPattern*>(NXOpen::NXObjectManager::Get(Feature01[i]->Tag())));
-                    if (convertToSheetmetal1 == NULL)
-                    {
-                        continue;
-                    }
-                    NXOpen::Features::SheetMetal::FlatPatternBuilder* flatPatternBuilder1;
-                    flatPatternBuilder1 = workPart->Features()->SheetmetalManager()->CreateFlatPatternBuilder(convertToSheetmetal1);
-                    FlatPatternBuilderGuard flatPatternBuilderGuard(flatPatternBuilder1);
-                    NXOpen::Face* FACE1A;
-
-
-                    FACE1A = flatPatternBuilderGuard.Get()->UpwardFace()->Value();
-
-                    std::vector<NXOpen::Face*> faces = selectedBody->GetFaces();
-                    for (size_t C = 0; C < faces.size(); C++)
-                    {
-
-                        if (FACE1A != NULL && faces[C]->Tag() == FACE1A->Tag())
-                        {
-                            foundFlatPattern = true;
-                            x = convertToSheetmetal1->GetRealAttribute("Minimum X");
-                            y = convertToSheetmetal1->GetRealAttribute("Minimum Y");
-                            selectedFlatPattern = convertToSheetmetal1;
-                        }
-                    }
-                    if (foundFlatPattern)
-                    {
-                        break;
-                    }
-                }
+                bodyNameAttribute = selectedBody->GetUserAttribute(
+                    bodyNameTitle,
+                    NXOpen::NXObject::AttributeTypeString,
+                    -1).StringValue;
             }
-            char charX[256], charY[256];
-            sprintf(charX, "%.5f", x);
-            sprintf(charY, "%.5f", y);
-            PropertyList* string01Props = string01->GetProperties();
-            string01Props->SetString("Value", charX);
-            delete string01Props;
-            string01Props = NULL;
+            PropertyList* string06Props = string06->GetProperties();
+            string06Props->SetString("Value", bodyNameAttribute);
+            delete string06Props;
+            string06Props = NULL;
 
-            PropertyList* string02Props = string02->GetProperties();
-            string02Props->SetString("Value", charY);
-            delete string02Props;
-            string02Props = NULL;
 
-            double z = workPart->Features()->SheetmetalManager()->GetBodyThickness(selectedBody);//获得钣金厚度
-            char charZ[256];
-            sprintf(charZ, "%.1f", z);
-
-            PropertyList* string03Props = string03->GetProperties();
-            string03Props->SetString("Value", charZ);
-            delete string03Props;
-            string03Props = NULL;
         }
         else if(block == string0)
+        {
+        //---------Enter your code here-----------
+        }
+        else if(block == string06)
         {
         //---------Enter your code here-----------
         }
@@ -1032,18 +962,6 @@ int ATTRmodify::update_cb(NXOpen::BlockStyler::UIBlock* block)
         //---------Enter your code here-----------
         }
         else if(block == toggle02)
-        {
-        //---------Enter your code here-----------
-        }
-        else if(block == string01)
-        {
-        //---------Enter your code here-----------
-        }
-        else if(block == string02)
-        {
-        //---------Enter your code here-----------
-        }
-        else if(block == string03)
         {
         //---------Enter your code here-----------
         }
