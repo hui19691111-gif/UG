@@ -33,7 +33,8 @@ enum ControlId
     ID_ROOT = 1001, ID_BROWSE_ROOT, ID_REFRESH, ID_SEARCH, ID_CATEGORY,
     ID_LIST, ID_NAME, ID_EDIT_CATEGORY, ID_SOURCE, ID_BROWSE_SOURCE,
     ID_ADD_CURRENT, ID_ADD_FILE, ID_DELETE,
-    ID_MODE_ASSEMBLY, ID_MODE_BODY, ID_INSERT, ID_CLOSE, ID_STATUS, ID_PREVIEW
+    ID_MODE_ASSEMBLY, ID_MODE_BODY, ID_INSERT, ID_CLOSE, ID_STATUS, ID_PREVIEW,
+    ID_DETAIL_NAME, ID_DETAIL_CATEGORY, ID_DETAIL_FILE
 };
 
 struct LibraryItem
@@ -52,9 +53,13 @@ struct AppState
     HWND category = nullptr;
     HWND preview = nullptr;
     HBITMAP previewBitmap = nullptr;
+    HIMAGELIST thumbnails = nullptr;
     HFONT font = nullptr;
     std::vector<LibraryItem> items;
     std::vector<std::size_t> visible;
+    std::vector<std::wstring> categories;
+    std::wstring selectedCategory;
+    bool refreshingCategories = false;
     bool running = true;
 };
 
@@ -302,16 +307,39 @@ void LoadIndex(AppState* state)
 
 void RefreshCategories(AppState* state)
 {
-    const std::wstring old = GetText(state->window, ID_CATEGORY);
-    SendMessageW(state->category, CB_RESETCONTENT, 0, 0);
-    SendMessageW(state->category, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"全部分类"));
-    std::set<std::wstring> categories;
-    for (const auto& item : state->items) categories.insert(item.category);
-    for (const auto& category : categories)
-        SendMessageW(state->category, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(category.c_str()));
-    const LRESULT found = SendMessageW(state->category, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1),
-                                       reinterpret_cast<LPARAM>(old.c_str()));
-    SendMessageW(state->category, CB_SETCURSEL, found == CB_ERR ? 0 : found, 0);
+    state->refreshingCategories = true;
+    const std::wstring old = state->selectedCategory;
+    TreeView_DeleteAllItems(state->category);
+    state->categories.clear();
+    std::set<std::wstring> uniqueCategories;
+    for (const auto& item : state->items) uniqueCategories.insert(item.category);
+    state->categories.assign(uniqueCategories.begin(), uniqueCategories.end());
+
+    TVINSERTSTRUCTW insert{};
+    insert.hParent = TVI_ROOT;
+    insert.hInsertAfter = TVI_LAST;
+    insert.item.mask = TVIF_TEXT | TVIF_PARAM;
+    std::wstring rootText = L"全部标准件  (" + std::to_wstring(state->items.size()) + L")";
+    insert.item.pszText = rootText.data();
+    insert.item.lParam = 0;
+    const HTREEITEM root = TreeView_InsertItem(state->category, &insert);
+    HTREEITEM selected = root;
+    for (std::size_t index = 0; index < state->categories.size(); ++index)
+    {
+        const auto& category = state->categories[index];
+        const auto count = std::count_if(state->items.begin(), state->items.end(),
+            [&](const LibraryItem& item) { return item.category == category; });
+        std::wstring label = category + L"  (" + std::to_wstring(count) + L")";
+        insert.hParent = root;
+        insert.item.pszText = label.data();
+        insert.item.lParam = static_cast<LPARAM>(index + 1);
+        const HTREEITEM node = TreeView_InsertItem(state->category, &insert);
+        if (category == old) selected = node;
+    }
+    state->selectedCategory = selected == root ? L"" : old;
+    TreeView_Expand(state->category, root, TVE_EXPAND);
+    TreeView_SelectItem(state->category, selected);
+    state->refreshingCategories = false;
 }
 
 std::wstring Lower(std::wstring value)
@@ -324,20 +352,63 @@ void RefreshList(AppState* state)
 {
     ListView_DeleteAllItems(state->list);
     state->visible.clear();
+    if (state->thumbnails != nullptr)
+    {
+        ListView_SetImageList(state->list, nullptr, LVSIL_NORMAL);
+        ImageList_Destroy(state->thumbnails);
+    }
+    state->thumbnails = ImageList_Create(112, 112, ILC_COLOR32 | ILC_MASK, 8, 8);
+    HDC screen = GetDC(nullptr);
+    HBITMAP placeholder = CreateCompatibleBitmap(screen, 112, 112);
+    HDC memory = CreateCompatibleDC(screen);
+    const HGDIOBJ oldBitmap = SelectObject(memory, placeholder);
+    RECT placeholderRect{0, 0, 112, 112};
+    FillRect(memory, &placeholderRect, reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
+    HPEN pen = CreatePen(PS_SOLID, 2, RGB(130, 150, 170));
+    const HGDIOBJ oldPen = SelectObject(memory, pen);
+    Rectangle(memory, 18, 28, 94, 84);
+    MoveToEx(memory, 18, 28, nullptr); LineTo(memory, 43, 13);
+    LineTo(memory, 102, 13); LineTo(memory, 94, 28);
+    SelectObject(memory, oldPen);
+    DeleteObject(pen);
+    SelectObject(memory, oldBitmap);
+    DeleteDC(memory);
+    ReleaseDC(nullptr, screen);
+    ImageList_AddMasked(state->thumbnails, placeholder, RGB(255, 255, 255));
+    DeleteObject(placeholder);
+    ListView_SetImageList(state->list, state->thumbnails, LVSIL_NORMAL);
+    ListView_SetIconSpacing(state->list, 142, 148);
+
     const std::wstring search = Lower(Trim(GetText(state->window, ID_SEARCH)));
-    const std::wstring category = GetText(state->window, ID_CATEGORY);
     for (std::size_t index = 0; index < state->items.size(); ++index)
     {
         const auto& item = state->items[index];
-        if (category != L"全部分类" && !category.empty() && item.category != category) continue;
+        if (!state->selectedCategory.empty() && item.category != state->selectedCategory) continue;
         if (!search.empty() && Lower(item.name + L" " + item.category + L" " + item.relativePath).find(search) == std::wstring::npos) continue;
+        int imageIndex = 0;
+        const fs::path model = LibraryRoot(state) / item.relativePath;
+        IShellItemImageFactory* factory = nullptr;
+        HBITMAP thumbnail = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(model.c_str(), nullptr, IID_PPV_ARGS(&factory))))
+        {
+            SIZE size{112, 112};
+            factory->GetImage(size,
+                static_cast<SIIGBF>(SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK |
+                                    SIIGBF_RESIZETOFIT), &thumbnail);
+            factory->Release();
+        }
+        if (thumbnail != nullptr)
+        {
+            imageIndex = ImageList_Add(state->thumbnails, thumbnail, nullptr);
+            DeleteObject(thumbnail);
+            if (imageIndex < 0) imageIndex = 0;
+        }
         LVITEMW row{};
-        row.mask = LVIF_TEXT;
+        row.mask = LVIF_TEXT | LVIF_IMAGE;
         row.iItem = static_cast<int>(state->visible.size());
+        row.iImage = imageIndex;
         row.pszText = const_cast<wchar_t*>(item.name.c_str());
-        const int inserted = ListView_InsertItem(state->list, &row);
-        ListView_SetItemText(state->list, inserted, 1, const_cast<wchar_t*>(item.category.c_str()));
-        ListView_SetItemText(state->list, inserted, 2, const_cast<wchar_t*>(item.relativePath.c_str()));
+        ListView_InsertItem(state->list, &row);
         state->visible.push_back(index);
     }
     UpdatePreview(state);
@@ -472,6 +543,9 @@ void UpdatePreview(AppState* state)
     const std::size_t index = SelectedIndex(state);
     if (index != SIZE_MAX)
     {
+        SetText(state->window, ID_DETAIL_NAME, state->items[index].name);
+        SetText(state->window, ID_DETAIL_CATEGORY, state->items[index].category);
+        SetText(state->window, ID_DETAIL_FILE, state->items[index].relativePath);
         std::wstring error;
         const fs::path model = ResolvedModel(state, state->items[index], error);
         if (!model.empty())
@@ -488,6 +562,12 @@ void UpdatePreview(AppState* state)
                 factory->Release();
             }
         }
+    }
+    else
+    {
+        SetText(state->window, ID_DETAIL_NAME, L"未选择");
+        SetText(state->window, ID_DETAIL_CATEGORY, L"-");
+        SetText(state->window, ID_DETAIL_FILE, L"-");
     }
     if (state->preview != nullptr) InvalidateRect(state->preview, nullptr, TRUE);
 }
@@ -576,53 +656,62 @@ void BuildUi(AppState* state)
     state->font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     AddControl(state, 0, L"STATIC", L"库目录：", SS_LEFT, 14, 15, 65, 22, 0);
     const std::wstring savedRoot = LoadRootPreference();
-    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", savedRoot.c_str(), ES_AUTOHSCROLL, 80, 12, 830, 25, ID_ROOT);
-    AddControl(state, 0, L"BUTTON", L"浏览...", BS_PUSHBUTTON, 920, 11, 78, 27, ID_BROWSE_ROOT);
-    AddControl(state, 0, L"BUTTON", L"刷新", BS_PUSHBUTTON, 1008, 11, 76, 27, ID_REFRESH);
+    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", savedRoot.c_str(), ES_AUTOHSCROLL, 80, 12, 960, 25, ID_ROOT);
+    AddControl(state, 0, L"BUTTON", L"浏览...", BS_PUSHBUTTON, 1050, 11, 82, 27, ID_BROWSE_ROOT);
+    AddControl(state, 0, L"BUTTON", L"刷新", BS_PUSHBUTTON, 1142, 11, 82, 27, ID_REFRESH);
 
     AddControl(state, 0, L"STATIC", L"搜索：", SS_LEFT, 14, 52, 55, 22, 0);
-    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL, 66, 49, 280, 25, ID_SEARCH);
-    AddControl(state, 0, L"STATIC", L"分类：", SS_LEFT, 365, 52, 55, 22, 0);
-    state->category = AddControl(state, 0, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL,
-                                 418, 49, 210, 250, ID_CATEGORY);
+    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL, 66, 49, 420, 25, ID_SEARCH);
+    AddControl(state, 0, L"STATIC", L"输入名称、分类或规格关键字", SS_LEFT, 500, 52, 260, 22, 0);
 
+    AddControl(state, 0, L"BUTTON", L"标准件分类", BS_GROUPBOX, 14, 80, 220, 472, 0);
+    state->category = AddControl(state, WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
+                                 TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT |
+                                 TVS_SHOWSELALWAYS, 25, 105, 198, 432, ID_CATEGORY);
+
+    AddControl(state, 0, L"BUTTON", L"标准件选择", BS_GROUPBOX, 244, 80, 606, 472, 0);
     state->list = AddControl(state, WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-                             LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-                             14, 84, 724, 260, ID_LIST);
-    ListView_SetExtendedListViewStyle(state->list, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
-    LVCOLUMNW column{};
-    column.mask = LVCF_TEXT | LVCF_WIDTH;
-    column.pszText = const_cast<wchar_t*>(L"名称"); column.cx = 215; ListView_InsertColumn(state->list, 0, &column);
-    column.pszText = const_cast<wchar_t*>(L"分类"); column.cx = 150; ListView_InsertColumn(state->list, 1, &column);
-    column.pszText = const_cast<wchar_t*>(L"模型文件"); column.cx = 330; ListView_InsertColumn(state->list, 2, &column);
+                             LVS_ICON | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_AUTOARRANGE,
+                             255, 105, 584, 432, ID_LIST);
+    ListView_SetExtendedListViewStyle(state->list,
+                                      LVS_EX_DOUBLEBUFFER | LVS_EX_BORDERSELECT | LVS_EX_INFOTIP);
 
-    AddControl(state, 0, L"BUTTON", L"模型预览", BS_GROUPBOX, 750, 74, 334, 396, 0);
+    AddControl(state, 0, L"BUTTON", L"模型预览与调用", BS_GROUPBOX, 860, 80, 364, 472, 0);
     state->preview = AddControl(state, WS_EX_CLIENTEDGE, L"STATIC", L"", SS_OWNERDRAW,
-                                765, 101, 304, 278, ID_PREVIEW);
-    AddControl(state, 0, L"STATIC",
-               L"预览来自 PRT 文件缩略图\r\n重新保存部件可更新预览",
-               SS_CENTER, 770, 391, 294, 48, 0);
-
-    AddControl(state, 0, L"BUTTON", L"自定义入库", BS_GROUPBOX, 14, 354, 724, 116, 0);
-    AddControl(state, 0, L"STATIC", L"名称：", SS_LEFT, 28, 382, 50, 22, 0);
-    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL, 80, 379, 210, 25, ID_NAME);
-    AddControl(state, 0, L"STATIC", L"分类：", SS_LEFT, 310, 382, 50, 22, 0);
-    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"用户自定义", ES_AUTOHSCROLL, 360, 379, 185, 25, ID_EDIT_CATEGORY);
-    AddControl(state, 0, L"STATIC", L"源文件：", SS_LEFT, 28, 418, 60, 22, 0);
-    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL | ES_READONLY, 92, 415, 453, 25, ID_SOURCE);
-    AddControl(state, 0, L"BUTTON", L"选择...", BS_PUSHBUTTON, 555, 414, 68, 27, ID_BROWSE_SOURCE);
-    AddControl(state, 0, L"BUTTON", L"入库当前部件", BS_PUSHBUTTON, 555, 378, 104, 28, ID_ADD_CURRENT);
-    AddControl(state, 0, L"BUTTON", L"添加文件", BS_PUSHBUTTON, 555, 414, 82, 28, ID_ADD_FILE);
-    AddControl(state, 0, L"BUTTON", L"删除定义", BS_PUSHBUTTON, 642, 414, 82, 28, ID_DELETE);
-
-    AddControl(state, 0, L"BUTTON", L"调用方式", BS_GROUPBOX, 14, 478, 724, 68, 0);
-    AddControl(state, 0, L"BUTTON", L"装配调用", BS_AUTORADIOBUTTON | WS_GROUP, 32, 502, 102, 24, ID_MODE_ASSEMBLY);
-    AddControl(state, 0, L"BUTTON", L"多实体调用", BS_AUTORADIOBUTTON, 146, 502, 112, 24, ID_MODE_BODY);
+                                875, 105, 334, 260, ID_PREVIEW);
+    AddControl(state, 0, L"STATIC", L"名称：", SS_LEFT, 878, 381, 48, 22, 0);
+    AddControl(state, 0, L"STATIC", L"未选择", SS_LEFT | SS_PATHELLIPSIS,
+               928, 381, 274, 22, ID_DETAIL_NAME);
+    AddControl(state, 0, L"STATIC", L"分类：", SS_LEFT, 878, 405, 48, 22, 0);
+    AddControl(state, 0, L"STATIC", L"-", SS_LEFT | SS_PATHELLIPSIS,
+               928, 405, 274, 22, ID_DETAIL_CATEGORY);
+    AddControl(state, 0, L"STATIC", L"文件：", SS_LEFT, 878, 429, 48, 22, 0);
+    AddControl(state, 0, L"STATIC", L"-", SS_LEFT | SS_PATHELLIPSIS,
+               928, 429, 274, 22, ID_DETAIL_FILE);
+    AddControl(state, 0, L"BUTTON", L"装配调用", BS_AUTORADIOBUTTON | WS_GROUP,
+               878, 459, 102, 24, ID_MODE_ASSEMBLY);
+    AddControl(state, 0, L"BUTTON", L"多实体调用", BS_AUTORADIOBUTTON,
+               990, 459, 112, 24, ID_MODE_BODY);
     CheckRadioButton(state->window, ID_MODE_ASSEMBLY, ID_MODE_BODY, ID_MODE_ASSEMBLY);
-    AddControl(state, 0, L"STATIC", L"定位：按当前 WCS 原点和方向放置", SS_LEFT, 278, 503, 265, 22, 0);
-    AddControl(state, 0, L"BUTTON", L"调用选中标准件", BS_DEFPUSHBUTTON, 765, 490, 198, 42, ID_INSERT);
-    AddControl(state, 0, L"BUTTON", L"关闭", BS_PUSHBUTTON, 977, 490, 107, 42, ID_CLOSE);
-    AddControl(state, 0, L"STATIC", L"", SS_LEFT, 14, 553, 1070, 22, ID_STATUS);
+    AddControl(state, 0, L"STATIC", L"按当前 WCS 原点和方向放置",
+               SS_LEFT, 878, 486, 230, 20, 0);
+    AddControl(state, 0, L"BUTTON", L"调用选中标准件", BS_DEFPUSHBUTTON,
+               878, 510, 324, 32, ID_INSERT);
+
+    AddControl(state, 0, L"BUTTON", L"用户标准件管理", BS_GROUPBOX, 14, 560, 1030, 106, 0);
+    AddControl(state, 0, L"STATIC", L"名称：", SS_LEFT, 28, 589, 50, 22, 0);
+    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL, 78, 586, 210, 25, ID_NAME);
+    AddControl(state, 0, L"STATIC", L"分类：", SS_LEFT, 305, 589, 50, 22, 0);
+    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"用户自定义", ES_AUTOHSCROLL, 355, 586, 190, 25, ID_EDIT_CATEGORY);
+    AddControl(state, 0, L"BUTTON", L"入库当前部件", BS_PUSHBUTTON, 560, 584, 114, 29, ID_ADD_CURRENT);
+    AddControl(state, 0, L"STATIC", L"源文件：", SS_LEFT, 28, 626, 60, 22, 0);
+    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL | ES_READONLY,
+               92, 623, 453, 25, ID_SOURCE);
+    AddControl(state, 0, L"BUTTON", L"浏览...", BS_PUSHBUTTON, 560, 621, 72, 29, ID_BROWSE_SOURCE);
+    AddControl(state, 0, L"BUTTON", L"添加文件", BS_PUSHBUTTON, 640, 621, 90, 29, ID_ADD_FILE);
+    AddControl(state, 0, L"BUTTON", L"删除选中项", BS_PUSHBUTTON, 740, 621, 100, 29, ID_DELETE);
+    AddControl(state, 0, L"STATIC", L"", SS_LEFT, 860, 574, 364, 48, ID_STATUS);
+    AddControl(state, 0, L"BUTTON", L"关闭", BS_PUSHBUTTON, 1118, 628, 106, 32, ID_CLOSE);
 }
 
 void DeleteSelected(AppState* state)
@@ -729,15 +818,28 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case ID_SEARCH:
             if (HIWORD(wParam) == EN_CHANGE) RefreshList(state);
             return 0;
-        case ID_CATEGORY:
-            if (HIWORD(wParam) == CBN_SELCHANGE) RefreshList(state);
-            return 0;
         default: break;
         }
         break;
     case WM_NOTIFY:
-        if (state != nullptr && reinterpret_cast<NMHDR*>(lParam)->idFrom == ID_LIST &&
-            reinterpret_cast<NMHDR*>(lParam)->code == LVN_ITEMCHANGED)
+        if (state == nullptr) return 0;
+        if (reinterpret_cast<NMHDR*>(lParam)->idFrom == ID_CATEGORY &&
+            reinterpret_cast<NMHDR*>(lParam)->code == TVN_SELCHANGEDW)
+        {
+            if (state->refreshingCategories) return 0;
+            const auto* notification = reinterpret_cast<NMTREEVIEWW*>(lParam);
+            const std::size_t categoryIndex = static_cast<std::size_t>(notification->itemNew.lParam);
+            state->selectedCategory = categoryIndex == 0 || categoryIndex > state->categories.size()
+                ? L"" : state->categories[categoryIndex - 1];
+            RefreshList(state);
+        }
+        else if (reinterpret_cast<NMHDR*>(lParam)->idFrom == ID_LIST &&
+                 reinterpret_cast<NMHDR*>(lParam)->code == NM_DBLCLK)
+        {
+            InsertSelected(state);
+        }
+        else if (reinterpret_cast<NMHDR*>(lParam)->idFrom == ID_LIST &&
+                 reinterpret_cast<NMHDR*>(lParam)->code == LVN_ITEMCHANGED)
         {
             const auto* notification = reinterpret_cast<NMLISTVIEW*>(lParam);
             if ((notification->uChanged & LVIF_STATE) != 0 &&
@@ -795,6 +897,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 DeleteObject(state->previewBitmap);
                 state->previewBitmap = nullptr;
             }
+            if (state->thumbnails != nullptr)
+            {
+                ListView_SetImageList(state->list, nullptr, LVSIL_NORMAL);
+                ImageList_Destroy(state->thumbnails);
+                state->thumbnails = nullptr;
+            }
             state->running = false;
         }
         return 0;
@@ -834,8 +942,8 @@ int LaunchStandardPartsLibrary()
 
     RECT area{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &area, 0);
-    constexpr int width = 1116;
-    constexpr int height = 625;
+    constexpr int width = 1256;
+    constexpr int height = 750;
     const int x = area.left + ((area.right - area.left) - width) / 2;
     const int y = area.top + ((area.bottom - area.top) - height) / 2;
     HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, className.c_str(), kTitle,
