@@ -134,6 +134,11 @@ const char* kDefaultSerialStart = "01";
 const char* kDefaultNameFormat = "\x7B\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x7D\x5F\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D";
 const char* kDefaultBodyNameAttribute = "DB_PART_NAME";
 const char* kNameConfigFileName = "DuoSiTiZuanZuanPei_name_config.ini";
+const wchar_t* kDialogStateConfigFileName = L"DuoSiTiZuanZuanPei_dialog_state.ini";
+const wchar_t* kDialogStateSection = L"DialogState";
+const wchar_t* kAssemblyModeStateKey = L"AssemblyMode";
+const wchar_t* kRetainBodiesStateKey = L"RetainBodies";
+const wchar_t* kColorMatchedBodiesStateKey = L"ColorMatchedBodies";
 const char* kSerialToken = "\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D";
 const char* kCustomToken = "\x7B\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x7D";
 const char* kWorkPartToken = "\x7B\xE5\xB7\xA5\xE4\xBD\x9C\xE9\x83\xA8\xE4\xBB\xB6\xE5\x90\x8D\x7D";
@@ -227,6 +232,33 @@ std::string GetNameConfigPath()
     CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
     CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
     return std::string("D:\\UG智辉钣金插件\\config\\") + kNameConfigFileName;
+}
+
+std::wstring GetDialogStateConfigPath()
+{
+    CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+    CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
+    return std::wstring(L"D:\\UG智辉钣金插件\\config\\") +
+        kDialogStateConfigFileName;
+}
+
+int ReadDialogStateInt(const wchar_t* key, int defaultValue)
+{
+    return static_cast<int>(GetPrivateProfileIntW(
+        kDialogStateSection,
+        key,
+        defaultValue,
+        GetDialogStateConfigPath().c_str()));
+}
+
+void WriteDialogStateInt(const wchar_t* key, int value)
+{
+    const wchar_t* text = value == 0 ? L"0" : L"1";
+    WritePrivateProfileStringW(
+        kDialogStateSection,
+        key,
+        text,
+        GetDialogStateConfigPath().c_str());
 }
 
 void ResetPreviewDebugLog()
@@ -4989,6 +5021,7 @@ public:
           assemblyList(NULL),
           assemblyListReady(false),
           namingControlsInitializing(false),
+          rememberedOptionsInitializing(false),
           postApplyResetting(false),
           retainOriginalBodies(false),
           cachedSearchDataValid(false),
@@ -5046,6 +5079,7 @@ private:
     NXOpen::BlockStyler::Tree* assemblyList;
     bool assemblyListReady;
     bool namingControlsInitializing;
+    bool rememberedOptionsInitializing;
     bool postApplyResetting;
     bool retainOriginalBodies;
     std::vector<AssemblyPreviewRow> previewRows;
@@ -5076,6 +5110,7 @@ private:
         assemblyList = NULL;
         assemblyListReady = false;
         namingControlsInitializing = false;
+        rememberedOptionsInitializing = false;
         postApplyResetting = false;
         lastConversionCreatedPart = false;
         lastConversionFailureReason.clear();
@@ -5089,6 +5124,7 @@ private:
         EnsureNameConfigFileExists();
         RefreshBlockPointers();
         InitializeNamingControls();
+        InitializeRememberedOptions();
         ConfigureBodySelectionFilter();
         InitializeOutputFolder();
         UpdateColorMatchedBodiesOption();
@@ -5145,6 +5181,12 @@ private:
             {
                 assemblyMode = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(block);
                 WritePreviewDebugLog("Update routed to assemblyMode");
+                if (!rememberedOptionsInitializing)
+                {
+                    WriteDialogStateInt(
+                        kAssemblyModeStateKey,
+                        GetAssemblyOutputMode());
+                }
                 RefreshPreviewForAssemblyMode();
             }
             else if (block == findSameBodiesButton || blockName == kFindSameBodiesButtonBlockId)
@@ -5182,12 +5224,24 @@ private:
             {
                 colorMatchedBodiesToggle = block;
                 UpdateColorMatchedBodiesOption();
+                if (!rememberedOptionsInitializing)
+                {
+                    WriteDialogStateInt(
+                        kColorMatchedBodiesStateKey,
+                        gColorMatchedBodies ? 1 : 0);
+                }
                 WritePreviewDebugLog("Update routed to colorMatchedBodiesToggle");
             }
             else if (block == retainBodiesToggle || blockName == kRetainBodiesToggleBlockId)
             {
                 retainBodiesToggle = block;
                 UpdateRetainBodiesOption();
+                if (!rememberedOptionsInitializing)
+                {
+                    WriteDialogStateInt(
+                        kRetainBodiesStateKey,
+                        retainOriginalBodies ? 1 : 0);
+                }
                 WritePreviewDebugLog("Update routed to retainBodiesToggle");
             }
             else if (block == bodySelection || blockName == kBodySelectionBlockId)
@@ -5465,6 +5519,56 @@ private:
         return value == AssemblyOutputModeAllBodiesInOnePart
             ? AssemblyOutputModeAllBodiesInOnePart
             : AssemblyOutputModeOnePartPerBodyGroup;
+    }
+
+    static void SetLogicalBlockValue(
+        NXOpen::BlockStyler::UIBlock* block,
+        bool value)
+    {
+        if (block == NULL)
+        {
+            return;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties = block->GetProperties();
+        properties->SetLogical("Value", value);
+        delete properties;
+    }
+
+    void InitializeRememberedOptions()
+    {
+        rememberedOptionsInitializing = true;
+        try
+        {
+            const int rememberedAssemblyMode = ReadDialogStateInt(
+                kAssemblyModeStateKey,
+                AssemblyOutputModeOnePartPerBodyGroup);
+            if (assemblyMode != NULL)
+            {
+                NXOpen::BlockStyler::PropertyList* properties =
+                    assemblyMode->GetProperties();
+                properties->SetEnum(
+                    "Value",
+                    rememberedAssemblyMode == AssemblyOutputModeAllBodiesInOnePart
+                        ? AssemblyOutputModeAllBodiesInOnePart
+                        : AssemblyOutputModeOnePartPerBodyGroup);
+                delete properties;
+            }
+
+            SetLogicalBlockValue(
+                retainBodiesToggle,
+                ReadDialogStateInt(kRetainBodiesStateKey, 0) != 0);
+            SetLogicalBlockValue(
+                colorMatchedBodiesToggle,
+                ReadDialogStateInt(kColorMatchedBodiesStateKey, 1) != 0);
+        }
+        catch (...)
+        {
+            rememberedOptionsInitializing = false;
+            throw;
+        }
+        rememberedOptionsInitializing = false;
+        WritePreviewDebugLog("InitializeRememberedOptions end");
     }
 
     void SetNamingMode(int value)
