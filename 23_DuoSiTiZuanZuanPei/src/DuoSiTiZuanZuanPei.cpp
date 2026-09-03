@@ -4984,8 +4984,10 @@ public:
           assemblyList(NULL),
           assemblyListReady(false),
           namingControlsInitializing(false),
+          postApplyResetting(false),
           retainOriginalBodies(false),
-          cachedSearchDataValid(false)
+          cachedSearchDataValid(false),
+          lastConversionCreatedPart(false)
     {
         ResetPreviewDebugLog();
         WritePreviewDebugLog("constructor begin, dialogPath=" + GetDialogFullPath());
@@ -5038,6 +5040,7 @@ private:
     NXOpen::BlockStyler::Tree* assemblyList;
     bool assemblyListReady;
     bool namingControlsInitializing;
+    bool postApplyResetting;
     bool retainOriginalBodies;
     std::vector<AssemblyPreviewRow> previewRows;
     std::vector<NXOpen::BlockStyler::Node*> previewNodes;
@@ -5045,6 +5048,7 @@ private:
     SameBodySearchData cachedSearchData;
     std::vector<tag_t> cachedSearchSelectionTags;
     bool cachedSearchDataValid;
+    bool lastConversionCreatedPart;
     std::vector<tag_t> previewHighlightedTags;
 
     void ResetBlockPointersForInitialize()
@@ -5065,6 +5069,8 @@ private:
         assemblyList = NULL;
         assemblyListReady = false;
         namingControlsInitializing = false;
+        postApplyResetting = false;
+        lastConversionCreatedPart = false;
         previewNodes.clear();
     }
 
@@ -5121,6 +5127,12 @@ private:
             ", pointer=" + PointerText(block));
         try
         {
+            if (postApplyResetting &&
+                (block == bodySelection || blockName == kBodySelectionBlockId))
+            {
+                WritePreviewDebugLog("Update skipped during post-Apply selection reset");
+                return 0;
+            }
             if (block == assemblyMode || blockName == kAssemblyModeBlockId)
             {
                 assemblyMode = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(block);
@@ -6536,9 +6548,77 @@ private:
     int Apply()
     {
         WritePreviewDebugLog("Apply begin");
-        const int result = ConvertSelectedBodies();
-        WritePreviewDebugLog(result == 0 ? "Apply end" : "Apply failed");
-        return result;
+        try
+        {
+            const bool advanceSinglePartSerial =
+                GetAssemblyOutputMode() == AssemblyOutputModeAllBodiesInOnePart;
+            const int result = ConvertSelectedBodies();
+            if (result == 0 && advanceSinglePartSerial && lastConversionCreatedPart)
+            {
+                PrepareForNextSinglePartApply();
+            }
+            WritePreviewDebugLog(result == 0 ? "Apply end" : "Apply failed");
+            return result;
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogCallbackError("Apply NXException", ex.Message());
+            return 1;
+        }
+        catch (const std::exception& ex)
+        {
+            LogCallbackError("Apply exception", ex.what());
+            return 1;
+        }
+        catch (...)
+        {
+            LogCallbackError("Apply unknown exception", "Unknown Apply error.");
+            return 1;
+        }
+    }
+
+    void PrepareForNextSinglePartApply()
+    {
+        const std::string currentSerial = GetCurrentSerialStart();
+        const long currentNumber = std::strtol(currentSerial.c_str(), NULL, 10);
+        if (currentNumber >= 999999999L)
+        {
+            WritePreviewDebugLog(
+                "Post-Apply serial not advanced: maximum value reached");
+            return;
+        }
+
+        const std::string nextSerial = FormatPaddedNumber(
+            static_cast<int>(currentNumber + 1),
+            static_cast<int>(currentSerial.size()));
+
+        namingControlsInitializing = true;
+        postApplyResetting = true;
+        try
+        {
+            SetStringBlockValue(serialStart, nextSerial);
+            SaveNamingControls();
+
+            if (bodySelection != NULL)
+            {
+                const std::vector<NXOpen::TaggedObject*> emptySelection;
+                bodySelection->SetSelectedObjects(emptySelection);
+            }
+
+            ClearAssemblyList();
+            previewSelectionTags.clear();
+            ClearCachedSearchData();
+            WritePreviewDebugLog(
+                "Post-Apply ready for next single part, serial=" + nextSerial);
+        }
+        catch (...)
+        {
+            postApplyResetting = false;
+            namingControlsInitializing = false;
+            throw;
+        }
+        postApplyResetting = false;
+        namingControlsInitializing = false;
     }
 
     void ExecuteCachedSameBodySearch()
@@ -6566,6 +6646,9 @@ private:
                     ConvertForAssemblyMode(
                         assemblyGroups,
                         componentNames);
+                lastConversionCreatedPart =
+                    assemblyConversionResult.convertedGroups > 0 &&
+                    assemblyConversionResult.failedGroups == 0;
                 {
                     std::ostringstream line;
                     line << "Cached assembly conversion convertedGroups="
@@ -6593,6 +6676,7 @@ private:
     int ConvertSelectedBodies()
     {
         WritePreviewDebugLog("ConvertSelectedBodies begin");
+        lastConversionCreatedPart = false;
         try
         {
             RefreshBlockPointers();
@@ -6769,6 +6853,9 @@ private:
                     ConvertForAssemblyMode(
                         assemblyGroups,
                         componentNames);
+                lastConversionCreatedPart =
+                    assemblyConversionResult.convertedGroups > 0 &&
+                    assemblyConversionResult.failedGroups == 0;
                 {
                     std::ostringstream line;
                     line << "Assembly conversion convertedGroups="
