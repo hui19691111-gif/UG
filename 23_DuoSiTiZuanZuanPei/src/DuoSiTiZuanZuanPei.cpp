@@ -2016,7 +2016,11 @@ std::string BuildUniqueComponentPartPath(
         name << ".prt";
 
         const std::string path = JoinPath(directory, name.str());
-        if (!PathExists(path))
+        const int loadedState = UF_PART_is_loaded(path.c_str());
+        const bool alreadyLoaded =
+            UF_PART_ask_part_tag(path.c_str()) != NULL_TAG ||
+            loadedState == 1 || loadedState == 2;
+        if (!PathExists(path) && !alreadyLoaded)
         {
             return path;
         }
@@ -3279,7 +3283,8 @@ AssemblyConversionResult ConvertAllBodiesToSinglePart(
         result.failedGroups = 1;
         std::ostringstream reason;
         reason << "all bodies single part failed: NX error " << ex.ErrorCode()
-               << ", " << UfErrorMessage(ex.ErrorCode());
+               << ", " << UfErrorMessage(ex.ErrorCode())
+               << ", " << ex.Message();
         result.failureReasons.push_back(reason.str());
     }
     catch (const std::exception& ex)
@@ -4987,7 +4992,8 @@ public:
           postApplyResetting(false),
           retainOriginalBodies(false),
           cachedSearchDataValid(false),
-          lastConversionCreatedPart(false)
+          lastConversionCreatedPart(false),
+          lastConversionFailureReason()
     {
         ResetPreviewDebugLog();
         WritePreviewDebugLog("constructor begin, dialogPath=" + GetDialogFullPath());
@@ -5049,6 +5055,7 @@ private:
     std::vector<tag_t> cachedSearchSelectionTags;
     bool cachedSearchDataValid;
     bool lastConversionCreatedPart;
+    std::string lastConversionFailureReason;
     std::vector<tag_t> previewHighlightedTags;
 
     void ResetBlockPointersForInitialize()
@@ -5071,6 +5078,7 @@ private:
         namingControlsInitializing = false;
         postApplyResetting = false;
         lastConversionCreatedPart = false;
+        lastConversionFailureReason.clear();
         previewNodes.clear();
     }
 
@@ -6649,6 +6657,11 @@ private:
                 lastConversionCreatedPart =
                     assemblyConversionResult.convertedGroups > 0 &&
                     assemblyConversionResult.failedGroups == 0;
+                if (!assemblyConversionResult.failureReasons.empty())
+                {
+                    lastConversionFailureReason =
+                        assemblyConversionResult.failureReasons.front();
+                }
                 {
                     std::ostringstream line;
                     line << "Cached assembly conversion convertedGroups="
@@ -6657,6 +6670,14 @@ private:
                          << ", deletedOriginalBodies=" << assemblyConversionResult.deletedOriginalBodies
                          << ", failedGroups=" << assemblyConversionResult.failedGroups;
                     WritePreviewDebugLog(line.str());
+                }
+                for (std::size_t reasonIndex = 0;
+                     reasonIndex < assemblyConversionResult.failureReasons.size();
+                     ++reasonIndex)
+                {
+                    WritePreviewDebugLog(
+                        "Cached assembly conversion failure: " +
+                        assemblyConversionResult.failureReasons[reasonIndex]);
                 }
                 PopulateAssemblyList(BuildPreviewRowsForAssemblyMode(assemblyGroups));
             }
@@ -6677,6 +6698,7 @@ private:
     {
         WritePreviewDebugLog("ConvertSelectedBodies begin");
         lastConversionCreatedPart = false;
+        lastConversionFailureReason.clear();
         try
         {
             RefreshBlockPointers();
@@ -6718,6 +6740,19 @@ private:
             {
                 RunSameBodySearch(selectedBodies);
                 ClearCachedSearchData();
+            }
+            if (!lastConversionCreatedPart)
+            {
+                const std::string message = lastConversionFailureReason.empty()
+                    ? "Assembly component was not created. See the preview log for details."
+                    : lastConversionFailureReason;
+                ui->NXMessageBox()->Show(
+                    NXOpen::NXString(kDialogName),
+                    NXOpen::NXMessageBox::DialogTypeError,
+                    NXOpen::NXString(message, NXOpen::NXString::UTF8));
+                WritePreviewDebugLog(
+                    "ConvertSelectedBodies failed: " + message);
+                return 1;
             }
             WritePreviewDebugLog("ConvertSelectedBodies end");
             return 0;
@@ -6856,6 +6891,11 @@ private:
                 lastConversionCreatedPart =
                     assemblyConversionResult.convertedGroups > 0 &&
                     assemblyConversionResult.failedGroups == 0;
+                if (!assemblyConversionResult.failureReasons.empty())
+                {
+                    lastConversionFailureReason =
+                        assemblyConversionResult.failureReasons.front();
+                }
                 {
                     std::ostringstream line;
                     line << "Assembly conversion convertedGroups="
