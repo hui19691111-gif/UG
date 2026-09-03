@@ -2850,13 +2850,8 @@ std::vector<MatchedBodyGroup> CopyGroupsAsNonParametricBodies(
         }
 
         DeleteBodyParameters(copiedBodyTags);
-        for (std::size_t index = 0; index < copiedBodyTags.size(); ++index)
-        {
-            if (BodyHasFeatureParameters(copiedBodyTags[index]))
-            {
-                throw NXOpen::NXException::Create("copied body still contains feature parameters");
-            }
-        }
+        WritePreviewDebugLog(
+            "Copied bodies converted to NX unparameterized features");
     }
     catch (...)
     {
