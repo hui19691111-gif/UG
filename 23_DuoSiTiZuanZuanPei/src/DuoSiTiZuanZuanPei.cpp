@@ -92,6 +92,7 @@ namespace
 {
 const char* kDialogName = "DuoSiTiZuanZuanPei";
 const char* kDialogFile = "DuoSiTiZuanZuanPei.dlx";
+const char* kAssemblyModeBlockId = "assemblyMode";
 const char* kBodySelectionBlockId = "bodySelection";
 const char* kOutputFolderBlockId = "nativeFolderBrowser0";
 const char* kColorMatchedBodiesToggleBlockId = "colorMatchedBodiesToggle";
@@ -149,6 +150,12 @@ enum NamingMode
     NamingModeBodyName = 2,
     NamingModeBodyAttribute = 3,
     NamingModeAdvanced = 4
+};
+
+enum AssemblyOutputMode
+{
+    AssemblyOutputModeOnePartPerBodyGroup = 0,
+    AssemblyOutputModeAllBodiesInOnePart = 1
 };
 
 std::string gSelectedOutputDirectory;
@@ -2359,25 +2366,33 @@ void SaveComponentPart(NXOpen::Part* componentPart)
     }
 }
 
-void CreateReferenceComponentWithRecordedBuilder(
+void CreateComponentWithRecordedBuilder(
     NXOpen::Session* session,
     NXOpen::Part* workPart,
     const std::string& componentPartPath,
     const std::string& instanceName,
     int units,
-    tag_t bodyTag,
+    const std::vector<tag_t>& bodyTags,
     AssemblyConversionResult& result)
 {
-    if (session == NULL || session->Parts() == NULL || workPart == NULL)
+    if (session == NULL || session->Parts() == NULL || workPart == NULL ||
+        bodyTags.empty())
     {
-        throw NXOpen::NXException::Create("invalid session or work part");
+        throw NXOpen::NXException::Create("invalid session, work part, or body list");
     }
 
-    NXOpen::TaggedObject* taggedObject = NXOpen::NXObjectManager::Get(bodyTag);
-    NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(taggedObject);
-    if (body == NULL)
+    std::vector<NXOpen::Body*> bodies;
+    bodies.reserve(bodyTags.size());
+    for (std::size_t index = 0; index < bodyTags.size(); ++index)
     {
-        throw NXOpen::NXException::Create("reference body is not available for CreateNewComponentBuilder");
+        NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(
+            NXOpen::NXObjectManager::Get(bodyTags[index]));
+        if (body == NULL)
+        {
+            throw NXOpen::NXException::Create(
+                "body is not available for CreateNewComponentBuilder");
+        }
+        bodies.push_back(body);
     }
 
     NXOpen::FileNew* fileNew = session->Parts()->FileNew();
@@ -2403,8 +2418,15 @@ void CreateReferenceComponentWithRecordedBuilder(
             NXOpen::Assemblies::CreateNewComponentBuilder::ComponentOriginTypeAbsolute);
         WritePreviewDebugLog("CreateNewComponentBuilder set refset");
         builder->SetReferenceSetName("MODEL");
-        WritePreviewDebugLog("CreateNewComponentBuilder add body");
-        builder->ObjectForNewComponent()->Add(body);
+        {
+            std::ostringstream line;
+            line << "CreateNewComponentBuilder add bodies=" << bodies.size();
+            WritePreviewDebugLog(line.str());
+        }
+        for (std::size_t index = 0; index < bodies.size(); ++index)
+        {
+            builder->ObjectForNewComponent()->Add(bodies[index]);
+        }
         WritePreviewDebugLog("CreateNewComponentBuilder set new file");
         builder->SetNewFile(fileNew);
         WritePreviewDebugLog("CreateNewComponentBuilder commit begin");
@@ -2429,6 +2451,26 @@ void CreateReferenceComponentWithRecordedBuilder(
         WritePreviewDebugLog("CreateNewComponentBuilder exception cleanup end");
         throw;
     }
+}
+
+void CreateReferenceComponentWithRecordedBuilder(
+    NXOpen::Session* session,
+    NXOpen::Part* workPart,
+    const std::string& componentPartPath,
+    const std::string& instanceName,
+    int units,
+    tag_t bodyTag,
+    AssemblyConversionResult& result)
+{
+    std::vector<tag_t> bodyTags(1, bodyTag);
+    CreateComponentWithRecordedBuilder(
+        session,
+        workPart,
+        componentPartPath,
+        instanceName,
+        units,
+        bodyTags,
+        result);
 }
 
 void CreateReferenceComponentPart(
@@ -3095,6 +3137,163 @@ AssemblyConversionResult ConvertMatchedGroupsToAssembly(
     {
         DeleteWorkPartBodiesSilently(copiedBodyTags, parentPartTag);
         WritePreviewDebugLog("Retain bodies enabled: original bodies and parameters kept");
+    }
+    UF_DISP_refresh();
+    return result;
+}
+
+MatchedBodyGroup CombineMatchedBodyGroups(
+    const std::vector<MatchedBodyGroup>& groups)
+{
+    MatchedBodyGroup combinedGroup;
+    std::set<tag_t> seenTags;
+    for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+    {
+        for (std::size_t instanceIndex = 0;
+             instanceIndex < groups[groupIndex].instances.size();
+             ++instanceIndex)
+        {
+            const MatchedBodyInstance& instance =
+                groups[groupIndex].instances[instanceIndex];
+            if (instance.bodyTag != NULL_TAG &&
+                seenTags.insert(instance.bodyTag).second)
+            {
+                combinedGroup.instances.push_back(instance);
+            }
+        }
+    }
+    return combinedGroup;
+}
+
+AssemblyConversionResult ConvertAllBodiesToSinglePart(
+    NXOpen::Session* session,
+    const std::vector<MatchedBodyGroup>& matchedGroups,
+    const std::vector<std::string>& componentNames,
+    bool retainOriginalBodies)
+{
+    AssemblyConversionResult result = {};
+    if (session == NULL || matchedGroups.empty())
+    {
+        return result;
+    }
+
+    NXOpen::Part* workPart = session->Parts()->Work();
+    if (workPart == NULL)
+    {
+        result.failedGroups = 1;
+        result.failureReasons.push_back("work part is null");
+        return result;
+    }
+
+    const tag_t parentPartTag = workPart->Tag();
+    const int parentUnits = AskPartUnits(parentPartTag);
+    const std::string outputDirectory = BuildAssemblyOutputDirectory(workPart);
+    if (!EnsureDirectoryExists(outputDirectory))
+    {
+        result.failedGroups = 1;
+        std::ostringstream reason;
+        reason << "cannot create output directory: " << outputDirectory
+               << ", Win32 error=" << GetLastError();
+        result.failureReasons.push_back(reason.str());
+        return result;
+    }
+
+    const MatchedBodyGroup sourceCombinedGroup =
+        CombineMatchedBodyGroups(matchedGroups);
+    if (sourceCombinedGroup.instances.empty())
+    {
+        result.failedGroups = 1;
+        result.failureReasons.push_back("all-bodies group is empty");
+        return result;
+    }
+
+    std::vector<tag_t> copiedBodyTags;
+    std::vector<MatchedBodyGroup> copiedGroups;
+    MatchedBodyGroup conversionGroup = sourceCombinedGroup;
+    try
+    {
+        if (retainOriginalBodies)
+        {
+            copiedGroups = CopyGroupsAsNonParametricBodies(
+                session,
+                matchedGroups,
+                copiedBodyTags);
+            conversionGroup = CombineMatchedBodyGroups(copiedGroups);
+
+            if (gColorMatchedBodies)
+            {
+                std::vector<std::vector<tag_t> > copiedMatchedGroups;
+                copiedMatchedGroups.reserve(copiedGroups.size());
+                for (std::size_t groupIndex = 0;
+                     groupIndex < copiedGroups.size();
+                     ++groupIndex)
+                {
+                    std::vector<tag_t> groupTags;
+                    for (std::size_t instanceIndex = 0;
+                         instanceIndex < copiedGroups[groupIndex].instances.size();
+                         ++instanceIndex)
+                    {
+                        groupTags.push_back(
+                            copiedGroups[groupIndex].instances[instanceIndex].bodyTag);
+                    }
+                    copiedMatchedGroups.push_back(groupTags);
+                }
+                std::vector<tag_t> colorFailedTags;
+                ColorMatchedGroups(session, copiedMatchedGroups, colorFailedTags);
+            }
+        }
+
+        std::string componentName =
+            BuildComponentNameForRule(session, sourceCombinedGroup, 1);
+        if (!componentNames.empty() && !componentNames[0].empty())
+        {
+            componentName = componentNames[0];
+        }
+
+        const std::string componentPartPath =
+            BuildUniqueComponentPartPath(outputDirectory, componentName);
+        std::vector<tag_t> bodyTags;
+        bodyTags.reserve(conversionGroup.instances.size());
+        for (std::size_t instanceIndex = 0;
+             instanceIndex < conversionGroup.instances.size();
+             ++instanceIndex)
+        {
+            bodyTags.push_back(conversionGroup.instances[instanceIndex].bodyTag);
+        }
+        WritePreviewDebugLog(
+            "All bodies single part path=" + componentPartPath);
+        CreateComponentWithRecordedBuilder(
+            session,
+            workPart,
+            componentPartPath,
+            BuildComponentInstanceName(1, 1, componentName),
+            parentUnits,
+            bodyTags,
+            result);
+
+        result.convertedGroups = 1;
+        result.partFiles.push_back(componentPartPath);
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        result.failedGroups = 1;
+        std::ostringstream reason;
+        reason << "all bodies single part failed: NX error " << ex.ErrorCode()
+               << ", " << UfErrorMessage(ex.ErrorCode());
+        result.failureReasons.push_back(reason.str());
+    }
+    catch (const std::exception& ex)
+    {
+        result.failedGroups = 1;
+        result.failureReasons.push_back(
+            std::string("all bodies single part failed: ") + ex.what());
+    }
+
+    if (retainOriginalBodies)
+    {
+        DeleteWorkPartBodiesSilently(copiedBodyTags, parentPartTag);
+        WritePreviewDebugLog(
+            "All bodies single part: original bodies and parameters kept");
     }
     UF_DISP_refresh();
     return result;
@@ -4769,6 +4968,7 @@ public:
         : session(NXOpen::Session::GetSession()),
           ui(NXOpen::UI::GetUI()),
           dialog(NULL),
+          assemblyMode(NULL),
           bodySelection(NULL),
           outputFolder(NULL),
           colorMatchedBodiesToggle(NULL),
@@ -4822,6 +5022,7 @@ private:
     NXOpen::Session* session;
     NXOpen::UI* ui;
     NXOpen::BlockStyler::BlockDialog* dialog;
+    NXOpen::BlockStyler::Enumeration* assemblyMode;
     NXOpen::BlockStyler::SelectObject* bodySelection;
     NXOpen::BlockStyler::UIBlock* outputFolder;
     NXOpen::BlockStyler::UIBlock* colorMatchedBodiesToggle;
@@ -4848,6 +5049,7 @@ private:
 
     void ResetBlockPointersForInitialize()
     {
+        assemblyMode = NULL;
         bodySelection = NULL;
         outputFolder = NULL;
         colorMatchedBodiesToggle = NULL;
@@ -4919,7 +5121,13 @@ private:
             ", pointer=" + PointerText(block));
         try
         {
-            if (block == findSameBodiesButton || blockName == kFindSameBodiesButtonBlockId)
+            if (block == assemblyMode || blockName == kAssemblyModeBlockId)
+            {
+                assemblyMode = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(block);
+                WritePreviewDebugLog("Update routed to assemblyMode");
+                RefreshPreviewForAssemblyMode();
+            }
+            else if (block == findSameBodiesButton || blockName == kFindSameBodiesButtonBlockId)
             {
                 findSameBodiesButton = dynamic_cast<NXOpen::BlockStyler::Button*>(block);
                 WritePreviewDebugLog("Update routed to BuildAssemblyPreviewFromSelection");
@@ -5042,6 +5250,11 @@ private:
         }
 
         NXOpen::BlockStyler::CompositeBlock* topBlock = dialog->TopBlock();
+        if (assemblyMode == NULL)
+        {
+            assemblyMode = dynamic_cast<NXOpen::BlockStyler::Enumeration*>(
+                FindBlockRecursive(topBlock, kAssemblyModeBlockId));
+        }
         if (bodySelection == NULL)
         {
             bodySelection = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(
@@ -5110,7 +5323,8 @@ private:
         }
 
         std::ostringstream line;
-        line << "RefreshBlockPointers body=" << PointerText(bodySelection)
+        line << "RefreshBlockPointers assemblyMode=" << PointerText(assemblyMode)
+             << ", body=" << PointerText(bodySelection)
              << ", outputFolder=" << PointerText(outputFolder)
              << ", colorToggle=" << PointerText(colorMatchedBodiesToggle)
              << ", retainToggle=" << PointerText(retainBodiesToggle)
@@ -5215,6 +5429,22 @@ private:
         return value >= NamingModeCustomSerial && value <= NamingModeAdvanced
             ? value
             : NamingModeCustomSerial;
+    }
+
+    int GetAssemblyOutputMode() const
+    {
+        if (assemblyMode == NULL)
+        {
+            return AssemblyOutputModeOnePartPerBodyGroup;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties =
+            assemblyMode->GetProperties();
+        const int value = properties->GetEnum("Value");
+        delete properties;
+        return value == AssemblyOutputModeAllBodiesInOnePart
+            ? AssemblyOutputModeAllBodiesInOnePart
+            : AssemblyOutputModeOnePartPerBodyGroup;
     }
 
     void SetNamingMode(int value)
@@ -6036,6 +6266,35 @@ private:
         return rows;
     }
 
+    std::vector<AssemblyPreviewRow> BuildPreviewRowsForAssemblyMode(
+        const std::vector<MatchedBodyGroup>& assemblyGroups)
+    {
+        if (GetAssemblyOutputMode() != AssemblyOutputModeAllBodiesInOnePart)
+        {
+            return BuildPreviewRows(assemblyGroups);
+        }
+
+        std::vector<MatchedBodyGroup> combinedGroups;
+        const MatchedBodyGroup combinedGroup =
+            CombineMatchedBodyGroups(assemblyGroups);
+        if (!combinedGroup.instances.empty())
+        {
+            combinedGroups.push_back(combinedGroup);
+        }
+        return BuildPreviewRows(combinedGroups);
+    }
+
+    void RefreshPreviewForAssemblyMode()
+    {
+        InitializeAssemblyList();
+        if (cachedSearchDataValid)
+        {
+            PopulateAssemblyList(
+                BuildPreviewRowsForAssemblyMode(
+                    cachedSearchData.assemblyGroups));
+        }
+    }
+
     void ClearCachedSearchData()
     {
         DeleteDebugCoordinateObjects(&cachedSearchData.activeDebugObjectTags);
@@ -6098,7 +6357,7 @@ private:
         if (CachedSearchMatchesSelection(selectionTags))
         {
             WritePreviewDebugLog("RefreshAssemblyPreview using cached search data");
-            PopulateAssemblyList(BuildPreviewRows(cachedSearchData.assemblyGroups));
+            PopulateAssemblyList(BuildPreviewRowsForAssemblyMode(cachedSearchData.assemblyGroups));
             return;
         }
 
@@ -6115,7 +6374,7 @@ private:
         }
         DeleteDebugCoordinateObjects(&data.activeDebugObjectTags);
         StoreCachedSearchData(data, selectionTags);
-        PopulateAssemblyList(BuildPreviewRows(data.assemblyGroups));
+        PopulateAssemblyList(BuildPreviewRowsForAssemblyMode(data.assemblyGroups));
         WritePreviewDebugLog("RefreshAssemblyPreview end");
     }
 
@@ -6158,7 +6417,7 @@ private:
         if (CachedSearchMatchesSelection(selectionTags))
         {
             WritePreviewDebugLog("BuildAssemblyPreviewFromSelection using cached search data");
-            PopulateAssemblyList(BuildPreviewRows(cachedSearchData.assemblyGroups));
+            PopulateAssemblyList(BuildPreviewRowsForAssemblyMode(cachedSearchData.assemblyGroups));
             previewSelectionTags = selectionTags;
             return;
         }
@@ -6176,7 +6435,7 @@ private:
         }
         DeleteDebugCoordinateObjects(&data.activeDebugObjectTags);
         StoreCachedSearchData(data, selectionTags);
-        PopulateAssemblyList(BuildPreviewRows(data.assemblyGroups));
+        PopulateAssemblyList(BuildPreviewRowsForAssemblyMode(data.assemblyGroups));
         previewSelectionTags = selectionTags;
 
         if (kWriteResultToListingWindow)
@@ -6230,6 +6489,44 @@ private:
         return names;
     }
 
+    std::vector<std::string> ResolveComponentNamesForAssemblyMode(
+        const std::vector<MatchedBodyGroup>& assemblyGroups)
+    {
+        if (GetAssemblyOutputMode() != AssemblyOutputModeAllBodiesInOnePart)
+        {
+            return ResolveComponentNames(assemblyGroups);
+        }
+
+        std::vector<MatchedBodyGroup> combinedGroups;
+        const MatchedBodyGroup combinedGroup =
+            CombineMatchedBodyGroups(assemblyGroups);
+        if (!combinedGroup.instances.empty())
+        {
+            combinedGroups.push_back(combinedGroup);
+        }
+        return ResolveComponentNames(combinedGroups);
+    }
+
+    AssemblyConversionResult ConvertForAssemblyMode(
+        const std::vector<MatchedBodyGroup>& assemblyGroups,
+        const std::vector<std::string>& componentNames)
+    {
+        if (GetAssemblyOutputMode() == AssemblyOutputModeAllBodiesInOnePart)
+        {
+            return ConvertAllBodiesToSinglePart(
+                session,
+                assemblyGroups,
+                componentNames,
+                retainOriginalBodies);
+        }
+
+        return ConvertMatchedGroupsToAssembly(
+            session,
+            assemblyGroups,
+            componentNames,
+            retainOriginalBodies);
+    }
+
     int Ok()
     {
         WritePreviewDebugLog("Ok begin");
@@ -6264,13 +6561,11 @@ private:
             if (kConvertMatchedGroupsToAssembly)
             {
                 const std::vector<std::string> componentNames =
-                    ResolveComponentNames(assemblyGroups);
+                    ResolveComponentNamesForAssemblyMode(assemblyGroups);
                 assemblyConversionResult =
-                    ConvertMatchedGroupsToAssembly(
-                        session,
+                    ConvertForAssemblyMode(
                         assemblyGroups,
-                        componentNames,
-                        retainOriginalBodies);
+                        componentNames);
                 {
                     std::ostringstream line;
                     line << "Cached assembly conversion convertedGroups="
@@ -6280,7 +6575,7 @@ private:
                          << ", failedGroups=" << assemblyConversionResult.failedGroups;
                     WritePreviewDebugLog(line.str());
                 }
-                PopulateAssemblyList(BuildPreviewRows(assemblyGroups));
+                PopulateAssemblyList(BuildPreviewRowsForAssemblyMode(assemblyGroups));
             }
         }
 
@@ -6469,13 +6764,11 @@ private:
             if (kConvertMatchedGroupsToAssembly)
             {
                 const std::vector<std::string> componentNames =
-                    ResolveComponentNames(assemblyGroups);
+                    ResolveComponentNamesForAssemblyMode(assemblyGroups);
                 assemblyConversionResult =
-                    ConvertMatchedGroupsToAssembly(
-                        session,
+                    ConvertForAssemblyMode(
                         assemblyGroups,
-                        componentNames,
-                        retainOriginalBodies);
+                        componentNames);
                 {
                     std::ostringstream line;
                     line << "Assembly conversion convertedGroups="
@@ -6493,7 +6786,7 @@ private:
                         "Assembly conversion failure: " +
                         assemblyConversionResult.failureReasons[reasonIndex]);
                 }
-                PopulateAssemblyList(BuildPreviewRows(assemblyGroups));
+                PopulateAssemblyList(BuildPreviewRowsForAssemblyMode(assemblyGroups));
             }
         }
 

@@ -4,6 +4,19 @@
     <PropertyList>
       <Property class="UGS::UI::Comp::Container" dynamic="1" group="Block Specific::" hierarchy="UGS::UICOMP_group" id="Members" mask="0" name="Members" sname="Members" source="1" type="array">
         <PropertyList Expanded="1" class="UGS::UI::Comp::Container" hierarchy="UGS::UICOMP_group" icon="tiles_palette.bmp" id="ContainerItems" mode="1">
+          <Property class="UICOMP_enum" hierarchy="UGS::UICOMP_group" id="assemblyMode" mask="256" name="assemblyMode" presentation="Enumeration" type="uicomp">
+            <item Expanded="1" class="UICOMP_enum" hierarchy="UGS::UICOMP_enum" icon="styler_enum.bmp" id="assemblyMode" name="assemblyMode" presentation="Enumeration" type="uicomp">
+              <PropertyList id="id" mode="0">
+                <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" id="API Name" name="API Name" sname="BlockID" source="3" type="string" value="assemblyMode"/>
+                <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" id="Title" name="Title" sname="Label" source="1" type="utfstring" value="装配方式"/>
+                <Property ClassID="UGS::UICOMP_enum" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="PresentationStyle" mask="16384" name="PresentationStyle" selected="1" sname="PresentationStyle" source="1" type="enum"><Option name="Option Menu" value="0"/><Option name="Radio Box" value="1"/><Option name="Pulldown" value="2"/></Property>
+                <Property ClassID="UGS::UICOMP_enum" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="RadioOrientation" mask="16386" name="RadioOrientation" selected="1" sname="Layout" source="1" type="enum"><Option name="Vertical" value="0"/><Option name="Horizontal" value="1"/></Property>
+                <Property ClassID="UGS::UICOMP_enum" data="@@1@@1" dtype="0" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="EnumSensitivity" mask="0" name="EnumSensitivity" size="2" sname="EnumSensitivity" source="1" type="stlvector"/>
+                <Property ClassID="UGS::UICOMP_enum" data="@@1@@1" dtype="0" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="EnumVisibility" mask="0" name="EnumVisibility" size="2" sname="EnumVisibility" source="1" type="stlvector"/>
+                <Property ClassID="UGS::UICOMP_enum" brief="0" dynamic="1" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="Titles_1" mask="256" name="Titles_1" selected="0" sname="Value" source="4" type="enum"><Option name="每个体装配对应PRT（相同体除外）" value="0"/><Option name="多实体装配1个PRT" value="1"/></Property>
+              </PropertyList>
+            </item>
+          </Property>
           <Property class="UICOMP_selection" hierarchy="UGS::UICOMP_group" id="bodySelection" mask="256" name="bodySelection" presentation="Select Object" type="uicomp">
             <item Expanded="1" class="UICOMP_selection" icon="selection_cursor.bmp" id="bodySelection" name="bodySelection" presentation="Select Object" type="uicomp">
     <PropertyList id="id" mode="0">
