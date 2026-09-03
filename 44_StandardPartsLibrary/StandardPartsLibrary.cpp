@@ -828,28 +828,17 @@ void PickPlacement(AppState* state)
 void QuickOrient(AppState* state)
 {
     std::wstring error;
-    if (!state->hasPlacement && !AskWcs(state->placementOrigin, state->placementMatrix, error))
+    if (!AskWcs(state->placementOrigin, state->placementMatrix, error))
     {
         MessageBoxW(state->window, error.c_str(), kTitle, MB_OK | MB_ICONERROR);
         return;
     }
-    int option = 5;
-    tag_t csys = NULL_TAG;
-    ShowWindow(state->window, SW_HIDE);
-    const int code = UF_UI_specify_csys(const_cast<char*>("快速定位"), &option,
-                                        state->placementMatrix, state->placementOrigin, &csys);
-    ShowWindow(state->window, SW_SHOW);
-    SetForegroundWindow(state->window);
-    if (code == 0)
-    {
-        state->hasPlacement = true;
-        UpdatePlacementStatus(state);
-    }
-    else if (code != 1 && code != 2)
-    {
-        const std::wstring message = L"快速定位失败：" + UfError(code);
-        MessageBoxW(state->window, message.c_str(), kTitle, MB_OK | MB_ICONERROR);
-    }
+    // Do not invoke UF_UI_specify_csys here. It starts an NX modal command from
+    // inside this Win32 dialog's message loop and makes the application appear
+    // frozen until the nested CSYS dialog is explicitly completed or cancelled.
+    state->hasPlacement = true;
+    UpdatePlacementStatus(state);
+    SetStatus(state, L"已采用当前 WCS 的原点和方向。需要调整时请先修改 NX 工作坐标系。");
 }
 
 bool AskPlacement(AppState* state, double origin[3], double matrix[9], std::wstring& error)
@@ -1444,7 +1433,7 @@ void BuildLegacyUi(AppState* state)
                354, 524, 126, 30, ID_PLACE_CIRCLE);
     CheckRadioButton(state->window, ID_PLACE_WCS, ID_PLACE_CIRCLE, ID_PLACE_WCS);
     AddControl(state, 0, L"BUTTON", L"指定位置", BS_PUSHBUTTON, 496, 524, 105, 30, ID_PICK_PLACE);
-    AddControl(state, 0, L"BUTTON", L"快速定位", BS_PUSHBUTTON, 608, 524, 105, 30, ID_QUICK_ORIENT);
+    AddControl(state, 0, L"BUTTON", L"采用当前WCS", BS_PUSHBUTTON, 608, 524, 105, 30, ID_QUICK_ORIENT);
     AddControl(state, 0, L"STATIC", L"○ 当前 WCS", SS_LEFT,
                24, 568, 760, 24, ID_PLACE_STATUS);
     AddControl(state, 0, L"STATIC", L"提示：快速定位可使用 NX 动态坐标系确定原点和方向",
@@ -1559,8 +1548,8 @@ void BuildUi(AppState* state)
                174, 598, 220, 22, ID_PLACE_STATUS);
     AddControl(state, 0, L"STATIC", L"指定方位", SS_LEFT,
                22, 642, 72, 22, 0);
-    AddControl(state, 0, L"BUTTON", L"快速定位", BS_PUSHBUTTON,
-               96, 635, 86, 30, ID_QUICK_ORIENT);
+    AddControl(state, 0, L"BUTTON", L"采用当前WCS", BS_PUSHBUTTON,
+               96, 635, 100, 30, ID_QUICK_ORIENT);
     AddControl(state, 0, L"STATIC", L"选择需要修剪的实体 (0)", SS_RIGHT,
                322, 642, 214, 22, ID_TRIM_STATUS);
     AddControl(state, 0, L"BUTTON", L"选择", BS_PUSHBUTTON,
