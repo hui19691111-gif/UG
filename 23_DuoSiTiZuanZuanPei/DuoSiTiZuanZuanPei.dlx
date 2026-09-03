@@ -219,6 +219,34 @@
     </PropertyList>
   </item>
           </Property>
+          <Property class="UICOMP_toggle" hierarchy="UGS::UICOMP_group" id="retainBodiesToggle" mask="256" name="retainBodiesToggle" presentation="Toggle" type="uicomp">
+            <item Expanded="1" SupportsDisablingLogic="1" class="UICOMP_toggle" hierarchy="" icon="styler_toggle.bmp" id="retainBodiesToggle" name="retainBodiesToggle" notes="" presentation="Toggle" type="uicomp">
+    <PropertyList id="id" mode="0">
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="API Name" mask="16656" name="API Name" sname="BlockID" source="3" type="string" value="retainBodiesToggle"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="HideGroup" mask="69636" name="HideGroup" sname="HideGroup" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Focus" mask="69636" name="Focus" sname="Focus" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="CanFocus" mask="69636" name="CanFocus" sname="CanFocus" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="KeyboardFocus" mask="69636" name="KeyboardFocus" sname="KeyboardFocus" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="CanKeyboardFocus" mask="69636" name="CanKeyboardFocus" sname="CanKeyboardFocus" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_toggle" id="ReadWrite" mask="0" name="ReadWrite" sname="RetainValue" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_toggle" id="UIOnly" mask="69636" name="UIOnly" sname="RetainValueInUIOnly" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_toggle" id="Translated" mask="16384" name="Translated" sname="Localize" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="保留体（复制无参数体转装配）"/>
+      <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Icon" mask="128" name="Icon" sname="Bitmap" source="3" type="string" value=""/>
+      <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Value" mask="0" name="Value" sname="Value" source="4" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="BitmapOnly" mask="16384" name="BitmapOnly" sname="BitmapOnly" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Tooltip" mask="0" name="Tooltip" sname="Tooltip" source="1" type="utfstring" value="勾选后复制无参数体用于转装配，原体及其特征参数保留"/>
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Top" loc="1" mask="16384" name="Top" offset="0" sname="Top" source="3" target="Default" type="attachment"/>
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Left" loc="2" mask="16384" name="Left" offset="0" sname="Left" source="3" target="Default" type="attachment"/>
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment"/>
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Bottom" loc="4" mask="16384" name="Bottom" offset="0" sname="Bottom" source="3" target="Default" type="attachment"/>
+    </PropertyList>
+  </item>
+          </Property>
           <Property class="UICOMP_toggle" hierarchy="UGS::UICOMP_group" id="colorMatchedBodiesToggle" mask="256" name="colorMatchedBodiesToggle" presentation="Toggle" type="uicomp">
             <item Expanded="1" SupportsDisablingLogic="1" class="UICOMP_toggle" hierarchy="" icon="styler_toggle.bmp" id="colorMatchedBodiesToggle" name="colorMatchedBodiesToggle" notes="" presentation="Toggle" type="uicomp">
     <PropertyList id="id" mode="0">

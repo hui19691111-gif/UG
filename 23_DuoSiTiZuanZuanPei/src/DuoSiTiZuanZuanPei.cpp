@@ -22,6 +22,9 @@
 #include <NXOpen/DisplayModification.hxx>
 #include <NXOpen/DisplayableObject.hxx>
 #include <NXOpen/FileNew.hxx>
+#include <NXOpen/Features_ExtractFaceBuilder.hxx>
+#include <NXOpen/Features_Feature.hxx>
+#include <NXOpen/Features_FeatureCollection.hxx>
 #include <NXOpen/ISurface.hxx>
 #include <NXOpen/ListingWindow.hxx>
 #include <NXOpen/Measurement.hxx>
@@ -34,6 +37,7 @@
 #include <NXOpen/PartSaveStatus.hxx>
 #include <NXOpen/Selection.hxx>
 #include <NXOpen/SelectDisplayableObjectList.hxx>
+#include <NXOpen/SelectObjectList.hxx>
 #include <NXOpen/Session.hxx>
 #include <NXOpen/SmartObject.hxx>
 #include <NXOpen/TaggedObject.hxx>
@@ -91,6 +95,7 @@ const char* kDialogFile = "DuoSiTiZuanZuanPei.dlx";
 const char* kBodySelectionBlockId = "bodySelection";
 const char* kOutputFolderBlockId = "nativeFolderBrowser0";
 const char* kColorMatchedBodiesToggleBlockId = "colorMatchedBodiesToggle";
+const char* kRetainBodiesToggleBlockId = "retainBodiesToggle";
 const char* kFindSameBodiesButtonBlockId = "findSameBodiesButton";
 const char* kNameModeBlockId = "nameMode";
 const char* kNameCustomTextBlockId = "nameCustomText";
@@ -2732,6 +2737,140 @@ void DeleteBodyParameters(const std::vector<tag_t>& bodyTags)
     }
 }
 
+void DeleteWorkPartBodiesSilently(
+    const std::vector<tag_t>& bodyTags,
+    tag_t workPartTag)
+{
+    for (std::size_t index = 0; index < bodyTags.size(); ++index)
+    {
+        const tag_t bodyTag = bodyTags[index];
+        if (bodyTag == NULL_TAG)
+        {
+            continue;
+        }
+
+        const int objectStatus = UF_OBJ_ask_status(bodyTag);
+        if (objectStatus != UF_OBJ_ALIVE && objectStatus != UF_OBJ_TEMPORARY)
+        {
+            continue;
+        }
+
+        tag_t owningPartTag = NULL_TAG;
+        if (UF_OBJ_ask_owning_part(bodyTag, &owningPartTag) == 0 &&
+            owningPartTag == workPartTag)
+        {
+            UF_OBJ_delete_object(bodyTag);
+        }
+    }
+}
+
+std::vector<MatchedBodyGroup> CopyGroupsAsNonParametricBodies(
+    NXOpen::Session* session,
+    const std::vector<MatchedBodyGroup>& sourceGroups,
+    std::vector<tag_t>& copiedBodyTags)
+{
+    if (session == NULL || session->Parts() == NULL || session->Parts()->Work() == NULL)
+    {
+        throw NXOpen::NXException::Create("cannot copy bodies without a work part");
+    }
+
+    NXOpen::Part* workPart = session->Parts()->Work();
+    const tag_t workPartTag = workPart->Tag();
+    std::vector<MatchedBodyGroup> copiedGroups = sourceGroups;
+    copiedBodyTags.clear();
+
+    try
+    {
+        for (std::size_t groupIndex = 0; groupIndex < copiedGroups.size(); ++groupIndex)
+        {
+            for (std::size_t instanceIndex = 0;
+                 instanceIndex < copiedGroups[groupIndex].instances.size();
+                 ++instanceIndex)
+            {
+                const tag_t sourceTag =
+                    sourceGroups[groupIndex].instances[instanceIndex].bodyTag;
+                NXOpen::Body* sourceBody = dynamic_cast<NXOpen::Body*>(
+                    NXOpen::NXObjectManager::Get(sourceTag));
+                if (sourceBody == NULL)
+                {
+                    throw NXOpen::NXException::Create("source body is unavailable for non-parametric copy");
+                }
+
+                NXOpen::Features::ExtractFaceBuilder* builder =
+                    workPart->Features()->CreateExtractFaceBuilder(NULL);
+                if (builder == NULL)
+                {
+                    throw NXOpen::NXException::Create("cannot create Extract Body builder");
+                }
+
+                try
+                {
+                    builder->SetType(
+                        NXOpen::Features::ExtractFaceBuilder::ExtractTypeBody);
+                    builder->SetParentPart(
+                        UF_ASSEM_is_occurrence(sourceTag)
+                            ? NXOpen::Features::ExtractFaceBuilder::ParentPartTypeOtherPart
+                            : NXOpen::Features::ExtractFaceBuilder::ParentPartTypeWorkPart);
+                    builder->SetAssociative(false);
+                    builder->SetHideOriginal(false);
+                    builder->SetInheritDisplayProperties(true);
+                    builder->SetMakePositionIndependent(false);
+                    builder->BodyToExtract()->Add(sourceBody);
+
+                    NXOpen::Features::Feature* copyFeature = builder->CommitFeature();
+                    if (copyFeature == NULL)
+                    {
+                        throw NXOpen::NXException::Create("Extract Body did not create a feature");
+                    }
+
+                    const std::vector<NXOpen::Body*> resultBodies =
+                        copyFeature->GetBodies();
+                    if (resultBodies.size() != 1 || resultBodies[0] == NULL)
+                    {
+                        throw NXOpen::NXException::Create("Extract Body did not create exactly one body");
+                    }
+
+                    const tag_t copiedTag = resultBodies[0]->Tag();
+                    copiedBodyTags.push_back(copiedTag);
+                    copiedGroups[groupIndex].instances[instanceIndex].bodyTag = copiedTag;
+                    builder->Destroy();
+                }
+                catch (...)
+                {
+                    try
+                    {
+                        builder->Destroy();
+                    }
+                    catch (...)
+                    {
+                    }
+                    throw;
+                }
+            }
+        }
+
+        DeleteBodyParameters(copiedBodyTags);
+        for (std::size_t index = 0; index < copiedBodyTags.size(); ++index)
+        {
+            if (BodyHasFeatureParameters(copiedBodyTags[index]))
+            {
+                throw NXOpen::NXException::Create("copied body still contains feature parameters");
+            }
+        }
+    }
+    catch (...)
+    {
+        DeleteWorkPartBodiesSilently(copiedBodyTags, workPartTag);
+        copiedBodyTags.clear();
+        throw;
+    }
+
+    std::ostringstream line;
+    line << "Created non-parametric body copies count=" << copiedBodyTags.size();
+    WritePreviewDebugLog(line.str());
+    return copiedGroups;
+}
+
 void AddExportedReferenceBodyInstances(
     NXOpen::Session* session,
     NXOpen::Part* workPart,
@@ -2831,7 +2970,8 @@ void AddMovedReferenceBodyInstances(
 AssemblyConversionResult ConvertMatchedGroupsToAssembly(
     NXOpen::Session* session,
     const std::vector<MatchedBodyGroup>& matchedGroups,
-    const std::vector<std::string>& componentNames)
+    const std::vector<std::string>& componentNames,
+    bool retainOriginalBodies)
 {
     AssemblyConversionResult result = {};
     if (session == NULL || matchedGroups.empty())
@@ -2860,10 +3000,22 @@ AssemblyConversionResult ConvertMatchedGroupsToAssembly(
         return result;
     }
 
-    std::vector<tag_t> originalBodyTagsToDelete;
-    for (std::size_t groupIndex = 0; groupIndex < matchedGroups.size(); ++groupIndex)
+    std::vector<tag_t> copiedBodyTags;
+    std::vector<MatchedBodyGroup> copiedGroups;
+    const std::vector<MatchedBodyGroup>* conversionGroups = &matchedGroups;
+    if (retainOriginalBodies)
     {
-        const MatchedBodyGroup& group = matchedGroups[groupIndex];
+        copiedGroups = CopyGroupsAsNonParametricBodies(
+            session,
+            matchedGroups,
+            copiedBodyTags);
+        conversionGroups = &copiedGroups;
+    }
+
+    std::vector<tag_t> originalBodyTagsToDelete;
+    for (std::size_t groupIndex = 0; groupIndex < conversionGroups->size(); ++groupIndex)
+    {
+        const MatchedBodyGroup& group = (*conversionGroups)[groupIndex];
         if (group.instances.empty())
         {
             ++result.failedGroups;
@@ -2913,6 +3065,11 @@ AssemblyConversionResult ConvertMatchedGroupsToAssembly(
     }
 
     DeleteOriginalBodyTagsInBatch(originalBodyTagsToDelete, result);
+    if (retainOriginalBodies)
+    {
+        DeleteWorkPartBodiesSilently(copiedBodyTags, parentPartTag);
+        WritePreviewDebugLog("Retain bodies enabled: original bodies and parameters kept");
+    }
     UF_DISP_refresh();
     return result;
 }
@@ -4589,6 +4746,7 @@ public:
           bodySelection(NULL),
           outputFolder(NULL),
           colorMatchedBodiesToggle(NULL),
+          retainBodiesToggle(NULL),
           findSameBodiesButton(NULL),
           nameMode(NULL),
           nameCustomText(NULL),
@@ -4600,6 +4758,7 @@ public:
           assemblyList(NULL),
           assemblyListReady(false),
           namingControlsInitializing(false),
+          retainOriginalBodies(false),
           cachedSearchDataValid(false)
     {
         ResetPreviewDebugLog();
@@ -4640,6 +4799,7 @@ private:
     NXOpen::BlockStyler::SelectObject* bodySelection;
     NXOpen::BlockStyler::UIBlock* outputFolder;
     NXOpen::BlockStyler::UIBlock* colorMatchedBodiesToggle;
+    NXOpen::BlockStyler::UIBlock* retainBodiesToggle;
     NXOpen::BlockStyler::Button* findSameBodiesButton;
     NXOpen::BlockStyler::Enumeration* nameMode;
     NXOpen::BlockStyler::StringBlock* nameCustomText;
@@ -4651,6 +4811,7 @@ private:
     NXOpen::BlockStyler::Tree* assemblyList;
     bool assemblyListReady;
     bool namingControlsInitializing;
+    bool retainOriginalBodies;
     std::vector<AssemblyPreviewRow> previewRows;
     std::vector<NXOpen::BlockStyler::Node*> previewNodes;
     std::vector<tag_t> previewSelectionTags;
@@ -4664,6 +4825,7 @@ private:
         bodySelection = NULL;
         outputFolder = NULL;
         colorMatchedBodiesToggle = NULL;
+        retainBodiesToggle = NULL;
         findSameBodiesButton = NULL;
         nameMode = NULL;
         nameCustomText = NULL;
@@ -4688,6 +4850,7 @@ private:
         ConfigureBodySelectionFilter();
         InitializeOutputFolder();
         UpdateColorMatchedBodiesOption();
+        UpdateRetainBodiesOption();
         WritePreviewDebugLog("Initialize end");
     }
 
@@ -4766,6 +4929,12 @@ private:
                 colorMatchedBodiesToggle = block;
                 UpdateColorMatchedBodiesOption();
                 WritePreviewDebugLog("Update routed to colorMatchedBodiesToggle");
+            }
+            else if (block == retainBodiesToggle || blockName == kRetainBodiesToggleBlockId)
+            {
+                retainBodiesToggle = block;
+                UpdateRetainBodiesOption();
+                WritePreviewDebugLog("Update routed to retainBodiesToggle");
             }
             else if (block == bodySelection || blockName == kBodySelectionBlockId)
             {
@@ -4862,6 +5031,12 @@ private:
                 topBlock,
                 kColorMatchedBodiesToggleBlockId);
         }
+        if (retainBodiesToggle == NULL)
+        {
+            retainBodiesToggle = FindBlockRecursive(
+                topBlock,
+                kRetainBodiesToggleBlockId);
+        }
         if (findSameBodiesButton == NULL)
         {
             findSameBodiesButton = dynamic_cast<NXOpen::BlockStyler::Button*>(
@@ -4912,6 +5087,7 @@ private:
         line << "RefreshBlockPointers body=" << PointerText(bodySelection)
              << ", outputFolder=" << PointerText(outputFolder)
              << ", colorToggle=" << PointerText(colorMatchedBodiesToggle)
+             << ", retainToggle=" << PointerText(retainBodiesToggle)
              << ", button=" << PointerText(findSameBodiesButton)
              << ", nameMode=" << PointerText(nameMode)
              << ", nameCustomText=" << PointerText(nameCustomText)
@@ -5426,6 +5602,24 @@ private:
             colorMatchedBodiesToggle->GetProperties();
         gColorMatchedBodies = properties->GetLogical("Value");
         delete properties;
+    }
+
+    void UpdateRetainBodiesOption()
+    {
+        if (retainBodiesToggle == NULL)
+        {
+            retainOriginalBodies = false;
+            return;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties =
+            retainBodiesToggle->GetProperties();
+        retainOriginalBodies = properties->GetLogical("Value");
+        delete properties;
+
+        WritePreviewDebugLog(
+            std::string("Retain bodies option=") +
+            (retainOriginalBodies ? "true" : "false"));
     }
 
     void InitializeAssemblyList()
@@ -6046,7 +6240,11 @@ private:
                 const std::vector<std::string> componentNames =
                     ResolveComponentNames(assemblyGroups);
                 assemblyConversionResult =
-                    ConvertMatchedGroupsToAssembly(session, assemblyGroups, componentNames);
+                    ConvertMatchedGroupsToAssembly(
+                        session,
+                        assemblyGroups,
+                        componentNames,
+                        retainOriginalBodies);
                 {
                     std::ostringstream line;
                     line << "Cached assembly conversion convertedGroups="
@@ -6094,7 +6292,9 @@ private:
                 return 1;
             }
 
-            if (!ConfirmAndDeleteFeatureParameters(selectedBodies))
+            UpdateRetainBodiesOption();
+            if (!retainOriginalBodies &&
+                !ConfirmAndDeleteFeatureParameters(selectedBodies))
             {
                 WritePreviewDebugLog("ConvertSelectedBodies stopped: delete parameters canceled");
                 return 1;
@@ -6245,7 +6445,11 @@ private:
                 const std::vector<std::string> componentNames =
                     ResolveComponentNames(assemblyGroups);
                 assemblyConversionResult =
-                    ConvertMatchedGroupsToAssembly(session, assemblyGroups, componentNames);
+                    ConvertMatchedGroupsToAssembly(
+                        session,
+                        assemblyGroups,
+                        componentNames,
+                        retainOriginalBodies);
                 {
                     std::ostringstream line;
                     line << "Assembly conversion convertedGroups="
