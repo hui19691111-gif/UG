@@ -10,6 +10,7 @@
 #include <CommCtrl.h>
 #include <commdlg.h>
 #include <ShlObj.h>
+#include <shobjidl_core.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -32,7 +33,7 @@ enum ControlId
     ID_ROOT = 1001, ID_BROWSE_ROOT, ID_REFRESH, ID_SEARCH, ID_CATEGORY,
     ID_LIST, ID_NAME, ID_EDIT_CATEGORY, ID_SOURCE, ID_BROWSE_SOURCE,
     ID_ADD_CURRENT, ID_ADD_FILE, ID_DELETE,
-    ID_MODE_ASSEMBLY, ID_MODE_BODY, ID_INSERT, ID_CLOSE, ID_STATUS
+    ID_MODE_ASSEMBLY, ID_MODE_BODY, ID_INSERT, ID_CLOSE, ID_STATUS, ID_PREVIEW
 };
 
 struct LibraryItem
@@ -49,11 +50,15 @@ struct AppState
     HWND parent = nullptr;
     HWND list = nullptr;
     HWND category = nullptr;
+    HWND preview = nullptr;
+    HBITMAP previewBitmap = nullptr;
     HFONT font = nullptr;
     std::vector<LibraryItem> items;
     std::vector<std::size_t> visible;
     bool running = true;
 };
+
+void UpdatePreview(AppState* state);
 
 std::wstring Trim(std::wstring value)
 {
@@ -335,6 +340,7 @@ void RefreshList(AppState* state)
         ListView_SetItemText(state->list, inserted, 2, const_cast<wchar_t*>(item.relativePath.c_str()));
         state->visible.push_back(index);
     }
+    UpdatePreview(state);
 }
 
 std::size_t SelectedIndex(AppState* state)
@@ -456,6 +462,36 @@ fs::path ResolvedModel(AppState* state, const LibraryItem& item, std::wstring& e
     return model;
 }
 
+void UpdatePreview(AppState* state)
+{
+    if (state->previewBitmap != nullptr)
+    {
+        DeleteObject(state->previewBitmap);
+        state->previewBitmap = nullptr;
+    }
+    const std::size_t index = SelectedIndex(state);
+    if (index != SIZE_MAX)
+    {
+        std::wstring error;
+        const fs::path model = ResolvedModel(state, state->items[index], error);
+        if (!model.empty())
+        {
+            IShellItemImageFactory* factory = nullptr;
+            if (SUCCEEDED(SHCreateItemFromParsingName(model.c_str(), nullptr,
+                                                       IID_PPV_ARGS(&factory))))
+            {
+                SIZE size{300, 250};
+                factory->GetImage(size,
+                    static_cast<SIIGBF>(SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK |
+                                        SIIGBF_RESIZETOFIT),
+                    &state->previewBitmap);
+                factory->Release();
+            }
+        }
+    }
+    if (state->preview != nullptr) InvalidateRect(state->preview, nullptr, TRUE);
+}
+
 bool InsertAssembly(AppState* state, const LibraryItem& item, std::wstring& error)
 {
     const tag_t workPart = UF_ASSEM_ask_work_part();
@@ -540,9 +576,9 @@ void BuildUi(AppState* state)
     state->font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     AddControl(state, 0, L"STATIC", L"库目录：", SS_LEFT, 14, 15, 65, 22, 0);
     const std::wstring savedRoot = LoadRootPreference();
-    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", savedRoot.c_str(), ES_AUTOHSCROLL, 80, 12, 605, 25, ID_ROOT);
-    AddControl(state, 0, L"BUTTON", L"浏览...", BS_PUSHBUTTON, 694, 11, 78, 27, ID_BROWSE_ROOT);
-    AddControl(state, 0, L"BUTTON", L"刷新", BS_PUSHBUTTON, 780, 11, 76, 27, ID_REFRESH);
+    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", savedRoot.c_str(), ES_AUTOHSCROLL, 80, 12, 830, 25, ID_ROOT);
+    AddControl(state, 0, L"BUTTON", L"浏览...", BS_PUSHBUTTON, 920, 11, 78, 27, ID_BROWSE_ROOT);
+    AddControl(state, 0, L"BUTTON", L"刷新", BS_PUSHBUTTON, 1008, 11, 76, 27, ID_REFRESH);
 
     AddControl(state, 0, L"STATIC", L"搜索：", SS_LEFT, 14, 52, 55, 22, 0);
     AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL, 66, 49, 280, 25, ID_SEARCH);
@@ -552,15 +588,22 @@ void BuildUi(AppState* state)
 
     state->list = AddControl(state, WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                              LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-                             14, 84, 842, 260, ID_LIST);
+                             14, 84, 724, 260, ID_LIST);
     ListView_SetExtendedListViewStyle(state->list, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
     LVCOLUMNW column{};
     column.mask = LVCF_TEXT | LVCF_WIDTH;
-    column.pszText = const_cast<wchar_t*>(L"名称"); column.cx = 245; ListView_InsertColumn(state->list, 0, &column);
-    column.pszText = const_cast<wchar_t*>(L"分类"); column.cx = 180; ListView_InsertColumn(state->list, 1, &column);
-    column.pszText = const_cast<wchar_t*>(L"模型文件"); column.cx = 390; ListView_InsertColumn(state->list, 2, &column);
+    column.pszText = const_cast<wchar_t*>(L"名称"); column.cx = 215; ListView_InsertColumn(state->list, 0, &column);
+    column.pszText = const_cast<wchar_t*>(L"分类"); column.cx = 150; ListView_InsertColumn(state->list, 1, &column);
+    column.pszText = const_cast<wchar_t*>(L"模型文件"); column.cx = 330; ListView_InsertColumn(state->list, 2, &column);
 
-    AddControl(state, 0, L"BUTTON", L"自定义入库", BS_GROUPBOX, 14, 354, 842, 116, 0);
+    AddControl(state, 0, L"BUTTON", L"模型预览", BS_GROUPBOX, 750, 74, 334, 396, 0);
+    state->preview = AddControl(state, WS_EX_CLIENTEDGE, L"STATIC", L"", SS_OWNERDRAW,
+                                765, 101, 304, 278, ID_PREVIEW);
+    AddControl(state, 0, L"STATIC",
+               L"预览来自 PRT 文件缩略图\r\n重新保存部件可更新预览",
+               SS_CENTER, 770, 391, 294, 48, 0);
+
+    AddControl(state, 0, L"BUTTON", L"自定义入库", BS_GROUPBOX, 14, 354, 724, 116, 0);
     AddControl(state, 0, L"STATIC", L"名称：", SS_LEFT, 28, 382, 50, 22, 0);
     AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL, 80, 379, 210, 25, ID_NAME);
     AddControl(state, 0, L"STATIC", L"分类：", SS_LEFT, 310, 382, 50, 22, 0);
@@ -568,18 +611,18 @@ void BuildUi(AppState* state)
     AddControl(state, 0, L"STATIC", L"源文件：", SS_LEFT, 28, 418, 60, 22, 0);
     AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL | ES_READONLY, 92, 415, 453, 25, ID_SOURCE);
     AddControl(state, 0, L"BUTTON", L"选择...", BS_PUSHBUTTON, 555, 414, 68, 27, ID_BROWSE_SOURCE);
-    AddControl(state, 0, L"BUTTON", L"入库当前部件", BS_PUSHBUTTON, 634, 378, 104, 28, ID_ADD_CURRENT);
-    AddControl(state, 0, L"BUTTON", L"添加文件", BS_PUSHBUTTON, 634, 414, 104, 28, ID_ADD_FILE);
-    AddControl(state, 0, L"BUTTON", L"删除定义", BS_PUSHBUTTON, 746, 414, 96, 28, ID_DELETE);
+    AddControl(state, 0, L"BUTTON", L"入库当前部件", BS_PUSHBUTTON, 555, 378, 104, 28, ID_ADD_CURRENT);
+    AddControl(state, 0, L"BUTTON", L"添加文件", BS_PUSHBUTTON, 555, 414, 82, 28, ID_ADD_FILE);
+    AddControl(state, 0, L"BUTTON", L"删除定义", BS_PUSHBUTTON, 642, 414, 82, 28, ID_DELETE);
 
-    AddControl(state, 0, L"BUTTON", L"调用方式", BS_GROUPBOX, 14, 478, 548, 68, 0);
+    AddControl(state, 0, L"BUTTON", L"调用方式", BS_GROUPBOX, 14, 478, 724, 68, 0);
     AddControl(state, 0, L"BUTTON", L"装配调用", BS_AUTORADIOBUTTON | WS_GROUP, 32, 502, 102, 24, ID_MODE_ASSEMBLY);
     AddControl(state, 0, L"BUTTON", L"多实体调用", BS_AUTORADIOBUTTON, 146, 502, 112, 24, ID_MODE_BODY);
     CheckRadioButton(state->window, ID_MODE_ASSEMBLY, ID_MODE_BODY, ID_MODE_ASSEMBLY);
     AddControl(state, 0, L"STATIC", L"定位：按当前 WCS 原点和方向放置", SS_LEFT, 278, 503, 265, 22, 0);
-    AddControl(state, 0, L"BUTTON", L"调用选中标准件", BS_DEFPUSHBUTTON, 580, 490, 170, 42, ID_INSERT);
-    AddControl(state, 0, L"BUTTON", L"关闭", BS_PUSHBUTTON, 764, 490, 92, 42, ID_CLOSE);
-    AddControl(state, 0, L"STATIC", L"", SS_LEFT, 14, 553, 842, 22, ID_STATUS);
+    AddControl(state, 0, L"BUTTON", L"调用选中标准件", BS_DEFPUSHBUTTON, 765, 490, 198, 42, ID_INSERT);
+    AddControl(state, 0, L"BUTTON", L"关闭", BS_PUSHBUTTON, 977, 490, 107, 42, ID_CLOSE);
+    AddControl(state, 0, L"STATIC", L"", SS_LEFT, 14, 553, 1070, 22, ID_STATUS);
 }
 
 void DeleteSelected(AppState* state)
@@ -692,11 +735,68 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         default: break;
         }
         break;
+    case WM_NOTIFY:
+        if (state != nullptr && reinterpret_cast<NMHDR*>(lParam)->idFrom == ID_LIST &&
+            reinterpret_cast<NMHDR*>(lParam)->code == LVN_ITEMCHANGED)
+        {
+            const auto* notification = reinterpret_cast<NMLISTVIEW*>(lParam);
+            if ((notification->uChanged & LVIF_STATE) != 0 &&
+                ((notification->uNewState ^ notification->uOldState) & LVIS_SELECTED) != 0)
+                UpdatePreview(state);
+        }
+        return 0;
+    case WM_DRAWITEM:
+        if (state != nullptr && wParam == ID_PREVIEW)
+        {
+            const auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+            FillRect(draw->hDC, &draw->rcItem, reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
+            if (state->previewBitmap != nullptr)
+            {
+                BITMAP bitmap{};
+                GetObjectW(state->previewBitmap, sizeof(bitmap), &bitmap);
+                const int areaWidth = draw->rcItem.right - draw->rcItem.left - 16;
+                const int areaHeight = draw->rcItem.bottom - draw->rcItem.top - 16;
+                const double scale = std::min(
+                    static_cast<double>(areaWidth) / std::max(1L, bitmap.bmWidth),
+                    static_cast<double>(areaHeight) / std::max(1L, bitmap.bmHeight));
+                const int width = std::max(1, static_cast<int>(bitmap.bmWidth * scale));
+                const int height = std::max(1, static_cast<int>(bitmap.bmHeight * scale));
+                const int x = draw->rcItem.left + (draw->rcItem.right - draw->rcItem.left - width) / 2;
+                const int y = draw->rcItem.top + (draw->rcItem.bottom - draw->rcItem.top - height) / 2;
+                HDC memory = CreateCompatibleDC(draw->hDC);
+                const HGDIOBJ old = SelectObject(memory, state->previewBitmap);
+                SetStretchBltMode(draw->hDC, HALFTONE);
+                StretchBlt(draw->hDC, x, y, width, height, memory, 0, 0,
+                           bitmap.bmWidth, bitmap.bmHeight, SRCCOPY);
+                SelectObject(memory, old);
+                DeleteDC(memory);
+            }
+            else
+            {
+                RECT textArea = draw->rcItem;
+                SetBkMode(draw->hDC, TRANSPARENT);
+                SetTextColor(draw->hDC, RGB(105, 105, 105));
+                DrawTextW(draw->hDC,
+                          L"请选中标准件\r\n\r\n若没有缩略图，请用 NX\r\n重新保存该 PRT 后刷新",
+                          -1, &textArea, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+            }
+            FrameRect(draw->hDC, &draw->rcItem, reinterpret_cast<HBRUSH>(COLOR_3DSHADOW + 1));
+            return TRUE;
+        }
+        break;
     case WM_CLOSE:
         DestroyWindow(window);
         return 0;
     case WM_DESTROY:
-        if (state != nullptr) state->running = false;
+        if (state != nullptr)
+        {
+            if (state->previewBitmap != nullptr)
+            {
+                DeleteObject(state->previewBitmap);
+                state->previewBitmap = nullptr;
+            }
+            state->running = false;
+        }
         return 0;
     default: break;
     }
@@ -734,7 +834,7 @@ int LaunchStandardPartsLibrary()
 
     RECT area{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &area, 0);
-    constexpr int width = 888;
+    constexpr int width = 1116;
     constexpr int height = 625;
     const int x = area.left + ((area.right - area.left) - width) / 2;
     const int y = area.top + ((area.bottom - area.top) - height) / 2;
