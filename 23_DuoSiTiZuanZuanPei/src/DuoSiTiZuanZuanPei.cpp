@@ -3010,6 +3010,37 @@ AssemblyConversionResult ConvertMatchedGroupsToAssembly(
             matchedGroups,
             copiedBodyTags);
         conversionGroups = &copiedGroups;
+
+        if (gColorMatchedBodies)
+        {
+            std::vector<std::vector<tag_t> > copiedMatchedGroups;
+            copiedMatchedGroups.reserve(copiedGroups.size());
+            for (std::size_t groupIndex = 0;
+                 groupIndex < copiedGroups.size();
+                 ++groupIndex)
+            {
+                std::vector<tag_t> copiedGroupTags;
+                copiedGroupTags.reserve(copiedGroups[groupIndex].instances.size());
+                for (std::size_t instanceIndex = 0;
+                     instanceIndex < copiedGroups[groupIndex].instances.size();
+                     ++instanceIndex)
+                {
+                    copiedGroupTags.push_back(
+                        copiedGroups[groupIndex].instances[instanceIndex].bodyTag);
+                }
+                copiedMatchedGroups.push_back(copiedGroupTags);
+            }
+
+            std::vector<tag_t> colorFailedTags;
+            ColorMatchedGroups(session, copiedMatchedGroups, colorFailedTags);
+            if (!colorFailedTags.empty())
+            {
+                std::ostringstream line;
+                line << "Non-parametric copy color failures="
+                     << colorFailedTags.size();
+                WritePreviewDebugLog(line.str());
+            }
+        }
     }
 
     std::vector<tag_t> originalBodyTagsToDelete;
@@ -6231,7 +6262,7 @@ private:
         if (!cachedSearchData.coordinateDebugCanceled)
         {
             DeleteDebugCoordinateObjects(&cachedSearchData.activeDebugObjectTags);
-            if (gColorMatchedBodies)
+            if (gColorMatchedBodies && !retainOriginalBodies)
             {
                 ColorMatchedGroups(session, matchedGroups, colorFailedTags);
             }
@@ -6436,7 +6467,7 @@ private:
         else
         {
             DeleteDebugCoordinateObjects(&searchData.activeDebugObjectTags);
-            if (gColorMatchedBodies)
+            if (gColorMatchedBodies && !retainOriginalBodies)
             {
                 ColorMatchedGroups(session, matchedGroups, colorFailedTags);
             }
