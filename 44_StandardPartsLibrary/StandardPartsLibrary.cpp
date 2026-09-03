@@ -84,6 +84,7 @@ struct AppState
     double placementMatrix[9]{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
     std::vector<tag_t> trimTargets;
     bool refreshingCategories = false;
+    bool refreshingList = false;
     bool running = true;
 };
 
@@ -470,6 +471,7 @@ void RefreshSpecifications(AppState* state)
 
 void RefreshList(AppState* state)
 {
+    state->refreshingList = true;
     ListView_DeleteAllItems(state->list);
     state->visible.clear();
     const std::wstring search = Lower(Trim(GetText(state->window, ID_SEARCH)));
@@ -497,6 +499,7 @@ void RefreshList(AppState* state)
     if (!state->visible.empty())
         ListView_SetItemState(state->list, 0, LVIS_SELECTED | LVIS_FOCUSED,
                               LVIS_SELECTED | LVIS_FOCUSED);
+    state->refreshingList = false;
     RefreshSpecifications(state);
     UpdatePreview(state);
 }
@@ -1035,17 +1038,21 @@ void UpdatePreview(AppState* state)
                 }
             }
             const fs::path preview = FindSidecarPreview(model);
-            const fs::path imageSource = preview.empty() ? model : preview;
-            IShellItemImageFactory* factory = nullptr;
-            if (SUCCEEDED(SHCreateItemFromParsingName(imageSource.c_str(), nullptr,
-                                                       IID_PPV_ARGS(&factory))))
+            // Never ask the Windows shell to extract a thumbnail from an NX .prt file.
+            // Siemens' shell thumbnail provider can re-enter the active NX process while
+            // this dialog is running on NX's UI thread, leaving both sides waiting.
+            if (!preview.empty())
             {
-                SIZE size{400, 240};
-                factory->GetImage(size,
-                    static_cast<SIIGBF>((preview.empty() ? SIIGBF_THUMBNAILONLY : 0) |
-                                        SIIGBF_BIGGERSIZEOK | SIIGBF_RESIZETOFIT),
-                    &state->previewBitmap);
-                factory->Release();
+                IShellItemImageFactory* factory = nullptr;
+                if (SUCCEEDED(SHCreateItemFromParsingName(preview.c_str(), nullptr,
+                                                           IID_PPV_ARGS(&factory))))
+                {
+                    SIZE size{400, 240};
+                    factory->GetImage(size,
+                        static_cast<SIIGBF>(SIIGBF_BIGGERSIZEOK | SIIGBF_RESIZETOFIT),
+                        &state->previewBitmap);
+                    factory->Release();
+                }
             }
         }
     }
@@ -1721,6 +1728,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         else if (reinterpret_cast<NMHDR*>(lParam)->idFrom == ID_LIST &&
                  reinterpret_cast<NMHDR*>(lParam)->code == LVN_ITEMCHANGED)
         {
+            if (state->refreshingList) return 0;
             const auto* notification = reinterpret_cast<NMLISTVIEW*>(lParam);
             if ((notification->uChanged & LVIF_STATE) != 0 &&
                 ((notification->uNewState ^ notification->uOldState) & LVIS_SELECTED) != 0)
