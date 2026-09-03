@@ -33,7 +33,9 @@
 #include <NXOpen/Features_ExtrudeBuilder.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_FlatPattern.hxx>
 #include <NXOpen/Features_SketchFeature.hxx>
+#include <NXOpen/Features_SheetMetal_FlatPatternBuilder.hxx>
 #include <NXOpen/Features_SheetMetal_RebendBuilder.hxx>
 #include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
 #include <NXOpen/Features_SheetMetal_UnbendBuilder.hxx>
@@ -56,6 +58,7 @@
 #include <NXOpen/ScCollector.hxx>
 #include <NXOpen/ScCollectorCollection.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
+#include <NXOpen/SelectFace.hxx>
 #include <NXOpen/Selection.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
 #include <NXOpen/Section.hxx>
@@ -72,6 +75,7 @@
 #include <uf_disp.h>
 #include <uf_modl.h>
 #include <uf_obj.h>
+#include <uf_smd.h>
 #include <uf_ui_types.h>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -90,6 +94,58 @@ namespace
 {
 constexpr double kTolerance = 1.0e-6;
 constexpr double kPi = 3.14159265358979323846;
+
+void AppendDebugLog(const std::string& message) noexcept
+{
+    try
+    {
+        SYSTEMTIME now = {};
+        GetLocalTime(&now);
+        char prefix[128] = {};
+        sprintf_s(prefix, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] [T%lu] "
+                          "BendMarkNotch: ",
+                  now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+                  now.wSecond, now.wMilliseconds, GetCurrentThreadId());
+        const std::string line = std::string(prefix) + message + "\r\n";
+
+        const wchar_t* directory = L"D:\\UG智辉钣金插件\\logs";
+        const wchar_t* path =
+            L"D:\\UG智辉钣金插件\\logs\\BendMarkNotch_debug.log";
+        CreateDirectoryW(directory, nullptr);
+        HANDLE file = CreateFileW(
+            path, FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            DWORD written = 0;
+            WriteFile(file, line.data(), static_cast<DWORD>(line.size()),
+                      &written, nullptr);
+            CloseHandle(file);
+        }
+
+        std::vector<char> syslog(line.begin(), line.end());
+        syslog.push_back('\0');
+        UF_print_syslog(syslog.data(), false);
+    }
+    catch (...) {}
+}
+
+std::string PointText(const NXOpen::Point3d& point)
+{
+    std::ostringstream text;
+    text.precision(16);
+    text << point.X << ',' << point.Y << ',' << point.Z;
+    return text.str();
+}
+
+std::string VectorText(const NXOpen::Vector3d& vector)
+{
+    std::ostringstream text;
+    text.precision(16);
+    text << vector.X << ',' << vector.Y << ',' << vector.Z;
+    return text.str();
+}
 
 class DisplaySuppressionGuard
 {
@@ -473,8 +529,7 @@ std::vector<NXOpen::Body*> BendMarkNotchDialog::TargetBodies() const
         for (NXOpen::Body* body : *part->Bodies())
             if (body != nullptr && body->IsSolidBody() &&
                 IsSheetMetalBody(body) &&
-                FindBodyInsertionFeature(
-                    std::vector<NXOpen::Body*>(1, body)) != nullptr)
+                FindFlatPatternFeature(body) != nullptr)
                 result.push_back(body);
     }
     else
@@ -524,11 +579,8 @@ int BendMarkNotchDialog::Execute()
     if (bodies.empty()) throw std::runtime_error("没有可处理的钣金体。");
 
     NXOpen::Part* workPart = session_->Parts()->Work();
-    NXOpen::Features::Feature* insertionFeature =
-        FindBodyInsertionFeature(bodies);
-    if (workPart == nullptr || insertionFeature == nullptr)
-        throw std::runtime_error(
-            "无法确定钣金体的插入位置，已停止创建缺口。");
+    if (workPart == nullptr)
+        throw std::runtime_error("当前没有可用的工作部件。");
     NXOpen::Features::Feature* originalCurrentFeature =
         workPart->CurrentFeature();
 
@@ -538,35 +590,79 @@ int BendMarkNotchDialog::Execute()
     pendingInternalFeatureTags_.clear();
     try
     {
-        if (originalCurrentFeature == nullptr ||
-            originalCurrentFeature->Tag() != insertionFeature->Tag())
-            insertionFeature->MakeCurrentFeature();
-
         int bodyCount = 0;
         int notchCount = 0;
         for (NXOpen::Body* body : bodies)
         {
+            NXOpen::Features::Feature* flatPattern =
+                FindFlatPatternFeature(body);
+            NXOpen::Features::Feature* insertionFeature =
+                FindFeatureBefore(flatPattern);
+            if (flatPattern == nullptr || insertionFeature == nullptr)
+                throw std::runtime_error(
+                    "未找到该钣金体的展平图样或其前一特征，"
+                    "无法在展平图样前插入缺口特征。");
+            {
+                std::ostringstream log;
+                log << "body insertion body="
+                    << (body == nullptr ? 0 : body->Tag())
+                    << " beforeFlatPattern=" << flatPattern->Tag()
+                    << " flatTimestamp=" << flatPattern->Timestamp()
+                    << " insertionFeature=" << insertionFeature->Tag()
+                    << " insertionTimestamp=" << insertionFeature->Timestamp()
+                    << " restoreFeature="
+                    << (originalCurrentFeature == nullptr
+                            ? 0 : originalCurrentFeature->Tag());
+                AppendDebugLog(log.str());
+            }
+            if (workPart->CurrentFeature() == nullptr ||
+                workPart->CurrentFeature()->Tag() != insertionFeature->Tag())
+                insertionFeature->MakeCurrentFeature();
+
+            // Each body owns an independent custom-feature node.  Do not let
+            // internal feature tags from a previous body leak into this one.
+            pendingInternalFeatureTags_.clear();
             const int created = ProcessBody(body);
             if (created > 0)
             {
+                if (!CreateCustomFeatureNode())
+                    throw std::runtime_error(
+                        "创建单个钣金体的“折弯标记缺口”自定义特征失败，"
+                        "请重启 NX 后重试。");
+                AppendDebugLog("custom feature node created for body=" +
+                    std::to_string(body == nullptr ? 0 : body->Tag()) +
+                    " internalFeatures=" +
+                    std::to_string(pendingInternalFeatureTags_.size()));
                 ++bodyCount;
                 notchCount += created;
+                pendingInternalFeatureTags_.clear();
             }
+
+            // Return to exactly the current-feature position that was active
+            // before the command.  The newly inserted node remains before the
+            // target body's Flat Pattern in model history.
+            if (originalCurrentFeature != nullptr &&
+                IsAlive(originalCurrentFeature->Tag()))
+                originalCurrentFeature->MakeCurrentFeature();
         }
         if (notchCount == 0)
             throw std::runtime_error("未找到可伸直并标记的折弯。");
-        if (!CreateCustomFeatureNode())
-            throw std::runtime_error(
-                "创建“折弯标记缺口”自定义特征失败，请重启 NX 后重试。");
-        if (originalCurrentFeature != nullptr &&
-            IsAlive(originalCurrentFeature->Tag()))
-            originalCurrentFeature->MakeCurrentFeature();
-        else
-            workPart->ResetTimestampToLatestFeature();
         const int updateErrors =
             session_->UpdateManager()->DoUpdate(operationMark);
         if (updateErrors != 0)
             throw std::runtime_error("折弯标记缺口自定义特征更新失败。");
+        {
+            NXOpen::Features::Feature* afterRestore =
+                workPart->CurrentFeature();
+            std::ostringstream log;
+            log << "restore original current feature after="
+                << (afterRestore == nullptr ? 0 : afterRestore->Tag())
+                << " expected="
+                << (originalCurrentFeature == nullptr
+                        ? 0 : originalCurrentFeature->Tag())
+                << " updateErrors=" << updateErrors;
+            AppendDebugLog(log.str());
+        }
 
         std::ostringstream message;
         message << "完成：处理 " << bodyCount << " 个钣金体，创建 "
@@ -647,6 +743,86 @@ bool BendMarkNotchDialog::CreateCustomFeatureNode()
     }
 }
 
+NXOpen::Features::Feature* BendMarkNotchDialog::FindFlatPatternFeature(
+    NXOpen::Body* body) const
+{
+    NXOpen::Part* part = session_ == nullptr ? nullptr : session_->Parts()->Work();
+    if (part == nullptr || body == nullptr || !IsAlive(body->Tag()))
+        return nullptr;
+
+    // Prefer the direct sheet-metal association when it resolves to the
+    // actual FlatPattern feature.
+    tag_t directTag = NULL_TAG;
+    if (UF_SMD_ask_flat_pattern(body->Tag(), &directTag) == 0 &&
+        IsAlive(directTag))
+    {
+        auto* direct = dynamic_cast<NXOpen::Features::FlatPattern*>(
+            NXOpen::NXObjectManager::Get(directTag));
+        if (direct != nullptr) return direct;
+    }
+
+    // Some parts return the legacy flat-pattern group tag above.  In that
+    // case identify the feature by its committed upward face on the formed
+    // body, which also distinguishes flat patterns in multi-body parts.
+    std::set<tag_t> bodyFaceTags;
+    for (NXOpen::Face* face : body->GetFaces())
+        if (face != nullptr && IsAlive(face->Tag()))
+            bodyFaceTags.insert(face->Tag());
+
+    auto* manager = part->Features()->SheetmetalManager();
+    NXOpen::Features::Feature* best = nullptr;
+    for (NXOpen::Features::Feature* feature : part->Features()->GetFeatures())
+    {
+        if (feature == nullptr || !IsAlive(feature->Tag()) ||
+            dynamic_cast<NXOpen::Features::FlatPattern*>(feature) == nullptr)
+            continue;
+        NXOpen::Features::SheetMetal::FlatPatternBuilder* builder = nullptr;
+        try
+        {
+            builder = manager->CreateFlatPatternBuilder(feature);
+            NXOpen::Face* upward = builder == nullptr ||
+                    builder->UpwardFace() == nullptr
+                ? nullptr : builder->UpwardFace()->Value();
+            const bool matched = upward != nullptr &&
+                bodyFaceTags.find(upward->Tag()) != bodyFaceTags.end();
+            if (builder != nullptr) builder->Destroy();
+            builder = nullptr;
+            if (matched && (best == nullptr ||
+                feature->Timestamp() > best->Timestamp()))
+                best = feature;
+        }
+        catch (...)
+        {
+            if (builder != nullptr)
+            {
+                try { builder->Destroy(); }
+                catch (...) {}
+            }
+        }
+    }
+    return best;
+}
+
+NXOpen::Features::Feature* BendMarkNotchDialog::FindFeatureBefore(
+    NXOpen::Features::Feature* target) const
+{
+    NXOpen::Part* part = session_ == nullptr ? nullptr : session_->Parts()->Work();
+    if (part == nullptr || target == nullptr || !IsAlive(target->Tag()))
+        return nullptr;
+    const int targetTimestamp = target->Timestamp();
+    NXOpen::Features::Feature* previous = nullptr;
+    for (NXOpen::Features::Feature* feature : part->Features()->GetFeatures())
+    {
+        if (feature == nullptr || !IsAlive(feature->Tag()) ||
+            feature->IsInternal() || feature->Timestamp() >= targetTimestamp)
+            continue;
+        if (previous == nullptr ||
+            feature->Timestamp() > previous->Timestamp())
+            previous = feature;
+    }
+    return previous;
+}
+
 NXOpen::Features::Feature* BendMarkNotchDialog::FindBodyInsertionFeature(
     const std::vector<NXOpen::Body*>& bodies) const
 {
@@ -700,6 +876,13 @@ NXOpen::Features::Feature* BendMarkNotchDialog::FindBodyInsertionFeature(
 
 NXOpen::Face* BendMarkNotchDialog::FindReferenceFace(NXOpen::Body* body) const
 {
+    if (body == nullptr) return nullptr;
+
+    NXOpen::Part* part = session_->Parts()->Work();
+    if (part == nullptr) return nullptr;
+    auto* manager = part->Features()->SheetmetalManager();
+    if (manager == nullptr) return nullptr;
+
     NXOpen::Face* best = nullptr;
     double bestScore = -1.0;
     for (NXOpen::Face* face : body->GetFaces())
@@ -712,6 +895,23 @@ NXOpen::Face* BendMarkNotchDialog::FindReferenceFace(NXOpen::Body* body) const
                 &radiusData, &normalDirection) != 0 ||
             type != UF_MODL_PLANAR_FACE)
             continue;
+
+        // Unbend accepts only a planar sheet-metal web as its stationary
+        // entity.  A geometrically planar face may belong to a normal solid,
+        // a boolean result, or a thickness side and therefore have no sheet-
+        // metal attribute.  Passing such a face makes NX report error 3675320
+        // ("Face has no SM attribute" / "Select planar stationary face").
+        try
+        {
+            if (manager->GetFaceType(face) !=
+                    NXOpen::Features::SheetMetal::SheetmetalFaceTypeWeb)
+                continue;
+        }
+        catch (const NXOpen::NXException&)
+        {
+            continue;
+        }
+
         const double dx = box[3] - box[0];
         const double dy = box[4] - box[1];
         const double dz = box[5] - box[2];
@@ -807,24 +1007,85 @@ BendMarkNotchDialog::CollectBends(NXOpen::Body* body, double thickness) const
     std::vector<NXOpen::Face*> innerFaces;
     std::vector<NXOpen::Features::SheetMetal::SheetmetalBendState> states;
     manager->GetInnerBendFaces(body, innerFaces, states);
+    AppendDebugLog("CollectBends query body=" +
+        std::to_string(body == nullptr ? 0 : body->Tag()) +
+        " innerFaces=" + std::to_string(innerFaces.size()) +
+        " states=" + std::to_string(states.size()));
     std::vector<BendRecord> result;
     std::set<tag_t> seen;
     for (std::size_t index = 0; index < innerFaces.size(); ++index)
     {
         NXOpen::Face* inner = innerFaces[index];
-        if (inner == nullptr || !seen.insert(inner->Tag()).second) continue;
+        if (inner == nullptr)
+        {
+            AppendDebugLog("CollectBends skip index=" +
+                std::to_string(index) + " reason=null-inner-face");
+            continue;
+        }
+        if (!seen.insert(inner->Tag()).second)
+        {
+            AppendDebugLog("CollectBends skip index=" +
+                std::to_string(index) + " inner=" +
+                std::to_string(inner->Tag()) + " reason=duplicate-inner-face");
+            continue;
+        }
         if (index < states.size() && states[index] ==
                 NXOpen::Features::SheetMetal::SheetmetalBendStateFlat)
+        {
+            AppendDebugLog("CollectBends skip index=" +
+                std::to_string(index) + " inner=" +
+                std::to_string(inner->Tag()) + " reason=already-flat");
             continue;
+        }
         BendRecord record;
         record.innerFace = inner;
-        record.outerFace = FindOppositeBendFace(body, inner, thickness);
+        try { record.outerFace = manager->GetOppositeFace(inner); }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog("CollectBends NX opposite failed index=" +
+                std::to_string(index) + " inner=" +
+                std::to_string(inner->Tag()) + " code=" +
+                std::to_string(ex.ErrorCode()));
+            record.outerFace = nullptr;
+        }
         if (record.outerFace == nullptr ||
-            !FindBoundaryEdges(inner, record.firstBoundary,
-                               record.secondBoundary))
+            !IsAlive(record.outerFace->Tag()))
+        {
+            record.outerFace = FindOppositeBendFace(body, inner, thickness);
+            AppendDebugLog("CollectBends geometric opposite index=" +
+                std::to_string(index) + " inner=" +
+                std::to_string(inner->Tag()) + " outer=" +
+                std::to_string(record.outerFace == nullptr
+                    ? 0 : record.outerFace->Tag()));
+        }
+        if (record.outerFace == nullptr)
+        {
+            AppendDebugLog("CollectBends skip index=" +
+                std::to_string(index) + " inner=" +
+                std::to_string(inner->Tag()) + " reason=no-opposite-face");
             continue;
+        }
+        if (!FindBoundaryEdges(inner, record.firstBoundary,
+                               record.secondBoundary) &&
+            !FindBoundaryEdges(record.outerFace, record.firstBoundary,
+                               record.secondBoundary))
+        {
+            AppendDebugLog("CollectBends skip index=" +
+                std::to_string(index) + " inner=" +
+                std::to_string(inner->Tag()) + " outer=" +
+                std::to_string(record.outerFace->Tag()) +
+                " reason=no-two-axial-boundaries");
+            continue;
+        }
+        AppendDebugLog("CollectBends accept index=" +
+            std::to_string(index) + " inner=" +
+            std::to_string(inner->Tag()) + " outer=" +
+            std::to_string(record.outerFace->Tag()));
         result.push_back(record);
     }
+    AppendDebugLog("CollectBends result body=" +
+        std::to_string(body == nullptr ? 0 : body->Tag()) +
+        " accepted=" + std::to_string(result.size()));
     return result;
 }
 
@@ -888,13 +1149,44 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
 {
     NXOpen::Part* part = session_->Parts()->Work();
     auto* manager = part->Features()->SheetmetalManager();
+    AppendDebugLog("============================================================");
+    AppendDebugLog("ProcessBody begin body=" +
+        std::to_string(body == nullptr ? 0 : body->Tag()));
     const double thickness = manager->GetBodyThickness(body);
     NXOpen::Face* referenceFace = FindReferenceFace(body);
     const std::vector<BendRecord> bends = CollectBends(body, thickness);
-    if (referenceFace == nullptr || bends.empty()) return 0;
+    {
+        std::ostringstream log;
+        log.precision(16);
+        log << "sheet-metal query thickness=" << thickness
+            << " referenceFace="
+            << (referenceFace == nullptr ? 0 : referenceFace->Tag())
+            << " bendCount=" << bends.size();
+        AppendDebugLog(log.str());
+    }
+    for (std::size_t index = 0; index < bends.size(); ++index)
+    {
+        const BendRecord& bend = bends[index];
+        std::ostringstream log;
+        log << "bend[" << index << "] innerFace="
+            << (bend.innerFace == nullptr ? 0 : bend.innerFace->Tag())
+            << " outerFace="
+            << (bend.outerFace == nullptr ? 0 : bend.outerFace->Tag())
+            << " firstBoundary="
+            << (bend.firstBoundary == nullptr ? 0 : bend.firstBoundary->Tag())
+            << " secondBoundary="
+            << (bend.secondBoundary == nullptr ? 0 : bend.secondBoundary->Tag());
+        AppendDebugLog(log.str());
+    }
+    if (referenceFace == nullptr || bends.empty())
+    {
+        AppendDebugLog("ProcessBody skipped: no valid reference web or bends");
+        return 0;
+    }
 
     const NXOpen::Session::UndoMarkId mark = session_->SetUndoMark(
         NXOpen::Session::MarkVisibilityInvisible, "折弯标记缺口内部处理");
+    std::string failureStage = "prepare unbend faces";
     try
     {
         std::vector<NXOpen::Face*> bendFaces;
@@ -911,16 +1203,197 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
         auto* unbend = manager->CreateUnbendFeatureBuilder(nullptr);
         unbend->SetReferenceEntity(referenceFace);
         unbend->SetFaceCollector(collector);
+        failureStage = "commit unbend";
+        AppendDebugLog("unbend commit begin referenceFace=" +
+            std::to_string(referenceFace->Tag()) + " collectorFaces=" +
+            std::to_string(bendFaces.size()));
         NXOpen::Features::Feature* unbendFeature = unbend->CommitFeature();
         unbend->Destroy();
         if (unbendFeature == nullptr)
             throw std::runtime_error("钣金体全部折弯一次伸直失败。");
+        AppendDebugLog("unbend commit success feature=" +
+            std::to_string(unbendFeature->Tag()));
 
+        failureStage = "verify unbent body envelope thickness";
+        const NXOpen::Vector3d normal = ReferenceNormal(referenceFace);
+        const NXOpen::Vector3d helper = std::fabs(normal.X) < 0.9
+            ? NXOpen::Vector3d{1.0, 0.0, 0.0}
+            : NXOpen::Vector3d{0.0, 1.0, 0.0};
+        const NXOpen::Vector3d secondary = Normalize(Cross(normal, helper));
+        const NXOpen::Vector3d tertiary = Normalize(Cross(normal, secondary));
+        double maximumProjection = -DBL_MAX;
+        double minimumProjection = DBL_MAX;
+        std::size_t measuredFaceCount = 0;
+        for (NXOpen::Face* face : body->GetFaces())
+        {
+            if (face == nullptr || !IsAlive(face->Tag())) continue;
+            double positiveDirection[3] = {
+                normal.X, normal.Y, normal.Z};
+            double negativeDirection[3] = {
+                -normal.X, -normal.Y, -normal.Z};
+            double secondDirection[3] = {
+                secondary.X, secondary.Y, secondary.Z};
+            double thirdDirection[3] = {
+                tertiary.X, tertiary.Y, tertiary.Z};
+            tag_t positiveSubentity = NULL_TAG;
+            tag_t negativeSubentity = NULL_TAG;
+            double positivePoint[3] = {};
+            double negativePoint[3] = {};
+            if (UF_MODL_ask_extreme(
+                    face->Tag(), positiveDirection, secondDirection,
+                    thirdDirection, &positiveSubentity, positivePoint) != 0 ||
+                UF_MODL_ask_extreme(
+                    face->Tag(), negativeDirection, secondDirection,
+                    thirdDirection, &negativeSubentity, negativePoint) != 0)
+                continue;
+            maximumProjection = (std::max)(maximumProjection,
+                positivePoint[0] * normal.X + positivePoint[1] * normal.Y +
+                positivePoint[2] * normal.Z);
+            minimumProjection = (std::min)(minimumProjection,
+                negativePoint[0] * normal.X + negativePoint[1] * normal.Y +
+                negativePoint[2] * normal.Z);
+            ++measuredFaceCount;
+        }
+        if (measuredFaceCount == 0 || maximumProjection < minimumProjection)
+            throw std::runtime_error("无法计算伸直实体的包容体厚度。");
+        const double envelopeThickness =
+            maximumProjection - minimumProjection;
+        const double thicknessTolerance =
+            (std::max)(1.0e-3, thickness * 1.0e-3);
+        {
+            std::ostringstream log;
+            log.precision(16);
+            log << "unbent envelope thickness body=" << body->Tag()
+                << " measuredFaces=" << measuredFaceCount
+                << " normal=" << VectorText(normal)
+                << " minimumProjection=" << minimumProjection
+                << " maximumProjection=" << maximumProjection
+                << " envelopeThickness=" << envelopeThickness
+                << " sheetThickness=" << thickness
+                << " difference=" << std::fabs(envelopeThickness - thickness)
+                << " tolerance=" << thicknessTolerance;
+            AppendDebugLog(log.str());
+        }
+        if (std::fabs(envelopeThickness - thickness) > thicknessTolerance)
+        {
+            std::ostringstream message;
+            message.precision(10);
+            message << "伸直后包容体厚度 " << envelopeThickness
+                    << " mm 与板厚 " << thickness
+                    << " mm 不一致。";
+            throw std::runtime_error(message.str());
+        }
+
+        failureStage = "resolve flattened bend endpoints";
         std::vector<FlatBend> flatBends;
         for (const BendRecord& bend : bends)
             flatBends.push_back(ResolveFlatBend(bend));
-        const NXOpen::Vector3d normal = ReferenceNormal(referenceFace);
 
+        // Collapse bend segments that lie on the same infinite line into one
+        // overall span.  Only the two extreme endpoints of that span receive
+        // notches; intermediate endpoints between collinear segments do not.
+        struct CollinearSpan
+        {
+            NXOpen::Point3d origin;
+            NXOpen::Vector3d direction;
+            double minimum = 0.0;
+            double maximum = 0.0;
+            NXOpen::Point3d minimumPoint;
+            NXOpen::Point3d maximumPoint;
+        };
+        std::vector<CollinearSpan> spans;
+        constexpr double kCollinearTolerance = 1.0e-3;
+        for (const FlatBend& flat : flatBends)
+        {
+            const NXOpen::Vector3d direction = Normalize(
+                Subtract(flat.secondEnd, flat.firstEnd));
+            CollinearSpan* matched = nullptr;
+            for (CollinearSpan& span : spans)
+            {
+                if (std::fabs(Dot(direction, span.direction)) < 0.999999)
+                    continue;
+                const auto distanceToLine = [&](const NXOpen::Point3d& point)
+                {
+                    const NXOpen::Vector3d offset =
+                        Subtract(point, span.origin);
+                    return Length(Subtract(
+                        Add(span.origin, Scale(
+                            span.direction, Dot(offset, span.direction))),
+                        point));
+                };
+                if (distanceToLine(flat.firstEnd) <= kCollinearTolerance &&
+                    distanceToLine(flat.secondEnd) <= kCollinearTolerance)
+                {
+                    matched = &span;
+                    break;
+                }
+            }
+            if (matched == nullptr)
+            {
+                CollinearSpan span;
+                span.origin = flat.firstEnd;
+                span.direction = direction;
+                span.minimum = 0.0;
+                span.maximum = Dot(Subtract(flat.secondEnd, span.origin),
+                                   span.direction);
+                span.minimumPoint = flat.firstEnd;
+                span.maximumPoint = flat.secondEnd;
+                if (span.maximum < span.minimum)
+                {
+                    std::swap(span.minimum, span.maximum);
+                    std::swap(span.minimumPoint, span.maximumPoint);
+                }
+                spans.push_back(span);
+                continue;
+            }
+            const auto extendSpan = [&](const NXOpen::Point3d& point)
+            {
+                const double parameter = Dot(
+                    Subtract(point, matched->origin), matched->direction);
+                if (parameter < matched->minimum)
+                {
+                    matched->minimum = parameter;
+                    matched->minimumPoint = point;
+                }
+                if (parameter > matched->maximum)
+                {
+                    matched->maximum = parameter;
+                    matched->maximumPoint = point;
+                }
+            };
+            extendSpan(flat.firstEnd);
+            extendSpan(flat.secondEnd);
+        }
+        const std::size_t originalFlatBendCount = flatBends.size();
+        flatBends.clear();
+        flatBends.reserve(spans.size());
+        for (const CollinearSpan& span : spans)
+            flatBends.push_back(
+                {span.minimumPoint, span.maximumPoint});
+        AppendDebugLog("collinear bend merge original=" +
+            std::to_string(originalFlatBendCount) + " spans=" +
+            std::to_string(flatBends.size()));
+        AppendDebugLog("flat reference origin=" +
+            PointText(flatBends.front().firstEnd) + " normal=" +
+            VectorText(normal));
+        const NXOpen::Point3d flatReference = flatBends.front().firstEnd;
+        for (std::size_t index = 0; index < flatBends.size(); ++index)
+        {
+            const FlatBend& flat = flatBends[index];
+            const double firstOffset = Dot(
+                Subtract(flat.firstEnd, flatReference), normal);
+            const double secondOffset = Dot(
+                Subtract(flat.secondEnd, flatReference), normal);
+            std::ostringstream log;
+            log.precision(16);
+            log << "flatBend[" << index << "] first="
+                << PointText(flat.firstEnd) << " second="
+                << PointText(flat.secondEnd) << " firstPlaneOffset="
+                << firstOffset << " secondPlaneOffset=" << secondOffset;
+            AppendDebugLog(log.str());
+        }
+
+        failureStage = "build notch profiles";
         std::vector<NotchProfile> profiles;
         profiles.reserve(flatBends.size() * 2);
         for (const FlatBend& flat : flatBends)
@@ -964,98 +1437,72 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
                 appendTriangle(flat.secondEnd, Scale(lineDirection, -1.0));
             }
         }
+        AppendDebugLog("notch profiles built type=" +
+            std::to_string(NotchType()) + " count=" +
+            std::to_string(profiles.size()));
         if (profiles.empty()) throw std::runtime_error("展平状态创建缺口失败。");
         ToolRecord groupedTool;
+        failureStage = "create combined sketch extrusion tool";
         if (!CreateInternalSketchExtrudeTool(
                 normal, profiles, thickness, groupedTool))
             throw std::runtime_error("全部缺口合并草图拉伸失败。");
         const std::vector<ToolRecord> tools(1, groupedTool);
         NXOpen::Features::Feature* booleanFeature = nullptr;
+        failureStage = "subtract combined tool bodies";
         if (!SubtractToolsOnce(body, tools, booleanFeature) ||
             booleanFeature == nullptr)
             throw std::runtime_error("全部缺口工具体一次布尔减失败。");
 
-        // 端部缺口会改变折弯面的边界拓扑，切除前保存的圆柱面标签可能
-        // 因此失效。重新向钣金管理器查询当前 Flat 状态的折弯面，避免
-        // 把陈旧标签交给 RebendBuilder。
-        std::vector<NXOpen::Face*> currentInnerFaces;
-        std::vector<NXOpen::Features::SheetMetal::SheetmetalBendState>
-            currentStates;
-        manager->GetInnerBendFaces(body, currentInnerFaces, currentStates);
-        std::vector<NXOpen::Face*> rebendFaces;
-        std::set<tag_t> rebendTags;
-        std::size_t rebendPairCount = 0;
-        for (std::size_t index = 0; index < currentInnerFaces.size(); ++index)
-        {
-            NXOpen::Face* face = currentInnerFaces[index];
-            const bool flat = index < currentStates.size() &&
-                currentStates[index] ==
-                    NXOpen::Features::SheetMetal::SheetmetalBendStateFlat;
-            if (face == nullptr || !IsAlive(face->Tag()) || !flat) continue;
-
-            // Rebend requires the current inner/outer layer pair.  A Boolean
-            // notch may replace either planar bend face, so resolve the
-            // opposite face from the post-Boolean topology instead of using
-            // the pre-cut outer-face tag.
-            NXOpen::Face* opposite = nullptr;
-            try { opposite = manager->GetOppositeFace(face); }
-            catch (const NXOpen::NXException&) { opposite = nullptr; }
-            if (opposite == nullptr || !IsAlive(opposite->Tag())) continue;
-            if (manager->GetFaceType(face) !=
-                    NXOpen::Features::SheetMetal::SheetmetalFaceTypeBend ||
-                manager->GetFaceType(opposite) !=
-                    NXOpen::Features::SheetMetal::SheetmetalFaceTypeBend)
-                continue;
-
-            if (rebendTags.insert(face->Tag()).second)
-                rebendFaces.push_back(face);
-            if (rebendTags.insert(opposite->Tag()).second)
-                rebendFaces.push_back(opposite);
-            ++rebendPairCount;
-        }
-        if (rebendPairCount < bends.size() ||
-            rebendFaces.size() < bends.size() * 2)
-            throw std::runtime_error(
-                "切除后未找到完整的内、外层 Flat 折弯面对。");
+        // Reuse exactly the same paired bend faces selected for Unbend.  Do
+        // not re-query, remap, de-duplicate, or pre-validate them after the
+        // Boolean; Rebend receives the original selection unchanged.
+        AppendDebugLog("rebend selection source=original-unbend-pairs faceCount=" +
+            std::to_string(bendFaces.size()));
         NXOpen::FaceDumbRule* rebendRule =
-            part->ScRuleFactory()->CreateRuleFaceDumb(rebendFaces);
+            part->ScRuleFactory()->CreateRuleFaceDumb(bendFaces);
         NXOpen::ScCollector* rebendCollector =
             part->ScCollectors()->CreateCollector();
         rebendCollector->ReplaceRules(
             std::vector<NXOpen::SelectionIntentRule*>(1, rebendRule), false);
         auto* rebend = manager->CreateRebendFeatureBuilder(nullptr);
         rebend->SetFaceCollector(rebendCollector);
+        failureStage = "commit rebend";
         NXOpen::Features::Feature* rebendFeature = rebend->CommitFeature();
         rebend->Destroy();
         if (rebendFeature == nullptr)
             throw std::runtime_error("创建缺口后重新折弯失败。");
+        failureStage = "update model after rebend";
         const int errors = session_->UpdateManager()->DoUpdate(mark);
         if (errors != 0) throw std::runtime_error("折弯标记缺口模型更新失败。");
 
-        std::vector<NXOpen::Face*> verifiedInnerFaces;
-        std::vector<NXOpen::Features::SheetMetal::SheetmetalBendState>
-            verifiedStates;
-        manager->GetInnerBendFaces(body, verifiedInnerFaces, verifiedStates);
-        std::size_t bentCount = 0;
-        for (NXOpen::Features::SheetMetal::SheetmetalBendState state :
-             verifiedStates)
-        {
-            if (state !=
-                NXOpen::Features::SheetMetal::SheetmetalBendStateFlat)
-                ++bentCount;
-        }
-        if (bentCount < bends.size())
-            throw std::runtime_error(
-                "重新折弯特征已提交，但钣金体仍处于展平状态。");
         pendingInternalFeatureTags_.push_back(unbendFeature->Tag());
         pendingInternalFeatureTags_.push_back(groupedTool.featureTag);
         pendingInternalFeatureTags_.push_back(booleanFeature->Tag());
         pendingInternalFeatureTags_.push_back(rebendFeature->Tag());
         session_->DeleteUndoMark(mark, "折弯标记缺口内部处理");
+        AppendDebugLog("ProcessBody success profiles=" +
+            std::to_string(profiles.size()) + " rebendFeature=" +
+            std::to_string(rebendFeature->Tag()));
         return static_cast<int>(profiles.size());
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("ProcessBody NXException stage=" + failureStage +
+            " code=" + std::to_string(ex.ErrorCode()) + " message=" +
+            ex.Message());
+        session_->UndoToMark(mark, "折弯标记缺口失败回退");
+        throw;
+    }
+    catch (const std::exception& ex)
+    {
+        AppendDebugLog("ProcessBody std::exception stage=" + failureStage +
+            " message=" + ex.what());
+        session_->UndoToMark(mark, "折弯标记缺口失败回退");
+        throw;
     }
     catch (...)
     {
+        AppendDebugLog("ProcessBody unknown exception stage=" + failureStage);
         session_->UndoToMark(mark, "折弯标记缺口失败回退");
         throw;
     }
@@ -1066,7 +1513,11 @@ bool BendMarkNotchDialog::SubtractToolsOnce(
     NXOpen::Features::Feature*& booleanFeature) const
 {
     booleanFeature = nullptr;
-    if (body == nullptr || tools.empty()) return false;
+    if (body == nullptr || tools.empty())
+    {
+        AppendDebugLog("SubtractToolsOnce rejected empty body/tools");
+        return false;
+    }
     NXOpen::Part* part = session_->Parts()->Work();
     std::vector<NXOpen::Body*> toolBodies;
     for (const ToolRecord& tool : tools)
@@ -1080,7 +1531,14 @@ bool BendMarkNotchDialog::SubtractToolsOnce(
             toolBodies.push_back(toolBody);
         }
     }
-    if (toolBodies.empty()) return false;
+    if (toolBodies.empty())
+    {
+        AppendDebugLog("SubtractToolsOnce found no alive tool bodies");
+        return false;
+    }
+    AppendDebugLog("SubtractToolsOnce begin target=" +
+        std::to_string(body->Tag()) + " toolBodies=" +
+        std::to_string(toolBodies.size()));
 
     auto* booleanBuilder =
         part->Features()->CreateBooleanBuilderUsingCollector(nullptr);
@@ -1110,10 +1568,27 @@ bool BendMarkNotchDialog::SubtractToolsOnce(
 
         booleanFeature = booleanBuilder->CommitFeature();
         booleanBuilder->Destroy();
+        AppendDebugLog("SubtractToolsOnce commit result=" +
+            std::to_string(booleanFeature == nullptr ? 0 : booleanFeature->Tag()));
         return booleanFeature != nullptr;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("SubtractToolsOnce NXException code=" +
+            std::to_string(ex.ErrorCode()) + " message=" + ex.Message());
+        booleanBuilder->Destroy();
+        return false;
+    }
+    catch (const std::exception& ex)
+    {
+        AppendDebugLog("SubtractToolsOnce std::exception message=" +
+            std::string(ex.what()));
+        booleanBuilder->Destroy();
+        return false;
     }
     catch (...)
     {
+        AppendDebugLog("SubtractToolsOnce unknown exception");
         booleanBuilder->Destroy();
         return false;
     }
@@ -1138,6 +1613,42 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
                                   : NXOpen::Vector3d{1.0, 0.0, 0.0};
     const NXOpen::Vector3d xAxis = Normalize(Cross(reference, normal));
     const NXOpen::Vector3d yAxis = Normalize(Cross(normal, xAxis));
+    const auto projectToSketchPlane = [&](const NXOpen::Point3d& point)
+    {
+        const double offset = Dot(Subtract(point, origin), normal);
+        return Add(point, Scale(normal, -offset));
+    };
+    {
+        std::ostringstream log;
+        log.precision(16);
+        log << "CreateInternalSketchExtrudeTool begin profiles="
+            << profiles.size() << " thickness=" << thickness
+            << " origin=" << PointText(origin)
+            << " normal=" << VectorText(normal)
+            << " xAxis=" << VectorText(xAxis)
+            << " yAxis=" << VectorText(yAxis);
+        AppendDebugLog(log.str());
+    }
+    for (std::size_t index = 0; index < profiles.size(); ++index)
+    {
+        const NotchProfile& profile = profiles[index];
+        const double centerOffset = Dot(Subtract(profile.center, origin), normal);
+        std::ostringstream log;
+        log.precision(16);
+        log << "profile[" << index << "] center="
+            << PointText(profile.center) << " planeOffset=" << centerOffset
+            << " circleRadius=" << profile.circleRadius
+            << " polygonPoints=" << profile.polygon.size();
+        for (std::size_t pointIndex = 0;
+             pointIndex < profile.polygon.size(); ++pointIndex)
+        {
+            log << " p" << pointIndex << '='
+                << PointText(profile.polygon[pointIndex])
+                << " p" << pointIndex << "Offset="
+                << Dot(Subtract(profile.polygon[pointIndex], origin), normal);
+        }
+        AppendDebugLog(log.str());
+    }
 
     NXOpen::SketchInPlaceBuilder* sketchBuilder = nullptr;
     NXOpen::Features::ExtrudeBuilder* extrudeBuilder = nullptr;
@@ -1149,8 +1660,30 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
     tag_t axisTag = NULL_TAG;
     tag_t extrusionDirectionTag = NULL_TAG;
     std::vector<tag_t> curveTags;
+    std::string failureStage = "initialization";
+    const auto cleanup = [&]()
+    {
+        if (extrudeBuilder != nullptr) extrudeBuilder->Destroy();
+        if (sketchBuilder != nullptr) sketchBuilder->Destroy();
+        try
+        {
+            if (sketch != nullptr && sketch->IsActive())
+                sketch->Deactivate(
+                    NXOpen::Sketch::ViewReorientFalse,
+                    NXOpen::Sketch::UpdateLevelModel);
+        }
+        catch (...) {}
+        if (extrudeFeature != nullptr) DeleteObject(extrudeFeature->Tag());
+        if (sketchFeature != nullptr) DeleteObject(sketchFeature->Tag());
+        for (tag_t curve : curveTags) DeleteObject(curve);
+        DeleteObject(extrusionDirectionTag);
+        DeleteObject(pointTag);
+        DeleteObject(axisTag);
+        DeleteObject(planeTag);
+    };
     try
     {
+        failureStage = "create sketch plane, axis and origin";
         NXOpen::Plane* plane = part->Planes()->CreatePlane(
             origin, normal, NXOpen::SmartObject::UpdateOptionWithinModeling);
         NXOpen::Direction* axis = part->Directions()->CreateDirection(
@@ -1165,6 +1698,7 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
         axis->SetVisibility(NXOpen::SmartObject::VisibilityOptionInvisible);
         sketchOrigin->SetVisibility(NXOpen::SmartObject::VisibilityOptionInvisible);
 
+        failureStage = "commit sketch";
         sketchBuilder = part->Sketches()->CreateSketchInPlaceBuilder2(nullptr);
         sketchBuilder->SetPlaneOption(NXOpen::Sketch::PlaneOptionExistingPlane);
         sketchBuilder->SetPlaneReference(plane);
@@ -1200,14 +1734,28 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
         if (sketchFeature == nullptr) sketchFeature = sketch->Feature();
         if (sketchFeature == nullptr)
             throw std::runtime_error("取得缺口草图特征失败。");
+        AppendDebugLog("sketch commit success sketch=" +
+            std::to_string(sketch->Tag()) + " feature=" +
+            std::to_string(sketchFeature->Tag()));
 
+        failureStage = "activate sketch";
         sketch->Activate(NXOpen::Sketch::ViewReorientFalse);
-        for (const NotchProfile& profile : profiles)
+        for (std::size_t profileIndex = 0;
+             profileIndex < profiles.size(); ++profileIndex)
         {
+            const NotchProfile& profile = profiles[profileIndex];
             if (profile.circleRadius > kTolerance)
             {
+                failureStage = "create/add circle profile " +
+                    std::to_string(profileIndex);
+                const NXOpen::Point3d projectedCenter =
+                    projectToSketchPlane(profile.center);
+                AppendDebugLog("project circle profile[" +
+                    std::to_string(profileIndex) + "] source=" +
+                    PointText(profile.center) + " projected=" +
+                    PointText(projectedCenter));
                 NXOpen::Arc* circle = part->Curves()->CreateArc(
-                    profile.center, xAxis, yAxis, profile.circleRadius,
+                    projectedCenter, xAxis, yAxis, profile.circleRadius,
                     0.0, 2.0 * kPi);
                 if (circle == nullptr)
                     throw std::runtime_error("创建圆形缺口草图失败。");
@@ -1221,9 +1769,33 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
                 for (std::size_t index = 0;
                      index < profile.polygon.size(); ++index)
                 {
+                    failureStage = "create/add polygon profile " +
+                        std::to_string(profileIndex) + " edge " +
+                        std::to_string(index);
+                    const NXOpen::Point3d projectedStart =
+                        projectToSketchPlane(profile.polygon[index]);
+                    const NXOpen::Point3d projectedEnd =
+                        projectToSketchPlane(profile.polygon[
+                            (index + 1) % profile.polygon.size()]);
+                    {
+                        std::ostringstream log;
+                        log.precision(16);
+                        log << "project polygon profile[" << profileIndex
+                            << "] edge=" << index << " sourceStart="
+                            << PointText(profile.polygon[index])
+                            << " sourceEnd="
+                            << PointText(profile.polygon[
+                                (index + 1) % profile.polygon.size()])
+                            << " projectedStart=" << PointText(projectedStart)
+                            << " projectedEnd=" << PointText(projectedEnd)
+                            << " projectedStartOffset="
+                            << Dot(Subtract(projectedStart, origin), normal)
+                            << " projectedEndOffset="
+                            << Dot(Subtract(projectedEnd, origin), normal);
+                        AppendDebugLog(log.str());
+                    }
                     NXOpen::Line* line = part->Curves()->CreateLine(
-                        profile.polygon[index],
-                        profile.polygon[(index + 1) % profile.polygon.size()]);
+                        projectedStart, projectedEnd);
                     if (line == nullptr)
                         throw std::runtime_error("创建三角缺口草图失败。");
                     curveTags.push_back(line->Tag());
@@ -1233,11 +1805,16 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
                 }
             }
         }
+        AppendDebugLog("sketch geometry added curveTags=" +
+            std::to_string(curveTags.size()));
+        failureStage = "update sketch";
         sketch->Update();
         sketch->UpdateNavigator();
+        failureStage = "deactivate sketch";
         sketch->Deactivate(
             NXOpen::Sketch::ViewReorientFalse, NXOpen::Sketch::UpdateLevelModel);
 
+        failureStage = "read sketch geometry";
         std::vector<NXOpen::Curve*> profileCurves;
         for (NXOpen::NXObject* geometry : sketch->GetAllGeometry())
         {
@@ -1246,7 +1823,11 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
         }
         if (profileCurves.empty())
             throw std::runtime_error("缺口草图中没有有效轮廓。");
+        AppendDebugLog("sketch geometry query count=" +
+            std::to_string(profileCurves.size()) + " firstCurve=" +
+            std::to_string(profileCurves.front()->Tag()));
 
+        failureStage = "configure extrude builder";
         extrudeBuilder = part->Features()->CreateExtrudeBuilder(nullptr);
         NXOpen::Section* section =
             part->Sections()->CreateSection(9.5e-05, 0.0001, 0.5);
@@ -1282,11 +1863,16 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
         NXOpen::CurveFeatureRule* profileRule =
             part->ScRuleFactory()->CreateRuleCurveFeature(
                 std::vector<NXOpen::Features::Feature*>(1, sketchFeature));
+        failureStage = "add sketch rule to extrude section";
         section->AddToSection(
             std::vector<NXOpen::SelectionIntentRule*>(1, profileRule),
             profileCurves.front(), nullptr, nullptr, origin,
             NXOpen::Section::ModeCreate, false);
+        AppendDebugLog("extrude section added sketchFeature=" +
+            std::to_string(sketchFeature->Tag()) + " seedCurve=" +
+            std::to_string(profileCurves.front()->Tag()));
 
+        failureStage = "create extrusion direction";
         NXOpen::Direction* extrusionDirection = part->Directions()->CreateDirection(
             origin, normal, NXOpen::SmartObject::UpdateOptionWithinModeling);
         if (extrusionDirection == nullptr)
@@ -1296,15 +1882,22 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
             NXOpen::SmartObject::VisibilityOptionInvisible);
         extrudeBuilder->SetDirection(extrusionDirection);
         extrudeBuilder->SetParentFeatureInternal(sketchFeature);
+        failureStage = "commit extrusion";
+        AppendDebugLog("extrude commit begin direction=" +
+            std::to_string(extrusionDirectionTag));
         extrudeFeature = extrudeBuilder->CommitFeature();
         extrudeBuilder->Destroy();
         extrudeBuilder = nullptr;
         if (extrudeFeature == nullptr)
             throw std::runtime_error("创建缺口拉伸体失败。");
+        AppendDebugLog("extrude commit success feature=" +
+            std::to_string(extrudeFeature->Tag()));
+        failureStage = "make sketch internal";
         if (!sketchFeature->IsInternal()) extrudeFeature->MakeSketchInternal();
         if (!sketchFeature->IsInternal())
             throw std::runtime_error("缺口草图未能放入拉伸特征内部。");
 
+        failureStage = "collect extrusion tool bodies";
         const std::vector<NXOpen::Body*> toolBodies = extrudeFeature->GetBodies();
         for (NXOpen::Body* toolBody : toolBodies)
             if (toolBody != nullptr && IsAlive(toolBody->Tag()))
@@ -1312,27 +1905,31 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
         if (tool.bodyTags.empty())
             throw std::runtime_error("取得合并缺口拉伸工具体失败。");
         tool.featureTag = extrudeFeature->Tag();
+        AppendDebugLog("CreateInternalSketchExtrudeTool success feature=" +
+            std::to_string(tool.featureTag) + " toolBodies=" +
+            std::to_string(tool.bodyTags.size()));
         return true;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("CreateInternalSketchExtrudeTool NXException stage=" +
+            failureStage + " code=" + std::to_string(ex.ErrorCode()) +
+            " message=" + ex.Message());
+        cleanup();
+        return false;
+    }
+    catch (const std::exception& ex)
+    {
+        AppendDebugLog("CreateInternalSketchExtrudeTool std::exception stage=" +
+            failureStage + " message=" + ex.what());
+        cleanup();
+        return false;
     }
     catch (...)
     {
-        if (extrudeBuilder != nullptr) extrudeBuilder->Destroy();
-        if (sketchBuilder != nullptr) sketchBuilder->Destroy();
-        try
-        {
-            if (sketch != nullptr && sketch->IsActive())
-                sketch->Deactivate(
-                    NXOpen::Sketch::ViewReorientFalse,
-                    NXOpen::Sketch::UpdateLevelModel);
-        }
-        catch (...) {}
-        if (extrudeFeature != nullptr) DeleteObject(extrudeFeature->Tag());
-        if (sketchFeature != nullptr) DeleteObject(sketchFeature->Tag());
-        for (tag_t curve : curveTags) DeleteObject(curve);
-        DeleteObject(extrusionDirectionTag);
-        DeleteObject(pointTag);
-        DeleteObject(axisTag);
-        DeleteObject(planeTag);
+        AppendDebugLog("CreateInternalSketchExtrudeTool unknown exception stage=" +
+            failureStage);
+        cleanup();
         return false;
     }
 }

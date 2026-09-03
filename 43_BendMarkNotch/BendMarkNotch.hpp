@@ -78,6 +78,10 @@ private:
 
     int Execute();
     bool CreateCustomFeatureNode();
+    NXOpen::Features::Feature* FindFlatPatternFeature(
+        NXOpen::Body* body) const;
+    NXOpen::Features::Feature* FindFeatureBefore(
+        NXOpen::Features::Feature* feature) const;
     NXOpen::Features::Feature* FindBodyInsertionFeature(
         const std::vector<NXOpen::Body*>& bodies) const;
     int ProcessBody(NXOpen::Body* body);
