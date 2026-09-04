@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <new>
 #include <set>
 #include <sstream>
 #include <string>
@@ -88,10 +89,33 @@ struct AppState
     bool running = true;
     bool ownsUfSession = false;
     bool ownsOleSession = false;
+    HMODULE moduleReference = nullptr;
+    std::wstring windowClassName;
 };
 
 AppState* g_appState = nullptr;
 HWND g_managerWindow = nullptr;
+
+struct ModuleReleaseContext
+{
+    HMODULE module = nullptr;
+    std::wstring mainWindowClass;
+};
+
+DWORD WINAPI ReleaseModuleAfterWindowProc(void* parameter)
+{
+    ModuleReleaseContext* context =
+        static_cast<ModuleReleaseContext*>(parameter);
+    HMODULE module = context->module;
+    // WM_NCDESTROY must return before the final module reference is released;
+    // otherwise execution would continue in code that has already been unmapped.
+    Sleep(50);
+    UnregisterClassW(L"ZhihuiStandardPartsManagerWindow", module);
+    if (!context->mainWindowClass.empty())
+        UnregisterClassW(context->mainWindowClass.c_str(), module);
+    delete context;
+    FreeLibraryAndExitThread(module, 0);
+}
 
 void UpdatePreview(AppState* state);
 std::wstring Lower(std::wstring value);
@@ -1804,7 +1828,27 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             if (g_appState == state) g_appState = nullptr;
             if (state->ownsOleSession) OleUninitialize();
             if (state->ownsUfSession) UF_terminate();
+            HMODULE moduleReference = state->moduleReference;
+            std::wstring className;
+            className.swap(state->windowClassName);
             delete state;
+            if (moduleReference != nullptr)
+            {
+                ModuleReleaseContext* context =
+                    new (std::nothrow) ModuleReleaseContext();
+                if (context != nullptr)
+                {
+                    context->module = moduleReference;
+                    context->mainWindowClass.swap(className);
+                }
+                HANDLE unloadThread = context == nullptr ? nullptr :
+                    CreateThread(nullptr, 0, ReleaseModuleAfterWindowProc,
+                                 context, 0, nullptr);
+                if (unloadThread != nullptr) CloseHandle(unloadThread);
+                else delete context;
+                // If CreateThread fails, deliberately retain the reference.
+                // Leaking until NX exits is safer than unloading from WndProc.
+            }
         }
         return DefWindowProcW(window, message, wParam, lParam);
     default: break;
@@ -1832,11 +1876,20 @@ int LaunchStandardPartsLibrary(bool& keepUfInitialized)
     state->ownsUfSession = true;
     state->ownsOleSession = SUCCEEDED(oleStatus);
     HMODULE module = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                      reinterpret_cast<LPCWSTR>(&LaunchStandardPartsLibrary), &module);
+    // Keep one private reference while the modeless window exists. NX may now
+    // unload the command reference immediately after ufusr returns.
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                           reinterpret_cast<LPCWSTR>(&LaunchStandardPartsLibrary),
+                           &module))
+    {
+        if (state->ownsOleSession) OleUninitialize();
+        delete state;
+        return static_cast<int>(GetLastError());
+    }
     const std::wstring className = L"ZhihuiStandardPartsLibrary_" +
                                    std::to_wstring(reinterpret_cast<std::uintptr_t>(module));
+    state->moduleReference = module;
+    state->windowClassName = className;
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
     windowClass.lpfnWndProc = WindowProc;
@@ -1847,9 +1900,11 @@ int LaunchStandardPartsLibrary(bool& keepUfInitialized)
     windowClass.lpszClassName = className.c_str();
     if (!RegisterClassExW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
     {
+        const DWORD error = GetLastError();
         if (state->ownsOleSession) OleUninitialize();
+        FreeLibrary(module);
         delete state;
-        return static_cast<int>(GetLastError());
+        return static_cast<int>(error);
     }
 
     RECT area{};
@@ -1863,10 +1918,12 @@ int LaunchStandardPartsLibrary(bool& keepUfInitialized)
                                   x, y, width, height, state->parent, nullptr, module, state);
     if (window == nullptr)
     {
+        const DWORD error = GetLastError();
         UnregisterClassW(className.c_str(), module);
         if (state->ownsOleSession) OleUninitialize();
+        FreeLibrary(module);
         delete state;
-        return static_cast<int>(GetLastError());
+        return static_cast<int>(error);
     }
     g_appState = state;
     keepUfInitialized = true;

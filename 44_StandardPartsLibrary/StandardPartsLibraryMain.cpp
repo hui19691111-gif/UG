@@ -86,10 +86,13 @@ extern "C" DllExport void ufusr(char*, int* returnCode, int)
 
 extern "C" DllExport int ufusr_ask_unload()
 {
-    return UF_UNLOAD_UG_TERMINATE;
+    // LaunchStandardPartsLibrary owns a private module reference while its
+    // modeless window is alive and releases it only after WM_NCDESTROY returns.
+    return UF_UNLOAD_IMMEDIATELY;
 }
 
 extern "C" DllExport void ufusr_cleanup()
 {
-    // UI state, selections and GDI/OLE resources are released by WM_NCDESTROY.
+    // UI state, selections, UF/OLE and GDI resources are released by
+    // WM_NCDESTROY before the private DLL reference is released.
 }
