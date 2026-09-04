@@ -11,12 +11,28 @@
 #include <uf_retiring_ugopenint.h>
 #include <uf_ui.h>
 
+#include <NXOpen/BlockStyler_BlockDialog.hxx>
+#include <NXOpen/BlockStyler_CompositeBlock.hxx>
+#include <NXOpen/BlockStyler_DrawingArea.hxx>
+#include <NXOpen/BlockStyler_PropertyList.hxx>
+#include <NXOpen/BlockStyler_SelectObject.hxx>
+#include <NXOpen/BlockStyler_SpecifyOrientation.hxx>
+#include <NXOpen/BlockStyler_UIBlock.hxx>
+#include <NXOpen/NXException.hxx>
+#include <NXOpen/NXMessageBox.hxx>
+#include <NXOpen/Selection.hxx>
+#include <NXOpen/UI.hxx>
+
 #include <Windows.h>
 #include <CommCtrl.h>
 #include <commdlg.h>
 #include <ShlObj.h>
 #include <shobjidl_core.h>
 #include <shellapi.h>
+
+#ifdef CreateDialog
+#undef CreateDialog
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -89,6 +105,7 @@ struct AppState
     bool running = true;
     bool ownsUfSession = false;
     bool ownsOleSession = false;
+    bool embedded = false;
     HMODULE moduleReference = nullptr;
     std::wstring windowClassName;
 };
@@ -1563,6 +1580,8 @@ void BuildUi(AppState* state)
     AddControl(state, 0, L"BUTTON", L"修改配置", BS_PUSHBUTTON,
                10, 488, 72, 30, ID_MANAGE_CONFIG);
 
+    if (state->embedded) return;
+
     AddControl(state, 0, L"BUTTON", L"放置方式", BS_GROUPBOX, 10, 528, 594, 168, 0);
     AddControl(state, 0, L"BUTTON", L"任意点", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP,
                22, 552, 88, 31, ID_PLACE_POINT);
@@ -1825,6 +1844,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         if (state != nullptr)
         {
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+            if (state->embedded)
+            {
+                state->window = nullptr;
+                return DefWindowProcW(window, message, wParam, lParam);
+            }
             if (g_appState == state) g_appState = nullptr;
             if (state->ownsOleSession) OleUninitialize();
             if (state->ownsUfSession) UF_terminate();
@@ -1855,79 +1879,697 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     }
     return DefWindowProcW(window, message, wParam, lParam);
 }
+
+HWND FindBlockStylerWindow()
+{
+    struct Search
+    {
+        DWORD process = 0;
+        HWND result = nullptr;
+    } search{GetCurrentProcessId(), nullptr};
+    EnumWindows([](HWND window, LPARAM parameter) -> BOOL
+    {
+        auto* search = reinterpret_cast<Search*>(parameter);
+        DWORD process = 0;
+        GetWindowThreadProcessId(window, &process);
+        if (process != search->process) return TRUE;
+        wchar_t title[256] = {};
+        GetWindowTextW(window, title, 256);
+        if (wcscmp(title, kTitle) == 0)
+        {
+            search->result = window;
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&search));
+    if (search.result != nullptr) return search.result;
+
+    // NX calls dialogShown before every Block Styler window has published its
+    // caption to EnumWindows.  The active window on this UI thread is already
+    // the real dialog at that point, so use it as the lifecycle-safe fallback.
+    HWND active = GetActiveWindow();
+    DWORD process = 0;
+    if (active != nullptr)
+    {
+        GetWindowThreadProcessId(active, &process);
+        RECT bounds{};
+        GetWindowRect(active, &bounds);
+        const int width = bounds.right - bounds.left;
+        const int height = bounds.bottom - bounds.top;
+        if (process == search.process && width >= 300 && width <= 1200 &&
+            height >= 300 && height <= 1200)
+            return active;
+    }
+    return search.result;
+}
+
+std::string DialogFilePath()
+{
+    HMODULE module = nullptr;
+    wchar_t path[MAX_PATH] = {};
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&DialogFilePath), &module) ||
+        GetModuleFileNameW(module, path, MAX_PATH) == 0)
+        return "StandardPartsLibrary.dlx";
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (slash != nullptr) *(slash + 1) = L'\0';
+    return ToAnsi(std::wstring(path) + L"StandardPartsLibrary.dlx");
+}
+
+class StandardPartsDialogHost
+{
+public:
+    StandardPartsDialogHost()
+        : ui_(NXOpen::UI::GetUI()),
+          dialog_(ui_->CreateDialog(DialogFilePath().c_str()))
+    {
+        state_.embedded = true;
+        dialog_->AddInitializeHandler(NXOpen::make_callback(
+            this, &StandardPartsDialogHost::Initialize));
+        dialog_->AddDialogShownHandler(NXOpen::make_callback(
+            this, &StandardPartsDialogHost::DialogShown));
+        dialog_->AddUpdateHandler(NXOpen::make_callback(
+            this, &StandardPartsDialogHost::Update));
+        dialog_->AddApplyHandler(NXOpen::make_callback(
+            this, &StandardPartsDialogHost::Apply));
+        dialog_->AddOkHandler(NXOpen::make_callback(
+            this, &StandardPartsDialogHost::Ok));
+        dialog_->AddCancelHandler(NXOpen::make_callback(
+            this, &StandardPartsDialogHost::Cancel));
+    }
+
+    ~StandardPartsDialogHost()
+    {
+        if (timerId_ != 0)
+            KillTimer(timerWindow_, timerId_);
+        if (pendingTimerHost_ == this) pendingTimerHost_ = nullptr;
+        if (pane_ != nullptr && IsWindow(pane_)) DestroyWindow(pane_);
+        if (!paneClass_.empty() && module_ != nullptr)
+            UnregisterClassW(paneClass_.c_str(), module_);
+        if (g_appState == &state_) g_appState = nullptr;
+        delete dialog_;
+    }
+
+    int Launch()
+    {
+        return static_cast<int>(dialog_->Launch());
+    }
+
+private:
+    NXOpen::UI* ui_ = nullptr;
+    NXOpen::BlockStyler::BlockDialog* dialog_ = nullptr;
+    NXOpen::BlockStyler::DrawingArea* drawingArea_ = nullptr;
+    NXOpen::BlockStyler::UIBlock* group_ = nullptr;
+    NXOpen::BlockStyler::UIBlock* placementButtons_[4]{};
+    NXOpen::BlockStyler::SelectObject* placementSelection_ = nullptr;
+    NXOpen::BlockStyler::SelectObject* orientationSelection_ = nullptr;
+    NXOpen::BlockStyler::SpecifyOrientation* orientation_ = nullptr;
+    NXOpen::BlockStyler::UIBlock* quickPosition_ = nullptr;
+    NXOpen::BlockStyler::SelectObject* trimSelection_ = nullptr;
+    AppState state_;
+    HWND pane_ = nullptr;
+    HMODULE module_ = nullptr;
+    std::wstring paneClass_;
+    bool updating_ = false;
+    HWND timerWindow_ = nullptr;
+    UINT_PTR timerId_ = 0;
+    int paneAttempts_ = 0;
+    int pendingPlacementMode_ = -1;
+    bool pendingQuickOrient_ = false;
+    static StandardPartsDialogHost* pendingTimerHost_;
+
+    static void CALLBACK BrowserTimerProc(HWND window, UINT, UINT_PTR timerId,
+                                          DWORD)
+    {
+        auto* self = pendingTimerHost_;
+        if (self == nullptr) return;
+        if (self->pane_ != nullptr && IsWindow(self->pane_))
+        {
+            // NX may promote the DrawingArea again after another modal window
+            // (for example the update notice) closes.  Keep our browser above
+            // that sibling without activating it or disturbing user input.
+            SetWindowPos(self->pane_, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE |
+                             SWP_SHOWWINDOW);
+            // Selection dialogs must not be opened from update_cb because NX
+            // can re-enter the Block Styler update pipeline and deadlock.
+            // Execute requested placement/orientation after that callback has
+            // fully returned to the UI message loop.
+            try
+            {
+                if (self->pendingPlacementMode_ >= 0)
+                {
+                    self->pendingPlacementMode_ = -1;
+                    self->ActivatePlacementSelection();
+                }
+                if (self->pendingQuickOrient_)
+                {
+                    self->pendingQuickOrient_ = false;
+                    QuickOrient(&self->state_);
+                    self->SyncOrientationBlock();
+                }
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                self->pendingPlacementMode_ = -1;
+                self->pendingQuickOrient_ = false;
+                self->ShowError(ex.Message());
+            }
+            catch (const std::exception& ex)
+            {
+                self->pendingPlacementMode_ = -1;
+                self->pendingQuickOrient_ = false;
+                self->ShowError(ex.what());
+            }
+            catch (...)
+            {
+                self->pendingPlacementMode_ = -1;
+                self->pendingQuickOrient_ = false;
+                self->ShowError("执行标准件定位时发生未知错误。");
+            }
+            return;
+        }
+        ++self->paneAttempts_;
+        if (FindBlockStylerWindow() == nullptr && self->paneAttempts_ < 20)
+            return;
+        try { self->CreateBrowserPane(); }
+        catch (const NXOpen::NXException& ex)
+        {
+            KillTimer(window, timerId); self->timerId_ = 0;
+            pendingTimerHost_ = nullptr; self->ShowError(ex.Message());
+        }
+        catch (const std::exception& ex)
+        {
+            KillTimer(window, timerId); self->timerId_ = 0;
+            pendingTimerHost_ = nullptr; self->ShowError(ex.what());
+        }
+        catch (...)
+        {
+            KillTimer(window, timerId); self->timerId_ = 0;
+            pendingTimerHost_ = nullptr;
+            self->ShowError("创建标准件库浏览区时发生未知错误。");
+        }
+    }
+
+    static void SetLabel(NXOpen::BlockStyler::UIBlock* block,
+                         const char* label)
+    {
+        if (block == nullptr) return;
+        NXOpen::BlockStyler::PropertyList* properties = block->GetProperties();
+        properties->SetString(
+            NXOpen::NXString("Label", NXOpen::NXString::UTF8),
+            NXOpen::NXString(label, NXOpen::NXString::UTF8));
+        delete properties;
+    }
+
+    static void SetShow(NXOpen::BlockStyler::UIBlock* block, bool show)
+    {
+        if (block == nullptr) return;
+        NXOpen::BlockStyler::PropertyList* properties = block->GetProperties();
+        properties->SetLogical("Show", show);
+        properties->SetLogical("Enable", show);
+        delete properties;
+    }
+
+    void SyncOrientationBlock()
+    {
+        if (orientation_ == nullptr || !state_.hasPlacement) return;
+        const bool wasUpdating = updating_;
+        updating_ = true;
+        try
+        {
+            orientation_->SetOrigin(NXOpen::Point3d(
+                state_.placementOrigin[0], state_.placementOrigin[1],
+                state_.placementOrigin[2]));
+            orientation_->SetXAxis(NXOpen::Vector3d(
+                state_.placementMatrix[0], state_.placementMatrix[1],
+                state_.placementMatrix[2]));
+            orientation_->SetYAxis(NXOpen::Vector3d(
+                state_.placementMatrix[3], state_.placementMatrix[4],
+                state_.placementMatrix[5]));
+            orientation_->SetOriginSpecified(true);
+        }
+        catch (...)
+        {
+            updating_ = wasUpdating;
+            throw;
+        }
+        updating_ = wasUpdating;
+    }
+
+    void ReadOrientationBlock()
+    {
+        if (orientation_ == nullptr) return;
+        const NXOpen::Point3d origin = orientation_->Origin();
+        NXOpen::Vector3d x = orientation_->XAxis();
+        NXOpen::Vector3d y = orientation_->YAxis();
+        auto normalize = [](NXOpen::Vector3d& vector) -> bool
+        {
+            const double length = std::sqrt(vector.X * vector.X +
+                                            vector.Y * vector.Y +
+                                            vector.Z * vector.Z);
+            if (length <= 1.0e-9) return false;
+            vector.X /= length;
+            vector.Y /= length;
+            vector.Z /= length;
+            return true;
+        };
+        if (!normalize(x) || !normalize(y))
+            throw std::runtime_error("指定方位的坐标轴无效。");
+        NXOpen::Vector3d z(
+            x.Y * y.Z - x.Z * y.Y,
+            x.Z * y.X - x.X * y.Z,
+            x.X * y.Y - x.Y * y.X);
+        if (!normalize(z))
+            throw std::runtime_error("指定方位的 X/Y 轴不能平行。");
+        y = NXOpen::Vector3d(
+            z.Y * x.Z - z.Z * x.Y,
+            z.Z * x.X - z.X * x.Z,
+            z.X * x.Y - z.Y * x.X);
+        normalize(y);
+        state_.placementOrigin[0] = origin.X;
+        state_.placementOrigin[1] = origin.Y;
+        state_.placementOrigin[2] = origin.Z;
+        const double matrix[9] = {
+            x.X, x.Y, x.Z, y.X, y.Y, y.Z, z.X, z.Y, z.Z};
+        std::copy(matrix, matrix + 9, state_.placementMatrix);
+        state_.hasPlacement = true;
+        UpdatePlacementStatus(&state_);
+    }
+
+    void ActivatePlacementSelection()
+    {
+        if (placementSelection_ == nullptr) return;
+
+        const int mode = state_.placementMode;
+        std::vector<NXOpen::Selection::MaskTriple> masks;
+        if (mode == 0)
+        {
+            masks.emplace_back(UF_solid_type, UF_all_subtype,
+                               UF_UI_SEL_FEATURE_PLANAR_FACE);
+            placementSelection_->SetCue("在目标平面上指定投影点");
+            placementSelection_->SetLabelString("指定投影点");
+        }
+        else if (mode == 1)
+        {
+            masks.emplace_back(UF_point_type, UF_all_subtype, 0);
+            masks.emplace_back(UF_solid_type, UF_all_subtype,
+                               UF_UI_SEL_FEATURE_ANY_FACE);
+            masks.emplace_back(UF_solid_type, UF_all_subtype,
+                               UF_UI_SEL_FEATURE_ANY_EDGE);
+            masks.emplace_back(UF_line_type, UF_all_subtype, 0);
+            masks.emplace_back(UF_circle_type, UF_all_subtype, 0);
+            masks.emplace_back(UF_conic_type, UF_all_subtype, 0);
+            masks.emplace_back(UF_spline_type, UF_all_subtype, 0);
+            placementSelection_->SetCue("在模型上捕捉标准件放置点");
+            placementSelection_->SetLabelString("指定任意点");
+        }
+        else if (mode == 2)
+        {
+            masks.emplace_back(UF_solid_type, UF_all_subtype,
+                               UF_UI_SEL_FEATURE_ANY_FACE);
+            placementSelection_->SetCue("选择作为放置基准的面");
+            placementSelection_->SetLabelString("指定基准面");
+        }
+        else
+        {
+            masks.emplace_back(UF_solid_type, UF_all_subtype,
+                               UF_UI_SEL_FEATURE_ANY_EDGE);
+            masks.emplace_back(UF_circle_type, UF_all_subtype, 0);
+            placementSelection_->SetCue("选择圆或圆弧");
+            placementSelection_->SetLabelString("指定圆弧");
+        }
+
+        updating_ = true;
+        try
+        {
+            placementSelection_->SetSelectedObjects({});
+            placementSelection_->SetSelectionFilter(
+                NXOpen::Selection::SelectionActionClearAndEnableSpecific, masks);
+            placementSelection_->SetSelectModeAsString("Single");
+            placementSelection_->SetAutomaticProgression(false);
+            placementSelection_->SetPointOverlay(true);
+        }
+        catch (...)
+        {
+            updating_ = false;
+            throw;
+        }
+        updating_ = false;
+        placementSelection_->Focus();
+    }
+
+    static bool MatrixFromPlanarFace(tag_t face, double matrix[9],
+                                     double planePoint[3])
+    {
+        int faceType = 0;
+        int normalDirection = 0;
+        double direction[3]{};
+        double box[6]{};
+        double radius = 0.0;
+        double radiusData = 0.0;
+        if (UF_MODL_ask_face_data(face, &faceType, planePoint, direction, box,
+                                  &radius, &radiusData, &normalDirection) != 0 ||
+            faceType != 22)
+            return false;
+        if (normalDirection < 0)
+            for (double& value : direction) value = -value;
+        const double length = std::sqrt(direction[0] * direction[0] +
+                                        direction[1] * direction[1] +
+                                        direction[2] * direction[2]);
+        if (length <= 1.0e-9) return false;
+        double z[3] = {direction[0] / length, direction[1] / length,
+                       direction[2] / length};
+        double reference[3] = {std::abs(z[0]) < 0.9 ? 1.0 : 0.0,
+                               std::abs(z[0]) < 0.9 ? 0.0 : 1.0, 0.0};
+        double y[3] = {z[1] * reference[2] - z[2] * reference[1],
+                       z[2] * reference[0] - z[0] * reference[2],
+                       z[0] * reference[1] - z[1] * reference[0]};
+        const double yLength = std::sqrt(y[0] * y[0] + y[1] * y[1] +
+                                         y[2] * y[2]);
+        if (yLength <= 1.0e-9) return false;
+        for (double& value : y) value /= yLength;
+        double x[3] = {y[1] * z[2] - y[2] * z[1],
+                       y[2] * z[0] - y[0] * z[2],
+                       y[0] * z[1] - y[1] * z[0]};
+        std::copy(x, x + 3, matrix);
+        std::copy(y, y + 3, matrix + 3);
+        std::copy(z, z + 3, matrix + 6);
+        return true;
+    }
+
+    void ReadPlacementSelection()
+    {
+        if (placementSelection_ == nullptr) return;
+        const std::vector<NXOpen::TaggedObject*> objects =
+            placementSelection_->GetSelectedObjects();
+        const NXOpen::Point3d picked = placementSelection_->PickPoint();
+        std::wstring error;
+
+        if (state_.placementMode == 1)
+        {
+            state_.placementOrigin[0] = picked.X;
+            state_.placementOrigin[1] = picked.Y;
+            state_.placementOrigin[2] = picked.Z;
+            double unusedOrigin[3]{};
+            state_.hasPlacement = AskWcs(unusedOrigin,
+                                          state_.placementMatrix, error);
+        }
+        else if (objects.empty() || objects.front() == nullptr)
+        {
+            return;
+        }
+        else if (state_.placementMode == 0)
+        {
+            double planePoint[3]{};
+            if (!MatrixFromPlanarFace(objects.front()->Tag(),
+                                      state_.placementMatrix, planePoint))
+            {
+                error = L"点投影面只支持平面。";
+            }
+            else
+            {
+                const double point[3] = {picked.X, picked.Y, picked.Z};
+                const double* normal = state_.placementMatrix + 6;
+                const double distance =
+                    (point[0] - planePoint[0]) * normal[0] +
+                    (point[1] - planePoint[1]) * normal[1] +
+                    (point[2] - planePoint[2]) * normal[2];
+                for (int axis = 0; axis < 3; ++axis)
+                    state_.placementOrigin[axis] =
+                        point[axis] - distance * normal[axis];
+                state_.hasPlacement = true;
+            }
+        }
+        else
+        {
+            double box[6]{};
+            const int code = UF_MODL_ask_bounding_box(objects.front()->Tag(), box);
+            if (code != 0)
+                error = L"无法取得所选对象中心：" + UfError(code);
+            else
+            {
+                for (int axis = 0; axis < 3; ++axis)
+                    state_.placementOrigin[axis] =
+                        (box[axis] + box[axis + 3]) * 0.5;
+                bool oriented = false;
+                if (state_.placementMode == 2)
+                {
+                    double planePoint[3]{};
+                    oriented = MatrixFromPlanarFace(objects.front()->Tag(),
+                                                     state_.placementMatrix,
+                                                     planePoint);
+                }
+                if (!oriented)
+                {
+                    double unusedOrigin[3]{};
+                    if (!AskWcs(unusedOrigin, state_.placementMatrix, error))
+                    {
+                        UpdatePlacementStatus(&state_);
+                        return;
+                    }
+                }
+                state_.hasPlacement = true;
+            }
+        }
+        UpdatePlacementStatus(&state_);
+        if (state_.hasPlacement) SyncOrientationBlock();
+        if (!error.empty())
+            ShowError(ToAnsi(error));
+    }
+
+    void ShowError(const std::string& message) noexcept
+    {
+        try
+        {
+            ui_->NXMessageBox()->Show(
+                "智辉标准件库", NXOpen::NXMessageBox::DialogTypeError,
+                message.c_str());
+        }
+        catch (...) {}
+    }
+
+    void Initialize()
+    {
+        try
+        {
+            NXOpen::BlockStyler::CompositeBlock* top = dialog_->TopBlock();
+            drawingArea_ = dynamic_cast<NXOpen::BlockStyler::DrawingArea*>(
+                top->FindBlock("drawingArea0"));
+            group_ = top->FindBlock("group01");
+            placementButtons_[0] = top->FindBlock("buttonS1");
+            placementButtons_[1] = top->FindBlock("buttonS2");
+            placementButtons_[2] = top->FindBlock("buttonS3");
+            placementButtons_[3] = top->FindBlock("buttonS4");
+            placementSelection_ = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(
+                top->FindBlock("selection0"));
+            orientationSelection_ = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(
+                top->FindBlock("selection01"));
+            orientation_ = dynamic_cast<NXOpen::BlockStyler::SpecifyOrientation*>(
+                top->FindBlock("manip0"));
+            quickPosition_ = top->FindBlock("buttonCsysPos");
+            trimSelection_ = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(
+                top->FindBlock("selectionTrim"));
+            if (drawingArea_ == nullptr || group_ == nullptr ||
+                placementSelection_ == nullptr || trimSelection_ == nullptr)
+                throw std::runtime_error(
+                    "StandardPartsLibrary.dlx 缺少燕秀布局的必需控件。");
+
+            // Drawing-area geometry is an initialization-only Block Styler
+            // property.  Yanxiu's managed host sets it while initializing; do
+            // the same here, before NX finishes constructing the dialog.
+            // NX 2412 adds these logical values to the fixed geometry already
+            // stored in Yanxiu's DLX.  Keep only the small compatibility
+            // allowance needed for its original roughly 660 x 770 layout;
+            // the embedded browser itself remains a 610 x 525 child surface.
+            drawingArea_->SetWidth(90);
+            drawingArea_->SetHeight(10);
+
+            std::vector<NXOpen::Selection::MaskTriple> bodyMasks;
+            bodyMasks.emplace_back(UF_solid_type, UF_solid_body_subtype, 0);
+            trimSelection_->SetSelectionFilter(
+                NXOpen::Selection::SelectionActionClearAndEnableSpecific,
+                bodyMasks);
+            trimSelection_->SetSelectModeAsString("Multiple");
+            trimSelection_->SetAutomaticProgression(false);
+
+            placementSelection_->SetSelectModeAsString("Single");
+            placementSelection_->SetAutomaticProgression(false);
+            placementSelection_->SetPointOverlay(true);
+        }
+        catch (const NXOpen::NXException& ex) { ShowError(ex.Message()); }
+        catch (const std::exception& ex) { ShowError(ex.what()); }
+        catch (...) { ShowError("初始化燕秀对话框结构时发生未知错误。"); }
+    }
+
+    void DialogShown()
+    {
+        try
+        {
+            // Keep the labels and icons from the copied Yanxiu DLX intact.
+            SetShow(topHiddenParameters(), false);
+            // Yanxiu's host hides this auxiliary block.  Leaving it visible
+            // creates an unrelated second "指定放置" row on NX 2412.
+            SetShow(orientationSelection_, false);
+            // dialogShown precedes publication of the native NX window title
+            // on NX 2412.  Defer the Win32 child attachment on the same UI
+            // thread until the real Block Styler window can be enumerated.
+            // dialogShown may run while NX deliberately reports no foreground
+            // HWND.  A thread timer belongs to this NX UI thread and therefore
+            // does not depend on an incompletely published native dialog.
+            timerWindow_ = nullptr;
+            pendingTimerHost_ = this;
+            timerId_ = SetTimer(nullptr, 0, 100, BrowserTimerProc);
+            if (timerId_ == 0)
+            {
+                pendingTimerHost_ = nullptr;
+                throw std::runtime_error("无法启动标准件库界面挂载任务。");
+            }
+        }
+        catch (const NXOpen::NXException& ex) { ShowError(ex.Message()); }
+        catch (const std::exception& ex) { ShowError(ex.what()); }
+        catch (...) { ShowError("显示标准件库时发生未知错误。"); }
+    }
+
+    NXOpen::BlockStyler::UIBlock* topHiddenParameters()
+    {
+        return dialog_->TopBlock()->FindBlock("group");
+    }
+
+    void CreateBrowserPane()
+    {
+        if (pane_ != nullptr && IsWindow(pane_)) return;
+        HWND host = FindBlockStylerWindow();
+        if (host == nullptr)
+            throw std::runtime_error("无法找到 NX 标准件库对话框窗口。");
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          reinterpret_cast<LPCWSTR>(&DialogFilePath), &module_);
+        paneClass_ = L"ZhihuiStandardPartsBrowserPane_" +
+            std::to_wstring(reinterpret_cast<std::uintptr_t>(module_));
+        WNDCLASSEXW windowClass{};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.lpfnWndProc = WindowProc;
+        windowClass.hInstance = module_;
+        windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        windowClass.hbrBackground =
+            reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        windowClass.lpszClassName = paneClass_.c_str();
+        if (!RegisterClassExW(&windowClass) &&
+            GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+            throw std::runtime_error("无法创建标准件库浏览区。");
+
+        RECT client{};
+        GetClientRect(host, &client);
+        const int width = std::max(610,
+            static_cast<int>(client.right - client.left - 16));
+        state_.parent = host;
+        state_.embedded = true;
+        pane_ = CreateWindowExW(
+            0, paneClass_.c_str(), L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+            8, 8, width, 525, host, nullptr, module_, &state_);
+        if (pane_ == nullptr)
+            throw std::runtime_error("标准件库浏览区创建失败。");
+        g_appState = &state_;
+        BringWindowToTop(pane_);
+    }
+
+    int Update(NXOpen::BlockStyler::UIBlock* block)
+    {
+        if (updating_) return 0;
+        try
+        {
+            updating_ = true;
+            for (int index = 0; index < 4; ++index)
+            {
+                if (block == placementButtons_[index])
+                {
+                    // Actual Yanxiu button order, identified by the original
+                    // DLX icons: face centre, circle/arc centre, arbitrary
+                    // point, point projected to face.
+                    static const int modes[] = {2, 3, 1, 0};
+                    SetPlacementMode(&state_, modes[index]);
+                    pendingPlacementMode_ = modes[index];
+                }
+            }
+            if (block == placementSelection_)
+                ReadPlacementSelection();
+            if (block == orientation_)
+                ReadOrientationBlock();
+            if (block == quickPosition_) pendingQuickOrient_ = true;
+            updating_ = false;
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            updating_ = false; ShowError(ex.Message()); return ex.ErrorCode();
+        }
+        catch (const std::exception& ex)
+        {
+            updating_ = false; ShowError(ex.what()); return 1;
+        }
+        catch (...)
+        {
+            updating_ = false; ShowError("更新标准件库对话框时发生未知错误。"); return 1;
+        }
+        return 0;
+    }
+
+    void ReadTrimTargets()
+    {
+        state_.trimTargets.clear();
+        for (NXOpen::TaggedObject* object : trimSelection_->GetSelectedObjects())
+        {
+            if (object != nullptr) state_.trimTargets.push_back(object->Tag());
+        }
+    }
+
+    int Apply()
+    {
+        try
+        {
+            if (state_.hasPlacement) ReadOrientationBlock();
+            ReadTrimTargets();
+            InsertSelected(&state_);
+            return 0;
+        }
+        catch (const NXOpen::NXException& ex) { ShowError(ex.Message()); return ex.ErrorCode(); }
+        catch (const std::exception& ex) { ShowError(ex.what()); return 1; }
+        catch (...) { ShowError("调用标准件时发生未知错误。"); return 1; }
+    }
+
+    int Ok() { return Apply(); }
+    int Cancel() { return 0; }
+};
+
+StandardPartsDialogHost* StandardPartsDialogHost::pendingTimerHost_ = nullptr;
 }
 
 int LaunchStandardPartsLibrary(bool& keepUfInitialized)
 {
     keepUfInitialized = false;
-    if (g_appState != nullptr && g_appState->window != nullptr &&
-        IsWindow(g_appState->window))
+    // Block Styler refuses to create a dialog when NX has no work part.  Catch
+    // that state here so NX does not turn it into a callback automation error.
+    if (UF_ASSEM_ask_work_part() == NULL_TAG)
     {
-        ShowWindow(g_appState->window, SW_RESTORE);
-        SetForegroundWindow(g_appState->window);
+        MessageBoxW(GetForegroundWindow(), L"请先打开一个工作部件。",
+                    L"智辉标准件库", MB_OK | MB_ICONINFORMATION);
         return 0;
     }
     INITCOMMONCONTROLSEX commonControls{sizeof(commonControls), ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&commonControls);
     const HRESULT oleStatus = OleInitialize(nullptr);
-
-    AppState* state = new AppState();
-    state->parent = GetForegroundWindow();
-    state->ownsUfSession = true;
-    state->ownsOleSession = SUCCEEDED(oleStatus);
-    HMODULE module = nullptr;
-    // Keep one private reference while the modeless window exists. NX may now
-    // unload the command reference immediately after ufusr returns.
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                           reinterpret_cast<LPCWSTR>(&LaunchStandardPartsLibrary),
-                           &module))
+    int result = 0;
+    try
     {
-        if (state->ownsOleSession) OleUninitialize();
-        delete state;
-        return static_cast<int>(GetLastError());
+        StandardPartsDialogHost host;
+        result = host.Launch();
     }
-    const std::wstring className = L"ZhihuiStandardPartsLibrary_" +
-                                   std::to_wstring(reinterpret_cast<std::uintptr_t>(module));
-    state->moduleReference = module;
-    state->windowClassName = className;
-    WNDCLASSEXW windowClass{};
-    windowClass.cbSize = sizeof(windowClass);
-    windowClass.lpfnWndProc = WindowProc;
-    windowClass.hInstance = module;
-    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    windowClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
-    windowClass.lpszClassName = className.c_str();
-    if (!RegisterClassExW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+    catch (...)
     {
-        const DWORD error = GetLastError();
-        if (state->ownsOleSession) OleUninitialize();
-        FreeLibrary(module);
-        delete state;
-        return static_cast<int>(error);
+        if (SUCCEEDED(oleStatus)) OleUninitialize();
+        throw;
     }
-
-    RECT area{};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &area, 0);
-    constexpr int width = 620;
-    constexpr int height = 810;
-    const int x = area.left + ((area.right - area.left) - width) / 2;
-    const int y = area.top + ((area.bottom - area.top) - height) / 2;
-    HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, className.c_str(), kTitle,
-                                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                  x, y, width, height, state->parent, nullptr, module, state);
-    if (window == nullptr)
-    {
-        const DWORD error = GetLastError();
-        UnregisterClassW(className.c_str(), module);
-        if (state->ownsOleSession) OleUninitialize();
-        FreeLibrary(module);
-        delete state;
-        return static_cast<int>(error);
-    }
-    g_appState = state;
-    keepUfInitialized = true;
-    ShowWindow(window, SW_SHOW);
-    UpdateWindow(window);
-    return 0;
+    if (SUCCEEDED(oleStatus)) OleUninitialize();
+    return result;
 }

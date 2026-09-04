@@ -32,9 +32,14 @@ target_link_options(StandardPartsLibrary PRIVATE
     $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/DYNAMICBASE>
     $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/NXCOMPAT>)
 target_link_libraries(StandardPartsLibrary PRIVATE
-    libugopenint.lib libufun.lib user32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib)
+    libugopenint.lib libufun.lib libnxopencpp.lib libnxopencpp_gateway.lib
+    libnxopenuicpp.lib user32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib)
 
 add_custom_command(TARGET StandardPartsLibrary POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/StandardPartsLibrary.bmp"
         "$<TARGET_FILE_DIR:StandardPartsLibrary>/StandardPartsLibrary.bmp")
+add_custom_command(TARGET StandardPartsLibrary POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/StandardPartsLibrary.dlx"
+        "$<TARGET_FILE_DIR:StandardPartsLibrary>/StandardPartsLibrary.dlx")
