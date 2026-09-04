@@ -1,3 +1,3 @@
 #pragma once
 
-int LaunchStandardPartsLibrary();
+int LaunchStandardPartsLibrary(bool& keepUfInitialized);

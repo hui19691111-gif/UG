@@ -69,9 +69,10 @@ extern "C" DllExport void ufusr(char*, int* returnCode, int)
         if (returnCode != nullptr) *returnCode = status;
         return;
     }
+    bool keepUfInitialized = false;
     try
     {
-        const int result = LaunchStandardPartsLibrary();
+        const int result = LaunchStandardPartsLibrary(keepUfInitialized);
         if (returnCode != nullptr) *returnCode = result;
     }
     catch (...)
@@ -80,15 +81,15 @@ extern "C" DllExport void ufusr(char*, int* returnCode, int)
                     L"智辉标准件库", MB_OK | MB_ICONERROR);
         if (returnCode != nullptr) *returnCode = -1;
     }
-    UF_terminate();
+    if (!keepUfInitialized) UF_terminate();
 }
 
 extern "C" DllExport int ufusr_ask_unload()
 {
-    return UF_UNLOAD_IMMEDIATELY;
+    return UF_UNLOAD_UG_TERMINATE;
 }
 
 extern "C" DllExport void ufusr_cleanup()
 {
-    // The window, index and selections are function-local and released on close.
+    // UI state, selections and GDI/OLE resources are released by WM_NCDESTROY.
 }

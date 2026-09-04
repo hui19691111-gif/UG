@@ -86,7 +86,12 @@ struct AppState
     bool refreshingCategories = false;
     bool refreshingList = false;
     bool running = true;
+    bool ownsUfSession = false;
+    bool ownsOleSession = false;
 };
+
+AppState* g_appState = nullptr;
+HWND g_managerWindow = nullptr;
 
 void UpdatePreview(AppState* state);
 std::wstring Lower(std::wstring value);
@@ -1324,16 +1329,31 @@ LRESULT CALLBACK ManagerWindowProc(HWND window, UINT message, WPARAM wParam, LPA
         }
     }
     if (message == WM_CLOSE) { DestroyWindow(window); return 0; }
+    if (message == WM_NCDESTROY)
+    {
+        if (g_managerWindow == window) g_managerWindow = nullptr;
+        SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+    }
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
 void ShowManagerConfig(AppState* state)
 {
+    if (g_managerWindow != nullptr && IsWindow(g_managerWindow))
+    {
+        ShowWindow(g_managerWindow, SW_RESTORE);
+        SetForegroundWindow(g_managerWindow);
+        return;
+    }
     const wchar_t* className = L"ZhihuiStandardPartsManagerWindow";
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                      reinterpret_cast<LPCWSTR>(&ShowManagerConfig), &module);
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
     windowClass.lpfnWndProc = ManagerWindowProc;
-    windowClass.hInstance = GetModuleHandleW(nullptr);
+    windowClass.hInstance = module;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     windowClass.lpszClassName = className;
@@ -1343,21 +1363,10 @@ void ShowManagerConfig(AppState* state)
     HWND manager = CreateWindowExW(WS_EX_DLGMODALFRAME, className,
         L"智辉零件库管理配置", WS_CAPTION | WS_SYSMENU | WS_POPUP,
         parentRect.left + 10, parentRect.top + 100, 654, 355,
-        state->window, nullptr, GetModuleHandleW(nullptr), state);
+        state->window, nullptr, module, state);
     if (manager == nullptr) return;
-    EnableWindow(state->window, FALSE);
+    g_managerWindow = manager;
     ShowWindow(manager, SW_SHOW);
-    MSG message{};
-    while (IsWindow(manager) && GetMessageW(&message, nullptr, 0, 0) > 0)
-    {
-        if (!IsDialogMessageW(manager, &message))
-        {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-    }
-    EnableWindow(state->window, TRUE);
-    SetForegroundWindow(state->window);
 }
 
 void BuildLegacyUi(AppState* state)
@@ -1772,6 +1781,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     case WM_DESTROY:
         if (state != nullptr)
         {
+            if (g_managerWindow != nullptr && IsWindow(g_managerWindow))
+                DestroyWindow(g_managerWindow);
             if (state->previewBitmap != nullptr)
             {
                 DeleteObject(state->previewBitmap);
@@ -1786,20 +1797,40 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             state->running = false;
         }
         return 0;
+    case WM_NCDESTROY:
+        if (state != nullptr)
+        {
+            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+            if (g_appState == state) g_appState = nullptr;
+            if (state->ownsOleSession) OleUninitialize();
+            if (state->ownsUfSession) UF_terminate();
+            delete state;
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
     default: break;
     }
     return DefWindowProcW(window, message, wParam, lParam);
 }
 }
 
-int LaunchStandardPartsLibrary()
+int LaunchStandardPartsLibrary(bool& keepUfInitialized)
 {
+    keepUfInitialized = false;
+    if (g_appState != nullptr && g_appState->window != nullptr &&
+        IsWindow(g_appState->window))
+    {
+        ShowWindow(g_appState->window, SW_RESTORE);
+        SetForegroundWindow(g_appState->window);
+        return 0;
+    }
     INITCOMMONCONTROLSEX commonControls{sizeof(commonControls), ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&commonControls);
-    OleInitialize(nullptr);
+    const HRESULT oleStatus = OleInitialize(nullptr);
 
-    AppState state;
-    state.parent = GetForegroundWindow();
+    AppState* state = new AppState();
+    state->parent = GetForegroundWindow();
+    state->ownsUfSession = true;
+    state->ownsOleSession = SUCCEEDED(oleStatus);
     HMODULE module = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -1816,7 +1847,8 @@ int LaunchStandardPartsLibrary()
     windowClass.lpszClassName = className.c_str();
     if (!RegisterClassExW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
     {
-        OleUninitialize();
+        if (state->ownsOleSession) OleUninitialize();
+        delete state;
         return static_cast<int>(GetLastError());
     }
 
@@ -1828,31 +1860,17 @@ int LaunchStandardPartsLibrary()
     const int y = area.top + ((area.bottom - area.top) - height) / 2;
     HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, className.c_str(), kTitle,
                                   WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                  x, y, width, height, state.parent, nullptr, module, &state);
+                                  x, y, width, height, state->parent, nullptr, module, state);
     if (window == nullptr)
     {
         UnregisterClassW(className.c_str(), module);
-        OleUninitialize();
+        if (state->ownsOleSession) OleUninitialize();
+        delete state;
         return static_cast<int>(GetLastError());
     }
-    if (state.parent != nullptr) EnableWindow(state.parent, FALSE);
+    g_appState = state;
+    keepUfInitialized = true;
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
-    MSG message{};
-    while (state.running && GetMessageW(&message, nullptr, 0, 0) > 0)
-    {
-        if (!IsDialogMessageW(window, &message))
-        {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-    }
-    if (state.parent != nullptr)
-    {
-        EnableWindow(state.parent, TRUE);
-        SetForegroundWindow(state.parent);
-    }
-    UnregisterClassW(className.c_str(), module);
-    OleUninitialize();
     return 0;
 }
