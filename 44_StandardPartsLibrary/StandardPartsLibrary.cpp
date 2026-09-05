@@ -21,6 +21,7 @@
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/Selection.hxx>
+#include <NXOpen/Session.hxx>
 #include <NXOpen/UI.hxx>
 
 #include <Windows.h>
@@ -35,6 +36,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -65,6 +67,8 @@ enum ControlId
     ID_AUTO_TRIM, ID_SELECT_TRIM, ID_TRIM_STATUS, ID_LAYER,
     ID_MANAGE_CONFIG, ID_PATTERN_SINGLE, ID_PATTERN_X, ID_PATTERN_Y,
     ID_PATTERN_DIAGONAL, ID_PATTERN_FOUR, ID_PATTERN_CENTER, ID_PATTERN_ARRAY,
+    ID_PATTERN_SPACING_X, ID_PATTERN_SPACING_Y, ID_PATTERN_COUNT_X,
+    ID_PATTERN_COUNT_Y,
     ID_PARAM_LABEL1, ID_PARAM_LABEL2, ID_PARAM_LABEL3, ID_PARAM_LABEL4,
     ID_PARAM_VALUE1, ID_PARAM_VALUE2, ID_PARAM_VALUE3, ID_PARAM_VALUE4
 };
@@ -96,6 +100,10 @@ struct AppState
     int libraryFilter = 0;
     int placementMode = 0;
     int patternMode = 0;
+    double patternSpacingX = 100.0;
+    double patternSpacingY = 100.0;
+    int patternCountX = 2;
+    int patternCountY = 2;
     bool hasPlacement = false;
     double placementOrigin[3]{};
     double placementMatrix[9]{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
@@ -106,12 +114,16 @@ struct AppState
     bool ownsUfSession = false;
     bool ownsOleSession = false;
     bool embedded = false;
+    bool axisLocked[3]{false, false, false};
+    void* orientationContext = nullptr;
+    void (*orientationChanged)(void*) = nullptr;
     HMODULE moduleReference = nullptr;
     std::wstring windowClassName;
 };
 
 AppState* g_appState = nullptr;
 HWND g_managerWindow = nullptr;
+HWND g_quickPositionWindow = nullptr;
 
 struct ModuleReleaseContext
 {
@@ -136,6 +148,7 @@ DWORD WINAPI ReleaseModuleAfterWindowProc(void* parameter)
 
 void UpdatePreview(AppState* state);
 std::wstring Lower(std::wstring value);
+void ShowQuickPosition(AppState* state);
 
 std::wstring Trim(std::wstring value)
 {
@@ -873,18 +886,7 @@ void PickPlacement(AppState* state)
 
 void QuickOrient(AppState* state)
 {
-    std::wstring error;
-    if (!AskWcs(state->placementOrigin, state->placementMatrix, error))
-    {
-        MessageBoxW(state->window, error.c_str(), kTitle, MB_OK | MB_ICONERROR);
-        return;
-    }
-    // Do not invoke UF_UI_specify_csys here. It starts an NX modal command from
-    // inside this Win32 dialog's message loop and makes the application appear
-    // frozen until the nested CSYS dialog is explicitly completed or cancelled.
-    state->hasPlacement = true;
-    UpdatePlacementStatus(state);
-    SetStatus(state, L"已采用当前 WCS 的原点和方向。需要调整时请先修改 NX 工作坐标系。");
+    ShowQuickPosition(state);
 }
 
 bool AskPlacement(AppState* state, double origin[3], double matrix[9], std::wstring& error)
@@ -902,6 +904,124 @@ int RequestedLayer(AppState* state)
     const long value = wcstol(text.c_str(), &end, 10);
     return end != text.c_str() && *end == L'\0' && value >= 1 && value <= 256
         ? static_cast<int>(value) : 1;
+}
+
+double PositiveNumber(HWND window, int id, double fallback)
+{
+    const std::wstring text = Trim(GetText(window, id));
+    wchar_t* end = nullptr;
+    const double value = wcstod(text.c_str(), &end);
+    return end != text.c_str() && *end == L'\0' && std::isfinite(value) &&
+                   value > 0.0
+        ? value
+        : fallback;
+}
+
+int PositiveCount(HWND window, int id, int fallback)
+{
+    const std::wstring text = Trim(GetText(window, id));
+    wchar_t* end = nullptr;
+    const long value = wcstol(text.c_str(), &end, 10);
+    return end != text.c_str() && *end == L'\0'
+        ? std::clamp(static_cast<int>(value), 1, 50)
+        : fallback;
+}
+
+void ReadPatternSettings(AppState* state)
+{
+    state->patternSpacingX = PositiveNumber(
+        state->window, ID_PATTERN_SPACING_X, state->patternSpacingX);
+    state->patternSpacingY = PositiveNumber(
+        state->window, ID_PATTERN_SPACING_Y, state->patternSpacingY);
+    state->patternCountX = PositiveCount(
+        state->window, ID_PATTERN_COUNT_X, state->patternCountX);
+    state->patternCountY = PositiveCount(
+        state->window, ID_PATTERN_COUNT_Y, state->patternCountY);
+}
+
+std::array<double, 3> OffsetPoint(const double origin[3],
+                                  const double matrix[9], double x, double y)
+{
+    return {origin[0] + x * matrix[0] + y * matrix[3],
+            origin[1] + x * matrix[1] + y * matrix[4],
+            origin[2] + x * matrix[2] + y * matrix[5]};
+}
+
+bool TargetPatternFrame(const AppState* state, const double matrix[9],
+                        std::array<double, 3>& center,
+                        double& width, double& height)
+{
+    if (state->trimTargets.empty()) return false;
+    double box[6]{};
+    if (UF_MODL_ask_bounding_box(state->trimTargets.front(), box) != 0)
+        return false;
+    center = {(box[0] + box[3]) * 0.5,
+              (box[1] + box[4]) * 0.5,
+              (box[2] + box[5]) * 0.5};
+    double minX = 1.0e100, maxX = -1.0e100;
+    double minY = 1.0e100, maxY = -1.0e100;
+    for (int ix = 0; ix < 2; ++ix)
+        for (int iy = 0; iy < 2; ++iy)
+            for (int iz = 0; iz < 2; ++iz)
+            {
+                const double point[3] = {box[ix ? 3 : 0], box[iy ? 4 : 1],
+                                         box[iz ? 5 : 2]};
+                const double relative[3] = {
+                    point[0] - center[0], point[1] - center[1],
+                    point[2] - center[2]};
+                const double x = relative[0] * matrix[0] +
+                                 relative[1] * matrix[1] +
+                                 relative[2] * matrix[2];
+                const double y = relative[0] * matrix[3] +
+                                 relative[1] * matrix[4] +
+                                 relative[2] * matrix[5];
+                minX = std::min(minX, x); maxX = std::max(maxX, x);
+                minY = std::min(minY, y); maxY = std::max(maxY, y);
+            }
+    width = maxX - minX;
+    height = maxY - minY;
+    return width > 1.0e-6 && height > 1.0e-6;
+}
+
+std::vector<std::array<double, 3>> PatternOrigins(
+    AppState* state, const double origin[3], const double matrix[9])
+{
+    ReadPatternSettings(state);
+    std::vector<std::array<double, 3>> points;
+    std::array<double, 3> center{origin[0], origin[1], origin[2]};
+    double width = state->patternSpacingX;
+    double height = state->patternSpacingY;
+    const bool hasTarget = TargetPatternFrame(state, matrix, center, width, height);
+    const double halfX = width * 0.5;
+    const double halfY = height * 0.5;
+    const double* base = (state->patternMode == 5 && hasTarget)
+        ? center.data() : origin;
+    const auto add = [&](double x, double y)
+    {
+        points.push_back(OffsetPoint(base, matrix, x, y));
+    };
+    switch (state->patternMode)
+    {
+    case 1: add(-halfX, 0.0); add(halfX, 0.0); break;
+    case 2: add(0.0, -halfY); add(0.0, halfY); break;
+    case 3: add(-halfX, -halfY); add(halfX, halfY); break;
+    case 4:
+        add(-halfX, -halfY); add(halfX, -halfY);
+        add(-halfX, halfY); add(halfX, halfY); break;
+    case 5: add(0.0, 0.0); break;
+    case 6:
+    {
+        const int countX = state->patternCountX;
+        const int countY = state->patternCountY;
+        for (int row = 0; row < countY; ++row)
+            for (int column = 0; column < countX; ++column)
+                add((column - (countX - 1) * 0.5) * state->patternSpacingX,
+                    (row - (countY - 1) * 0.5) * state->patternSpacingY);
+        break;
+    }
+    default: add(0.0, 0.0); break;
+    }
+    return points;
 }
 
 void SelectTrimTargets(AppState* state)
@@ -1119,45 +1239,62 @@ bool InsertAssembly(AppState* state, const LibraryItem& item, std::wstring& erro
         error = L"已启用自动修剪，请先选择需要修剪的目标实体。";
         return false;
     }
+    if (state->patternMode == 5 && state->trimTargets.empty())
+    {
+        error = L"居中放置需要先在“选择需要修剪的实体”中选择一个目标实体。";
+        return false;
+    }
     double origin[3]{};
     double matrix[9]{};
     if (!AskPlacement(state, origin, matrix, error)) return false;
     UF_PART_load_status_t loadStatus{};
-    tag_t instance = NULL_TAG;
     const std::string path = ToAnsi(model.wstring());
     const std::string instanceName = ToAnsi(SanitizeFileName(item.name).substr(0, 30));
-    const int code = UF_ASSEM_add_part_to_assembly2(
-        workPart, path.c_str(), "MODEL", instanceName.c_str(), origin, matrix,
-        -1, &instance, &loadStatus);
-    UF_PART_free_load_status(&loadStatus);
-    if (code != 0 || instance == NULL_TAG)
+    const auto origins = PatternOrigins(state, origin, matrix);
+    for (std::size_t placement = 0; placement < origins.size(); ++placement)
     {
-        error = L"创建装配组件失败：" + UfError(code);
-        return false;
-    }
-    UF_OBJ_set_layer(instance, RequestedLayer(state));
-    if (autoTrim)
-    {
-        double destinationCsys[6] = {
-            matrix[0], matrix[1], matrix[2], matrix[3], matrix[4], matrix[5]};
-        UF_import_part_modes_t modes{};
-        modes.layer_mode = IP_ORIG;
-        modes.group_mode = IP_GROUP;
-        modes.view_mode = IP_NO_VIEW;
-        modes.cam_mode = false;
-        modes.use_search_dirs = false;
-        tag_t group = NULL_TAG;
-        const int importCode = UF_PART_import(path.c_str(), &modes, destinationCsys,
-                                               origin, 1.0, &group);
-        if (importCode != 0)
+        tag_t instance = NULL_TAG;
+        std::string numberedName = instanceName;
+        if (origins.size() > 1)
+            numberedName += "_" + std::to_string(placement + 1);
+        const int code = UF_ASSEM_add_part_to_assembly2(
+            workPart, path.c_str(), "MODEL", numberedName.c_str(),
+            const_cast<double*>(origins[placement].data()), matrix,
+            -1, &instance, &loadStatus);
+        UF_PART_free_load_status(&loadStatus);
+        loadStatus = {};
+        if (code != 0 || instance == NULL_TAG)
         {
-            error = L"组件已装配，但导入修剪工具失败：" + UfError(importCode);
+            error = L"创建第 " + std::to_wstring(placement + 1) +
+                    L" 个装配组件失败：" + UfError(code);
             return false;
         }
-        if (!ApplyAutomaticTrim(state, ImportedBodies(group), true, error))
+        UF_OBJ_set_layer(instance, RequestedLayer(state));
+        if (autoTrim)
         {
-            error = L"组件已装配，但" + error;
-            return false;
+            double destinationCsys[6] = {
+                matrix[0], matrix[1], matrix[2], matrix[3], matrix[4], matrix[5]};
+            UF_import_part_modes_t modes{};
+            modes.layer_mode = IP_ORIG;
+            modes.group_mode = IP_GROUP;
+            modes.view_mode = IP_NO_VIEW;
+            modes.cam_mode = false;
+            modes.use_search_dirs = false;
+            tag_t group = NULL_TAG;
+            const int importCode = UF_PART_import(
+                path.c_str(), &modes, destinationCsys,
+                const_cast<double*>(origins[placement].data()), 1.0, &group);
+            if (importCode != 0)
+            {
+                error = L"组件已装配，但导入修剪工具失败：" +
+                        UfError(importCode);
+                return false;
+            }
+            if (!ApplyAutomaticTrim(state, ImportedBodies(group), true, error))
+            {
+                error = L"组件已装配，但" + error;
+                return false;
+            }
         }
     }
     UF_DISP_regenerate_display();
@@ -1175,6 +1312,11 @@ bool InsertBodies(AppState* state, const LibraryItem& item, std::wstring& error)
     if (autoTrim && state->trimTargets.empty())
     {
         error = L"已启用自动修剪，请先选择需要修剪的目标实体。";
+        return false;
+    }
+    if (state->patternMode == 5 && state->trimTargets.empty())
+    {
+        error = L"居中放置需要先在“选择需要修剪的实体”中选择一个目标实体。";
         return false;
     }
     const fs::path model = ResolvedModel(state, item, error);
@@ -1195,21 +1337,28 @@ bool InsertBodies(AppState* state, const LibraryItem& item, std::wstring& error)
     modes.view_mode = IP_NO_VIEW;
     modes.cam_mode = false;
     modes.use_search_dirs = false;
-    tag_t group = NULL_TAG;
     const std::string path = ToAnsi(model.wstring());
-    const int code = UF_PART_import(path.c_str(), &modes, destinationCsys, origin, 1.0, &group);
-    if (code != 0)
+    const auto origins = PatternOrigins(state, origin, matrix);
+    for (std::size_t placement = 0; placement < origins.size(); ++placement)
     {
-        error = L"合并标准件模型失败：" + UfError(code);
-        return false;
-    }
-    const std::vector<tag_t> importedBodies = ImportedBodies(group);
-    const int layer = RequestedLayer(state);
-    for (tag_t body : importedBodies) UF_OBJ_set_layer(body, layer);
-    if (autoTrim && !ApplyAutomaticTrim(state, importedBodies, false, error))
-    {
-        error = L"标准件已导入，但" + error;
-        return false;
+        tag_t group = NULL_TAG;
+        const int code = UF_PART_import(
+            path.c_str(), &modes, destinationCsys,
+            const_cast<double*>(origins[placement].data()), 1.0, &group);
+        if (code != 0)
+        {
+            error = L"合并第 " + std::to_wstring(placement + 1) +
+                    L" 个标准件失败：" + UfError(code);
+            return false;
+        }
+        const std::vector<tag_t> importedBodies = ImportedBodies(group);
+        const int layer = RequestedLayer(state);
+        for (tag_t body : importedBodies) UF_OBJ_set_layer(body, layer);
+        if (autoTrim && !ApplyAutomaticTrim(state, importedBodies, false, error))
+        {
+            error = L"标准件已导入，但" + error;
+            return false;
+        }
     }
     UF_DISP_regenerate_display();
     return true;
@@ -1224,6 +1373,302 @@ HWND AddControl(AppState* state, DWORD exStyle, const wchar_t* cls, const wchar_
                                    GetModuleHandleW(nullptr), nullptr);
     SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(state->font), TRUE);
     return control;
+}
+
+namespace QuickPositionIds
+{
+constexpr int Keep = 3101;
+constexpr int Wcs = 3102;
+constexpr int Absolute = 3103;
+constexpr int RotateX = 3104;
+constexpr int RotateY = 3105;
+constexpr int RotateZ = 3106;
+constexpr int LockX = 3107;
+constexpr int LockY = 3108;
+constexpr int LockZ = 3109;
+constexpr int FlipX = 3110;
+constexpr int FlipY = 3111;
+constexpr int FlipZ = 3112;
+constexpr int RotateAll = 3113;
+}
+
+struct QuickPositionContext
+{
+    AppState* state = nullptr;
+    double originalOrigin[3]{};
+    double originalMatrix[9]{};
+    bool originalHasPlacement = false;
+    bool committed = false;
+};
+
+void NotifyOrientationChanged(AppState* state)
+{
+    state->hasPlacement = true;
+    UpdatePlacementStatus(state);
+    if (state->orientationChanged != nullptr)
+        state->orientationChanged(state->orientationContext);
+}
+
+void RotateFrame(double matrix[9], int axis, double degrees)
+{
+    if (!std::isfinite(degrees) || std::abs(degrees) < 1.0e-10) return;
+    constexpr double pi = 3.14159265358979323846;
+    const double radians = degrees * pi / 180.0;
+    const double c = std::cos(radians);
+    const double s = std::sin(radians);
+    double old[9]{};
+    std::copy(matrix, matrix + 9, old);
+    if (axis == 0)
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            matrix[3 + i] = c * old[3 + i] + s * old[6 + i];
+            matrix[6 + i] = -s * old[3 + i] + c * old[6 + i];
+        }
+    }
+    else if (axis == 1)
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            matrix[i] = c * old[i] - s * old[6 + i];
+            matrix[6 + i] = s * old[i] + c * old[6 + i];
+        }
+    }
+    else
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            matrix[i] = c * old[i] + s * old[3 + i];
+            matrix[3 + i] = -s * old[i] + c * old[3 + i];
+        }
+    }
+}
+
+double AngleValue(HWND window, int id)
+{
+    const std::wstring text = Trim(GetText(window, id));
+    wchar_t* end = nullptr;
+    const double value = wcstod(text.c_str(), &end);
+    return end != text.c_str() && *end == L'\0' && std::isfinite(value)
+        ? value : 0.0;
+}
+
+bool QuickAxisLocked(HWND window, int axis)
+{
+    return IsDlgButtonChecked(window, QuickPositionIds::LockX + axis) ==
+           BST_CHECKED;
+}
+
+LRESULT CALLBACK QuickPositionWindowProc(HWND window, UINT message,
+                                         WPARAM wParam, LPARAM lParam)
+{
+    auto* context = reinterpret_cast<QuickPositionContext*>(
+        GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE)
+    {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        context = static_cast<QuickPositionContext*>(create->lpCreateParams);
+        SetWindowLongPtrW(window, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(context));
+    }
+    if (message == WM_CREATE && context != nullptr)
+    {
+        AppState* state = context->state;
+        const HFONT font = state->font;
+        const auto add = [&](DWORD ex, const wchar_t* cls, const wchar_t* text,
+                             DWORD style, int x, int y, int width, int height,
+                             int id)
+        {
+            HWND control = CreateWindowExW(
+                ex, cls, text, style | WS_CHILD | WS_VISIBLE, x, y, width,
+                height, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(control, WM_SETFONT,
+                         reinterpret_cast<WPARAM>(font), TRUE);
+        };
+        add(0, L"BUTTON", L"保留已指定方位",
+            BS_AUTORADIOBUTTON | WS_GROUP, 16, 16, 150, 24,
+            QuickPositionIds::Keep);
+        add(0, L"BUTTON", L"工作坐标系 WCS", BS_AUTORADIOBUTTON,
+            170, 16, 138, 24, QuickPositionIds::Wcs);
+        add(0, L"BUTTON", L"绝对坐标系 ABS", BS_AUTORADIOBUTTON,
+            312, 16, 138, 24, QuickPositionIds::Absolute);
+        CheckRadioButton(window, QuickPositionIds::Keep,
+                         QuickPositionIds::Absolute, QuickPositionIds::Keep);
+        add(0, L"BUTTON", L"修改参数", BS_GROUPBOX,
+            14, 52, 440, 126, 0);
+        const wchar_t* labels[] = {L"X旋转", L"Y旋转", L"Z旋转"};
+        const int edits[] = {QuickPositionIds::RotateX,
+                             QuickPositionIds::RotateY,
+                             QuickPositionIds::RotateZ};
+        const int locks[] = {QuickPositionIds::LockX,
+                             QuickPositionIds::LockY,
+                             QuickPositionIds::LockZ};
+        for (int row = 0; row < 3; ++row)
+        {
+            const int y = 76 + row * 30;
+            add(0, L"STATIC", labels[row], SS_LEFT, 28, y + 3, 52, 22, 0);
+            add(WS_EX_CLIENTEDGE, L"EDIT", L"0", ES_AUTOHSCROLL,
+                84, y, 94, 24, edits[row]);
+            add(0, L"STATIC", L"度", SS_LEFT, 182, y + 3, 22, 22, 0);
+            add(0, L"BUTTON", L"锁定", BS_AUTOCHECKBOX,
+                216, y, 58, 24, locks[row]);
+        }
+        CheckDlgButton(window, QuickPositionIds::LockX,
+                       state->axisLocked[0] ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(window, QuickPositionIds::LockY,
+                       state->axisLocked[1] ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(window, QuickPositionIds::LockZ,
+                       state->axisLocked[2] ? BST_CHECKED : BST_UNCHECKED);
+        add(0, L"BUTTON", L"X翻转", BS_PUSHBUTTON,
+            292, 76, 66, 26, QuickPositionIds::FlipX);
+        add(0, L"BUTTON", L"Y翻转", BS_PUSHBUTTON,
+            364, 76, 66, 26, QuickPositionIds::FlipY);
+        add(0, L"BUTTON", L"Z翻转", BS_PUSHBUTTON,
+            292, 108, 66, 26, QuickPositionIds::FlipZ);
+        add(0, L"BUTTON", L"XYZ同时旋转", BS_PUSHBUTTON,
+            364, 108, 66, 56, QuickPositionIds::RotateAll);
+        add(0, L"STATIC",
+            L"面中心、圆弧中心、任意点和点投影由主对话框的四个定位按钮指定。",
+            SS_LEFT, 16, 188, 438, 38, 0);
+        add(0, L"BUTTON", L"确定", BS_DEFPUSHBUTTON,
+            292, 238, 74, 30, IDOK);
+        add(0, L"BUTTON", L"取消", BS_PUSHBUTTON,
+            374, 238, 74, 30, IDCANCEL);
+        return 0;
+    }
+    if (message == WM_COMMAND && context != nullptr)
+    {
+        AppState* state = context->state;
+        switch (LOWORD(wParam))
+        {
+        case QuickPositionIds::FlipX:
+            if (!QuickAxisLocked(window, 0))
+                RotateFrame(state->placementMatrix, 0, 180.0);
+            NotifyOrientationChanged(state); return 0;
+        case QuickPositionIds::FlipY:
+            if (!QuickAxisLocked(window, 1))
+                RotateFrame(state->placementMatrix, 1, 180.0);
+            NotifyOrientationChanged(state); return 0;
+        case QuickPositionIds::FlipZ:
+            if (!QuickAxisLocked(window, 2))
+                RotateFrame(state->placementMatrix, 2, 180.0);
+            NotifyOrientationChanged(state); return 0;
+        case QuickPositionIds::RotateAll:
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                if (!QuickAxisLocked(window, axis))
+                    RotateFrame(state->placementMatrix, axis,
+                                AngleValue(window, QuickPositionIds::RotateX + axis));
+                SetText(window, QuickPositionIds::RotateX + axis, L"0");
+            }
+            NotifyOrientationChanged(state); return 0;
+        case IDOK:
+        {
+            state->axisLocked[0] = IsDlgButtonChecked(
+                window, QuickPositionIds::LockX) == BST_CHECKED;
+            state->axisLocked[1] = IsDlgButtonChecked(
+                window, QuickPositionIds::LockY) == BST_CHECKED;
+            state->axisLocked[2] = IsDlgButtonChecked(
+                window, QuickPositionIds::LockZ) == BST_CHECKED;
+            if (IsDlgButtonChecked(window, QuickPositionIds::Wcs) == BST_CHECKED)
+            {
+                double wcsOrigin[3]{}, wcsMatrix[9]{};
+                std::wstring error;
+                if (!AskWcs(wcsOrigin, wcsMatrix, error))
+                {
+                    MessageBoxW(window, error.c_str(), kTitle,
+                                MB_OK | MB_ICONERROR);
+                    return 0;
+                }
+                if (!state->hasPlacement)
+                    std::copy(wcsOrigin, wcsOrigin + 3, state->placementOrigin);
+                std::copy(wcsMatrix, wcsMatrix + 9, state->placementMatrix);
+            }
+            else if (IsDlgButtonChecked(window, QuickPositionIds::Absolute) == BST_CHECKED)
+            {
+                const double identity[9] = {
+                    1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+                std::copy(identity, identity + 9, state->placementMatrix);
+            }
+            for (int axis = 0; axis < 3; ++axis)
+                if (!state->axisLocked[axis])
+                    RotateFrame(state->placementMatrix, axis,
+                                AngleValue(window, QuickPositionIds::RotateX + axis));
+            context->committed = true;
+            NotifyOrientationChanged(state);
+            DestroyWindow(window);
+            return 0;
+        }
+        case IDCANCEL: DestroyWindow(window); return 0;
+        default: break;
+        }
+    }
+    if (message == WM_CLOSE) { DestroyWindow(window); return 0; }
+    if (message == WM_NCDESTROY && context != nullptr)
+    {
+        if (!context->committed)
+        {
+            std::copy(context->originalOrigin, context->originalOrigin + 3,
+                      context->state->placementOrigin);
+            std::copy(context->originalMatrix, context->originalMatrix + 9,
+                      context->state->placementMatrix);
+            context->state->hasPlacement = context->originalHasPlacement;
+            UpdatePlacementStatus(context->state);
+            if (context->state->orientationChanged != nullptr)
+                context->state->orientationChanged(
+                    context->state->orientationContext);
+        }
+        if (g_quickPositionWindow == window) g_quickPositionWindow = nullptr;
+        SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+        delete context;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+void ShowQuickPosition(AppState* state)
+{
+    if (g_quickPositionWindow != nullptr && IsWindow(g_quickPositionWindow))
+    {
+        ShowWindow(g_quickPositionWindow, SW_RESTORE);
+        SetForegroundWindow(g_quickPositionWindow);
+        return;
+    }
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                      reinterpret_cast<LPCWSTR>(&ShowQuickPosition), &module);
+    const wchar_t* className = L"ZhihuiStandardPartsQuickPositionWindow";
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.lpfnWndProc = QuickPositionWindowProc;
+    windowClass.hInstance = module;
+    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    windowClass.lpszClassName = className;
+    RegisterClassExW(&windowClass);
+    auto* context = new (std::nothrow) QuickPositionContext();
+    if (context == nullptr) return;
+    context->state = state;
+    std::copy(state->placementOrigin, state->placementOrigin + 3,
+              context->originalOrigin);
+    std::copy(state->placementMatrix, state->placementMatrix + 9,
+              context->originalMatrix);
+    context->originalHasPlacement = state->hasPlacement;
+    RECT parent{};
+    GetWindowRect(state->parent != nullptr ? state->parent : state->window,
+                  &parent);
+    HWND quick = CreateWindowExW(
+        WS_EX_DLGMODALFRAME, className, L"快速定位 - 智辉标准件库",
+        WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        parent.left + 90, parent.top + 110, 486, 326,
+        state->parent != nullptr ? state->parent : state->window,
+        nullptr, module, context);
+    if (quick == nullptr) { delete context; return; }
+    g_quickPositionWindow = quick;
+    ShowWindow(quick, SW_SHOW);
+    SetForegroundWindow(quick);
 }
 
 LRESULT CALLBACK ManagerWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1551,32 +1996,60 @@ void BuildUi(AppState* state)
     ListView_InsertColumn(state->list, 0, &familyColumn);
 
     state->preview = AddControl(state, WS_EX_CLIENTEDGE, L"STATIC", L"", SS_OWNERDRAW,
-                                375, 44, 229, 225, ID_PREVIEW);
-    AddControl(state, 0, L"STATIC", L"规格", SS_LEFT, 379, 282, 54, 22, 0);
+                                375, 44, 229, 190, ID_PREVIEW);
+    AddControl(state, 0, L"STATIC", L"规格", SS_LEFT, 379, 242, 54, 22, 0);
     AddControl(state, 0, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL,
-               441, 278, 158, 200, ID_SPEC);
-    AddControl(state, 0, L"STATIC", L"名称", SS_LEFT, 379, 310, 58, 22, ID_PARAM_LABEL1);
+               441, 238, 158, 200, ID_SPEC);
+    AddControl(state, 0, L"STATIC", L"名称", SS_LEFT, 379, 270, 58, 22, ID_PARAM_LABEL1);
     AddControl(state, 0, L"STATIC", L"未选择", SS_LEFT | SS_PATHELLIPSIS,
-               441, 310, 158, 22, ID_PARAM_VALUE1);
-    AddControl(state, 0, L"STATIC", L"分类", SS_LEFT, 379, 336, 58, 22, ID_PARAM_LABEL2);
+               441, 270, 158, 22, ID_PARAM_VALUE1);
+    AddControl(state, 0, L"STATIC", L"分类", SS_LEFT, 379, 294, 58, 22, ID_PARAM_LABEL2);
     AddControl(state, 0, L"STATIC", L"-", SS_LEFT | SS_PATHELLIPSIS,
-               441, 336, 158, 22, ID_PARAM_VALUE2);
-    AddControl(state, 0, L"STATIC", L"模型", SS_LEFT, 379, 362, 58, 22, ID_PARAM_LABEL3);
+               441, 294, 158, 22, ID_PARAM_VALUE2);
+    AddControl(state, 0, L"STATIC", L"模型", SS_LEFT, 379, 318, 58, 22, ID_PARAM_LABEL3);
     AddControl(state, 0, L"STATIC", L"-", SS_LEFT | SS_PATHELLIPSIS,
-               441, 362, 158, 22, ID_PARAM_VALUE3);
-    AddControl(state, 0, L"STATIC", L"", SS_LEFT, 379, 388, 58, 22, ID_PARAM_LABEL4);
+               441, 318, 158, 22, ID_PARAM_VALUE3);
+    AddControl(state, 0, L"STATIC", L"", SS_LEFT, 379, 342, 58, 22, ID_PARAM_LABEL4);
     AddControl(state, 0, L"STATIC", L"", SS_LEFT | SS_PATHELLIPSIS,
-               441, 388, 158, 22, ID_PARAM_VALUE4);
+               441, 342, 158, 22, ID_PARAM_VALUE4);
     AddControl(state, 0, L"BUTTON", L"自动修剪", BS_AUTOCHECKBOX,
-               378, 414, 96, 24, ID_AUTO_TRIM);
-    AddControl(state, 0, L"STATIC", L"指定图层", SS_LEFT, 378, 446, 64, 22, 0);
+               378, 366, 96, 22, ID_AUTO_TRIM);
+    AddControl(state, 0, L"STATIC", L"指定图层", SS_LEFT, 378, 393, 64, 22, 0);
     AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"1", ES_NUMBER,
-               446, 442, 72, 25, ID_LAYER);
+               446, 390, 54, 23, ID_LAYER);
     AddControl(state, 0, L"BUTTON", L"装配", BS_AUTORADIOBUTTON | WS_GROUP,
-               378, 474, 62, 22, ID_MODE_ASSEMBLY);
+               378, 416, 58, 22, ID_MODE_ASSEMBLY);
     AddControl(state, 0, L"BUTTON", L"多实体", BS_AUTORADIOBUTTON,
-               444, 474, 72, 22, ID_MODE_BODY);
+               440, 416, 68, 22, ID_MODE_BODY);
     CheckRadioButton(state->window, ID_MODE_ASSEMBLY, ID_MODE_BODY, ID_MODE_ASSEMBLY);
+    AddControl(state, 0, L"BUTTON", L"单个", BS_AUTORADIOBUTTON | WS_GROUP,
+               378, 440, 52, 21, ID_PATTERN_SINGLE);
+    AddControl(state, 0, L"BUTTON", L"X轴", BS_AUTORADIOBUTTON,
+               430, 440, 44, 21, ID_PATTERN_X);
+    AddControl(state, 0, L"BUTTON", L"Y轴", BS_AUTORADIOBUTTON,
+               474, 440, 44, 21, ID_PATTERN_Y);
+    AddControl(state, 0, L"BUTTON", L"对角", BS_AUTORADIOBUTTON,
+               518, 440, 48, 21, ID_PATTERN_DIAGONAL);
+    AddControl(state, 0, L"BUTTON", L"4角", BS_AUTORADIOBUTTON,
+               378, 462, 52, 21, ID_PATTERN_FOUR);
+    AddControl(state, 0, L"BUTTON", L"居中", BS_AUTORADIOBUTTON,
+               430, 462, 52, 21, ID_PATTERN_CENTER);
+    AddControl(state, 0, L"BUTTON", L"阵列", BS_AUTORADIOBUTTON,
+               482, 462, 52, 21, ID_PATTERN_ARRAY);
+    CheckRadioButton(state->window, ID_PATTERN_SINGLE, ID_PATTERN_ARRAY,
+                     ID_PATTERN_SINGLE);
+    AddControl(state, 0, L"STATIC", L"X距", SS_LEFT, 378, 489, 24, 20, 0);
+    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"100", ES_AUTOHSCROLL,
+               402, 486, 34, 22, ID_PATTERN_SPACING_X);
+    AddControl(state, 0, L"STATIC", L"Y距", SS_LEFT, 438, 489, 24, 20, 0);
+    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"100", ES_AUTOHSCROLL,
+               462, 486, 34, 22, ID_PATTERN_SPACING_Y);
+    AddControl(state, 0, L"STATIC", L"X数", SS_LEFT, 498, 489, 24, 20, 0);
+    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"2", ES_NUMBER,
+               522, 486, 30, 22, ID_PATTERN_COUNT_X);
+    AddControl(state, 0, L"STATIC", L"Y数", SS_LEFT, 554, 489, 24, 20, 0);
+    AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"2", ES_NUMBER,
+               578, 486, 26, 22, ID_PATTERN_COUNT_Y);
     AddControl(state, 0, L"BUTTON", L"修改配置", BS_PUSHBUTTON,
                10, 488, 72, 30, ID_MANAGE_CONFIG);
 
@@ -1646,14 +2119,42 @@ void InsertSelected(AppState* state)
     const std::size_t index = SelectedIndex(state);
     if (index == SIZE_MAX) { SetStatus(state, L"请先选中要调用的标准件。"); return; }
     std::wstring error;
+    NXOpen::Session* session = nullptr;
+    NXOpen::Session::UndoMarkId mark =
+        static_cast<NXOpen::Session::UndoMarkId>(0);
+    bool hasMark = false;
+    try
+    {
+        session = NXOpen::Session::GetSession();
+        if (session != nullptr)
+        {
+            mark = session->SetUndoMark(
+                NXOpen::Session::MarkVisibilityVisible,
+                "调用智辉标准件");
+            hasMark = true;
+        }
+    }
+    catch (...) {}
     const bool assembly = IsDlgButtonChecked(state->window, ID_MODE_ASSEMBLY) == BST_CHECKED;
     const bool ok = assembly ? InsertAssembly(state, state->items[index], error)
                              : InsertBodies(state, state->items[index], error);
     if (ok)
-        SetStatus(state, L"已按指定位置" + std::wstring(assembly ? L"装配" : L"合并") +
-                         L"标准件：" + state->items[index].name);
+    {
+        const auto count = PatternOrigins(
+            state, state->placementOrigin, state->placementMatrix).size();
+        SetStatus(state, L"已" + std::wstring(assembly ? L"装配" : L"合并") +
+                         std::to_wstring(count) + L" 个标准件：" +
+                         state->items[index].name);
+    }
     else
+    {
+        if (hasMark && session != nullptr)
+        {
+            try { session->UndoToMark(mark, "调用智辉标准件"); } catch (...) {}
+            try { session->DeleteUndoMark(mark, "调用智辉标准件"); } catch (...) {}
+        }
         MessageBoxW(state->window, error.c_str(), kTitle, MB_OK | MB_ICONERROR);
+    }
 }
 
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1727,6 +2228,20 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             {
                 state->libraryFilter = LOWORD(wParam) - ID_FILTER_ALL;
                 RefreshList(state);
+            }
+            return 0;
+        case ID_PATTERN_SINGLE:
+        case ID_PATTERN_X:
+        case ID_PATTERN_Y:
+        case ID_PATTERN_DIAGONAL:
+        case ID_PATTERN_FOUR:
+        case ID_PATTERN_CENTER:
+        case ID_PATTERN_ARRAY:
+            if (HIWORD(wParam) == BN_CLICKED)
+            {
+                state->patternMode = LOWORD(wParam) - ID_PATTERN_SINGLE;
+                CheckRadioButton(state->window, ID_PATTERN_SINGLE,
+                                 ID_PATTERN_ARRAY, LOWORD(wParam));
             }
             return 0;
         case ID_PLACE_WCS:
@@ -1945,6 +2460,8 @@ public:
           dialog_(ui_->CreateDialog(DialogFilePath().c_str()))
     {
         state_.embedded = true;
+        state_.orientationContext = this;
+        state_.orientationChanged = &StandardPartsDialogHost::OrientationChangedThunk;
         dialog_->AddInitializeHandler(NXOpen::make_callback(
             this, &StandardPartsDialogHost::Initialize));
         dialog_->AddDialogShownHandler(NXOpen::make_callback(
@@ -1964,6 +2481,11 @@ public:
         if (timerId_ != 0)
             KillTimer(timerWindow_, timerId_);
         if (pendingTimerHost_ == this) pendingTimerHost_ = nullptr;
+        if (g_quickPositionWindow != nullptr &&
+            IsWindow(g_quickPositionWindow))
+            DestroyWindow(g_quickPositionWindow);
+        state_.orientationChanged = nullptr;
+        state_.orientationContext = nullptr;
         if (pane_ != nullptr && IsWindow(pane_)) DestroyWindow(pane_);
         if (!paneClass_.empty() && module_ != nullptr)
             UnregisterClassW(paneClass_.c_str(), module_);
@@ -1998,6 +2520,29 @@ private:
     int pendingPlacementMode_ = -1;
     bool pendingQuickOrient_ = false;
     static StandardPartsDialogHost* pendingTimerHost_;
+
+    static void OrientationChangedThunk(void* context) noexcept
+    {
+        auto* self = static_cast<StandardPartsDialogHost*>(context);
+        if (self == nullptr) return;
+        try
+        {
+            if (self->state_.hasPlacement)
+                self->SyncOrientationBlock();
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            self->ShowError(ex.Message());
+        }
+        catch (const std::exception& ex)
+        {
+            self->ShowError(ex.what());
+        }
+        catch (...)
+        {
+            self->ShowError("同步标准件方位时发生未知错误。");
+        }
+    }
 
     static void CALLBACK BrowserTimerProc(HWND window, UINT, UINT_PTR timerId,
                                           DWORD)

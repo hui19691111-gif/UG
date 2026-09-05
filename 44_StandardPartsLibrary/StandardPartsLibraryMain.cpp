@@ -1,8 +1,11 @@
 #include "StandardPartsLibrary.hpp"
 
 #include <uf.h>
+#include <NXOpen/NXException.hxx>
 #include <Windows.h>
 #include <cwchar>
+#include <exception>
+#include <string>
 
 #ifndef DllExport
 #define DllExport __declspec(dllexport)
@@ -12,7 +15,18 @@ namespace
 {
 using EnsureAuthorizedProc = int(__stdcall*)(const wchar_t*, const wchar_t*, wchar_t*, int);
 
-bool EnsureAuthorized()
+std::wstring ToWide(const char* value)
+{
+    if (value == nullptr || *value == '\0') return L"未知错误";
+    const int count = MultiByteToWideChar(CP_ACP, 0, value, -1, nullptr, 0);
+    if (count <= 1) return L"未知错误";
+    std::wstring result(static_cast<std::size_t>(count), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, value, -1, result.data(), count);
+    result.pop_back();
+    return result;
+}
+
+bool EnsureAuthorized(std::wstring& failureMessage)
 {
 #ifndef ZH_PROTECTED_BUILD
     return true;
@@ -43,12 +57,24 @@ bool EnsureAuthorized()
             owned = gate != nullptr;
         }
     }
-    if (gate == nullptr) return false;
+    if (gate == nullptr)
+    {
+        failureMessage = L"无法加载授权保护模块 ZhaoFuNxLicenseGate.dll。";
+        return false;
+    }
     const auto authorize = reinterpret_cast<EnsureAuthorizedProc>(
         GetProcAddress(gate, "ZfnxEnsureAuthorized"));
     wchar_t message[1024] = {};
     const bool allowed = authorize != nullptr &&
         authorize(L"ZHIHUI.CHAIJIJIA", L"智辉标准件库", message, 1024) == 1;
+    if (!allowed)
+    {
+        failureMessage = message[0] != L'\0'
+            ? message
+            : (authorize == nullptr
+                   ? L"授权保护模块缺少 ZfnxEnsureAuthorized 接口。"
+                   : L"当前授权未包含智辉标准件库功能。");
+    }
     if (owned) FreeLibrary(gate);
     return allowed;
 #endif
@@ -58,8 +84,11 @@ bool EnsureAuthorized()
 extern "C" DllExport void ufusr(char*, int* returnCode, int)
 {
     if (returnCode != nullptr) *returnCode = 0;
-    if (!EnsureAuthorized())
+    std::wstring authorizationError;
+    if (!EnsureAuthorized(authorizationError))
     {
+        MessageBoxW(GetForegroundWindow(), authorizationError.c_str(),
+                    L"智辉标准件库", MB_OK | MB_ICONERROR);
         if (returnCode != nullptr) *returnCode = 1;
         return;
     }
@@ -74,6 +103,20 @@ extern "C" DllExport void ufusr(char*, int* returnCode, int)
     {
         const int result = LaunchStandardPartsLibrary(keepUfInitialized);
         if (returnCode != nullptr) *returnCode = result;
+    }
+    catch (const NXOpen::NXException& exception)
+    {
+        const std::wstring message = ToWide(exception.Message());
+        MessageBoxW(GetForegroundWindow(), message.c_str(),
+                    L"智辉标准件库", MB_OK | MB_ICONERROR);
+        if (returnCode != nullptr) *returnCode = exception.ErrorCode();
+    }
+    catch (const std::exception& exception)
+    {
+        const std::wstring message = ToWide(exception.what());
+        MessageBoxW(GetForegroundWindow(), message.c_str(),
+                    L"智辉标准件库", MB_OK | MB_ICONERROR);
+        if (returnCode != nullptr) *returnCode = -1;
     }
     catch (...)
     {
