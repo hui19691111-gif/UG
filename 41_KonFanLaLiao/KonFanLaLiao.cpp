@@ -732,6 +732,7 @@ int KonFanLaLiaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
             }
 
             std::vector<NXOpen::TaggedObject*> normalizedObjects;
+            std::set<tag_t> normalizedFaceTags;
             for (const AnalysisResult::SlotCandidate& candidate :
                  currentAnalysis_.slotCandidates)
             {
@@ -752,7 +753,8 @@ int KonFanLaLiaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 {
                     for (NXOpen::Face* face : candidate.riskFaces)
                     {
-                        if (face != nullptr && IsAlive(face->Tag()))
+                        if (face != nullptr && IsAlive(face->Tag()) &&
+                            normalizedFaceTags.insert(face->Tag()).second)
                         {
                             normalizedObjects.push_back(face);
                         }
@@ -1183,6 +1185,7 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
             std::set<tag_t> loopEdgeTags;
             std::map<tag_t, NXOpen::Edge*> connectedBendEdges;
             std::map<tag_t, NXOpen::Face*> bendCarrierFaces;
+            std::string logicalHoleKey;
             bool roundProfile = true;
             bool profileInitialized = false;
             double profileLength = 0.0;
@@ -1348,6 +1351,7 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
                         for (tag_t tag : holeEdgeTags) key << tag << ',';
                     }
                     HoleRecord& record = holes[key.str()];
+                    record.logicalHoleKey = key.str();
                     if (!record.profileInitialized)
                     {
                         record.roundProfile = linearProfileEdges == 0;
@@ -1441,6 +1445,38 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
             return false;
         };
 
+        // Analyze every directly connected bend edge independently. The old
+        // implementation kept only the globally closest edge for a hole,
+        // which limited one hole to one relief slot. A bend-specific copy
+        // reuses the proven single-edge geometry calculation below while
+        // allowing one slot for every bend edge inside its own safe distance.
+        std::map<std::string, HoleRecord> bendSpecificHoles;
+        for (const auto& holeItem : holes)
+        {
+            const HoleRecord& source = holeItem.second;
+            for (const auto& bendItem : source.connectedBendEdges)
+            {
+                HoleRecord copy = source;
+                copy.connectedBendEdges.clear();
+                copy.connectedBendEdges[bendItem.first] = bendItem.second;
+                copy.bendCarrierFaces.clear();
+                const auto carrier = source.bendCarrierFaces.find(
+                    bendItem.first);
+                if (carrier != source.bendCarrierFaces.end())
+                {
+                    copy.bendCarrierFaces[bendItem.first] = carrier->second;
+                }
+                copy.closestLoopDistance = DBL_MAX;
+                copy.closestLoopBendEdge = NULL_TAG;
+                bendSpecificHoles[
+                    holeItem.first + "|B:" +
+                    std::to_string(bendItem.first)] = copy;
+            }
+        }
+        holes.swap(bendSpecificHoles);
+        std::set<std::string> countedThroughHoles;
+        std::set<std::string> countedRiskHoles;
+
         for (auto& item : holes)
         {
             HoleRecord& record = item.second;
@@ -1456,7 +1492,10 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
             {
                 continue;
             }
-            ++result.holeCount;
+            if (countedThroughHoles.insert(record.logicalHoleKey).second)
+            {
+                ++result.holeCount;
+            }
 
             // Some slot profiles return only the straight wall faces from
             // the planar inner loop. Complete the closed wall chain through
@@ -1602,7 +1641,10 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
             }
             if (holeHit)
             {
-                ++result.riskHoleCount;
+                if (countedRiskHoles.insert(record.logicalHoleKey).second)
+                {
+                    ++result.riskHoleCount;
+                }
                 const auto carrierItem = record.bendCarrierFaces.find(
                     record.closestLoopBendEdge);
                 if (carrierItem != record.bendCarrierFaces.end() &&
@@ -1631,6 +1673,7 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
                             Subtract(record.closestLoopPoint,
                                      planePoint), normal);
                         AnalysisResult::SlotCandidate candidate;
+                        candidate.holeKey = record.logicalHoleKey;
                         candidate.body = body;
                         candidate.referenceFace = carrierItem->second;
                         const auto bendOwner = bendEdgeOwners.find(
@@ -1995,13 +2038,14 @@ int KonFanLaLiaoDialog::CreateReliefSlotsForBody(
         struct CurrentFeatureGuard
         {
             NXOpen::Features::Feature* original = nullptr;
+            NXOpen::Features::Feature* restoreTarget = nullptr;
             ~CurrentFeatureGuard()
             {
-                if (original != nullptr && IsAlive(original->Tag()))
+                if (restoreTarget != nullptr && IsAlive(restoreTarget->Tag()))
                 {
                     try
                     {
-                        original->MakeCurrentFeature();
+                        restoreTarget->MakeCurrentFeature();
                     }
                     catch (...)
                     {
@@ -2053,8 +2097,9 @@ int KonFanLaLiaoDialog::CreateReliefSlotsForBody(
                 "无法确定钣金体最后一个建模特征，已停止创建防拉孔。 ");
         }
         currentFeatureGuard.original = workPart->CurrentFeature();
-        if (currentFeatureGuard.original == nullptr ||
-            currentFeatureGuard.original->Tag() !=
+        currentFeatureGuard.restoreTarget = currentFeatureGuard.original;
+        if (currentFeatureGuard.restoreTarget == nullptr ||
+            currentFeatureGuard.restoreTarget->Tag() !=
                 bodyInsertionFeature->Tag())
         {
             bodyInsertionFeature->MakeCurrentFeature();
@@ -2064,8 +2109,8 @@ int KonFanLaLiaoDialog::CreateReliefSlotsForBody(
             << " feature=" << bodyInsertionFeature->Tag()
             << " timestamp=" << bodyInsertionFeature->Timestamp()
             << " original_current="
-            << (currentFeatureGuard.original == nullptr
-                    ? 0 : currentFeatureGuard.original->Tag())
+            << (currentFeatureGuard.restoreTarget == nullptr
+                    ? 0 : currentFeatureGuard.restoreTarget->Tag())
             << " source=TARGET_BODY_HISTORY";
         AppendAnalysisLog(insertionLog.str());
 
@@ -2489,12 +2534,31 @@ int KonFanLaLiaoDialog::CreateReliefSlotsForBody(
             customFeature->SetName(
                 zhihui_konfan_laliao::kFeatureDisplayName);
 
+            // Preserve an originally-current downstream feature (for example
+            // Flat Pattern), so NX reactivates it after the slot is inserted.
+            // If the original current position was at/before the insertion
+            // point, advance to the new custom feature so it is not greyed
+            // out after the current timestamp.  No downstream feature is
+            // referenced by the custom feature itself.
+            NXOpen::Features::Feature* finalCurrent = customFeature;
+            if (currentFeatureGuard.original != nullptr &&
+                IsAlive(currentFeatureGuard.original->Tag()) &&
+                currentFeatureGuard.original->Timestamp() >
+                    customFeature->Timestamp())
+            {
+                finalCurrent = currentFeatureGuard.original;
+            }
+            currentFeatureGuard.restoreTarget = finalCurrent;
+
             std::ostringstream groupLog;
             groupLog << "BODY_CUSTOM_FEATURE body=" << body->Tag()
                 << " members=" << createdFeatures.size()
                 << " internal_objects=" << internalObjects.size()
                 << " custom_feature=" << customFeature->Tag()
-                << " name=孔防拉槽";
+                << " name=孔防拉槽"
+                << " custom_timestamp=" << customFeature->Timestamp()
+                << " final_current=" << finalCurrent->Tag()
+                << " final_timestamp=" << finalCurrent->Timestamp();
             AppendAnalysisLog(groupLog.str());
         }
         AppendAnalysisLog(
@@ -3419,6 +3483,7 @@ KonFanLaLiaoDialog::SelectedRiskHoles(const AnalysisResult& result) const
     }
 
     std::set<tag_t> riskFaceTags;
+    std::set<std::string> selectedHoleKeys;
     for (const AnalysisResult::SlotCandidate& candidate :
          result.slotCandidates)
     {
@@ -3436,7 +3501,10 @@ KonFanLaLiaoDialog::SelectedRiskHoles(const AnalysisResult& result) const
             continue;
         }
         selected.slotCandidates.push_back(candidate);
-        ++selected.riskHoleCount;
+        if (selectedHoleKeys.insert(candidate.holeKey).second)
+        {
+            ++selected.riskHoleCount;
+        }
         for (NXOpen::Face* face : candidate.riskFaces)
         {
             if (face != nullptr && riskFaceTags.insert(face->Tag()).second)
@@ -3452,12 +3520,14 @@ void KonFanLaLiaoDialog::PopulateRiskSelection(
     const AnalysisResult& result)
 {
     std::vector<NXOpen::TaggedObject*> objects;
+    std::set<tag_t> addedFaceTags;
     for (const AnalysisResult::SlotCandidate& candidate :
          result.slotCandidates)
     {
         for (NXOpen::Face* face : candidate.riskFaces)
         {
-            if (face != nullptr && IsAlive(face->Tag()))
+            if (face != nullptr && IsAlive(face->Tag()) &&
+                addedFaceTags.insert(face->Tag()).second)
             {
                 objects.push_back(face);
             }

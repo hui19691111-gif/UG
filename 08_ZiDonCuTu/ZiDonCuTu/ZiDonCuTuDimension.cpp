@@ -1,5 +1,6 @@
 ﻿#include "ZiDonCuTuDimension.hpp"
 #include "ZiDonCuTuSupport.hpp"
+#include <uf_drf.h>
 #include <NXOpen/Annotations_Annotation.hxx>
 #include <NXOpen/Annotations_OrdinateDimension.hxx>
 #include <NXOpen/Annotations_OrdinateDimensionBuilder.hxx>
@@ -5564,8 +5565,11 @@ bool CreateFlatPatternBendNote(
 	NXOpen::Drawings::DraftingCurve* curve,
 	const NXOpen::Point3d& drawingPoint,
 	const std::string& noteText,
-	double textHeight)
+	double textHeight,
+	double textAngleRadians)
 {
+	// NXOpen lettering angles are degrees; atan2 and UF text-info angles are radians.
+	const double textAngleDegrees = textAngleRadians * 180.0 / PI;
 	if (baseView == NULL || curve == NULL || noteText.empty())
 	{
 		return false;
@@ -5613,6 +5617,7 @@ bool CreateFlatPatternBendNote(
 		builder->Origin()->SetInferRelativeToGeometry(false);
 		builder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
 		builder->Style()->LetteringStyle()->SetGeneralTextSize(std::max(0.1, textHeight));
+		builder->Style()->LetteringStyle()->SetAngle(textAngleDegrees);
 		builder->Origin()->SetOriginPoint(drawingPoint);
 
 		std::vector<NXOpen::NXString> lines(1);
@@ -5620,11 +5625,52 @@ bool CreateFlatPatternBendNote(
 		builder->Text()->TextBlock()->SetText(lines);
 
 		created = builder->Commit();
+		double appliedAngleDegrees = 0.0;
+		NXOpen::Annotations::Annotation* createdAnnotation =
+			dynamic_cast<NXOpen::Annotations::Annotation*>(created);
+		if (createdAnnotation != NULL)
+		{
+			NXOpen::Annotations::LetteringPreferences* letteringPreferences =
+				createdAnnotation->GetLetteringPreferences();
+			if (letteringPreferences != NULL)
+			{
+				letteringPreferences->SetAngle(textAngleDegrees);
+				createdAnnotation->SetLetteringPreferences(letteringPreferences);
+				delete letteringPreferences;
+
+				NXOpen::Annotations::LetteringPreferences* appliedPreferences =
+					createdAnnotation->GetLetteringPreferences();
+				if (appliedPreferences != NULL)
+				{
+					appliedAngleDegrees = appliedPreferences->Angle();
+					delete appliedPreferences;
+				}
+			}
+			createdAnnotation->RedisplayObject();
+		}
 		std::ostringstream log;
 		log << "[BendNote] commit=" << (created != NULL ? "ok" : "null")
 			<< " curveTag=" << curve->Tag()
 			<< " text='" << noteText << "'"
+			<< " requestedAngleDeg=" << textAngleDegrees
+			<< " appliedAngleDeg=" << appliedAngleDegrees
 			<< " point=(" << drawingPoint.X << "," << drawingPoint.Y << ")";
+		if (created != NULL)
+		{
+			int textCount = 0;
+			UF_DRF_draft_aid_text_info_t* textInfo = NULL;
+			const int textInfoStatus = UF_DRF_ask_draft_aid_text_info(
+				created->Tag(), &textCount, &textInfo);
+			log << " textInfoStatus=" << textInfoStatus;
+			if (textInfoStatus == 0 && textCount > 0 && textInfo != NULL)
+			{
+				log << " renderedAngleDeg=" << (textInfo[0].angle * 180.0 / PI);
+			}
+			if (textInfo != NULL)
+			{
+				UF_DRF_free_text(textCount, &textInfo);
+			}
+		}
 		BendNoteDebugLog(log.str());
 	}
 	catch (const NXOpen::NXException& ex)
@@ -5698,6 +5744,19 @@ bool CreateFlatPatternBendNotesForObjects(
 			(startPoint[0] + endPoint[0]) * 0.5,
 			(startPoint[1] + endPoint[1]) * 0.5,
 			0.0);
+		double textAngleRadians = std::atan2(
+			endPoint[1] - startPoint[1],
+			endPoint[0] - startPoint[0]);
+		// Keep the baseline parallel to the bend line while ensuring the text
+		// reads left-to-right instead of being rotated upside down.
+		if (textAngleRadians > PI * 0.5)
+		{
+			textAngleRadians -= PI;
+		}
+		else if (textAngleRadians <= -PI * 0.5)
+		{
+			textAngleRadians += PI;
+		}
 		{
 			std::ostringstream log;
 			log << "[BendNote] mappedLine curveTag=" << draftingCurve->Tag()
@@ -5707,7 +5766,13 @@ bool CreateFlatPatternBendNotesForObjects(
 			BendNoteDebugLog(log.str());
 		}
 		const std::string noteText = FormatBendNoteText(directionUtf8, angleDegrees);
-		createdAny = CreateFlatPatternBendNote(baseView, draftingCurve, drawingPoint, noteText, textHeight) || createdAny;
+		createdAny = CreateFlatPatternBendNote(
+			baseView,
+			draftingCurve,
+			drawingPoint,
+			noteText,
+			textHeight,
+			textAngleRadians) || createdAny;
 	}
 	return createdAny;
 }

@@ -1900,6 +1900,8 @@ std::unique_ptr<AsyncDrawingBatch> PrepareAsyncDrawingBatch(
 
 bool ProcessNextAsyncDrawingTarget(AsyncDrawingBatch& batch)
 {
+    if (IsAutoCreateThreeViewsCancellationRequested())
+        return false;
     if (batch.directSingleRequest)
     {
         if (batch.nextTarget > 0)
@@ -2051,6 +2053,8 @@ bool ProcessNextAsyncDrawingTarget(AsyncDrawingBatch& batch)
         ExecuteAutoCreateThreeViewsFromRequest(partRequestPath);
         std::error_code ignored;
         std::filesystem::remove(partRequestPath, ignored);
+        if (IsAutoCreateThreeViewsCancellationRequested())
+            return false;
         batch.completedDrawingSheetTag = AskLastAutoCreateThreeViewsDrawingSheetTag();
         batch.completedSheetNeedsPresentation =
             batch.completedDrawingSheetTag != NULL_TAG;
@@ -2085,6 +2089,13 @@ void FinalizeAsyncDrawingBatch(AsyncDrawingBatch& batch)
     const int total = batch.directSingleRequest
         ? 1
         : static_cast<int>(batch.targets.size());
+    if (IsAutoCreateThreeViewsCancellationRequested())
+    {
+        WriteProgressFile(batch.requestPath, static_cast<int>(batch.nextTarget), total, "Drawing canceled.", true);
+        AddAutoCreateThreeViewsRunResultLine(u8"用户已取消出图，剩余任务未执行；当前图纸可能尚未完成，请检查后再使用。");
+        WriteLauncherLog("AutoCreateThreeViews: async drawing batch canceled; no further targets will run.");
+        return;
+    }
     WriteProgressFile(batch.requestPath, total, total, "Drawing finished.", true);
     WriteLauncherTiming("async_ui_request_total", batch.started, "parts=" + std::to_string(total));
     WriteLauncherLog("AutoCreateThreeViews: async drawing batch completed.");
@@ -2178,6 +2189,7 @@ void CALLBACK UiMonitorTimerProc(HWND, UINT, UINT_PTR, DWORD)
             {
                 FinalizeAsyncDrawingBatch(*g_asyncDrawingBatch);
                 ClearSelectionAndOccurrenceHighlights(true);
+                CompleteAutoCreateThreeViewsNativeProgress();
                 if (g_asyncDrawingBatch->showRunResults)
                     ShowAutoCreateThreeViewsRunResults();
                 std::error_code ignored;

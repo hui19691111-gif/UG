@@ -32,6 +32,7 @@ private:
     {
         struct SlotCandidate
         {
+            std::string holeKey;
             NXOpen::Body* body = nullptr;
             NXOpen::Face* bendFace = nullptr;
             NXOpen::Face* referenceFace = nullptr;

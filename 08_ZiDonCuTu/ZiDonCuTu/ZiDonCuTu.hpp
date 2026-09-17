@@ -272,10 +272,6 @@ private:
     NXOpen::BlockStyler::Toggle* toggleLargeArcMarkerLine;// Block type: Toggle
     NXOpen::BlockStyler::DoubleBlock* doubleLargeArcMarkerEdgeDistance;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* doubleLargeArcMarkerKeepLength;// Block type: Double
-    NXOpen::BlockStyler::Toggle* toggleBendLineUpNotch;// Block type: Toggle
-    NXOpen::BlockStyler::DoubleBlock* doubleBendLineUpNotchDiameter;// Block type: Double
-    NXOpen::BlockStyler::Toggle* toggleBendLineDownNotch;// Block type: Toggle
-    NXOpen::BlockStyler::DoubleBlock* doubleBendLineDownNotchDiameter;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineUpKeepLength;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineDownKeepLength;// Block type: Double
     NXOpen::BlockStyler::Toggle* toggleIndependentDrawingPart;// Block type: Toggle

@@ -1439,10 +1439,6 @@ static void SaveZiDonCuTuDialogState(
 	NXOpen::BlockStyler::Toggle* largeArcMarkerLineToggleBlock,
 	NXOpen::BlockStyler::DoubleBlock* largeArcMarkerEdgeDistanceBlock,
 	NXOpen::BlockStyler::DoubleBlock* largeArcMarkerKeepLengthBlock,
-	NXOpen::BlockStyler::Toggle* bendLineUpNotchToggleBlock,
-	NXOpen::BlockStyler::DoubleBlock* bendLineUpNotchDiameterBlock,
-	NXOpen::BlockStyler::Toggle* bendLineDownNotchToggleBlock,
-	NXOpen::BlockStyler::DoubleBlock* bendLineDownNotchDiameterBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineUpKeepLengthBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineDownKeepLengthBlock,
 	NXOpen::BlockStyler::Toggle* independentDrawingPartToggleBlock,
@@ -1480,10 +1476,6 @@ static void SaveZiDonCuTuDialogState(
 		file << "large_arc_marker_line=" << (GetToggleBlockValue(largeArcMarkerLineToggleBlock, false) ? 1 : 0) << "\r\n";
 		file << "large_arc_marker_edge_distance=" << GetDoubleBlockValue(largeArcMarkerEdgeDistanceBlock, 3.0) << "\r\n";
 		file << "large_arc_marker_keep_length=" << GetDoubleBlockValue(largeArcMarkerKeepLengthBlock, 5.0) << "\r\n";
-		file << "bend_line_up_notch=" << (GetToggleBlockValue(bendLineUpNotchToggleBlock, false) ? 1 : 0) << "\r\n";
-		file << "bend_line_up_notch_diameter=" << GetDoubleBlockValue(bendLineUpNotchDiameterBlock, 1.0) << "\r\n";
-		file << "bend_line_down_notch=" << (GetToggleBlockValue(bendLineDownNotchToggleBlock, false) ? 1 : 0) << "\r\n";
-		file << "bend_line_down_notch_diameter=" << GetDoubleBlockValue(bendLineDownNotchDiameterBlock, 1.0) << "\r\n";
 		file << "bend_line_up_keep_length=" << GetDoubleBlockValue(bendLineUpKeepLengthBlock, 5.0) << "\r\n";
 		file << "bend_line_down_keep_length=" << GetDoubleBlockValue(bendLineDownKeepLengthBlock, 5.0) << "\r\n";
 		file << "independent_drawing_part=" << (GetToggleBlockValue(independentDrawingPartToggleBlock, false) ? 1 : 0) << "\r\n";
@@ -1515,10 +1507,6 @@ static void RestoreZiDonCuTuDialogState(
 	NXOpen::BlockStyler::Toggle* largeArcMarkerLineToggleBlock,
 	NXOpen::BlockStyler::DoubleBlock* largeArcMarkerEdgeDistanceBlock,
 	NXOpen::BlockStyler::DoubleBlock* largeArcMarkerKeepLengthBlock,
-	NXOpen::BlockStyler::Toggle* bendLineUpNotchToggleBlock,
-	NXOpen::BlockStyler::DoubleBlock* bendLineUpNotchDiameterBlock,
-	NXOpen::BlockStyler::Toggle* bendLineDownNotchToggleBlock,
-	NXOpen::BlockStyler::DoubleBlock* bendLineDownNotchDiameterBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineUpKeepLengthBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineDownKeepLengthBlock,
 	NXOpen::BlockStyler::Toggle* independentDrawingPartToggleBlock,
@@ -1582,22 +1570,6 @@ static void RestoreZiDonCuTuDialogState(
 		if (largeArcMarkerKeepLengthBlock != NULL)
 		{
 			largeArcMarkerKeepLengthBlock->SetValue(std::max(0.1, ConfigReadDouble(path, "large_arc_marker_keep_length", largeArcMarkerKeepLengthBlock->Value())));
-		}
-		if (bendLineUpNotchToggleBlock != NULL)
-		{
-			bendLineUpNotchToggleBlock->SetValue(ConfigReadBool(path, "bend_line_up_notch", GetToggleBlockValue(bendLineUpNotchToggleBlock, false)));
-		}
-		if (bendLineUpNotchDiameterBlock != NULL)
-		{
-			bendLineUpNotchDiameterBlock->SetValue(std::max(0.1, ConfigReadDouble(path, "bend_line_up_notch_diameter", bendLineUpNotchDiameterBlock->Value())));
-		}
-		if (bendLineDownNotchToggleBlock != NULL)
-		{
-			bendLineDownNotchToggleBlock->SetValue(ConfigReadBool(path, "bend_line_down_notch", GetToggleBlockValue(bendLineDownNotchToggleBlock, false)));
-		}
-		if (bendLineDownNotchDiameterBlock != NULL)
-		{
-			bendLineDownNotchDiameterBlock->SetValue(std::max(0.1, ConfigReadDouble(path, "bend_line_down_notch_diameter", bendLineDownNotchDiameterBlock->Value())));
 		}
 		if (bendLineUpKeepLengthBlock != NULL)
 		{
@@ -7885,19 +7857,6 @@ static bool TryCreateOuterCircleDiameterForView(
 	}
 }
 
-static void UpdateBendLineNotchControls(
-	NXOpen::BlockStyler::Toggle* notchToggle,
-	NXOpen::BlockStyler::DoubleBlock* diameterBlock)
-{
-	if (diameterBlock == NULL)
-	{
-		return;
-	}
-	const bool showDiameter = GetToggleBlockValue(notchToggle, false);
-	diameterBlock->SetShow(showDiameter);
-	diameterBlock->SetEnable(showDiameter);
-}
-
 static void CreateSimpleDimensionsForPendingGroup(
 	NXOpen::Part* workPart,
 	const PendingScaleRefit& pending)
@@ -11035,10 +10994,6 @@ void ZiDonCuTu::initialize_cb()
 		toggleLargeArcMarkerLine = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleLargeArcMarkerLine"));
 		doubleLargeArcMarkerEdgeDistance = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleLargeArcMarkerEdgeDistance"));
 		doubleLargeArcMarkerKeepLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleLargeArcMarkerKeepLength"));
-		toggleBendLineUpNotch = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendLineUpNotch"));
-		doubleBendLineUpNotchDiameter = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineUpNotchDiameter"));
-		toggleBendLineDownNotch = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendLineDownNotch"));
-		doubleBendLineDownNotchDiameter = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineDownNotchDiameter"));
 		doubleBendLineUpKeepLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineUpKeepLength1"));
 		doubleBendLineDownKeepLength = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineDownKeepLength1"));
 		toggleIndependentDrawingPart = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleIndependentDrawingPart"));
@@ -11155,14 +11110,6 @@ void ZiDonCuTu::dialogShown_cb()
 		{
 			doubleLargeArcMarkerKeepLength->SetValue(5.0);
 		}
-		if (doubleBendLineUpNotchDiameter != NULL && doubleBendLineUpNotchDiameter->Value() <= 0.0)
-		{
-			doubleBendLineUpNotchDiameter->SetValue(1.0);
-		}
-		if (doubleBendLineDownNotchDiameter != NULL && doubleBendLineDownNotchDiameter->Value() <= 0.0)
-		{
-			doubleBendLineDownNotchDiameter->SetValue(1.0);
-		}
 		if (doubleBendLineDownKeepLength != NULL && doubleBendLineDownKeepLength->Value() <= 0.0)
 		{
 			doubleBendLineDownKeepLength->SetValue(5.0);
@@ -11184,10 +11131,6 @@ void ZiDonCuTu::dialogShown_cb()
 			toggleLargeArcMarkerLine,
 			doubleLargeArcMarkerEdgeDistance,
 			doubleLargeArcMarkerKeepLength,
-			toggleBendLineUpNotch,
-			doubleBendLineUpNotchDiameter,
-			toggleBendLineDownNotch,
-			doubleBendLineDownNotchDiameter,
 			doubleBendLineUpKeepLength,
 			doubleBendLineDownKeepLength,
 			toggleIndependentDrawingPart,
@@ -11231,8 +11174,6 @@ void ZiDonCuTu::dialogShown_cb()
 		UpdateBendNoteControls(toggleBendNote, doubleBendNoteTextHeight);
 		UpdateBreakBendLineControls(toggleBreakBendLine, doubleBendLineEdgeDistance, doubleBendLineUpKeepLength, doubleBendLineDownKeepLength);
 		UpdateLargeArcMarkerLineControls(toggleLargeArcMarkerLine, doubleLargeArcMarkerEdgeDistance, doubleLargeArcMarkerKeepLength);
-		UpdateBendLineNotchControls(toggleBendLineUpNotch, doubleBendLineUpNotchDiameter);
-		UpdateBendLineNotchControls(toggleBendLineDownNotch, doubleBendLineDownNotchDiameter);
 		UpdateManualTemplateControls(toggleManualTemplate, stringManualTemplatePath, buttonBrowseTemplate);
 		if (enum01 != NULL)
 		{
@@ -11281,10 +11222,6 @@ int ZiDonCuTu::apply_cb()
 			toggleLargeArcMarkerLine,
 			doubleLargeArcMarkerEdgeDistance,
 			doubleLargeArcMarkerKeepLength,
-			toggleBendLineUpNotch,
-			doubleBendLineUpNotchDiameter,
-			toggleBendLineDownNotch,
-			doubleBendLineDownNotchDiameter,
 			doubleBendLineUpKeepLength,
 			doubleBendLineDownKeepLength,
 			toggleIndependentDrawingPart,
@@ -12963,36 +12900,6 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 			if (doubleLargeArcMarkerKeepLength != NULL && doubleLargeArcMarkerKeepLength->Value() <= 0.0)
 			{
 				doubleLargeArcMarkerKeepLength->SetValue(5.0);
-			}
-		}
-		else if (block == toggleBendLineUpNotch)
-		{
-			blockName = "toggleBendLineUpNotch";
-			phase = "toggleBendLineUpNotch";
-			UpdateBendLineNotchControls(toggleBendLineUpNotch, doubleBendLineUpNotchDiameter);
-		}
-		else if (block == doubleBendLineUpNotchDiameter)
-		{
-			blockName = "doubleBendLineUpNotchDiameter";
-			phase = "doubleBendLineUpNotchDiameter";
-			if (doubleBendLineUpNotchDiameter != NULL && doubleBendLineUpNotchDiameter->Value() <= 0.0)
-			{
-				doubleBendLineUpNotchDiameter->SetValue(1.0);
-			}
-		}
-		else if (block == toggleBendLineDownNotch)
-		{
-			blockName = "toggleBendLineDownNotch";
-			phase = "toggleBendLineDownNotch";
-			UpdateBendLineNotchControls(toggleBendLineDownNotch, doubleBendLineDownNotchDiameter);
-		}
-		else if (block == doubleBendLineDownNotchDiameter)
-		{
-			blockName = "doubleBendLineDownNotchDiameter";
-			phase = "doubleBendLineDownNotchDiameter";
-			if (doubleBendLineDownNotchDiameter != NULL && doubleBendLineDownNotchDiameter->Value() <= 0.0)
-			{
-				doubleBendLineDownNotchDiameter->SetValue(1.0);
 			}
 		}
 		else if (block == doubleBendLineUpKeepLength)
@@ -16638,10 +16545,6 @@ int ZiDonCuTu::aabb_cb()
 				const double largeArcRadiusThreshold = std::max(0.0, GetDoubleBlockValue(doubleRInnerThreshold, 0.5));
 				const double largeArcMarkerEdgeDistance = std::max(0.0, GetDoubleBlockValue(doubleLargeArcMarkerEdgeDistance, 3.0));
 				const double largeArcMarkerKeepLength = std::max(0.1, GetDoubleBlockValue(doubleLargeArcMarkerKeepLength, 5.0));
-				const bool bendLineUpNotchEnabled = GetToggleBlockValue(toggleBendLineUpNotch, false);
-				const double bendLineUpNotchDiameter = std::max(0.1, GetDoubleBlockValue(doubleBendLineUpNotchDiameter, 1.0));
-				const bool bendLineDownNotchEnabled = GetToggleBlockValue(toggleBendLineDownNotch, false);
-				const double bendLineDownNotchDiameter = std::max(0.1, GetDoubleBlockValue(doubleBendLineDownNotchDiameter, 1.0));
 				const std::string holeMarkerStart = GetStringBlockValue(stringHoleMarker, "A");
 				{
 					std::ostringstream holeLog;
@@ -16657,10 +16560,6 @@ int ZiDonCuTu::aabb_cb()
 						<< " largeArcMarkerLineEnabled=" << (largeArcMarkerLineEnabled ? "true" : "false")
 						<< " largeArcMarkerEdgeDistance=" << largeArcMarkerEdgeDistance
 						<< " largeArcMarkerKeepLength=" << largeArcMarkerKeepLength
-						<< " bendLineUpNotchEnabled=" << (bendLineUpNotchEnabled ? "true" : "false")
-						<< " bendLineUpNotchDiameter=" << bendLineUpNotchDiameter
-						<< " bendLineDownNotchEnabled=" << (bendLineDownNotchEnabled ? "true" : "false")
-						<< " bendLineDownNotchDiameter=" << bendLineDownNotchDiameter
 						<< " markerStart='" << holeMarkerStart << "'";
 					HoleNoteInvokeDebugLog(holeLog.str());
 				}
@@ -16681,7 +16580,7 @@ int ZiDonCuTu::aabb_cb()
 					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped hole attribute dimensions");
 				}
 				NXOpen::Features::FlatPattern* matchedFlatPattern = NULL;
-				if (bendNoteEnabled || breakBendLineEnabled || largeArcMarkerLineEnabled || bendLineUpNotchEnabled || bendLineDownNotchEnabled)
+				if (bendNoteEnabled || breakBendLineEnabled || largeArcMarkerLineEnabled)
 				{
 					NXOpen::Part* flatPatternPart = g_independentDrawingPartActive
 						? DrawingModelPart()
@@ -16758,25 +16657,6 @@ int ZiDonCuTu::aabb_cb()
 				{
 					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped large arc marker line: no matching flat pattern");
 				}
-				if ((bendLineUpNotchEnabled || bendLineDownNotchEnabled) && matchedFlatPattern != NULL)
-				{
-					CreateFlatPatternBendLineNotches(
-						baseView3C,
-						matchedFlatPattern,
-						bendLineUpNotchEnabled,
-						bendLineUpNotchDiameter,
-						bendLineDownNotchEnabled,
-						bendLineDownNotchDiameter);
-				}
-				else if (bendLineUpNotchEnabled || bendLineDownNotchEnabled)
-				{
-					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped bend line notch: no matching flat pattern");
-				}
-				else
-				{
-					HoleNoteInvokeDebugLog("[HoleNoteInvoke] skipped bend line notch");
-				}
-
 				std::vector<Drawings::DraftingBody*>DraftingBodyVector;
 				//获取视图body
 				Drawings::DraftingBodyCollection* DraftingBodyCollection1 = baseView3C->DraftingBodies();

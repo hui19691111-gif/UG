@@ -29,6 +29,9 @@
 #include <utility>
 
 #include <NXOpen/BodyDumbRule.hxx>
+#include <NXOpen/BodyCollection.hxx>
+#include <NXOpen/Assemblies_Component.hxx>
+#include <NXOpen/Assemblies_ComponentAssembly.hxx>
 #include <NXOpen/ColorManager.hxx>
 #include <NXOpen/CurveGroupRule.hxx>
 #include <NXOpen/Drafting_PreferencesBuilder.hxx>
@@ -96,6 +99,7 @@
 #include <NXOpen/SketchCollection.hxx>
 #include <NXOpen/SketchInPlaceBuilder.hxx>
 #include <uf.h>
+#include <uf_assem.h>
 #include <uf_curve.h>
 #include <uf_disp.h>
 #include <uf_eval.h>
@@ -222,6 +226,7 @@ std::string DebugTag(tag_t tag);
 std::string DebugPoint(const double point[3]);
 bool IsAutoTestBottomRequested(const char* param, int paramLen);
 int RunBottomShallowGrooveAutoTest();
+int RunAssemblyShallowGrooveAutoTest(bool edgeMode);
 PreparedCurveSet ApplyPreSegmentRules(Part* workPart, const std::vector<tag_t>& curveTags, const ContactMatch& match);
 PreparedCurveGroupSet ApplyPreSegmentRulesToGroups(Part* workPart, const std::vector<tag_t>& curveTags, const ContactMatch& match);
 PreparedCurveGroupSet ApplyPreSegmentRulesToGroups(
@@ -3070,9 +3075,65 @@ std::vector<tag_t> AskAllCurveObjectsForSearch(Part* workPart)
     return curveTags;
 }
 
+void AppendSolidBodiesFromComponent(
+    NXOpen::Assemblies::Component* component,
+    std::vector<tag_t>& bodies,
+    std::unordered_set<tag_t>& seen)
+{
+    if (component == NULL || component->IsSuppressed())
+    {
+        return;
+    }
+
+    try
+    {
+        Part* prototypePart = dynamic_cast<Part*>(component->Prototype());
+        if (prototypePart != NULL)
+        {
+            if (!prototypePart->IsFullyLoaded())
+            {
+                PartLoadStatus* loadStatus = prototypePart->LoadThisPartFully();
+                delete loadStatus;
+            }
+            for (BodyCollection::iterator it = prototypePart->Bodies()->begin();
+                 it != prototypePart->Bodies()->end(); ++it)
+            {
+                Body* occurrenceBody = dynamic_cast<Body*>(component->FindOccurrence(*it));
+                if (occurrenceBody == NULL || !IsSolidBody(occurrenceBody->Tag()) ||
+                    occurrenceBody->IsBlanked())
+                {
+                    continue;
+                }
+                if (seen.insert(occurrenceBody->Tag()).second)
+                {
+                    bodies.push_back(occurrenceBody->Tag());
+                }
+            }
+        }
+        const std::vector<NXOpen::Assemblies::Component*> children = component->GetChildren();
+        for (std::size_t index = 0; index < children.size(); ++index)
+        {
+            AppendSolidBodiesFromComponent(children[index], bodies, seen);
+        }
+    }
+    catch (const NXException& ex)
+    {
+        DebugLog(std::string("Assembly component body loading failed: ") + ex.Message());
+    }
+    catch (const std::exception& ex)
+    {
+        DebugLog(std::string("Assembly component body loading failed: ") + ex.what());
+    }
+    catch (...)
+    {
+        DebugLog("Assembly component body loading failed: unknown exception");
+    }
+}
+
 std::vector<tag_t> AskSolidBodiesInWorkPart(tag_t partTag)
 {
     std::vector<tag_t> bodies;
+    std::unordered_set<tag_t> seen;
     tag_t bodyTag = NULL_TAG;
     while (UF_OBJ_cycle_objs_in_part(partTag, UF_solid_type, &bodyTag) == 0 && bodyTag != NULL_TAG)
     {
@@ -3089,7 +3150,27 @@ std::vector<tag_t> AskSolidBodiesInWorkPart(tag_t partTag)
 
         if (UF_OBJ_ask_status(bodyTag) == UF_OBJ_ALIVE)
         {
-            bodies.push_back(bodyTag);
+            if (seen.insert(bodyTag).second)
+            {
+                bodies.push_back(bodyTag);
+            }
+        }
+    }
+
+    Session* session = Session::GetSession();
+    Part* displayPart = session != NULL && session->Parts() != NULL
+        ? session->Parts()->Display() : NULL;
+    if (displayPart != NULL && displayPart->ComponentAssembly() != NULL)
+    {
+        NXOpen::Assemblies::Component* root =
+            displayPart->ComponentAssembly()->RootComponent();
+        if (root != NULL)
+        {
+            const std::vector<NXOpen::Assemblies::Component*> children = root->GetChildren();
+            for (std::size_t index = 0; index < children.size(); ++index)
+            {
+                AppendSolidBodiesFromComponent(children[index], bodies, seen);
+            }
         }
     }
     return bodies;
@@ -3667,7 +3748,7 @@ std::vector<ContactMatch> AskUserToSelectSourceBodyContact(tag_t targetFaceTag, 
     NXOpen::Selection::Response response = ui->SelectionManager()->SelectTaggedObjects(
         ToUtf8(L"请选择要标记的体，或取消退出").c_str(),
         ToUtf8(L"未检查到要标记的体，请手动选择或退出").c_str(),
-        NXOpen::Selection::SelectionScopeWorkPart,
+        NXOpen::Selection::SelectionScopeAnyInAssembly,
         NXOpen::Selection::SelectionActionClearAndEnableSpecific,
         false,
         true,
@@ -5379,6 +5460,170 @@ int CreateShallowGrooveByExtrude(
     return 1;
 }
 
+std::array<double, 3> AssemblyPointToPrototype(
+    const std::array<double, 3>& point,
+    const double transform[4][4])
+{
+    const double translated[3] = {
+        point[0] - transform[0][3],
+        point[1] - transform[1][3],
+        point[2] - transform[2][3]};
+    return {
+        transform[0][0] * translated[0] + transform[1][0] * translated[1] + transform[2][0] * translated[2],
+        transform[0][1] * translated[0] + transform[1][1] * translated[1] + transform[2][1] * translated[2],
+        transform[0][2] * translated[0] + transform[1][2] * translated[1] + transform[2][2] * translated[2]};
+}
+
+int CreateShallowGrooveInTargetComponent(
+    Part* workPart,
+    const std::vector<tag_t>& grooveCurves,
+    const ContactMatch& match,
+    double grooveDepth,
+    double grooveWidth)
+{
+    if (!UF_ASSEM_is_occurrence(match.targetBody))
+    {
+        return CreateShallowGrooveByExtrude(workPart, grooveCurves, match, grooveDepth, grooveWidth);
+    }
+
+    const tag_t prototypeBody = UF_ASSEM_ask_prototype_of_occ(match.targetBody);
+    const tag_t prototypeFace = UF_ASSEM_ask_prototype_of_occ(match.targetFace);
+    tag_t targetPartTag = NULL_TAG;
+    double transform[4][4] = {};
+    if (prototypeBody == NULL_TAG || prototypeFace == NULL_TAG ||
+        UF_OBJ_ask_owning_part(prototypeBody, &targetPartTag) != 0 ||
+        targetPartTag == NULL_TAG ||
+        UF_ASSEM_ask_transform_of_occ(match.targetBody, transform) != 0)
+    {
+        DebugLog("Assembly groove failed: target occurrence could not be mapped to prototype");
+        return 0;
+    }
+
+    Part* targetPart = dynamic_cast<Part*>(NXObjectManager::Get(targetPartTag));
+    if (targetPart == NULL)
+    {
+        DebugLog("Assembly groove failed: target prototype part is not loaded");
+        return 0;
+    }
+
+    std::vector<std::vector<std::array<double, 3> > > localPolylines;
+    for (std::size_t curveIndex = 0; curveIndex < grooveCurves.size(); ++curveIndex)
+    {
+        const tag_t curveTag = grooveCurves[curveIndex];
+        if (curveTag == NULL_TAG || UF_OBJ_ask_status(curveTag) != UF_OBJ_ALIVE)
+        {
+            continue;
+        }
+
+        std::vector<std::array<double, 3> > samples;
+        UF_CURVE_line_t lineData{};
+        if (UF_CURVE_ask_line_data(curveTag, &lineData) == 0)
+        {
+            samples.push_back({lineData.start_point[0], lineData.start_point[1], lineData.start_point[2]});
+            samples.push_back({lineData.end_point[0], lineData.end_point[1], lineData.end_point[2]});
+        }
+        else
+        {
+            samples = SampleCurvePolyline(curveTag, 0.1);
+        }
+
+        if (samples.size() < 2)
+        {
+            DebugLog("Assembly groove failed: a mark curve could not be sampled");
+            return 0;
+        }
+        for (std::size_t pointIndex = 0; pointIndex < samples.size(); ++pointIndex)
+        {
+            samples[pointIndex] = AssemblyPointToPrototype(samples[pointIndex], transform);
+        }
+        localPolylines.push_back(samples);
+    }
+    if (localPolylines.empty())
+    {
+        return 0;
+    }
+
+    ContactMatch localMatch = match;
+    localMatch.targetBody = prototypeBody;
+    localMatch.targetFace = prototypeFace;
+    const std::array<double, 3> localSourcePoint = AssemblyPointToPrototype(
+        {match.sourcePoint[0], match.sourcePoint[1], match.sourcePoint[2]}, transform);
+    const std::array<double, 3> localTargetPoint = AssemblyPointToPrototype(
+        {match.targetPoint[0], match.targetPoint[1], match.targetPoint[2]}, transform);
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        localMatch.sourcePoint[axis] = localSourcePoint[axis];
+        localMatch.targetPoint[axis] = localTargetPoint[axis];
+    }
+
+    UF_ASSEM_work_part_context_p_t previousContext = NULL;
+    const int contextError = UF_ASSEM_set_work_part_context_quietly(targetPartTag, &previousContext);
+    if (contextError != 0 || previousContext == NULL)
+    {
+        DebugLog("Assembly groove failed: cannot edit target prototype, error=" +
+                 std::to_string(contextError));
+        return 0;
+    }
+
+    std::vector<tag_t> localCurves;
+    int result = 0;
+    try
+    {
+        for (std::size_t polylineIndex = 0; polylineIndex < localPolylines.size(); ++polylineIndex)
+        {
+            const std::vector<std::array<double, 3> >& points = localPolylines[polylineIndex];
+            for (std::size_t pointIndex = 1; pointIndex < points.size(); ++pointIndex)
+            {
+                if (DistanceSquared(points[pointIndex - 1].data(), points[pointIndex].data()) <= 1.0e-12)
+                {
+                    continue;
+                }
+                UF_CURVE_line_t line{};
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    line.start_point[axis] = points[pointIndex - 1][axis];
+                    line.end_point[axis] = points[pointIndex][axis];
+                }
+                tag_t lineTag = NULL_TAG;
+                if (UF_CURVE_create_line(&line, &lineTag) != 0 || lineTag == NULL_TAG)
+                {
+                    throw std::runtime_error("cannot create transformed groove line");
+                }
+                localCurves.push_back(lineTag);
+            }
+        }
+
+        DebugLog("Assembly groove: targetPart=" + DebugTag(targetPartTag) +
+                 ", occurrenceBody=" + DebugTag(match.targetBody) +
+                 ", localCurves=" + std::to_string(localCurves.size()));
+        result = CreateShallowGrooveByExtrude(
+            targetPart, localCurves, localMatch, grooveDepth, grooveWidth);
+    }
+    catch (const std::exception& ex)
+    {
+        DebugLog(std::string("Assembly groove failed: ") + ex.what());
+    }
+    catch (...)
+    {
+        DebugLog("Assembly groove failed: unknown exception");
+    }
+    if (result == 0)
+    {
+        DeleteObjects(localCurves);
+    }
+    const int restoreError = UF_ASSEM_restore_work_part_context_quietly(&previousContext);
+    if (restoreError != 0)
+    {
+        DebugLog("Assembly groove warning: failed to restore work-part context, error=" +
+                 std::to_string(restoreError));
+    }
+    if (result != 0)
+    {
+        DeleteObjects(grooveCurves);
+    }
+    return result;
+}
+
 std::vector<tag_t> CreateShadowCurveForContact(Part* workPart, Body* sourceBody, const ContactMatch& match)
 {
     if (workPart == NULL || sourceBody == NULL || match.targetFace == NULL_TAG)
@@ -5713,7 +5958,7 @@ std::vector<ContactMatch> AskUserToSelectContactMatches(const std::vector<Contac
     NXOpen::Selection::Response response = ui->SelectionManager()->SelectTaggedObjects(
         ToUtf8(L"发现多个相贴面，请选择要标记的面，完成后点确定").c_str(),
         ToUtf8(L"选择标记面").c_str(),
-        NXOpen::Selection::SelectionScopeWorkPart,
+        NXOpen::Selection::SelectionScopeAnyInAssembly,
         NXOpen::Selection::SelectionActionClearAndEnableSpecific,
         false,
         true,
@@ -6090,7 +6335,7 @@ int RunBottomShallowGrooveAutoTest()
                 continue;
             }
 
-            const int grooveResult = CreateShallowGrooveByExtrude(workPart, finalCurves, match, grooveDepth, grooveWidth);
+            const int grooveResult = CreateShallowGrooveInTargetComponent(workPart, finalCurves, match, grooveDepth, grooveWidth);
             DebugLog(std::string("AutoTest bottom shallow groove result=") + (grooveResult != 0 ? "success" : "failed"));
             if (grooveResult != 0)
             {
@@ -6105,6 +6350,120 @@ int RunBottomShallowGrooveAutoTest()
         log << "AutoTest bottom failed: no shallow groove created, attempted=" << attempted;
         DebugLog(log.str());
     }
+    return 0;
+}
+
+int RunAssemblyShallowGrooveAutoTest(bool edgeMode)
+{
+    Session* session = Session::GetSession();
+    Part* workPart = session != NULL && session->Parts() != NULL
+        ? session->Parts()->Work() : NULL;
+    if (workPart == NULL)
+    {
+        return 0;
+    }
+    DebugLog(std::string("AutoTest assembly begin: mode=") + (edgeMode ? "edge" : "contour"));
+    const std::vector<tag_t> bodies = AskSolidBodiesInWorkPart(workPart->Tag());
+    SegmentParameters parameters;
+    parameters.segmentLength = 40.0;
+    parameters.maxMarkSpacing = 500.0;
+    parameters.closedCurveRule = 0;
+    for (std::size_t bodyIndex = 0; bodyIndex < bodies.size(); ++bodyIndex)
+    {
+        if (!UF_ASSEM_is_occurrence(bodies[bodyIndex]))
+        {
+            continue;
+        }
+        const std::vector<tag_t> faces = AskPlanarFaces(bodies[bodyIndex]);
+        for (std::size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex)
+        {
+            const std::vector<ContactMatch> matches = FindContactsForTargetFace(
+                faces[faceIndex], workPart->Tag());
+            if (matches.empty())
+            {
+                continue;
+            }
+            const ContactMatch& match = matches.front();
+            std::vector<tag_t> projectedCurves;
+            if (edgeMode)
+            {
+                const std::vector<tag_t> edges = AskPeripheralLoopEdges(match.sourceFace);
+                std::vector<Edge*> selectedEdges;
+                for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex)
+                {
+                    Edge* edge = dynamic_cast<Edge*>(NXObjectManager::Get(edges[edgeIndex]));
+                    if (edge != NULL)
+                    {
+                        selectedEdges.push_back(edge);
+                    }
+                }
+                const std::vector<EdgePlaneGroup> groups = BuildEdgePlaneGroups(
+                    selectedEdges, workPart->Tag());
+                if (groups.empty())
+                {
+                    continue;
+                }
+                ContactMatch edgeMatch;
+                double candidateDistance = DBL_MAX;
+                if (!FindBestEdgePlaneContact(groups.front(), workPart->Tag(),
+                                              edgeMatch, candidateDistance))
+                {
+                    continue;
+                }
+                projectedCurves = ProjectSelectedEdgesToFace(
+                    workPart, groups.front().edges, edgeMatch);
+                if (projectedCurves.empty())
+                {
+                    continue;
+                }
+                const std::vector<std::vector<tag_t> > projectedGroups(1, projectedCurves);
+                const PreparedCurveGroupSet prepared = ApplyPreSegmentRulesToGroups(
+                    workPart, projectedGroups, edgeMatch);
+                const std::vector<tag_t> finalCurves = FlattenCurveGroups(
+                    BuildSegmentedMarkCurveGroups(prepared.groups, parameters));
+                if (finalCurves.empty())
+                {
+                    continue;
+                }
+                const int result = CreateShallowGrooveInTargetComponent(
+                    workPart, finalCurves, edgeMatch, 0.002, 0.004);
+                DebugLog(std::string("AutoTest assembly edge result=") +
+                         (result != 0 ? "success" : "failed"));
+                if (result != 0)
+                {
+                    return 1;
+                }
+            }
+            else
+            {
+                Body* sourceBody = dynamic_cast<Body*>(NXObjectManager::Get(
+                    AskFaceOwningSolidBody(match.sourceFace)));
+                projectedCurves = CreateShadowCurveForContact(workPart, sourceBody, match);
+                if (projectedCurves.empty())
+                {
+                    continue;
+                }
+                const std::vector<std::vector<tag_t> > projectedGroups(1, projectedCurves);
+                const PreparedCurveGroupSet prepared = ApplyPreSegmentRulesToGroups(
+                    workPart, projectedGroups, match);
+                const std::vector<tag_t> finalCurves = FlattenCurveGroups(
+                    BuildSegmentedMarkCurveGroups(prepared.groups, parameters));
+                if (finalCurves.empty())
+                {
+                    continue;
+                }
+                const int result = CreateShallowGrooveInTargetComponent(
+                    workPart, finalCurves, match, 0.002, 0.004);
+                DebugLog(std::string("AutoTest assembly contour result=") +
+                         (result != 0 ? "success" : "failed"));
+                if (result != 0)
+                {
+                    return 1;
+                }
+            }
+        }
+    }
+    DebugLog("AutoTest assembly failed: no groove created");
     return 0;
 }
 }
@@ -6276,6 +6635,22 @@ extern "C" DllExport void ufusr(char* param, int* retcod, int param_len)
     static_cast<void>(retcod);
     static_cast<void>(param_len);
 
+    if (param != NULL && param_len > 0)
+    {
+        const std::string request(param, static_cast<std::size_t>(param_len));
+        if (request.find("autotest_assembly_contour") != std::string::npos ||
+            request.find("autotest_assembly_edge") != std::string::npos)
+        {
+            const bool edgeMode = request.find("autotest_assembly_edge") != std::string::npos;
+            const int result = RunAssemblyShallowGrooveAutoTest(edgeMode);
+            if (retcod != NULL)
+            {
+                *retcod = result != 0 ? 0 : 1;
+            }
+            return;
+        }
+    }
+
     if (IsAutoTestBottomRequested(param, param_len))
     {
         const int result = RunBottomShallowGrooveAutoTest();
@@ -6319,6 +6694,8 @@ NXOpen::BlockStyler::BlockDialog::DialogResponse BiaoJiXian_BJ::Launch()
 
 void BiaoJiXian_BJ::initialize_cb()
 {
+    try
+    {
     InputGroup = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("InputGroup"));
     SourceBody = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("SourceBody"));
     SourceEdges = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("SourceEdges"));
@@ -6340,12 +6717,31 @@ void BiaoJiXian_BJ::initialize_cb()
     CurveLineFont = dynamic_cast<LineFont*>(theDialog->TopBlock()->FindBlock("CurveLineFont"));
     LoadRememberedDialogValues();
     ConfigureSelectionFilters();
-    RefreshUiState();
+    }
+    catch (const NXException& ex)
+    {
+        DebugLog(std::string("initialize_cb failed: ") + ex.Message());
+    }
+    catch (...)
+    {
+        DebugLog("initialize_cb failed: unknown exception");
+    }
 }
 
 void BiaoJiXian_BJ::dialogShown_cb()
 {
-    RefreshUiState();
+    try
+    {
+        RefreshUiState();
+    }
+    catch (const NXException& ex)
+    {
+        DebugLog(std::string("dialogShown_cb failed: ") + ex.Message());
+    }
+    catch (...)
+    {
+        DebugLog("dialogShown_cb failed: unknown exception");
+    }
 }
 
 int BiaoJiXian_BJ::apply_cb()
@@ -6574,7 +6970,7 @@ int BiaoJiXian_BJ::apply_cb()
                 }
                 if (outputMode == 1)
                 {
-                    const int grooveResult = CreateShallowGrooveByExtrude(workPart, finalCurves, representativeMatch, grooveDepth, grooveWidth);
+                    const int grooveResult = CreateShallowGrooveInTargetComponent(workPart, finalCurves, representativeMatch, grooveDepth, grooveWidth);
                     DebugLog(std::string("Contour mode shallow groove result=") + (grooveResult != 0 ? "success" : "failed"));
                 }
                 if (outputMode == 0 && !flatCurvesForBody.empty())
@@ -6703,7 +7099,7 @@ int BiaoJiXian_BJ::apply_cb()
                 }
                 if (outputMode == 1)
                 {
-                    const int grooveResult = CreateShallowGrooveByExtrude(workPart, finalCurves, representativeMatch, grooveDepth, grooveWidth);
+                    const int grooveResult = CreateShallowGrooveInTargetComponent(workPart, finalCurves, representativeMatch, grooveDepth, grooveWidth);
                     DebugLog(std::string("Bottom mode shallow groove result=") + (grooveResult != 0 ? "success" : "failed"));
                 }
                 if (outputMode == 0 && !flatCurvesForBody.empty())
@@ -6805,7 +7201,7 @@ int BiaoJiXian_BJ::apply_cb()
 
                     if (outputMode == 1)
                     {
-                        const int grooveResult = CreateShallowGrooveByExtrude(
+                        const int grooveResult = CreateShallowGrooveInTargetComponent(
                             workPart,
                             finalCurves,
                             match,
@@ -6861,15 +7257,21 @@ int BiaoJiXian_BJ::ok_cb()
 
 int BiaoJiXian_BJ::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
+    static bool modeUpdateInProgress = false;
+    if (block == MarkLineMode && modeUpdateInProgress)
+    {
+        return 0;
+    }
     if (block == SourceBody)
     {
         NormalizeFaceSelection();
     }
     if (block == MarkLineMode)
     {
-        RefreshUiState();
+        modeUpdateInProgress = true;
         try
         {
+            RefreshUiState();
             NXOpen::BlockStyler::UIBlock* selectionBlock =
                 GetEnumerationValue(MarkLineMode) == 2
                     ? static_cast<NXOpen::BlockStyler::UIBlock*>(SourceEdges)
@@ -6891,6 +7293,7 @@ int BiaoJiXian_BJ::update_cb(NXOpen::BlockStyler::UIBlock* block)
         {
             DebugLog("MarkLineMode selection focus failed: unknown exception");
         }
+        modeUpdateInProgress = false;
     }
     else if (block == MarkOutputMode || block == CurveLayerModeOption)
     {
@@ -6981,7 +7384,7 @@ void BiaoJiXian_BJ::ConfigureFaceFilter() const
 
     try
     {
-        SourceBody->SetMaximumScopeAsString("Within Work Part Only");
+        SourceBody->SetMaximumScopeAsString("Within Work Part and Components");
         SourceBody->SetSelectModeAsString("Single");
         SourceBody->SetInterpartSelectionAsString("Simple");
         SourceBody->SetAllowConvergentObject(false);
@@ -6993,8 +7396,13 @@ void BiaoJiXian_BJ::ConfigureFaceFilter() const
         properties->SetSelectionFilter("SelectionFilter", action, maskArray);
         delete properties;
     }
+    catch (const NXException& ex)
+    {
+        DebugLog(std::string("ConfigureFaceFilter failed: ") + ex.Message());
+    }
     catch (...)
     {
+        DebugLog("ConfigureFaceFilter failed: unknown exception");
     }
 }
 
@@ -7005,12 +7413,25 @@ void BiaoJiXian_BJ::ConfigureEdgeFilter() const
         return;
     }
 
-    PropertyList* properties = SourceEdges->GetProperties();
-    Selection::SelectionAction action = Selection::SelectionActionClearAndEnableSpecific;
-    std::vector<Selection::MaskTriple> maskArray(1);
-    maskArray[0] = Selection::MaskTriple(UF_solid_type, UF_solid_body_subtype, UF_UI_SEL_FEATURE_ANY_EDGE);
-    properties->SetSelectionFilter("SelectionFilter", action, maskArray);
-    delete properties;
+    try
+    {
+        SourceEdges->SetMaximumScopeAsString("Within Work Part and Components");
+        SourceEdges->SetInterpartSelectionAsString("Simple");
+        PropertyList* properties = SourceEdges->GetProperties();
+        Selection::SelectionAction action = Selection::SelectionActionClearAndEnableSpecific;
+        std::vector<Selection::MaskTriple> maskArray(1);
+        maskArray[0] = Selection::MaskTriple(UF_solid_type, UF_solid_body_subtype, UF_UI_SEL_FEATURE_ANY_EDGE);
+        properties->SetSelectionFilter("SelectionFilter", action, maskArray);
+        delete properties;
+    }
+    catch (const NXException& ex)
+    {
+        DebugLog(std::string("ConfigureEdgeFilter failed: ") + ex.Message());
+    }
+    catch (...)
+    {
+        DebugLog("ConfigureEdgeFilter failed: unknown exception");
+    }
 }
 
 void BiaoJiXian_BJ::NormalizeFaceSelection() const

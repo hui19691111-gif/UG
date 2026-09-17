@@ -33,7 +33,7 @@ target_link_options(StandardPartsLibrary PRIVATE
     $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/NXCOMPAT>)
 target_link_libraries(StandardPartsLibrary PRIVATE
     libugopenint.lib libufun.lib libnxopencpp.lib libnxopencpp_gateway.lib
-    libnxopenuicpp.lib user32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib)
+    libnxopenuicpp.lib user32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib windowscodecs.lib)
 
 add_custom_command(TARGET StandardPartsLibrary POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -43,3 +43,47 @@ add_custom_command(TARGET StandardPartsLibrary POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/StandardPartsLibrary.dlx"
         "$<TARGET_FILE_DIR:StandardPartsLibrary>/StandardPartsLibrary.dlx")
+add_custom_command(TARGET StandardPartsLibrary POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/StandardPartsCapture.dlx"
+        "$<TARGET_FILE_DIR:StandardPartsLibrary>/StandardPartsCapture.dlx")
+
+# Opt-in external NX integration test. Never deployed with the plugin.
+option(ZH_STANDARD_PARTS_TESTS "Build placement integration test" OFF)
+if(ZH_STANDARD_PARTS_TESTS)
+    add_executable(StandardPartsPlacementTest tests/PlacementIntegration.cpp)
+    target_include_directories(StandardPartsPlacementTest PRIVATE
+        "${NX_INSTALL_ROOT}/UGOPEN" "${NX_INSTALL_ROOT}/UGOPEN/NXOpen")
+    target_compile_definitions(StandardPartsPlacementTest PRIVATE
+        UNICODE _UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(StandardPartsPlacementTest PRIVATE /W4 /EHsc /utf-8)
+    target_link_directories(StandardPartsPlacementTest PRIVATE "${NX_INSTALL_ROOT}/UGOPEN")
+    target_link_libraries(StandardPartsPlacementTest PRIVATE
+        libugopenint.lib libufun.lib libnxopencpp.lib libnxopencpp_gateway.lib
+        libnxopenuicpp.lib user32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib windowscodecs.lib)
+    add_executable(GenerateGbSocketLibrary tests/GenerateGbSocketLibrary.cpp)
+    target_include_directories(GenerateGbSocketLibrary PRIVATE
+        "${NX_INSTALL_ROOT}/UGOPEN" "${NX_INSTALL_ROOT}/UGOPEN/NXOpen")
+    target_compile_definitions(GenerateGbSocketLibrary PRIVATE UNICODE _UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(GenerateGbSocketLibrary PRIVATE /W4 /EHsc /utf-8)
+    target_link_directories(GenerateGbSocketLibrary PRIVATE "${NX_INSTALL_ROOT}/UGOPEN")
+    target_link_libraries(GenerateGbSocketLibrary PRIVATE
+        libugopenint.lib libufun.lib libnxopencpp.lib libnxopencpp_gateway.lib libnxopencpp_features.lib
+        libnxopenuicpp.lib user32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib windowscodecs.lib)
+    add_executable(StandardPartsParameterTest tests/ParameterIntegration.cpp)
+    add_executable(GenerateGbFlatLibrary tests/GenerateGbFlatLibrary.cpp)
+    target_include_directories(GenerateGbFlatLibrary PRIVATE "${NX_INSTALL_ROOT}/UGOPEN" "${NX_INSTALL_ROOT}/UGOPEN/NXOpen")
+    target_compile_definitions(GenerateGbFlatLibrary PRIVATE UNICODE _UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(GenerateGbFlatLibrary PRIVATE /W4 /EHsc /utf-8)
+    target_link_directories(GenerateGbFlatLibrary PRIVATE "${NX_INSTALL_ROOT}/UGOPEN")
+    target_link_libraries(GenerateGbFlatLibrary PRIVATE
+        libugopenint.lib libufun.lib libnxopencpp.lib libnxopencpp_gateway.lib libnxopencpp_features.lib
+        libnxopenuicpp.lib user32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib windowscodecs.lib)
+    target_include_directories(StandardPartsParameterTest PRIVATE "${NX_INSTALL_ROOT}/UGOPEN" "${NX_INSTALL_ROOT}/UGOPEN/NXOpen")
+    target_compile_definitions(StandardPartsParameterTest PRIVATE UNICODE _UNICODE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(StandardPartsParameterTest PRIVATE /W4 /EHsc /utf-8)
+    target_link_directories(StandardPartsParameterTest PRIVATE "${NX_INSTALL_ROOT}/UGOPEN")
+    target_link_libraries(StandardPartsParameterTest PRIVATE
+        libugopenint.lib libufun.lib libnxopencpp.lib libnxopencpp_gateway.lib
+        libnxopenuicpp.lib user32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib windowscodecs.lib)
+endif()

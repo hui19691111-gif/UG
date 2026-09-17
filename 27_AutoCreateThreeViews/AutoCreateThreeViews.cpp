@@ -1,4 +1,5 @@
 #include "AutoCreateThreeViews.hpp"
+#include <atomic>
 #include "../../common/ZhihuiEmbeddedDialog.hpp"
 #include "embedded_dialog_resources.h"
 
@@ -13,6 +14,7 @@
 #include <NXOpen/BlockStyler_Enumeration.hxx>
 #include <NXOpen/BlockStyler_Toggle.hxx>
 #include <NXOpen/BlockStyler_SelectObject.hxx>
+#include <NXOpen/BlockStyler_TabControl.hxx>
 #include <NXOpen/Assemblies_Component.hxx>
 #include <stdexcept>
 #include <NXOpen/Body.hxx>
@@ -535,6 +537,11 @@ struct AutoViewDirection
 };
 
 std::map<std::pair<tag_t, int>, AutoViewDirection> g_manualFrontDirections;
+// A batch can invoke the drawing engine once for every layer/page of the same
+// part. Drafting preferences belong to the part, so applying them again for
+// every page only reopens the same template and forces needless NX updates.
+std::map<tag_t, std::string> g_appliedDraftingPreferenceTemplates;
+std::map<tag_t, bool> g_appliedHiddenLinePreferences;
 
 std::filesystem::path CurrentModuleDirectory()
 {
@@ -2054,6 +2061,33 @@ struct NativeDrawingProgressMonitor
     HANDLE thread = nullptr;
 };
 
+std::atomic<bool> g_drawingCancellationRequested{false};
+
+LRESULT CALLBACK NativeDrawingProgressWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_NCCREATE)
+    {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+    }
+    auto* monitor = reinterpret_cast<NativeDrawingProgressMonitor*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (monitor != nullptr && (message == WM_CLOSE ||
+        (message == WM_COMMAND && LOWORD(wParam) == IDCANCEL) || message == WM_DESTROY))
+    {
+        // Only signal cancellation here. NX work and DLL unloading belong to
+        // the main thread after the active NX operation has safely returned.
+        if (WaitForSingleObject(monitor->stopEvent, 0) != WAIT_OBJECT_0)
+            g_drawingCancellationRequested.store(true);
+        if (message != WM_DESTROY)
+        {
+            SetWindowTextW(window, L"正在取消出图，等待当前 NX 操作结束");
+            EnableWindow(GetDlgItem(window, IDCANCEL), FALSE);
+            return 0;
+        }
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
 DWORD WINAPI NativeDrawingProgressThread(LPVOID parameter)
 {
     NativeDrawingProgressMonitor* monitor = static_cast<NativeDrawingProgressMonitor*>(parameter);
@@ -2067,7 +2101,7 @@ DWORD WINAPI NativeDrawingProgressThread(LPVOID parameter)
     WNDCLASSEXW windowClass = {};
     windowClass.cbSize = sizeof(windowClass);
     windowClass.hInstance = instance;
-    windowClass.lpfnWndProc = DefWindowProcW;
+    windowClass.lpfnWndProc = NativeDrawingProgressWindowProc;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     windowClass.lpszClassName = className;
@@ -2076,13 +2110,13 @@ DWORD WINAPI NativeDrawingProgressThread(LPVOID parameter)
     RECT workArea = {};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
     const int width = 440;
-    const int height = 160;
+    const int height = 190;
     const int left = workArea.left + std::max(0L, (workArea.right - workArea.left - width) / 2);
     const int top = workArea.top + std::max(0L, (workArea.bottom - workArea.top - height) / 2);
     HWND window = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW, className, L"生成图纸",
         WS_CAPTION | WS_SYSMENU, left, top, width, height,
-        nullptr, nullptr, instance, nullptr);
+        nullptr, nullptr, instance, monitor);
     if (window == nullptr)
         return 2;
 
@@ -2099,6 +2133,9 @@ DWORD WINAPI NativeDrawingProgressThread(LPVOID parameter)
     SendMessageW(heading, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     SendMessageW(message, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     SendMessageW(progress, PBM_SETMARQUEE, TRUE, 30);
+    HWND cancel = CreateWindowExW(0, L"BUTTON", L"取消出图", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        312, 116, 100, 26, window, reinterpret_cast<HMENU>(IDCANCEL), instance, nullptr);
+    SendMessageW(cancel, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
 
@@ -2111,6 +2148,8 @@ DWORD WINAPI NativeDrawingProgressThread(LPVOID parameter)
         {
             if (nativeMessage.message == WM_QUIT)
             {
+                if (WaitForSingleObject(monitor->stopEvent, 0) != WAIT_OBJECT_0)
+                    g_drawingCancellationRequested.store(true);
                 done = true;
                 break;
             }
@@ -2140,7 +2179,8 @@ DWORD WINAPI NativeDrawingProgressThread(LPVOID parameter)
             std::wstring displayText = TextToWide(progressText);
             if (total > 0)
                 displayText += L" (" + std::to_wstring(current) + L"/" + std::to_wstring(total) + L")";
-            SetWindowTextW(message, displayText.c_str());
+            SetWindowTextW(message, g_drawingCancellationRequested.load()
+                ? L"已请求取消，等待当前 NX 操作安全返回..." : displayText.c_str());
             if (total > 0)
             {
                 if (!determinate)
@@ -2172,6 +2212,7 @@ DWORD WINAPI NativeDrawingProgressThread(LPVOID parameter)
             QS_ALLINPUT);
     }
 
+    SetEvent(monitor->stopEvent); // Normal teardown must not request cancellation.
     if (IsWindow(window))
         DestroyWindow(window);
     UnregisterClassW(className, instance);
@@ -2180,6 +2221,7 @@ DWORD WINAPI NativeDrawingProgressThread(LPVOID parameter)
 
 NativeDrawingProgressMonitor* StartDrawingProgressMonitor(const std::filesystem::path& requestPath)
 {
+    g_drawingCancellationRequested.store(false);
     auto* monitor = new NativeDrawingProgressMonitor();
     monitor->progressPath = ProgressPathFromRequest(requestPath);
     std::error_code ignored;
@@ -2206,17 +2248,17 @@ void CompleteAutoCreateThreeViewsNativeProgressImpl()
     NativeDrawingProgressMonitor* monitor = g_asyncDrawingProgressMonitor;
     g_asyncDrawingProgressMonitor = nullptr;
     StopDrawingProgressMonitor(monitor);
+    g_drawingCancellationRequested.store(false);
 }
 
 void StopDrawingProgressMonitor(NativeDrawingProgressMonitor* monitor)
 {
     if (monitor == nullptr)
         return;
-    if (WaitForSingleObject(monitor->thread, 1200) == WAIT_TIMEOUT)
-    {
-        SetEvent(monitor->stopEvent);
-        WaitForSingleObject(monitor->thread, 3000);
-    }
+    // This worker never invokes NX or synchronously calls the main thread.
+    // Join before freeing its state or allowing the main DLL to unload.
+    SetEvent(monitor->stopEvent);
+    WaitForSingleObject(monitor->thread, INFINITE);
     CloseHandle(monitor->thread);
     CloseHandle(monitor->stopEvent);
     delete monitor;
@@ -4170,300 +4212,11 @@ bool AskSolidBodyTagBoundsCenter(NXOpen::Part* part, NXOpen::Point3d& center)
     return true;
 }
 
-bool TryComputeAutoFrontDirectionFromLeafAssemblyBodies(
-    NXOpen::Part* assemblyPart,
-    AutoViewDirection& result)
-{
-    if (assemblyPart == nullptr)
-    {
-        return false;
-    }
-
-    const tag_t rootOccurrence = UF_ASSEM_ask_root_part_occ(assemblyPart->Tag());
-    if (rootOccurrence == NULL_TAG)
-    {
-        return false;
-    }
-
-    std::vector<std::pair<tag_t, AssemblyOccurrenceTransform>> leaves;
-    int rootChildCount = 0;
-    tag_t* rootChildren = nullptr;
-    rootChildCount = UF_ASSEM_ask_part_occ_children(rootOccurrence, &rootChildren);
-    if (rootChildCount <= 0 || rootChildren == nullptr)
-    {
-        return false;
-    }
-
-    const AssemblyOccurrenceTransform identity = IdentityOccurrenceTransform();
-    for (int index = 0; index < rootChildCount; ++index)
-    {
-        if (rootChildren[index] != NULL_TAG)
-        {
-            CollectLeafPartOccurrences(rootChildren[index], identity, leaves);
-        }
-    }
-    UF_free(rootChildren);
-
-    struct AssemblyPlanarFaceCandidate
-    {
-        tag_t occurrence = NULL_TAG;
-        tag_t faceTag = NULL_TAG;
-        tag_t edgeTag = NULL_TAG;
-        NXOpen::Vector3d normal = NXOpen::Vector3d(0.0, 0.0, 0.0);
-        NXOpen::Vector3d xDirection = NXOpen::Vector3d(0.0, 0.0, 0.0);
-        double area = 0.0;
-        double edgeLength = 0.0;
-    };
-
-    AssemblyPlanarFaceCandidate best;
-    bool found = false;
-    int leafCount = 0;
-    int directObjectOccurrenceCount = 0;
-    int directBodyOccurrenceCount = 0;
-    int prototypeBodyCount = 0;
-    int mappedBodyOccurrenceCount = 0;
-    int bodyCount = 0;
-    int planarFaceCount = 0;
-
-    for (const auto& leaf : leaves)
-    {
-        const tag_t occurrence = leaf.first;
-        ++leafCount;
-
-        std::vector<tag_t> bodyOccurrences;
-        std::set<tag_t> seenBodyOccurrences;
-        tag_t objectOccurrence = NULL_TAG;
-        while ((objectOccurrence = UF_ASSEM_cycle_ents_in_part_occ(occurrence, objectOccurrence)) != NULL_TAG)
-        {
-            ++directObjectOccurrenceCount;
-            const size_t before = bodyOccurrences.size();
-            AddUniqueBodyOccurrence(objectOccurrence, bodyOccurrences, seenBodyOccurrences);
-            if (bodyOccurrences.size() > before)
-            {
-                ++directBodyOccurrenceCount;
-            }
-        }
-
-        const tag_t prototypeTag = UF_ASSEM_ask_prototype_of_occ(occurrence);
-        if (prototypeTag != NULL_TAG)
-        {
-            tag_t prototypeBody = NULL_TAG;
-            while (UF_OBJ_cycle_objs_in_part(prototypeTag, UF_solid_type, &prototypeBody) == 0 &&
-                   prototypeBody != NULL_TAG)
-            {
-                if (!IsSolidBodyTag(prototypeBody))
-                {
-                    continue;
-                }
-                ++prototypeBodyCount;
-
-                const tag_t mappedOccurrence = UF_ASSEM_find_occurrence(occurrence, prototypeBody);
-                const size_t before = bodyOccurrences.size();
-                AddUniqueBodyOccurrence(mappedOccurrence, bodyOccurrences, seenBodyOccurrences);
-                if (bodyOccurrences.size() > before)
-                {
-                    ++mappedBodyOccurrenceCount;
-                }
-            }
-        }
-
-        for (tag_t bodyOccurrence : bodyOccurrences)
-        {
-            ++bodyCount;
-
-            uf_list_p_t faceList = nullptr;
-            if (UF_MODL_ask_body_faces(bodyOccurrence, &faceList) != 0 || faceList == nullptr)
-            {
-                continue;
-            }
-
-            int faceCount = 0;
-            UF_MODL_ask_list_count(faceList, &faceCount);
-            for (int faceIndex = 0; faceIndex < faceCount; ++faceIndex)
-            {
-                tag_t faceTag = NULL_TAG;
-                if (UF_MODL_ask_list_item(faceList, faceIndex, &faceTag) != 0 || faceTag == NULL_TAG)
-                {
-                    continue;
-                }
-
-                int faceType = 0;
-                double point[3] = {0.0, 0.0, 0.0};
-                double normalData[3] = {0.0, 0.0, 0.0};
-                double box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-                double radius = 0.0;
-                double radData = 0.0;
-                int normDir = 1;
-                if (UF_MODL_ask_face_data(faceTag, &faceType, point, normalData, box, &radius, &radData, &normDir) != 0 ||
-                    faceType != 22)
-                {
-                    continue;
-                }
-
-                NXOpen::Vector3d faceNormal(
-                    normalData[0] * static_cast<double>(normDir),
-                    normalData[1] * static_cast<double>(normDir),
-                    normalData[2] * static_cast<double>(normDir));
-                faceNormal = NormalizeVector(faceNormal);
-                if (VectorLength(faceNormal) < 1.0e-6)
-                {
-                    continue;
-                }
-                StabilizeDirectionSign(faceNormal);
-
-                double area = AskPlanarFaceArea(assemblyPart, faceTag);
-                if (area <= 1.0e-6)
-                {
-                    area = ApproximatePlanarFaceArea(normalData, box);
-                }
-                if (area <= 1.0e-6)
-                {
-                    continue;
-                }
-                ++planarFaceCount;
-
-                double longestEdge = 0.0;
-                tag_t longestEdgeTag = NULL_TAG;
-                NXOpen::Vector3d longestDirection(0.0, 0.0, 0.0);
-                uf_list_p_t edgeList = nullptr;
-                if (UF_MODL_ask_face_edges(faceTag, &edgeList) == 0 && edgeList != nullptr)
-                {
-                    int edgeCount = 0;
-                    UF_MODL_ask_list_count(edgeList, &edgeCount);
-                    for (int edgeIndex = 0; edgeIndex < edgeCount; ++edgeIndex)
-                    {
-                        tag_t edgeTag = NULL_TAG;
-                        if (UF_MODL_ask_list_item(edgeList, edgeIndex, &edgeTag) != 0 || edgeTag == NULL_TAG)
-                        {
-                            continue;
-                        }
-
-                        double start[3] = {0.0, 0.0, 0.0};
-                        double end[3] = {0.0, 0.0, 0.0};
-                        int vertexCount = 0;
-                        if (UF_MODL_ask_edge_verts(edgeTag, start, end, &vertexCount) != 0 ||
-                            vertexCount < 2 ||
-                            !IsStraightEdge(edgeTag, start, end))
-                        {
-                            continue;
-                        }
-
-                        NXOpen::Vector3d edgeVector(
-                            end[0] - start[0],
-                            end[1] - start[1],
-                            end[2] - start[2]);
-                        const double edgeLength = VectorLength(edgeVector);
-                        if (edgeLength <= longestEdge)
-                        {
-                            continue;
-                        }
-
-                        longestEdge = edgeLength;
-                        longestEdgeTag = edgeTag;
-                        longestDirection = edgeVector;
-                    }
-                    UF_MODL_delete_list(&edgeList);
-                }
-
-                if (longestEdge <= 1.0e-6 || longestEdgeTag == NULL_TAG)
-                {
-                    continue;
-                }
-                longestDirection = ProjectPerpendicular(longestDirection, faceNormal);
-                longestDirection = NormalizeVector(longestDirection);
-                if (VectorLength(longestDirection) < 1.0e-6)
-                {
-                    continue;
-                }
-                StabilizeDirectionSign(longestDirection);
-
-                if (!found ||
-                    area > best.area + 1.0e-6 ||
-                    (std::abs(area - best.area) <= 1.0e-6 && longestEdge > best.edgeLength))
-                {
-                    found = true;
-                    best.occurrence = occurrence;
-                    best.faceTag = faceTag;
-                    best.edgeTag = longestEdgeTag;
-                    best.normal = faceNormal;
-                    best.xDirection = longestDirection;
-                    best.area = area;
-                    best.edgeLength = longestEdge;
-                }
-            }
-
-            UF_MODL_delete_list(&faceList);
-        }
-    }
-
-    if (!found)
-    {
-        std::ostringstream line;
-        line << "AutoCreateThreeViews: assembly leaf front direction not found"
-             << ", leaves=" << leaves.size()
-             << ", visitedLeaves=" << leafCount
-             << ", objectOccurrences=" << directObjectOccurrenceCount
-             << ", directBodies=" << directBodyOccurrenceCount
-             << ", prototypeBodies=" << prototypeBodyCount
-             << ", mappedBodies=" << mappedBodyOccurrenceCount
-             << ", bodies=" << bodyCount
-             << ", planarFaces=" << planarFaceCount << ".";
-        WriteLine(nullptr, line.str());
-        return false;
-    }
-
-    result.normal = best.normal;
-    result.xDirection = best.xDirection;
-    if (DominantAxisName(result.normal) == "Y" && DominantAxisName(result.xDirection) == "X")
-    {
-        result.xDirection.X = -result.xDirection.X;
-        result.xDirection.Y = -result.xDirection.Y;
-        result.xDirection.Z = -result.xDirection.Z;
-    }
-    result.normalName = DominantAxisName(result.normal);
-    result.xName = DominantAxisName(result.xDirection);
-    result.faceArea = best.area;
-    result.edgeLength = best.edgeLength;
-    result.faceTag = best.faceTag;
-    result.edgeTag = best.edgeTag;
-    result.source = "assembly leaf component largest planar face + longest straight edge";
-    result.valid = true;
-
-    std::ostringstream line;
-    line << "AutoCreateThreeViews: selected assembly leaf front direction normal="
-         << result.normalName
-         << ", x="
-         << result.xName
-         << ", faceArea="
-         << result.faceArea
-         << ", edgeLength="
-         << result.edgeLength
-         << ", occurrence="
-         << static_cast<unsigned long long>(best.occurrence)
-         << ", faceTag="
-         << static_cast<unsigned long long>(result.faceTag)
-         << ", edgeTag="
-         << static_cast<unsigned long long>(result.edgeTag)
-         << ", leaves="
-         << leaves.size()
-         << ", objectOccurrences="
-         << directObjectOccurrenceCount
-         << ", directBodies="
-         << directBodyOccurrenceCount
-         << ", prototypeBodies="
-         << prototypeBodyCount
-         << ", mappedBodies="
-         << mappedBodyOccurrenceCount
-         << ".";
-    WriteLine(nullptr, line.str());
-    return true;
-}
 
 bool TryComputeAutoFrontDirectionFromOverallBoundingBox(
-    NXOpen::Part* part,
+    const ModelBounds& bounds,
     AutoViewDirection& result)
 {
-    const ModelBounds bounds = AskModelBounds(part);
     if (!bounds.valid)
     {
         return false;
@@ -4480,6 +4233,13 @@ bool TryComputeAutoFrontDirectionFromOverallBoundingBox(
     };
 
     const double sizes[3] = {bounds.sizeX, bounds.sizeY, bounds.sizeZ};
+    for (double size : sizes)
+    {
+        if (!std::isfinite(size) || size < 0.0)
+        {
+            return false;
+        }
+    }
     std::vector<BoxProjectionCandidate> candidates;
     for (int normalAxis = 0; normalAxis < 3; ++normalAxis)
     {
@@ -4560,6 +4320,13 @@ bool TryComputeAutoFrontDirectionFromOverallBoundingBox(
          << ".";
     WriteLine(nullptr, line.str());
     return true;
+}
+
+bool TryComputeAutoFrontDirectionFromOverallBoundingBox(
+    NXOpen::Part* part,
+    AutoViewDirection& result)
+{
+    return TryComputeAutoFrontDirectionFromOverallBoundingBox(AskModelBounds(part), result);
 }
 
 bool TryComputeAutoFrontDirectionFromLargestPlanarFace(
@@ -6253,8 +6020,10 @@ void PreferOverallBoxDirectionWithMostCurves(
     AutoViewDirection& frontDirection,
     double scaleDenominator)
 {
+    if (part == nullptr)
+        return;
     const ModelBounds bounds = AskModelBounds(part);
-    if (part == nullptr || !bounds.valid)
+    if (!bounds.valid)
     {
         WriteLine(session, "AutoCreateThreeViews: drafting view boundary direction skipped; model bounds invalid.");
         return;
@@ -6474,6 +6243,7 @@ void PreferOverallBoxDirectionWithMostCurves(
     frontDirection = probes[bestIndex].direction;
     DeleteTemporaryDraftingViews(part, temporaryViews);
 }
+
 
 NXOpen::Drawings::BaseView* CreateBaseViewFromModelingView(
     NXOpen::Session* session,
@@ -17683,6 +17453,7 @@ void CreateProjectedOverallDimensions(
     const std::vector<CreatedView>& createdProjectedViews,
     const AutoViewDirection& frontDirection)
 {
+    if (IsAutoCreateThreeViewsCancellationRequested()) return;
     if (!request.autoDimensions)
     {
         WriteLine(session, "AutoCreateThreeViews: auto dimension skipped by request.");
@@ -17712,6 +17483,7 @@ void CreateProjectedOverallDimensions(
     };
     for (const CreatedView& created : createdProjectedViews)
     {
+        if (IsAutoCreateThreeViewsCancellationRequested()) return;
         if (created.view == nullptr)
         {
             continue;
@@ -17802,6 +17574,7 @@ void CreateProjectedOverallDimensions(
         std::vector<LineProjectionFaceCandidate> verticalOverallPairFaces;
         bool hasHorizontalOverallPair = false;
         bool hasVerticalOverallPair = false;
+        if (IsAutoCreateThreeViewsCancellationRequested()) return;
         if (request.dimensionInnerClosedCurve)
         {
             ensureShallowCache();
@@ -17809,7 +17582,8 @@ void CreateProjectedOverallDimensions(
             overallFaces =
                 CollectLineProjectionFaceCandidates(session, workPart, created.view, created.label + " overall", lines, axisTolerance, &shallowCache);
             overallFaces = CollapseSamePlaneFaceCandidates(overallFaces);
-            if (createHorizontal)
+            if (IsAutoCreateThreeViewsCancellationRequested()) return;
+        if (createHorizontal)
             {
                 hasHorizontalOverallPair =
                     TryFindOverallFacePair(
@@ -17822,7 +17596,8 @@ void CreateProjectedOverallDimensions(
                         session,
                         created.label);
             }
-            if (createVertical)
+            if (IsAutoCreateThreeViewsCancellationRequested()) return;
+        if (createVertical)
             {
                 hasVerticalOverallPair =
                     TryFindOverallFacePair(
@@ -17861,6 +17636,7 @@ void CreateProjectedOverallDimensions(
             << ", offset=" << offset << ".";
         WriteLine(session, log.str());
 
+        if (IsAutoCreateThreeViewsCancellationRequested()) return;
         if (createHorizontal)
         {
             bool dimensionCreated = CreateHorizontalOverallDimension(
@@ -17878,6 +17654,7 @@ void CreateProjectedOverallDimensions(
                 }
             }
         }
+        if (IsAutoCreateThreeViewsCancellationRequested()) return;
         if (createVertical)
         {
             bool dimensionCreated = CreateVerticalOverallDimension(
@@ -17895,16 +17672,19 @@ void CreateProjectedOverallDimensions(
                 }
             }
         }
+        if (IsAutoCreateThreeViewsCancellationRequested()) return;
         if (request.dimensionHole)
         {
             ensureShallowCache();
             CreateFrontHoleDiameterDimensions(session, workPart, shallowCache, created.view, extents, bounds, offset, annotatedTappedHoleDiameters);
         }
+        if (IsAutoCreateThreeViewsCancellationRequested()) return;
         if (request.dimensionHoleLocation)
         {
             ensureShallowCache();
             CreateFrontHoleLocationDimensions(session, workPart, shallowCache, created.view, extents, bounds, offset);
         }
+        if (IsAutoCreateThreeViewsCancellationRequested()) return;
         if (request.dimensionInnerClosedCurve)
         {
             ensureShallowCache();
@@ -17921,6 +17701,7 @@ void CreateProjectedOverallDimensions(
                 usedFacePairs,
                 closedCurveDimensionRecords);
         }
+        if (IsAutoCreateThreeViewsCancellationRequested()) return;
         if (request.dimensionAngle)
         {
             ensureShallowCache();
@@ -17943,6 +17724,7 @@ void CreateFlatPatternOverallDimensions(
     const RequestValues& request,
     const std::vector<CreatedAuxiliaryView>& auxiliaryViews)
 {
+    if (IsAutoCreateThreeViewsCancellationRequested()) return;
     if (!request.autoDimensions || !request.dimensionOverall)
     {
         return;
@@ -17950,6 +17732,7 @@ void CreateFlatPatternOverallDimensions(
 
     for (const CreatedAuxiliaryView& created : auxiliaryViews)
     {
+        if (IsAutoCreateThreeViewsCancellationRequested()) return;
         if (created.label != "flat pattern" || created.view == nullptr)
         {
             continue;
@@ -19240,6 +19023,11 @@ void CompleteAutoCreateThreeViewsNativeProgress()
     CompleteAutoCreateThreeViewsNativeProgressImpl();
 }
 
+bool IsAutoCreateThreeViewsCancellationRequested()
+{
+    return g_drawingCancellationRequested.load();
+}
+
 AutoCreateThreeViewsDialog::AutoCreateThreeViewsDialog()
     : ui_(NXOpen::UI::GetUI()),
       session_(NXOpen::Session::GetSession()),
@@ -19452,6 +19240,37 @@ void AutoCreateThreeViewsDialog::dialog_shown_cb()
     {
         NXOpen::Part* workPart = session_->Parts()->Work();
         SetString("currentPart", workPart != nullptr ? workPart->Leaf().GetText() : u8"未打开工作部件");
+
+        bool workPartIsAssembly = false;
+        if (workPart != nullptr)
+        {
+            const tag_t rootOccurrence = UF_ASSEM_ask_root_part_occ(workPart->Tag());
+            tag_t* rootChildren = nullptr;
+            const int rootChildCount = rootOccurrence == NULL_TAG
+                ? 0
+                : UF_ASSEM_ask_part_occ_children(rootOccurrence, &rootChildren);
+            workPartIsAssembly = rootChildCount > 0;
+            if (rootChildren != nullptr)
+                UF_free(rootChildren);
+        }
+
+        NXOpen::BlockStyler::TabControl* tabs =
+            dynamic_cast<NXOpen::BlockStyler::TabControl*>(
+                dialog_->TopBlock()->FindBlock("tabControl"));
+        if (workPartIsAssembly)
+        {
+            // Assemblies start from the deduplicated drawing-part list.  Do
+            // not let NX restore the tab or tree mode left from the last run.
+            SetString("assemblyListMode", u8"唯一部件清单");
+            if (tabs != nullptr)
+                tabs->SetActivePage(0);
+        }
+        else if (tabs != nullptr)
+        {
+            // A standalone part has no component selection to perform.
+            tabs->SetActivePage(1);
+        }
+
         InitializeNativeAssemblyList();
         PopulateNativeAssemblyList();
         InitializeTechnicalRequirementLibrary();
@@ -19465,7 +19284,9 @@ void AutoCreateThreeViewsDialog::dialog_shown_cb()
         // during initialize_cb, so native layout remains responsive without
         // forcing a Win32 resize in this callback.
         WriteLine(session_,
-            "AutoCreateThreeViews: native dialog shown; use Block Styler responsive sizing without Win32 re-entry.");
+            std::string("AutoCreateThreeViews: native dialog shown; initialPage=") +
+                (workPartIsAssembly ? "part-list" : "view") +
+                ", use Block Styler responsive sizing without Win32 re-entry.");
         return;
     }
     catch (const NXOpen::NXException& ex)
@@ -19863,6 +19684,8 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
     if (assemblyTree_ == nullptr)
         return;
 
+    const TimingClock::time_point populationStarted = TimingClock::now();
+
     const bool hadExistingRows = !assemblyNodes_.empty();
     std::set<tag_t> previouslySelectedPrototypes;
     for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
@@ -19906,6 +19729,7 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
     };
     countOccurrence(rootOccurrence);
     std::set<tag_t> displayedPrototypeParts;
+    std::map<tag_t, NativeAssemblyFilterMetadata> metadataByPrototype;
     int assemblyCount = 0;
     int ordinaryPartCount = 0;
     int sheetMetalCount = 0;
@@ -19933,8 +19757,31 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
                 UF_free(children);
             return;
         }
-        const NativeAssemblyFilterMetadata metadata =
-            ClassifyNativeAssemblyOccurrence(occurrence);
+        NativeAssemblyFilterMetadata metadata;
+        const auto cachedMetadata = metadataByPrototype.find(prototypeKey);
+        if (cachedMetadata == metadataByPrototype.end())
+        {
+            metadata = ClassifyNativeAssemblyOccurrence(occurrence);
+            metadataByPrototype.emplace(prototypeKey, metadata);
+        }
+        else
+        {
+            metadata = cachedMetadata->second;
+        }
+        // These two values belong to an occurrence, not its prototype. Keep
+        // the expensive part metadata cached while preserving tree accuracy.
+        metadata.assembly = childCount > 0;
+        try
+        {
+            NXOpen::Assemblies::Component* component =
+                dynamic_cast<NXOpen::Assemblies::Component*>(
+                    NXOpen::NXObjectManager::Get(occurrence));
+            metadata.hidden = component != nullptr && component->IsBlanked();
+        }
+        catch (...)
+        {
+            metadata.hidden = false;
+        }
         assemblyCount += metadata.assembly ? 1 : 0;
         sheetMetalCount += metadata.sheetMetal ? 1 : 0;
         ordinaryPartCount += !metadata.assembly && !metadata.sheetMetal ? 1 : 0;
@@ -20043,6 +19890,8 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
                 u8"，钣金 " + std::to_string(sheetMetalCount) +
                 u8"；预计出图 " +
                 std::to_string(SelectedNativeOccurrenceTags().size()) + u8" 份");
+    const double populationElapsedMs = std::chrono::duration<double, std::milli>(
+        TimingClock::now() - populationStarted).count();
     WriteLine(session_, "AutoCreateThreeViews: native assembly list populated, rows=" +
         std::to_string(assemblyNodes_.size()) +
         ", assemblies=" + std::to_string(assemblyCount) +
@@ -20051,8 +19900,10 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
         ", withDrawing=" + std::to_string(drawingCount) +
         ", hidden=" + std::to_string(hiddenCount) +
         ", mode=" + (uniquePartMode ? "unique-parts" : "assembly-tree") +
+        ", uniqueMetadataScans=" + std::to_string(metadataByPrototype.size()) +
         ", maximumTreeDepth=" + std::to_string(maximumTreeDepth) +
-        ", stateColumnWidth=" + std::to_string(stateColumnWidth) + ".");
+        ", stateColumnWidth=" + std::to_string(stateColumnWidth) +
+        ", elapsedMs=" + std::to_string(populationElapsedMs) + ".");
 }
 
 void AutoCreateThreeViewsDialog::OnNativeAssemblyStateChange(
@@ -21518,6 +21369,73 @@ int AutoCreateThreeViewsDialog::ExecuteCreateDrawing()
                 ? nativeValues.createRightView
                 : nativeValues.createLeftView;
             const std::vector<tag_t> selectedOccurrences = SelectedNativeOccurrenceTags();
+            const auto partHasComponents = [](tag_t partTag) {
+                const tag_t root = partTag == NULL_TAG ? NULL_TAG : UF_ASSEM_ask_root_part_occ(partTag);
+                tag_t* children = nullptr;
+                const int childCount = root == NULL_TAG ? 0 : UF_ASSEM_ask_part_occ_children(root, &children);
+                if (children != nullptr) UF_free(children);
+                return childCount > 0;
+            };
+            const bool workPartIsAssembly = partHasComponents(nativeWorkPart->Tag());
+            const tag_t displayPart = UF_PART_ask_display_part();
+            // The list represents the display assembly, which can differ from
+            // the work part. Never interpret an unchecked/failed assembly list
+            // as permission to draw the entire current part.
+            const bool requiresAssemblySelection = workPartIsAssembly ||
+                (displayPart != nativeWorkPart->Tag() && partHasComponents(displayPart)) ||
+                !assemblyNodes_.empty();
+            if (requiresAssemblySelection && selectedOccurrences.empty())
+            {
+                if (ui_ != nullptr && ui_->NXMessageBox() != nullptr)
+                {
+                    ui_->NXMessageBox()->Show(
+                        u8"自动三视图",
+                        NXOpen::NXMessageBox::DialogTypeWarning,
+                        u8"出图部件列表中没有勾选任何部件，请先勾选后再生成图纸。");
+                }
+                WriteLine(session_,
+                    "AutoCreateThreeViews: drawing request rejected; no assembly-list rows are checked.");
+                return 1;
+            }
+
+            if (requiresAssemblySelection && drawingTargetMode == "partLayers")
+            {
+                bool containsLeafPart = false;
+                for (tag_t occurrence : selectedOccurrences)
+                {
+                    tag_t* children = nullptr;
+                    const int childCount = occurrence == NULL_TAG
+                        ? 0
+                        : UF_ASSEM_ask_part_occ_children(occurrence, &children);
+                    if (children != nullptr)
+                        UF_free(children);
+                    if (childCount <= 0)
+                    {
+                        containsLeafPart = true;
+                        break;
+                    }
+                }
+                if (!containsLeafPart)
+                {
+                    if (ui_ != nullptr && ui_->NXMessageBox() != nullptr)
+                    {
+                        ui_->NXMessageBox()->Show(
+                            u8"自动三视图",
+                            NXOpen::NXMessageBox::DialogTypeWarning,
+                            u8"当前是“按部件内图层出图”，但筛选后只勾选了装配体。\n"
+                            u8"请保留并勾选普通零件或钣金件，或者将出图方式改为“按部件/组件出图”。");
+                    }
+                    WriteLine(session_,
+                        "AutoCreateThreeViews: layer drawing request rejected; selected rows contain assemblies only.");
+                    return 1;
+                }
+            }
+
+            WriteLine(session_,
+                "AutoCreateThreeViews: native drawing selection prepared, selectedOccurrences=" +
+                    std::to_string(selectedOccurrences.size()) +
+                    ", targetMode=" + drawingTargetMode +
+                    ", selectionSource=" + (requiresAssemblySelection ? "assembly-list" : "current-work-part") + ".");
 
             std::ofstream request(requestPath, std::ios::binary | std::ios::trunc);
             request << "action=create\n"
@@ -21531,7 +21449,7 @@ int AutoCreateThreeViewsDialog::ExecuteCreateDrawing()
                     << "layerRange=" << layerRange << "\n"
                     << "layersPerSheet=" << layersPerSheet << "\n"
                     << "layerLayoutMode=" << layerLayoutMode << "\n"
-                    << "assemblyDrawing=" << (UF_ASSEM_ask_root_part_occ(nativeWorkPart->Tag()) != NULL_TAG ? "true" : "false") << "\n"
+                    << "assemblyDrawing=" << (workPartIsAssembly ? "true" : "false") << "\n"
                     << "templatePath=" << templatePath << "\n"
                     << "inheritDraftingPreferences=" << (nativeValues.inheritDraftingPreferences ? "true" : "false") << "\n"
                     << "projection=" << (thirdAngle ? "third" : "first") << "\n"
@@ -21656,6 +21574,8 @@ tag_t AskLastAutoCreateThreeViewsDrawingSheetTag()
 void ClearAutoCreateThreeViewsManualDirectionCache()
 {
     g_manualFrontDirections.clear();
+    g_appliedDraftingPreferenceTemplates.clear();
+    g_appliedHiddenLinePreferences.clear();
 }
 
 bool PreselectAutoCreateThreeViewsManualDirection(tag_t partTag, int targetLayer)
@@ -21711,6 +21631,13 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             return 1;
         }
 
+        const auto cancellationRequested = [&](const char* stage) {
+            if (!IsAutoCreateThreeViewsCancellationRequested())
+                return false;
+            WriteLine(session, std::string("AutoCreateThreeViews: drawing canceled at safe checkpoint: ") + stage + ".");
+            return true;
+        };
+        if (cancellationRequested("before_request")) return 2;
         const std::string partLabel = PartResultName(workPart);
         ScopedPartTiming totalTiming(session, partLabel);
         TimingClock::time_point stageStarted = TimingClock::now();
@@ -21726,11 +21653,17 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         }
         const bool prepareSheetOnly = request.executionPhase == "prepareSheet";
         const bool populatePreparedSheet = request.executionPhase == "populatePreparedSheet";
-        const bool firstPreferencePassForPart =
-            request.targetLayer <= 0 || request.layerIndex == 0;
-        if (request.inheritDraftingPreferences && firstPreferencePassForPart && !populatePreparedSheet)
+        const tag_t workPartTag = workPart->Tag();
+        const std::filesystem::path preferenceTemplatePath =
+            request.inheritDraftingPreferences ? AutoTemplatePath(workPart, request) : std::filesystem::path();
+        const std::string preferenceTemplateKey = LocalPathString(preferenceTemplatePath);
+        const auto appliedTemplate = g_appliedDraftingPreferenceTemplates.find(workPartTag);
+        const bool draftingPreferencesAlreadyApplied =
+            appliedTemplate != g_appliedDraftingPreferenceTemplates.end() &&
+            appliedTemplate->second == preferenceTemplateKey;
+        if (request.inheritDraftingPreferences &&
+            !draftingPreferencesAlreadyApplied && !populatePreparedSheet)
         {
-            const std::filesystem::path preferenceTemplatePath = AutoTemplatePath(workPart, request);
             WriteLine(
                 session,
                 "AutoCreateThreeViews: follow-template drafting preferences enabled; source=" +
@@ -21742,6 +21675,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                 AddAutoCreateThreeViewsRunResultLine(message);
                 return 1;
             }
+            g_appliedDraftingPreferenceTemplates[workPartTag] = preferenceTemplateKey;
         }
         else if (!request.inheritDraftingPreferences)
         {
@@ -21759,13 +21693,17 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             WriteLine(
                 session,
                 "AutoCreateThreeViews: drafting preferences already inherited for this part; "
-                "skip repeated inheritance for layer index " + std::to_string(request.layerIndex) + ".");
+                "skip repeated inheritance for layer/page index " +
+                    std::to_string(request.layerIndex) + ".");
         }
-        const bool applyHiddenLinePreferenceForPart =
-            firstPreferencePassForPart && !populatePreparedSheet;
+        const auto appliedHiddenLine = g_appliedHiddenLinePreferences.find(workPartTag);
+        const bool applyHiddenLinePreferenceForPart = !populatePreparedSheet &&
+            (appliedHiddenLine == g_appliedHiddenLinePreferences.end() ||
+             appliedHiddenLine->second != request.showHiddenLines);
         if (applyHiddenLinePreferenceForPart)
         {
             ApplyHiddenLineDraftingPreference(session, workPart, request.showHiddenLines);
+            g_appliedHiddenLinePreferences[workPartTag] = request.showHiddenLines;
         }
         else
         {
@@ -21775,6 +21713,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                 "skip repeated preference update.");
         }
         WriteTimingLine(session, partLabel, "inherit_drafting_preferences", stageStarted);
+        if (cancellationRequested("inherit_drafting_preferences")) return 2;
 
         if (prepareSheetOnly)
         {
@@ -21837,6 +21776,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             }
 
             WriteTimingLine(session, partLabel, "prepare_and_open_drawing_sheet", stageStarted);
+            if (cancellationRequested("prepare_and_open_drawing_sheet")) return 2;
             WriteLine(
                 session,
                 "AutoCreateThreeViews: prepared and opened drawing sheet with a placeholder; "
@@ -21893,19 +21833,20 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
         }
         else
         {
-            if (!TryComputeAutoFrontDirectionFromLeafAssemblyBodies(workPart, frontDirection))
+            // Reuse the bounds already collected for layout. Selecting a plane
+            // must not generate temporary exact views or rescan component faces.
+            if (TryComputeAutoFrontDirectionFromOverallBoundingBox(bounds, frontDirection))
             {
-                WriteLine(
-                    session,
-                    "AutoCreateThreeViews: assembly largest planar face with a straight edge not found; fallback to overall bounding box.");
-                TryComputeAutoFrontDirectionFromOverallBoundingBox(workPart, frontDirection);
+                frontDirection.source = "assembly cached overall bounds projection estimate; no temporary views";
+                WriteLine(session, "AutoCreateThreeViews: assembly front selected from cached overall dimensions; bodyFaceSearch=false, directionProbeViews=0.");
             }
-            if (!frontDirection.valid)
+            else
             {
-                WriteLine(session, "AutoCreateThreeViews: assembly front direction not found after planar-face and bounding-box attempts; fallback to Top model view as front view.");
+                WriteLine(session, "AutoCreateThreeViews: assembly overall dimensions unavailable; fallback to Top model view without direction probes.");
             }
         }
         WriteTimingLine(session, partLabel, "model_bounds_and_front_direction", stageStarted);
+        if (cancellationRequested("model_bounds_and_front_direction")) return 2;
         if (!frontDirection.valid &&
             !absoluteFrontDirection &&
             (!request.assemblyDrawing || manualFrontDirection))
@@ -22325,6 +22266,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             WriteLine(session, cellLog.str());
         }
         WriteTimingLine(session, partLabel, "create_and_open_drawing_sheet", stageStarted);
+        if (cancellationRequested("create_and_open_drawing_sheet")) return 2;
 
         const double temporarySheetScaleDenominator = 1000.0;
         stageStarted = TimingClock::now();
@@ -22342,8 +22284,10 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             WriteLine(session, "AutoCreateThreeViews: keep existing sheet scale while probing appended layer group.");
         }
         const double viewScaleDenominator = temporarySheetScaleDenominator;
-        if ((request.assemblyDrawing && !manualFrontDirection && !absoluteFrontDirection) ||
-            frontDirectionMode == "overallBoxMaxArea")
+        const std::vector<PlannedView> plannedViews =
+            BuildProjectedLayout(request, bounds, viewScaleDenominator, sheetLength, sheetHeight);
+        NXOpen::Drawings::BaseView* frontView = nullptr;
+        if (!request.assemblyDrawing && frontDirectionMode == "overallBoxMaxArea")
         {
             PreferOverallBoxDirectionWithMostCurves(session, workPart, frontDirection, viewScaleDenominator);
         }
@@ -22352,30 +22296,32 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             PreferBackSideIfMoreCurves(session, workPart, frontDirection, viewScaleDenominator);
         }
         WriteTimingLine(session, partLabel, "temporary_scale_and_direction_probes", stageStarted);
+        if (cancellationRequested("temporary_scale_and_direction_probes")) return 2;
 
         stageStarted = TimingClock::now();
         int createdCount = 0;
-        const std::vector<PlannedView> plannedViews =
-            BuildProjectedLayout(request, bounds, viewScaleDenominator, sheetLength, sheetHeight);
         std::vector<CreatedView> createdProjectedViews;
         std::vector<CreatedAuxiliaryView> auxiliaryViews;
-        NXOpen::Drawings::BaseView* frontView = nullptr;
         for (const PlannedView& planned : plannedViews)
         {
+            if (cancellationRequested("before_next_view")) return 2;
             if (planned.label != "front")
             {
                 continue;
             }
 
-            frontView = CreateBaseView(
-                session,
-                workPart,
-                planned.label,
-                {planned.modelViewName},
-                planned.point,
-                false,
-                viewScaleDenominator,
-                frontDirection.valid ? &frontDirection : nullptr);
+            if (frontView == nullptr)
+            {
+                frontView = CreateBaseView(
+                    session,
+                    workPart,
+                    planned.label,
+                    {planned.modelViewName},
+                    planned.point,
+                    false,
+                    viewScaleDenominator,
+                    frontDirection.valid ? &frontDirection : nullptr);
+            }
             if (frontView != nullptr)
             {
                 createdProjectedViews.push_back({planned.label, planned.point, frontView});
@@ -22413,6 +22359,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             NXOpen::Drawings::DraftingView* bottomViewForBack = nullptr;
             for (const PlannedView& planned : plannedViews)
             {
+                if (cancellationRequested("before_next_view")) return 2;
                 if (planned.label == "front" || planned.label == "back" || planned.label == "back bottom")
                 {
                     continue;
@@ -22437,6 +22384,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
 
             for (const PlannedView& planned : plannedViews)
             {
+                if (cancellationRequested("before_next_view")) return 2;
                 if (planned.label != "back" && planned.label != "back bottom")
                 {
                     continue;
@@ -22469,6 +22417,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             WriteLine(session, "AutoCreateThreeViews: front view was not created; projected views skipped.");
         }
 
+        if (cancellationRequested("before_isometric")) return 2;
         if (request.iso)
         {
             NXOpen::Drawings::BaseView* isoView = CreateBaseView(
@@ -22491,6 +22440,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             }
         }
 
+        if (cancellationRequested("before_flat_pattern")) return 2;
         if (request.flat)
         {
             NXOpen::Drawings::BaseView* flatView = CreateFlatPatternView(
@@ -22505,6 +22455,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             }
         }
         WriteTimingLine(session, partLabel, "create_projected_and_auxiliary_views", stageStarted);
+        if (cancellationRequested("create_projected_and_auxiliary_views")) return 2;
 
         stageStarted = TimingClock::now();
         UpdateCreatedDraftingViews(
@@ -22515,6 +22466,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             "after_create");
         ArrangeCreatedProjectedViews(request, createdProjectedViews, sheetLength, sheetHeight);
         WriteTimingLine(session, partLabel, "initial_view_updates_and_arrangement", stageStarted);
+        if (cancellationRequested("initial_view_updates_and_arrangement")) return 2;
         const double measuredScaleDenominator = temporarySheetScaleDenominator;
 
         std::ostringstream roughLog;
@@ -22569,6 +22521,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                     std::to_string(static_cast<int>(layerRequiredDenominator)) + ".");
         }
         WriteTimingLine(session, partLabel, "measure_curves_and_choose_final_scale", stageStarted);
+        if (cancellationRequested("measure_curves_and_choose_final_scale")) return 2;
 
         stageStarted = TimingClock::now();
         if (request.targetLayer > 0 || !request.appendToCurrentSheet)
@@ -22657,10 +22610,13 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             }
         }
         WriteTimingLine(session, partLabel, "apply_final_scale_update_and_arrange", stageStarted);
+        if (cancellationRequested("apply_final_scale_update_and_arrange")) return 2;
 
         stageStarted = TimingClock::now();
         CreateProjectedOverallDimensions(session, workPart, request, createdProjectedViews, frontDirection);
+        if (cancellationRequested("after_projected_dimensions")) return 2;
         CreateFlatPatternOverallDimensions(session, workPart, request, auxiliaryViews);
+        if (cancellationRequested("after_flat_dimensions")) return 2;
         CreateFlatPatternNoteBelowView(session, workPart, request, auxiliaryViews);
         CreateLayerGroupNote(session, workPart, request, createdProjectedViews, auxiliaryViews);
         if (request.targetLayer <= 0 || request.layerIndex % request.layersPerSheet == 0)
@@ -22673,6 +22629,7 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
                 actualSheetHeight);
         }
         WriteTimingLine(session, partLabel, "dimensions_and_notes", stageStarted);
+        if (cancellationRequested("dimensions_and_notes")) return 2;
 
         stageStarted = TimingClock::now();
         UpdateCreatedDraftingViews(
@@ -22682,10 +22639,12 @@ int ExecuteAutoCreateThreeViewsFromRequest(const std::filesystem::path& requestP
             auxiliaryViews,
             "after_dimensions");
         WriteTimingLine(session, partLabel, "final_view_update", stageStarted);
+        if (cancellationRequested("final_view_update")) return 2;
 
         stageStarted = TimingClock::now();
         ClearCreatedDrawingSelectionAndHighlights(session, workPart, createdProjectedViews, auxiliaryViews);
         WriteTimingLine(session, partLabel, "clear_selection_and_highlights", stageStarted);
+        if (cancellationRequested("clear_selection_and_highlights")) return 2;
 
         std::ostringstream result;
         result << u8"成功：" << partLabel

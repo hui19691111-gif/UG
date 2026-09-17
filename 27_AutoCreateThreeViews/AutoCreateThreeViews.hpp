@@ -140,6 +140,7 @@ bool PreselectAutoCreateThreeViewsManualDirection(tag_t partTag, int targetLayer
 int ExecuteAutoCreateThreeViewsUiRequest(const std::filesystem::path& requestPath);
 int ScheduleAutoCreateThreeViewsUiRequest(const std::filesystem::path& requestPath);
 void CompleteAutoCreateThreeViewsNativeProgress();
+bool IsAutoCreateThreeViewsCancellationRequested();
 void BeginAutoCreateThreeViewsRunResults();
 void AddAutoCreateThreeViewsRunResultLine(const std::string& line);
 void ShowAutoCreateThreeViewsRunResults();

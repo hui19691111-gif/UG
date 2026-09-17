@@ -64,7 +64,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(UGIIRoot);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libufun.lib;libugopenint.lib;libnxopencpp.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_gateway.lib;libnxopencpp_modlutils.lib;libnxopencpp_drawings.lib;libnxopencpp_drafting.lib;libnxopencpp_preferences.lib;libnxopencpp_sheetmetal.lib;libnxopenuicpp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libufun.lib;libugopenint.lib;libnxopencpp.lib;libnxopencpp_assemblies.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_gateway.lib;libnxopencpp_modlutils.lib;libnxopencpp_drawings.lib;libnxopencpp_drafting.lib;libnxopencpp_preferences.lib;libnxopencpp_sheetmetal.lib;libnxopenuicpp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -90,7 +90,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(UGIIRoot);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libufun.lib;libugopenint.lib;libnxopencpp.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_gateway.lib;libnxopencpp_modlutils.lib;libnxopencpp_drawings.lib;libnxopencpp_drafting.lib;libnxopencpp_preferences.lib;libnxopencpp_sheetmetal.lib;libnxopenuicpp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libufun.lib;libugopenint.lib;libnxopencpp.lib;libnxopencpp_assemblies.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopencpp_gateway.lib;libnxopencpp_modlutils.lib;libnxopencpp_drawings.lib;libnxopencpp_drafting.lib;libnxopencpp_preferences.lib;libnxopencpp_sheetmetal.lib;libnxopenuicpp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>

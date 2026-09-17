@@ -1,3 +1,5 @@
+param([switch] $NativeOnly)
+
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -19,7 +21,11 @@ $targetUi = Join-Path $applicationRoot 'AutoCreateThreeViewsUI\AutoCreateThreeVi
 $hashManifestPath = Join-Path $manifestRoot 'file-hashes.json'
 $packageManifestPath = Join-Path $manifestRoot 'zhihui-package.json'
 
-foreach ($path in @($sourceDll, $sourceUnloadHelper, $sourceUi, $targetDll, $targetUi, $hashManifestPath, $packageManifestPath)) {
+$requiredPaths = @($sourceDll, $targetDll, $hashManifestPath, $packageManifestPath)
+if (-not $NativeOnly) {
+    $requiredPaths += @($sourceUnloadHelper, $sourceUi, $targetUi)
+}
+foreach ($path in $requiredPaths) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Missing deployment file: $path"
     }
@@ -45,10 +51,12 @@ $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $backupRoot = Join-Path (Join-Path $installRoot 'backup') ("${stamp}_AutoCreateThreeViews_layer_drawing")
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 Copy-Item -LiteralPath $targetDll -Destination (Join-Path $backupRoot 'AutoCreateThreeViews.dll') -Force
-if (Test-Path -LiteralPath $targetUnloadHelper) {
+if (-not $NativeOnly -and (Test-Path -LiteralPath $targetUnloadHelper)) {
     Copy-Item -LiteralPath $targetUnloadHelper -Destination (Join-Path $backupRoot 'AutoCreateThreeViewsUnloadHelper.dll') -Force
 }
-Copy-Item -LiteralPath $targetUi -Destination (Join-Path $backupRoot 'AutoCreateThreeViewsUI.exe') -Force
+if (-not $NativeOnly) {
+    Copy-Item -LiteralPath $targetUi -Destination (Join-Path $backupRoot 'AutoCreateThreeViewsUI.exe') -Force
+}
 Copy-Item -LiteralPath $hashManifestPath -Destination (Join-Path $backupRoot 'file-hashes.json') -Force
 Copy-Item -LiteralPath $packageManifestPath -Destination (Join-Path $backupRoot 'zhihui-package.json') -Force
 
@@ -56,32 +64,37 @@ try {
     if ($replaceDll) {
         Copy-Item -LiteralPath $sourceDll -Destination $targetDll -Force
     }
-    try {
-        Copy-Item -LiteralPath $sourceUnloadHelper -Destination $targetUnloadHelper -Force
+    if (-not $NativeOnly) {
+        try {
+            Copy-Item -LiteralPath $sourceUnloadHelper -Destination $targetUnloadHelper -Force
+        }
+        catch [System.IO.IOException] {
+            # Keep the loaded helper beside the main DLL for sibling lookup.
+            $loadedHelperBackup = Join-Path $applicationRoot ("AutoCreateThreeViewsUnloadHelper.loaded_${stamp}.dll")
+            Move-Item -LiteralPath $targetUnloadHelper -Destination $loadedHelperBackup
+            Copy-Item -LiteralPath $sourceUnloadHelper -Destination $targetUnloadHelper
+        }
+        Copy-Item -LiteralPath $sourceUi -Destination $targetUi -Force
     }
-    catch [System.IO.IOException] {
-        # The tiny helper intentionally remains loaded so it can unload the
-        # main DLL after future runs.  Keep its loaded image in the same
-        # directory (its sibling lookup depends on that directory), then put
-        # the newly built helper at the canonical path for the next NX process.
-        $loadedHelperBackup = Join-Path $applicationRoot ("AutoCreateThreeViewsUnloadHelper.loaded_${stamp}.dll")
-        Move-Item -LiteralPath $targetUnloadHelper -Destination $loadedHelperBackup
-        Copy-Item -LiteralPath $sourceUnloadHelper -Destination $targetUnloadHelper
-    }
-    Copy-Item -LiteralPath $sourceUi -Destination $targetUi -Force
 
     $dllHash = (Get-FileHash -LiteralPath $targetDll -Algorithm SHA256).Hash
-    $unloadHelperHash = (Get-FileHash -LiteralPath $targetUnloadHelper -Algorithm SHA256).Hash
-    $uiHash = (Get-FileHash -LiteralPath $targetUi -Algorithm SHA256).Hash
     $dllBytes = (Get-Item -LiteralPath $targetDll).Length
-    $unloadHelperBytes = (Get-Item -LiteralPath $targetUnloadHelper).Length
-    $uiBytes = (Get-Item -LiteralPath $targetUi).Length
+    $unloadHelperHash = $null
+    $uiHash = $null
+    if (-not $NativeOnly) {
+        $unloadHelperHash = (Get-FileHash -LiteralPath $targetUnloadHelper -Algorithm SHA256).Hash
+        $uiHash = (Get-FileHash -LiteralPath $targetUi -Algorithm SHA256).Hash
+        $unloadHelperBytes = (Get-Item -LiteralPath $targetUnloadHelper).Length
+        $uiBytes = (Get-Item -LiteralPath $targetUi).Length
+    }
 
     $hashItems = Get-Content -LiteralPath $hashManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $updates = @{
         'application/AutoCreateThreeViews.dll' = @{ Hash = $dllHash; Bytes = $dllBytes }
-        'application/AutoCreateThreeViewsUnloadHelper.dll' = @{ Hash = $unloadHelperHash; Bytes = $unloadHelperBytes }
-        'application/AutoCreateThreeViewsUI/AutoCreateThreeViewsUI.exe' = @{ Hash = $uiHash; Bytes = $uiBytes }
+    }
+    if (-not $NativeOnly) {
+        $updates['application/AutoCreateThreeViewsUnloadHelper.dll'] = @{ Hash = $unloadHelperHash; Bytes = $unloadHelperBytes }
+        $updates['application/AutoCreateThreeViewsUI/AutoCreateThreeViewsUI.exe'] = @{ Hash = $uiHash; Bytes = $uiBytes }
     }
     foreach ($relativePath in $updates.Keys) {
         $item = $hashItems | Where-Object { $_.path -eq $relativePath } | Select-Object -First 1
@@ -139,10 +152,12 @@ catch {
     if ($replaceDll) {
         try { Copy-Item -LiteralPath (Join-Path $backupRoot 'AutoCreateThreeViews.dll') -Destination $targetDll -Force } catch {}
     }
-    if (Test-Path -LiteralPath (Join-Path $backupRoot 'AutoCreateThreeViewsUnloadHelper.dll')) {
+    if (-not $NativeOnly -and (Test-Path -LiteralPath (Join-Path $backupRoot 'AutoCreateThreeViewsUnloadHelper.dll'))) {
         try { Copy-Item -LiteralPath (Join-Path $backupRoot 'AutoCreateThreeViewsUnloadHelper.dll') -Destination $targetUnloadHelper -Force } catch {}
     }
-    try { Copy-Item -LiteralPath (Join-Path $backupRoot 'AutoCreateThreeViewsUI.exe') -Destination $targetUi -Force } catch {}
+    if (-not $NativeOnly) {
+        try { Copy-Item -LiteralPath (Join-Path $backupRoot 'AutoCreateThreeViewsUI.exe') -Destination $targetUi -Force } catch {}
+    }
     try { Copy-Item -LiteralPath (Join-Path $backupRoot 'file-hashes.json') -Destination $hashManifestPath -Force } catch {}
     try { Copy-Item -LiteralPath (Join-Path $backupRoot 'zhihui-package.json') -Destination $packageManifestPath -Force } catch {}
     throw

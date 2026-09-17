@@ -2270,6 +2270,28 @@ tag_t ResolveExportableBodyTag(tag_t selectedBodyTag)
     return UF_ASSEM_ask_prototype_of_occ(selectedBodyTag);
 }
 
+// A work-part body can be returned as an occurrence when the display part is
+// an ancestor assembly. Only unwrap bodies owned by the current work part:
+// moving another component's body would modify the wrong part.
+tag_t ResolveWorkPartBodyTag(tag_t selectedBodyTag, tag_t workPartTag)
+{
+    const tag_t bodyTag = ResolveExportableBodyTag(selectedBodyTag);
+    tag_t owningPartTag = NULL_TAG;
+    if (bodyTag == NULL_TAG || workPartTag == NULL_TAG ||
+        UF_OBJ_ask_owning_part(bodyTag, &owningPartTag) != 0 ||
+        owningPartTag != workPartTag)
+    {
+        std::ostringstream line;
+        line << "Reject non-work-part body: selected=" << selectedBodyTag
+             << ", prototype=" << bodyTag << ", owner=" << owningPartTag
+             << ", work=" << workPartTag;
+        WritePreviewDebugLog(line.str());
+        throw std::runtime_error(
+            "所选体不属于当前工作部件。转换总装配自身的体时，请先将总装配设为工作部件；转换子部件的体时，请先将该子部件设为工作部件。");
+    }
+    return bodyTag;
+}
+
 void ExportReferenceBodyToPart(
     const std::string& componentPartPath,
     tag_t selectedBodyTag)
@@ -2421,8 +2443,9 @@ void CreateComponentWithRecordedBuilder(
     bodies.reserve(bodyTags.size());
     for (std::size_t index = 0; index < bodyTags.size(); ++index)
     {
+        const tag_t bodyTag = ResolveWorkPartBodyTag(bodyTags[index], workPart->Tag());
         NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(
-            NXOpen::NXObjectManager::Get(bodyTags[index]));
+            NXOpen::NXObjectManager::Get(bodyTag));
         if (body == NULL)
         {
             throw NXOpen::NXException::Create(
@@ -5120,16 +5143,31 @@ private:
     void Initialize()
     {
         WritePreviewDebugLog("Initialize begin");
-        ResetBlockPointersForInitialize();
-        EnsureNameConfigFileExists();
-        RefreshBlockPointers();
-        InitializeNamingControls();
-        InitializeRememberedOptions();
-        ConfigureBodySelectionFilter();
-        InitializeOutputFolder();
-        UpdateColorMatchedBodiesOption();
-        UpdateRetainBodiesOption();
-        WritePreviewDebugLog("Initialize end");
+        try
+        {
+            ResetBlockPointersForInitialize();
+            EnsureNameConfigFileExists();
+            RefreshBlockPointers();
+            InitializeNamingControls();
+            InitializeRememberedOptions();
+            ConfigureBodySelectionFilter();
+            InitializeOutputFolder();
+            UpdateColorMatchedBodiesOption();
+            UpdateRetainBodiesOption();
+            WritePreviewDebugLog("Initialize end");
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogCallbackError("Initialize NXException", ex.Message());
+        }
+        catch (const std::exception& ex)
+        {
+            LogCallbackError("Initialize exception", ex.what());
+        }
+        catch (...)
+        {
+            LogCallbackError("Initialize unknown exception", "Cannot initialize assembly dialog.");
+        }
     }
 
     void DialogShown()
@@ -6892,6 +6930,10 @@ private:
             UF_UI_SEL_FEATURE_BODY));
 
         NXOpen::BlockStyler::PropertyList* properties = bodySelection->GetProperties();
+        // Block Styler scope values (not UF_UI_SEL_SCOPE_*): 10 = Work Part Only.
+        // Do not let overlapping child-component occurrences enter the preview
+        // or CreateNewComponentBuilder, which accepts work-part objects only.
+        properties->SetEnum("MaximumScope", 10);
         properties->SetEnum("SelectMode", 1);
         properties->SetLogical("AutomaticProgression", false);
         properties->SetSelectionFilter(
@@ -6914,6 +6956,12 @@ private:
         std::vector<NXOpen::TaggedObject*> selectedObjects =
             bodySelection->GetSelectedObjects();
 
+        NXOpen::Part* workPart = session->Parts()->Work();
+        if (workPart == NULL)
+        {
+            return bodies;
+        }
+
         std::set<tag_t> seenTags;
         for (std::size_t index = 0; index < selectedObjects.size(); ++index)
         {
@@ -6922,6 +6970,20 @@ private:
             {
                 continue;
             }
+
+            const tag_t selectedTag = body->Tag();
+            const tag_t bodyTag = ResolveWorkPartBodyTag(selectedTag, workPart->Tag());
+            body = dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(bodyTag));
+            if (body == NULL)
+            {
+                throw std::runtime_error("无法读取当前工作部件的实体，请重新选择。");
+            }
+            std::ostringstream bodyLine;
+            bodyLine << "Selected work-part body: selected=" << selectedTag
+                     << ", prototype=" << bodyTag << ", work=" << workPart->Tag()
+                     << ", display=" << (session->Parts()->Display() != NULL
+                         ? session->Parts()->Display()->Tag() : NULL_TAG);
+            WritePreviewDebugLog(bodyLine.str());
 
             if (seenTags.insert(body->Tag()).second)
             {

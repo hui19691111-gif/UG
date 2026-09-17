@@ -86,6 +86,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -267,14 +268,28 @@ std::vector<char> NumberBuffer(double value)
     buffer.push_back('\0');
     return buffer;
 }
+
+NXOpen::Point3d PlanarFacePoint(NXOpen::Face* face)
+{
+    int type = 0, normalDirection = 0;
+    double point[3] = {}, direction[3] = {}, box[6] = {};
+    double radius = 0.0, radiusData = 0.0;
+    if (face == nullptr || !IsAlive(face->Tag()) ||
+        UF_MODL_ask_face_data(face->Tag(), &type, point, direction, box,
+            &radius, &radiusData, &normalDirection) != 0 ||
+        type != UF_MODL_PLANAR_FACE)
+        throw std::runtime_error("无法读取伸直后折弯面的平面位置。");
+    return {point[0], point[1], point[2]};
+}
 }
 
 BendMarkNotchDialog::BendMarkNotchDialog()
     : ui_(NXOpen::UI::GetUI()), session_(NXOpen::Session::GetSession()),
       dialog_(ui_->CreateDialog(DialogPath().c_str())), autoSelect_(nullptr),
-      bodySelect_(nullptr), notchType_(nullptr), diameter_(nullptr),
-      angle_(nullptr), depth_(nullptr), status_(nullptr), initialized_(false),
-      updating_(false)
+      bodySelect_(nullptr), distinguishBends_(nullptr), directionHelp_(nullptr),
+      largeBendRatio_(nullptr), divideLargeBend_(nullptr),
+      largeBendSegments_(nullptr), largeBendHelp_(nullptr),
+      status_(nullptr), initialized_(false), shown_(false), updating_(false)
 {
     dialog_->AddInitializeHandler(
         NXOpen::make_callback(this, &BendMarkNotchDialog::initialize_cb));
@@ -297,16 +312,22 @@ BendMarkNotchDialog::~BendMarkNotchDialog()
     pendingInternalFeatureTags_.clear();
     pendingInternalFeatureTags_.shrink_to_fit();
     initialized_ = false;
+    shown_ = false;
     updating_ = false;
 
     delete dialog_;
     dialog_ = nullptr;
     autoSelect_ = nullptr;
     bodySelect_ = nullptr;
-    notchType_ = nullptr;
-    diameter_ = nullptr;
-    angle_ = nullptr;
-    depth_ = nullptr;
+    distinguishBends_ = nullptr;
+    directionHelp_ = nullptr;
+    largeBendRatio_ = nullptr;
+    divideLargeBend_ = nullptr;
+    largeBendSegments_ = nullptr;
+    largeBendHelp_ = nullptr;
+    commonNotch_ = {};
+    upNotch_ = {};
+    downNotch_ = {};
     status_ = nullptr;
     ui_ = nullptr;
     session_ = nullptr;
@@ -329,14 +350,23 @@ void BendMarkNotchDialog::initialize_cb()
     {
         autoSelect_ = dialog_->TopBlock()->FindBlock("auto_select");
         bodySelect_ = dialog_->TopBlock()->FindBlock("body_select");
-        notchType_ = dialog_->TopBlock()->FindBlock("notch_type");
-        diameter_ = dialog_->TopBlock()->FindBlock("diameter");
-        angle_ = dialog_->TopBlock()->FindBlock("angle");
-        depth_ = dialog_->TopBlock()->FindBlock("depth");
+        distinguishBends_ = dialog_->TopBlock()->FindBlock("distinguish_bends");
+        directionHelp_ = dialog_->TopBlock()->FindBlock("direction_help");
+        largeBendRatio_ = dialog_->TopBlock()->FindBlock("large_bend_ratio");
+        divideLargeBend_ = dialog_->TopBlock()->FindBlock("divide_large_bend");
+        largeBendSegments_ = dialog_->TopBlock()->FindBlock("large_bend_segments");
+        largeBendHelp_ = dialog_->TopBlock()->FindBlock("large_bend_help");
+        commonNotch_ = FindNotchControls("");
+        // Preserve existing block IDs so saved per-direction parameters survive
+        // the user-facing rename from inner/outer to up/down.
+        upNotch_ = FindNotchControls("inner_");
+        downNotch_ = FindNotchControls("outer_");
         status_ = dialog_->TopBlock()->FindBlock("result_status");
         if (autoSelect_ == nullptr || bodySelect_ == nullptr ||
-            notchType_ == nullptr || diameter_ == nullptr || angle_ == nullptr ||
-            depth_ == nullptr || status_ == nullptr)
+            distinguishBends_ == nullptr || directionHelp_ == nullptr ||
+            largeBendRatio_ == nullptr || divideLargeBend_ == nullptr ||
+            largeBendSegments_ == nullptr || largeBendHelp_ == nullptr ||
+            status_ == nullptr)
         {
             throw std::runtime_error("BendMarkNotch.dlx 缺少必要控件。");
         }
@@ -366,6 +396,8 @@ void BendMarkNotchDialog::dialogShown_cb()
 {
     try
     {
+        if (!initialized_) return;
+        shown_ = true;
         UpdateControlState();
         if (!ToggleValue(autoSelect_) && bodySelect_ != nullptr)
             bodySelect_->Focus();
@@ -376,10 +408,13 @@ void BendMarkNotchDialog::dialogShown_cb()
 
 int BendMarkNotchDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
-    if (!initialized_ || updating_) return 0;
+    if (!initialized_ || !shown_ || updating_) return 0;
     try
     {
-        if (block == autoSelect_ || block == notchType_)
+        if (block == autoSelect_ || block == distinguishBends_ ||
+            block == divideLargeBend_ ||
+            block == commonNotch_.type || block == upNotch_.type ||
+            block == downNotch_.type)
             UpdateControlState();
         if (block == autoSelect_ && !ToggleValue(autoSelect_) &&
             bodySelect_ != nullptr)
@@ -419,7 +454,11 @@ int BendMarkNotchDialog::filter_cb(NXOpen::BlockStyler::UIBlock* block,
 
 int BendMarkNotchDialog::apply_cb()
 {
-    try { return Execute(); }
+    try
+    {
+        if (!initialized_ || !shown_ || updating_) return 1;
+        return Execute();
+    }
     catch (const NXOpen::NXException& ex) { ShowError(ex.Message()); return 1; }
     catch (const std::exception& ex) { ShowError(ex.what()); return 1; }
 }
@@ -436,23 +475,36 @@ int BendMarkNotchDialog::cancel_cb()
 
 void BendMarkNotchDialog::UpdateControlState()
 {
-    if (!initialized_) return;
+    if (!initialized_ || !shown_ || updating_) return;
     updating_ = true;
     try
     {
         const bool automatic = ToggleValue(autoSelect_);
-        const bool round = NotchType() == 0;
+        const bool separate = ToggleValue(distinguishBends_);
         auto setShow = [](NXOpen::BlockStyler::UIBlock* block, bool show)
         {
-            NXOpen::BlockStyler::PropertyList* properties = block->GetProperties();
+            std::unique_ptr<NXOpen::BlockStyler::PropertyList> properties(
+                block->GetProperties());
             properties->SetLogical("Show", show);
             properties->SetLogical("Enable", show);
-            delete properties;
+        };
+        const auto showSettings = [&](const NotchControls& controls, bool show)
+        {
+            const int type = NotchType(controls);
+            setShow(controls.type, show);
+            setShow(controls.diameter, show && type == 0);
+            setShow(controls.angle, show && type == 1);
+            setShow(controls.depth, show && type == 1);
+            setShow(controls.rectangleWidth, show && type == 2);
+            setShow(controls.rectangleDepth, show && type == 2);
         };
         setShow(bodySelect_, !automatic);
-        setShow(diameter_, round);
-        setShow(angle_, !round);
-        setShow(depth_, !round);
+        setShow(directionHelp_, separate);
+        setShow(largeBendSegments_, ToggleValue(divideLargeBend_));
+        setShow(largeBendHelp_, ToggleValue(divideLargeBend_));
+        showSettings(commonNotch_, !separate);
+        showSettings(upNotch_, separate);
+        showSettings(downNotch_, separate);
         SetStatus(automatic ? "将批量处理当前工作部件中的全部钣金体。"
                             : "请选择一个或多个钣金体。");
     }
@@ -467,43 +519,120 @@ void BendMarkNotchDialog::UpdateControlState()
 bool BendMarkNotchDialog::ToggleValue(
     NXOpen::BlockStyler::UIBlock* block) const
 {
-    NXOpen::BlockStyler::PropertyList* properties = block->GetProperties();
+    std::unique_ptr<NXOpen::BlockStyler::PropertyList> properties(block->GetProperties());
     const bool value = properties->GetLogical("Value");
-    delete properties;
     return value;
 }
 
-int BendMarkNotchDialog::NotchType() const
+BendMarkNotchDialog::NotchControls BendMarkNotchDialog::FindNotchControls(
+    const std::string& prefix) const
 {
-    NXOpen::BlockStyler::PropertyList* properties = notchType_->GetProperties();
+    NotchControls controls;
+    controls.type = dialog_->TopBlock()->FindBlock((prefix + "notch_type").c_str());
+    controls.diameter = dialog_->TopBlock()->FindBlock((prefix + "diameter").c_str());
+    controls.angle = dialog_->TopBlock()->FindBlock((prefix + "angle").c_str());
+    controls.depth = dialog_->TopBlock()->FindBlock((prefix + "depth").c_str());
+    controls.rectangleWidth = dialog_->TopBlock()->FindBlock(
+        (prefix + "rectangle_width").c_str());
+    controls.rectangleDepth = dialog_->TopBlock()->FindBlock(
+        (prefix + "rectangle_depth").c_str());
+    if (!controls.type || !controls.diameter || !controls.angle ||
+        !controls.depth || !controls.rectangleWidth || !controls.rectangleDepth)
+        throw std::runtime_error("BendMarkNotch.dlx 缺少缺口参数控件。");
+    return controls;
+}
+
+int BendMarkNotchDialog::NotchType(const NotchControls& controls) const
+{
+    std::unique_ptr<NXOpen::BlockStyler::PropertyList> properties(
+        controls.type->GetProperties());
     const int value = properties->GetEnum("Value");
-    delete properties;
     return value;
+}
+
+BendMarkNotchDialog::NotchSettings BendMarkNotchDialog::ReadNotchSettings(
+    const NotchControls& controls) const
+{
+    NotchSettings settings;
+    settings.type = NotchType(controls);
+    if (settings.type == 0)
+        settings.diameter = DoubleValue(controls.diameter);
+    else if (settings.type == 1)
+    {
+        settings.angle = DoubleValue(controls.angle);
+        settings.depth = DoubleValue(controls.depth);
+    }
+    else if (settings.type == 2)
+    {
+        settings.width = DoubleValue(controls.rectangleWidth);
+        settings.depth = DoubleValue(controls.rectangleDepth);
+    }
+    return settings;
+}
+
+void BendMarkNotchDialog::ValidateNotchSettings(
+    const NotchSettings& settings, const std::string& label) const
+{
+    if (settings.type != 0 && settings.type != 1 && settings.type != 2)
+        throw std::runtime_error(label + "缺口类型无效。");
+    if (settings.type == 0 && (!std::isfinite(settings.diameter) ||
+                              settings.diameter <= kTolerance))
+        throw std::runtime_error(label + "半圆缺口直径必须大于 0。");
+    if (settings.type == 1 && (!std::isfinite(settings.angle) ||
+        !std::isfinite(settings.depth) || settings.angle <= 0.0 ||
+        settings.angle >= 179.0 || settings.depth <= kTolerance))
+        throw std::runtime_error(label + "锐角缺口角度须在 0～179°之间，深度必须大于 0。");
+    if (settings.type == 2 && (!std::isfinite(settings.width) ||
+        !std::isfinite(settings.depth) || settings.width <= kTolerance ||
+        settings.depth <= kTolerance))
+        throw std::runtime_error(label + "矩形缺口宽度和深度必须大于 0。");
+}
+
+BendMarkNotchDialog::LargeBendSettings
+BendMarkNotchDialog::ReadLargeBendSettings() const
+{
+    LargeBendSettings settings;
+    settings.radiusThicknessRatio = DoubleValue(largeBendRatio_);
+    if (!std::isfinite(settings.radiusThicknessRatio) ||
+        settings.radiusThicknessRatio <= 0.0)
+        throw std::runtime_error("大圆弧判定倍数 R/t 必须大于 0（R 为内半径，t 为板厚）。");
+    if (ToggleValue(divideLargeBend_))
+    {
+        std::unique_ptr<NXOpen::BlockStyler::PropertyList> properties(
+            largeBendSegments_->GetProperties());
+        settings.segments = properties->GetInteger("Value");
+        if (settings.segments < 2 || settings.segments > 1000)
+            throw std::runtime_error("大圆弧均分段数必须是 2～1000 的整数。");
+    }
+    return settings;
 }
 
 double BendMarkNotchDialog::DoubleValue(
     NXOpen::BlockStyler::UIBlock* block) const
 {
-    NXOpen::BlockStyler::PropertyList* properties = block->GetProperties();
+    std::unique_ptr<NXOpen::BlockStyler::PropertyList> properties(block->GetProperties());
     const double value = properties->GetDouble("Value");
-    delete properties;
     return value;
 }
 
 void BendMarkNotchDialog::SetStatus(const std::string& text) const
 {
     if (status_ == nullptr) return;
-    NXOpen::BlockStyler::PropertyList* properties = status_->GetProperties();
+    std::unique_ptr<NXOpen::BlockStyler::PropertyList> properties(status_->GetProperties());
     properties->SetString(NXOpen::NXString("Label", NXOpen::NXString::UTF8),
                           NXOpen::NXString(text, NXOpen::NXString::UTF8));
-    delete properties;
 }
 
-void BendMarkNotchDialog::ShowError(const std::string& text) const
+void BendMarkNotchDialog::ShowError(const std::string& text) const noexcept
 {
-    ui_->NXMessageBox()->Show("折弯标记缺口",
+    AppendDebugLog("callback error: " + text);
+    try
+    {
+        ui_->NXMessageBox()->Show("折弯标记缺口",
                               NXOpen::NXMessageBox::DialogTypeError,
                               text.c_str());
+    }
+    catch (...) { AppendDebugLog("Unable to display callback error"); }
 }
 
 bool BendMarkNotchDialog::IsSheetMetalBody(NXOpen::Body* body) const
@@ -553,14 +682,15 @@ std::vector<NXOpen::Body*> BendMarkNotchDialog::TargetBodies() const
 
 int BendMarkNotchDialog::Execute()
 {
-    const int type = NotchType();
-    const double diameter = DoubleValue(diameter_);
-    const double angle = DoubleValue(angle_);
-    const double depth = DoubleValue(depth_);
-    if (type == 0 && diameter <= kTolerance)
-        throw std::runtime_error("半圆缺口直径必须大于 0。");
-    if (type == 1 && (angle <= 0.0 || angle >= 179.0 || depth <= kTolerance))
-        throw std::runtime_error("锐角缺口角度须在 0～179°之间，深度必须大于 0。");
+    ReadLargeBendSettings();
+    const bool separate = ToggleValue(distinguishBends_);
+    if (separate)
+    {
+        ValidateNotchSettings(ReadNotchSettings(upNotch_), "上折：");
+        ValidateNotchSettings(ReadNotchSettings(downNotch_), "下折：");
+    }
+    else
+        ValidateNotchSettings(ReadNotchSettings(commonNotch_), "");
 
     std::vector<NXOpen::Body*> bodies;
     const NXOpen::Session::UndoMarkId validationMark = session_->SetUndoMark(
@@ -576,8 +706,7 @@ int BendMarkNotchDialog::Execute()
         session_->DeleteUndoMark(validationMark, nullptr);
         throw;
     }
-    if (bodies.empty()) throw std::runtime_error("没有可处理的钣金体。");
-
+    if (bodies.empty()) throw std::runtime_error("请先创建展平特征");
     NXOpen::Part* workPart = session_->Parts()->Work();
     if (workPart == nullptr)
         throw std::runtime_error("当前没有可用的工作部件。");
@@ -602,6 +731,10 @@ int BendMarkNotchDialog::Execute()
                 throw std::runtime_error(
                     "未找到该钣金体的展平图样或其前一特征，"
                     "无法在展平图样前插入缺口特征。");
+            // Read the committed upward face before rolling model history back.
+            // A largest-web heuristic must not choose the meaning of up/down.
+            NXOpen::Face* upwardFace = separate
+                ? FlatPatternUpwardFace(flatPattern) : nullptr;
             {
                 std::ostringstream log;
                 log << "body insertion body="
@@ -622,7 +755,7 @@ int BendMarkNotchDialog::Execute()
             // Each body owns an independent custom-feature node.  Do not let
             // internal feature tags from a previous body leak into this one.
             pendingInternalFeatureTags_.clear();
-            const int created = ProcessBody(body);
+            const int created = ProcessBody(body, upwardFace);
             if (created > 0)
             {
                 if (!CreateCustomFeatureNode())
@@ -995,8 +1128,20 @@ bool BendMarkNotchDialog::FindBoundaryEdges(
               [](const auto& a, const auto& b) { return a.first > b.first; });
     if (candidates.size() < 2) return false;
     first = candidates[0].second;
-    second = candidates[1].second;
-    return true;
+    NXOpen::Point3d firstStart, firstEnd;
+    if (!EdgeEnds(first, firstStart, firstEnd)) return false;
+    for (std::size_t index = 1; index < candidates.size(); ++index)
+    {
+        NXOpen::Point3d start, end;
+        if (!EdgeEnds(candidates[index].second, start, end)) continue;
+        // A tangent boundary may be split into several collinear edges. The
+        // other boundary must be on a different cylinder generatrix.
+        if (Length(Cross(Subtract(start, firstStart), axis)) <= kTolerance)
+            continue;
+        second = candidates[index].second;
+        return true;
+    }
+    return false;
 }
 
 std::vector<BendMarkNotchDialog::BendRecord>
@@ -1039,6 +1184,14 @@ BendMarkNotchDialog::CollectBends(NXOpen::Body* body, double thickness) const
         }
         BendRecord record;
         record.innerFace = inner;
+        int faceType = 0, normalDirection = 0;
+        double axisPoint[3] = {}, axisDirection[3] = {}, bounds[6] = {};
+        double radiusData = 0.0;
+        if (UF_MODL_ask_face_data(inner->Tag(), &faceType, axisPoint,
+                axisDirection, bounds, &record.innerRadius, &radiusData,
+                &normalDirection) != 0 || faceType != UF_MODL_CYLINDRICAL_FACE ||
+            !std::isfinite(record.innerRadius) || record.innerRadius <= 0.0)
+            throw std::runtime_error("无法读取折弯内圆弧半径。");
         try { record.outerFace = manager->GetOppositeFace(inner); }
         catch (const NXOpen::NXException& ex)
         {
@@ -1130,6 +1283,36 @@ BendMarkNotchDialog::FlatBend BendMarkNotchDialog::ResolveFlatBend(
     return result;
 }
 
+std::vector<BendMarkNotchDialog::FlatBend>
+BendMarkNotchDialog::ResolveLargeBendMarks(
+    const BendRecord& bend, int segments) const
+{
+    NXOpen::Point3d a0, a1, b0, b1;
+    if (!EdgeEnds(bend.firstBoundary, a0, a1) ||
+        !EdgeEnds(bend.secondBoundary, b0, b1))
+        throw std::runtime_error("伸直后大圆弧相切边已失效。");
+    if (Distance(a0, b0) + Distance(a1, b1) >
+        Distance(a0, b1) + Distance(a1, b0))
+        std::swap(b0, b1);
+
+    // Use actual tangent-edge endpoints, without the longer-edge extension
+    // used by ordinary bend center marks. Equal positions across the flattened
+    // bend allowance correspond to equal arc angles on a cylindrical bend.
+    std::vector<FlatBend> result;
+    result.reserve(static_cast<std::size_t>(segments) + 1);
+    for (int index = 0; index <= segments; ++index)
+    {
+        const double fraction = static_cast<double>(index) / segments;
+        FlatBend mark;
+        mark.firstEnd = Add(a0, Scale(Subtract(b0, a0), fraction));
+        mark.secondEnd = Add(a1, Scale(Subtract(b1, a1), fraction));
+        if (Distance(mark.firstEnd, mark.secondEnd) <= kTolerance)
+            throw std::runtime_error("大圆弧标记线长度为零。");
+        result.push_back(mark);
+    }
+    return result;
+}
+
 NXOpen::Vector3d BendMarkNotchDialog::ReferenceNormal(
     NXOpen::Face* referenceFace) const
 {
@@ -1145,7 +1328,29 @@ NXOpen::Vector3d BendMarkNotchDialog::ReferenceNormal(
     return normalDirection < 0 ? Scale(value, -1.0) : value;
 }
 
-int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
+NXOpen::Face* BendMarkNotchDialog::FlatPatternUpwardFace(
+    NXOpen::Features::Feature* feature) const
+{
+    auto* manager = session_->Parts()->Work()->Features()->SheetmetalManager();
+    auto* builder = manager->CreateFlatPatternBuilder(feature);
+    NXOpen::Face* upward = nullptr;
+    try
+    {
+        if (builder != nullptr && builder->UpwardFace() != nullptr)
+            upward = builder->UpwardFace()->Value();
+    }
+    catch (...)
+    {
+        if (builder != nullptr) builder->Destroy();
+        throw;
+    }
+    if (builder != nullptr) builder->Destroy();
+    if (upward == nullptr || !IsAlive(upward->Tag()))
+        throw std::runtime_error("无法读取展平图样的朝上面，不能区分上下折。");
+    return upward;
+}
+
+int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFace)
 {
     NXOpen::Part* part = session_->Parts()->Work();
     auto* manager = part->Features()->SheetmetalManager();
@@ -1153,6 +1358,12 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
     AppendDebugLog("ProcessBody begin body=" +
         std::to_string(body == nullptr ? 0 : body->Tag()));
     const double thickness = manager->GetBodyThickness(body);
+    const LargeBendSettings largeBendSettings = ReadLargeBendSettings();
+    const bool separate = ToggleValue(distinguishBends_);
+    const NotchSettings upSettings = ReadNotchSettings(
+        separate ? upNotch_ : commonNotch_);
+    const NotchSettings downSettings = separate
+        ? ReadNotchSettings(downNotch_) : upSettings;
     NXOpen::Face* referenceFace = FindReferenceFace(body);
     const std::vector<BendRecord> bends = CollectBends(body, thickness);
     {
@@ -1286,8 +1497,85 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
 
         failureStage = "resolve flattened bend endpoints";
         std::vector<FlatBend> flatBends;
+        // Compare the actual skin planes after Unbend. Surface parameterization
+        // (and its normal sense) is not a reliable indication of the original
+        // bend direction. The original concave skin on the upward plane is an
+        // up bend; the other skin must be exactly one thickness away.
+        const NXOpen::Vector3d upwardNormal = separate
+            ? ReferenceNormal(upwardFace) : normal;
+        const NXOpen::Point3d upwardPoint = separate
+            ? PlanarFacePoint(upwardFace) : NXOpen::Point3d{};
+        const double sideTolerance = (std::max)(1.0e-6, thickness * 1.0e-4);
         for (const BendRecord& bend : bends)
-            flatBends.push_back(ResolveFlatBend(bend));
+        {
+            FlatBend flat = ResolveFlatBend(bend);
+            if (separate)
+            {
+                failureStage = "classify up/down bend";
+                const double innerOffset = Dot(Subtract(
+                    PlanarFacePoint(bend.innerFace), upwardPoint), upwardNormal);
+                const double outerOffset = Dot(Subtract(
+                    PlanarFacePoint(bend.outerFace), upwardPoint), upwardNormal);
+                const bool innerOnUpward = std::fabs(innerOffset) <= sideTolerance;
+                const bool outerOnUpward = std::fabs(outerOffset) <= sideTolerance;
+                AppendDebugLog("direction planes innerOffset=" +
+                    std::to_string(innerOffset) + " outerOffset=" +
+                    std::to_string(outerOffset) + " thickness=" +
+                    std::to_string(thickness));
+                if (innerOnUpward == outerOnUpward ||
+                    std::fabs(std::fabs(innerOffset - outerOffset) - thickness) >
+                        sideTolerance)
+                    throw std::runtime_error(
+                        "伸直后的折弯面方向不明确，无法可靠区分上下折。");
+                flat.upward = innerOnUpward;
+                AppendDebugLog("bend direction innerFace=" +
+                    std::to_string(bend.innerFace->Tag()) + " upwardFace=" +
+                    std::to_string(upwardFace->Tag()) + " direction=" +
+                    (flat.upward ? "up" : "down"));
+            }
+            const bool largeBend = bend.innerRadius / thickness >=
+                largeBendSettings.radiusThicknessRatio;
+            AppendDebugLog("bend marking radius=" +
+                std::to_string(bend.innerRadius) + " thickness=" +
+                std::to_string(thickness) + " ratio=" +
+                std::to_string(bend.innerRadius / thickness) + " large=" +
+                std::to_string(largeBend) + " segments=" +
+                std::to_string(largeBendSettings.segments));
+            if (!largeBend)
+            {
+                flatBends.push_back(flat);
+                continue;
+            }
+            failureStage = "resolve large bend tangent and division marks";
+            std::vector<FlatBend> marks = ResolveLargeBendMarks(
+                bend, largeBendSettings.segments);
+            const NXOpen::Vector3d axis = Normalize(
+                Subtract(marks.front().secondEnd, marks.front().firstEnd));
+            const double pitch = Length(Cross(axis, Subtract(
+                marks.back().firstEnd, marks.front().firstEnd))) /
+                largeBendSettings.segments;
+            const NotchSettings& settings = flat.upward ? upSettings : downSettings;
+            const double width = settings.type == 0 ? settings.diameter :
+                (settings.type == 1 ? 2.0 * settings.depth *
+                    std::tan(0.5 * settings.angle * kPi / 180.0) : settings.width);
+            if (pitch <= width + kTolerance)
+                throw std::runtime_error(
+                    "大圆弧标记间距小于或等于缺口宽度，请减少均分段数或减小缺口尺寸。");
+            for (std::size_t index = 0; index < marks.size(); ++index)
+            {
+                FlatBend& markLine = marks[index];
+                markLine.upward = flat.upward;
+                std::ostringstream log;
+                log.precision(16);
+                log << "large bend mark index=" << index
+                    << " segments=" << largeBendSettings.segments
+                    << " tangent=" << (index == 0 || index + 1 == marks.size())
+                    << " pitch=" << pitch << " first=" << PointText(markLine.firstEnd)
+                    << " second=" << PointText(markLine.secondEnd);
+                AppendDebugLog(log.str());
+                flatBends.push_back(markLine);
+            }
+        }
 
         // Collapse bend segments that lie on the same infinite line into one
         // overall span.  Only the two extreme endpoints of that span receive
@@ -1300,6 +1588,7 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
             double maximum = 0.0;
             NXOpen::Point3d minimumPoint;
             NXOpen::Point3d maximumPoint;
+            bool upward = true;
         };
         std::vector<CollinearSpan> spans;
         constexpr double kCollinearTolerance = 1.0e-3;
@@ -1310,6 +1599,8 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
             CollinearSpan* matched = nullptr;
             for (CollinearSpan& span : spans)
             {
+                // Opposite directions may share a line but use different marks.
+                if (separate && flat.upward != span.upward) continue;
                 if (std::fabs(Dot(direction, span.direction)) < 0.999999)
                     continue;
                 const auto distanceToLine = [&](const NXOpen::Point3d& point)
@@ -1333,6 +1624,7 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
                 CollinearSpan span;
                 span.origin = flat.firstEnd;
                 span.direction = direction;
+                span.upward = flat.upward;
                 span.minimum = 0.0;
                 span.maximum = Dot(Subtract(flat.secondEnd, span.origin),
                                    span.direction);
@@ -1369,7 +1661,7 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
         flatBends.reserve(spans.size());
         for (const CollinearSpan& span : spans)
             flatBends.push_back(
-                {span.minimumPoint, span.maximumPoint});
+                {span.minimumPoint, span.maximumPoint, span.upward});
         AppendDebugLog("collinear bend merge original=" +
             std::to_string(originalFlatBendCount) + " spans=" +
             std::to_string(flatBends.size()));
@@ -1398,11 +1690,19 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
         profiles.reserve(flatBends.size() * 2);
         for (const FlatBend& flat : flatBends)
         {
+            const NotchSettings& settings = flat.upward ? upSettings : downSettings;
             const NXOpen::Vector3d lineDirection = Normalize(
                 Subtract(flat.secondEnd, flat.firstEnd));
-            if (NotchType() == 0)
+            AppendDebugLog(std::string("notch span direction=") +
+                (separate ? (flat.upward ? "up" : "down") : "common") +
+                " type=" + std::to_string(settings.type) +
+                " diameter=" + std::to_string(settings.diameter) +
+                " angle=" + std::to_string(settings.angle) +
+                " width=" + std::to_string(settings.width) +
+                " depth=" + std::to_string(settings.depth));
+            if (settings.type == 0)
             {
-                const double radius = DoubleValue(diameter_) * 0.5;
+                const double radius = settings.diameter * 0.5;
                 NotchProfile first;
                 first.center = flat.firstEnd;
                 first.circleRadius = radius;
@@ -1414,11 +1714,11 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
             }
             else
             {
-                const double angle = DoubleValue(angle_);
-                const double depth = DoubleValue(depth_);
-                const double halfWidth = depth *
-                    std::tan(0.5 * angle * kPi / 180.0);
-                const auto appendTriangle = [&](
+                const double depth = settings.depth;
+                const double halfWidth = settings.type == 1
+                    ? depth * std::tan(0.5 * settings.angle * kPi / 180.0)
+                    : settings.width * 0.5;
+                const auto appendPolygon = [&](
                     const NXOpen::Point3d& edgeCenter,
                     const NXOpen::Vector3d& inwardInput)
                 {
@@ -1429,16 +1729,26 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body)
                     profile.center = edgeCenter;
                     profile.polygon = {
                         Add(edgeCenter, Scale(baseDirection, halfWidth)),
-                        Add(edgeCenter, Scale(baseDirection, -halfWidth)),
-                        Add(edgeCenter, Scale(inward, depth))};
+                        Add(edgeCenter, Scale(baseDirection, -halfWidth))};
+                    const NXOpen::Point3d innerCenter =
+                        Add(edgeCenter, Scale(inward, depth));
+                    if (settings.type == 1)
+                        profile.polygon.push_back(innerCenter);
+                    else
+                    {
+                        profile.polygon.push_back(
+                            Add(innerCenter, Scale(baseDirection, -halfWidth)));
+                        profile.polygon.push_back(
+                            Add(innerCenter, Scale(baseDirection, halfWidth)));
+                    }
                     profiles.push_back(profile);
                 };
-                appendTriangle(flat.firstEnd, lineDirection);
-                appendTriangle(flat.secondEnd, Scale(lineDirection, -1.0));
+                appendPolygon(flat.firstEnd, lineDirection);
+                appendPolygon(flat.secondEnd, Scale(lineDirection, -1.0));
             }
         }
-        AppendDebugLog("notch profiles built type=" +
-            std::to_string(NotchType()) + " count=" +
+        AppendDebugLog("notch profiles built separate=" +
+            std::to_string(separate) + " count=" +
             std::to_string(profiles.size()));
         if (profiles.empty()) throw std::runtime_error("展平状态创建缺口失败。");
         ToolRecord groupedTool;
@@ -1797,7 +2107,7 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
                     NXOpen::Line* line = part->Curves()->CreateLine(
                         projectedStart, projectedEnd);
                     if (line == nullptr)
-                        throw std::runtime_error("创建三角缺口草图失败。");
+                        throw std::runtime_error("创建缺口轮廓线失败。");
                     curveTags.push_back(line->Tag());
                     sketch->AddGeometry(
                         line,

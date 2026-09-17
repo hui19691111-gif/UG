@@ -3,9 +3,14 @@
 #include <uf.h>
 #include <uf_assem.h>
 #include <uf_csys.h>
+#include <uf_curve.h>
 #include <uf_disp.h>
+#include <uf_eval.h>
 #include <uf_group.h>
 #include <uf_modl.h>
+#include <uf_modl_expressions_retiring.h>
+#include <uf_mtx.h>
+#include <uf_trns.h>
 #include <uf_obj.h>
 #include <uf_part.h>
 #include <uf_retiring_ugopenint.h>
@@ -14,15 +19,25 @@
 #include <NXOpen/BlockStyler_BlockDialog.hxx>
 #include <NXOpen/BlockStyler_CompositeBlock.hxx>
 #include <NXOpen/BlockStyler_DrawingArea.hxx>
+#include <NXOpen/BlockStyler_DoubleBlock.hxx>
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_SelectObject.hxx>
+#include <NXOpen/BlockStyler_SpecifyPoint.hxx>
+#include <NXOpen/BlockStyler_StringBlock.hxx>
 #include <NXOpen/BlockStyler_SpecifyOrientation.hxx>
 #include <NXOpen/BlockStyler_UIBlock.hxx>
+#include <NXOpen/Gateway_ImageExportBuilder.hxx>
+#include <NXOpen/Expression.hxx>
+#include <NXOpen/NXObjectManager.hxx>
+#include <NXOpen/PartSaveStatus.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
+#include <NXOpen/Part.hxx>
+#include <NXOpen/PartCollection.hxx>
 #include <NXOpen/Selection.hxx>
 #include <NXOpen/Session.hxx>
 #include <NXOpen/UI.hxx>
+#include <NXOpen/ViewCollection.hxx>
 
 #include <Windows.h>
 #include <CommCtrl.h>
@@ -30,6 +45,8 @@
 #include <ShlObj.h>
 #include <shobjidl_core.h>
 #include <shellapi.h>
+#include <wincodec.h>
+#include <wrl/client.h>
 
 #ifdef CreateDialog
 #undef CreateDialog
@@ -42,6 +59,8 @@
 #include <filesystem>
 #include <fstream>
 #include <new>
+#include <memory>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
@@ -51,6 +70,8 @@ namespace fs = std::filesystem;
 
 namespace
 {
+class CapturePreviewImage;
+struct ParameterSaveRequest;
 constexpr wchar_t kTitle[] = L"智辉标准件库";
 constexpr wchar_t kDefaultRoot[] = L"D:\\UG智辉标准件库";
 
@@ -70,7 +91,9 @@ enum ControlId
     ID_PATTERN_SPACING_X, ID_PATTERN_SPACING_Y, ID_PATTERN_COUNT_X,
     ID_PATTERN_COUNT_Y,
     ID_PARAM_LABEL1, ID_PARAM_LABEL2, ID_PARAM_LABEL3, ID_PARAM_LABEL4,
-    ID_PARAM_VALUE1, ID_PARAM_VALUE2, ID_PARAM_VALUE3, ID_PARAM_VALUE4
+    ID_PARAM_VALUE1, ID_PARAM_VALUE2, ID_PARAM_VALUE3, ID_PARAM_VALUE4,
+    ID_EDIT_MODEL, ID_CAPTURE_BODIES, ID_INSERT_PARAMETERS, ID_SPEC_LABEL,
+    ID_REPLACE_PREVIEW, ID_CAPTURE_PREVIEW, ID_DEFINE_PARAMETERS
 };
 
 struct LibraryItem
@@ -97,8 +120,10 @@ struct AppState
     std::vector<std::size_t> visible;
     std::vector<std::wstring> categories;
     std::wstring selectedCategory;
-    int libraryFilter = 0;
-    int placementMode = 0;
+    int libraryFilter = 1;
+    std::array<std::wstring, 3> libraryCategories;
+    std::array<std::wstring, 3> librarySearches;
+    int placementMode = 1;
     int patternMode = 0;
     double patternSpacingX = 100.0;
     double patternSpacingY = 100.0;
@@ -117,13 +142,56 @@ struct AppState
     bool axisLocked[3]{false, false, false};
     void* orientationContext = nullptr;
     void (*orientationChanged)(void*) = nullptr;
+    void (*capturePreview)(void*, CapturePreviewImage&) = nullptr;
+    void (*prepareParameterSave)(void*, ParameterSaveRequest&) = nullptr;
     HMODULE moduleReference = nullptr;
     std::wstring windowClassName;
+    fs::path requestedEditModel;
+    fs::path requestedCaptureRoot;
+    std::wstring requestedCaptureCategory;
+    std::shared_ptr<ParameterSaveRequest> requestedParameterSave;
+    std::wstring resumeItemId;
+    std::wstring resumeGroupName;
+    std::vector<std::wstring> specificationGroups;
+    fs::path libraryRootOverride;
 };
 
 AppState* g_appState = nullptr;
+
+// The browser pane is native Win32, not a Block Styler selection block.
+// Only a valid placement controls OK/Apply availability; insertion validates
+// the selected library item and optional trim targets and reports errors.
+bool CanConfirmPlacement(bool shown, bool closing, bool hasPlacement,
+                         bool insertedAny) noexcept
+{
+    return shown && !closing && (hasPlacement || insertedAny);
+}
+
 HWND g_managerWindow = nullptr;
+HWND g_parameterWindow = nullptr;
 HWND g_quickPositionWindow = nullptr;
+
+bool RegisterOwnedWindowClass(const WNDCLASSEXW& windowClass, HWND owner)
+{
+    // NX can unload and reload this DLL at the same address. A class left by
+    // an older build must never retain its now invalid window procedure.
+    UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
+    if (RegisterClassExW(&windowClass)) return true;
+    UF_print_syslog("[StandardPartsLibrary] Window class registration failed\n", false);
+    MessageBoxW(owner, L"管理窗口初始化失败，请关闭标准件库后重新打开。",
+                L"智辉标准件库", MB_OK | MB_ICONERROR);
+    return false;
+}
+
+void UnregisterOwnedWindowClasses(HMODULE module)
+{
+    if (module == nullptr) return;
+    for (const auto* name : {L"ZhihuiStandardPartsManagerWindow",
+                            L"ZhihuiStandardPartsQuickPositionWindow",
+                            L"ZhihuiStandardPartsParameters",
+                            L"ZhihuiStandardPartsParameterDefinition"})
+        UnregisterClassW(name, module);
+}
 
 struct ModuleReleaseContext
 {
@@ -139,7 +207,7 @@ DWORD WINAPI ReleaseModuleAfterWindowProc(void* parameter)
     // WM_NCDESTROY must return before the final module reference is released;
     // otherwise execution would continue in code that has already been unmapped.
     Sleep(50);
-    UnregisterClassW(L"ZhihuiStandardPartsManagerWindow", module);
+    UnregisterOwnedWindowClasses(module);
     if (!context->mainWindowClass.empty())
         UnregisterClassW(context->mainWindowClass.c_str(), module);
     delete context;
@@ -287,6 +355,7 @@ bool WriteUtf16File(const fs::path& path, const std::wstring& text)
 
 fs::path LibraryRoot(AppState* state)
 {
+    if (!state->libraryRootOverride.empty()) return state->libraryRootOverride;
     const std::wstring input = Trim(GetText(state->window, ID_ROOT));
     return input.empty() ? fs::path(kDefaultRoot) : fs::path(input);
 }
@@ -392,7 +461,11 @@ void ScanLibraryFolder(AppState* state, const fs::path& base, bool parameterized
         if (ec) { ec.clear(); continue; }
         const std::wstring relativeText = relativeToRoot.wstring();
         if (std::any_of(state->items.begin(), state->items.end(),
-            [&](const LibraryItem& item) { return Lower(item.relativePath) == Lower(relativeText); }))
+            [&](const LibraryItem& item)
+            {
+                return Lower(fs::path(item.relativePath).lexically_normal().generic_wstring()) ==
+                    Lower(relativeToRoot.lexically_normal().generic_wstring());
+            }))
             continue;
         const fs::path relativeToBase = fs::relative(iterator->path(), base, ec);
         if (ec) { ec.clear(); continue; }
@@ -435,16 +508,35 @@ void LoadIndex(AppState* state)
             if (line.empty() || line[0] == L'#') continue;
             const auto fields = SplitTabs(line);
             if (fields.size() >= 4 && !fields[0].empty() && !fields[3].empty())
+            {
+                const auto relative = Lower(fs::path(fields[3]).lexically_normal().generic_wstring());
+                const bool parameterized = relative.rfind(L"libparam/", 0) == 0 ||
+                    (relative.rfind(L"lib/", 0) != 0 && fields.size() >= 6 && fields[5] == L"1");
                 state->items.push_back({fields[0], fields[1], fields[2], fields[3],
                                         fields.size() >= 5 && !fields[4].empty()
                                             ? fields[4] : fs::path(fields[3]).stem().wstring(),
-                                        fields.size() >= 6 ? fields[5] == L"1" :
-                                            Lower(fields[3]).rfind(L"libparam\\", 0) == 0});
+                                        parameterized});
+            }
         }
     }
     ScanLibraryFolder(state, LibraryRoot(state) / L"Lib", false);
     ScanLibraryFolder(state, LibraryRoot(state) / L"LibParam", true);
     SetStatus(state, L"已载入 " + std::to_wstring(state->items.size()) + L" 个标准件。");
+}
+
+bool InCurrentLibrary(const AppState* state, const LibraryItem& item)
+{
+    return item.parameterized == (state->libraryFilter == 2);
+}
+
+const wchar_t* CurrentLibraryName(const AppState* state)
+{
+    return state->libraryFilter == 2 ? L"本地有参" : L"本地无参";
+}
+
+fs::path CurrentLibraryFolder(AppState* state)
+{
+    return LibraryRoot(state) / (state->libraryFilter == 2 ? L"LibParam" : L"Lib");
 }
 
 void RefreshCategories(AppState* state)
@@ -454,14 +546,16 @@ void RefreshCategories(AppState* state)
     TreeView_DeleteAllItems(state->category);
     state->categories.clear();
     std::set<std::wstring> uniqueCategories;
-    for (const auto& item : state->items) uniqueCategories.insert(item.category);
+    std::size_t total = 0;
+    for (const auto& item : state->items)
+        if (InCurrentLibrary(state, item)) { uniqueCategories.insert(item.category); ++total; }
     state->categories.assign(uniqueCategories.begin(), uniqueCategories.end());
 
     TVINSERTSTRUCTW insert{};
     insert.hParent = TVI_ROOT;
     insert.hInsertAfter = TVI_LAST;
     insert.item.mask = TVIF_TEXT | TVIF_PARAM;
-    std::wstring rootText = L"全部标准件  (" + std::to_wstring(state->items.size()) + L")";
+    std::wstring rootText = std::wstring(CurrentLibraryName(state)) + L"  (" + std::to_wstring(total) + L")";
     insert.item.pszText = rootText.data();
     insert.item.lParam = 0;
     const HTREEITEM root = TreeView_InsertItem(state->category, &insert);
@@ -470,7 +564,7 @@ void RefreshCategories(AppState* state)
     {
         const auto& category = state->categories[index];
         const auto count = std::count_if(state->items.begin(), state->items.end(),
-            [&](const LibraryItem& item) { return item.category == category; });
+            [&](const LibraryItem& item) { return InCurrentLibrary(state, item) && item.category == category; });
         std::wstring label = category + L"  (" + std::to_wstring(count) + L")";
         insert.hParent = root;
         insert.item.pszText = label.data();
@@ -497,36 +591,8 @@ std::size_t SelectedFamilyIndex(AppState* state)
     return state->visible[static_cast<std::size_t>(row)];
 }
 
-bool IsParameterizedFamily(const AppState* state, const LibraryItem& candidate)
-{
-    static_cast<void>(state);
-    return candidate.parameterized;
-}
-
-void RefreshSpecifications(AppState* state)
-{
-    const HWND combo = GetDlgItem(state->window, ID_SPEC);
-    if (combo == nullptr) return;
-    const std::wstring old = GetText(state->window, ID_SPEC);
-    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
-    const std::size_t family = SelectedFamilyIndex(state);
-    if (family == SIZE_MAX) return;
-    int selected = 0;
-    int row = 0;
-    for (std::size_t index = 0; index < state->items.size(); ++index)
-    {
-        const auto& item = state->items[index];
-        if (item.category != state->items[family].category || item.name != state->items[family].name ||
-            item.parameterized != state->items[family].parameterized)
-            continue;
-        const int inserted = static_cast<int>(SendMessageW(combo, CB_ADDSTRING, 0,
-            reinterpret_cast<LPARAM>(item.specification.c_str())));
-        SendMessageW(combo, CB_SETITEMDATA, inserted, static_cast<LPARAM>(index));
-        if (item.specification == old) selected = row;
-        ++row;
-    }
-    if (row > 0) SendMessageW(combo, CB_SETCURSEL, selected, 0);
-}
+void RefreshSpecifications(AppState* state, std::size_t preferred = SIZE_MAX,
+    const std::wstring& groupName = {});
 
 void RefreshList(AppState* state)
 {
@@ -539,9 +605,7 @@ void RefreshList(AppState* state)
     {
         const auto& item = state->items[index];
         if (!state->selectedCategory.empty() && item.category != state->selectedCategory) continue;
-        const bool parameterized = IsParameterizedFamily(state, item);
-        if (state->libraryFilter == 1 && parameterized) continue;
-        if (state->libraryFilter == 2 && !parameterized) continue;
+        if (!InCurrentLibrary(state, item)) continue;
         if (!search.empty() && Lower(item.name + L" " + item.category + L" " +
                                      item.specification + L" " + item.relativePath).find(search) == std::wstring::npos)
             continue;
@@ -570,10 +634,29 @@ std::size_t SelectedIndex(AppState* state)
     if (row != CB_ERR)
     {
         const LRESULT data = SendMessageW(combo, CB_GETITEMDATA, row, 0);
-        if (data != CB_ERR && data >= 0 && static_cast<std::size_t>(data) < state->items.size())
+        if (data != CB_ERR && data >= 0 && static_cast<std::size_t>(data) < state->items.size() &&
+            InCurrentLibrary(state, state->items[static_cast<std::size_t>(data)]))
             return static_cast<std::size_t>(data);
     }
-    return SelectedFamilyIndex(state);
+    const auto family = SelectedFamilyIndex(state);
+    return family < state->items.size() && InCurrentLibrary(state, state->items[family]) ? family : SIZE_MAX;
+}
+
+void SelectLibrary(AppState* state, int filter)
+{
+    // A manager belongs to the library that opened it; never retarget it silently.
+    if (g_managerWindow && IsWindow(g_managerWindow)) DestroyWindow(g_managerWindow);
+    state->libraryCategories[state->libraryFilter] = state->selectedCategory;
+    state->librarySearches[state->libraryFilter] = GetText(state->window, ID_SEARCH);
+    state->libraryFilter = filter == 2 ? 2 : 1;
+    state->selectedCategory = state->libraryCategories[state->libraryFilter];
+    SetText(state->window, ID_SEARCH, state->librarySearches[state->libraryFilter]);
+    CheckRadioButton(state->window, ID_FILTER_STATIC, ID_FILTER_PARAM,
+        state->libraryFilter == 2 ? ID_FILTER_PARAM : ID_FILTER_STATIC);
+    SetText(state->window, ID_CAPTURE_BODIES,
+        state->libraryFilter == 2 ? L"当前部件\r\n加入库" : L"选择体\r\n加入库");
+    RefreshCategories(state);
+    RefreshList(state);
 }
 
 std::wstring BrowsePartFile(HWND owner)
@@ -1002,8 +1085,14 @@ std::vector<std::array<double, 3>> PatternOrigins(
     };
     switch (state->patternMode)
     {
-    case 1: add(-halfX, 0.0); add(halfX, 0.0); break;
-    case 2: add(0.0, -halfY); add(0.0, halfY); break;
+    case 1:
+        for (int i = 0; i < state->patternCountX; ++i)
+            add((i - (state->patternCountX - 1) * 0.5) * state->patternSpacingX, 0.0);
+        break;
+    case 2:
+        for (int i = 0; i < state->patternCountY; ++i)
+            add(0.0, (i - (state->patternCountY - 1) * 0.5) * state->patternSpacingY);
+        break;
     case 3: add(-halfX, -halfY); add(halfX, halfY); break;
     case 4:
         add(-halfX, -halfY); add(halfX, -halfY);
@@ -1122,10 +1211,32 @@ fs::path ResolvedModel(AppState* state, const LibraryItem& item, std::wstring& e
     return model;
 }
 
+#include "StandardPartsParameterData.inc"
+#include "StandardPartsGroupSelection.inc"
+
 std::vector<std::pair<std::wstring, std::wstring>> LoadSpecificationParameters(
     const fs::path& model, const std::wstring& specification)
 {
     std::vector<std::pair<std::wstring, std::wstring>> result;
+    try
+    {
+        const auto schema = ReadParameterSchema(model);
+        if (!schema.empty())
+        {
+            const auto values = SpecificationValues(model, specification, schema);
+            for (std::size_t i = 0; i < schema.size(); ++i)
+            {
+                std::wstring label = schema[i].label;
+                const std::wstring suffix = L" " + schema[i].expression;
+                if (label.size() > suffix.size() &&
+                    label.compare(label.size() - suffix.size(), suffix.size(), suffix) == 0)
+                    label.resize(label.size() - suffix.size());
+                result.emplace_back(label, values[i]);
+            }
+            return result;
+        }
+    }
+    catch (const std::exception& ex) { return {{L"参数配置错误", FromAnsi(ex.what())}}; }
     const fs::path table = model.parent_path() / L"parameters.tsv";
     std::wstring text;
     if (!ReadUtf16File(table, text)) return result;
@@ -1150,6 +1261,8 @@ std::vector<std::pair<std::wstring, std::wstring>> LoadSpecificationParameters(
     return result;
 }
 
+#include "StandardPartsPreviewImage.inc"
+
 void UpdatePreview(AppState* state)
 {
     if (state->previewBitmap != nullptr)
@@ -1160,6 +1273,11 @@ void UpdatePreview(AppState* state)
     for (int id = ID_PARAM_LABEL1; id <= ID_PARAM_LABEL4; ++id) SetText(state->window, id, L"");
     for (int id = ID_PARAM_VALUE1; id <= ID_PARAM_VALUE4; ++id) SetText(state->window, id, L"");
     const std::size_t index = SelectedIndex(state);
+    const bool parameterized = index < state->items.size() && state->items[index].parameterized;
+    if (auto button = GetDlgItem(state->window, ID_INSERT_PARAMETERS))
+        ShowWindow(button, parameterized ? SW_SHOW : SW_HIDE);
+    if (auto label = GetDlgItem(state->window, ID_SPEC_LABEL))
+        ShowWindow(label, parameterized ? SW_HIDE : SW_SHOW);
     if (index != SIZE_MAX)
     {
         SetText(state->window, ID_DETAIL_NAME, state->items[index].name);
@@ -1192,22 +1310,19 @@ void UpdatePreview(AppState* state)
                     SetText(state->window, valueIds[row], fallbackValues[row]);
                 }
             }
-            const fs::path preview = FindSidecarPreview(model);
+            fs::path preview = FindSidecarPreview(model);
+            if (preview.empty() && state->items[index].parameterized &&
+                fs::exists(model.parent_path() / L"parameter-preview.png"))
+                preview = model.parent_path() / L"parameter-preview.png";
             // Never ask the Windows shell to extract a thumbnail from an NX .prt file.
             // Siemens' shell thumbnail provider can re-enter the active NX process while
             // this dialog is running on NX's UI thread, leaving both sides waiting.
             if (!preview.empty())
             {
-                IShellItemImageFactory* factory = nullptr;
-                if (SUCCEEDED(SHCreateItemFromParsingName(preview.c_str(), nullptr,
-                                                           IID_PPV_ARGS(&factory))))
-                {
-                    SIZE size{400, 240};
-                    factory->GetImage(size,
-                        static_cast<SIIGBF>(SIIGBF_BIGGERSIZEOK | SIIGBF_RESIZETOFIT),
-                        &state->previewBitmap);
-                    factory->Release();
-                }
+                // Read the image itself so replacing a same-named sidecar is
+                // visible immediately instead of reusing the shell's cache.
+                try { state->previewBitmap = ReadPreviewBitmap(preview); }
+                catch (const std::exception& ex) { UF_print_syslog(const_cast<char*>(ex.what()), false); }
             }
         }
     }
@@ -1258,7 +1373,9 @@ bool InsertAssembly(AppState* state, const LibraryItem& item, std::wstring& erro
         if (origins.size() > 1)
             numberedName += "_" + std::to_string(placement + 1);
         const int code = UF_ASSEM_add_part_to_assembly2(
-            workPart, path.c_str(), "MODEL", numberedName.c_str(),
+            // User-defined library parts need not contain a MODEL reference
+            // set. A null name selects the entire part (UF_ASSEM contract).
+            workPart, path.c_str(), nullptr, numberedName.c_str(),
             const_cast<double*>(origins[placement].data()), matrix,
             -1, &instance, &loadStatus);
         UF_PART_free_load_status(&loadStatus);
@@ -1362,6 +1479,223 @@ bool InsertBodies(AppState* state, const LibraryItem& item, std::wstring& error)
     }
     UF_DISP_regenerate_display();
     return true;
+}
+
+struct PreviewSegment
+{
+    std::array<double, 3> start;
+    std::array<double, 3> end;
+};
+
+constexpr std::size_t kPreviewSegmentBudget = 5000;
+using PreviewBox = std::array<double, 6>;
+
+void IncludePreviewPoint(PreviewBox& box, const std::array<double, 3>& point)
+{
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        box[axis] = std::min(box[axis], point[axis]);
+        box[axis + 3] = std::max(box[axis + 3], point[axis]);
+    }
+}
+
+std::vector<PreviewSegment> PreviewBoxWireframe(const std::vector<PreviewBox>& boxes)
+{
+    if (boxes.empty()) return {};
+    // Keep every body's extent. If there are too many bodies, merge their boxes
+    // instead of dropping later bodies or allocating an unbounded preview.
+    if (boxes.size() > kPreviewSegmentBudget / 12)
+    {
+        PreviewBox overall = boxes.front();
+        for (const auto& box : boxes)
+        {
+            IncludePreviewPoint(overall, {box[0], box[1], box[2]});
+            IncludePreviewPoint(overall, {box[3], box[4], box[5]});
+        }
+        return PreviewBoxWireframe({overall});
+    }
+    std::vector<PreviewSegment> result;
+    result.reserve(boxes.size() * 12);
+    for (const auto& box : boxes)
+        for (int corner = 0; corner < 8; ++corner)
+            for (int axis = 0; axis < 3; ++axis)
+                if ((corner & (1 << axis)) == 0)
+                {
+                    std::array<double, 3> start{};
+                    for (int coordinate = 0; coordinate < 3; ++coordinate)
+                        start[coordinate] = box[coordinate + ((corner & (1 << coordinate)) ? 3 : 0)];
+                    auto end = start;
+                    end[axis] = box[axis + 3];
+                    result.push_back({start, end});
+                }
+    return result;
+}
+
+PreviewBox PreviewExtent(const std::vector<PreviewSegment>& segments)
+{
+    const auto& first = segments.front().start;
+    PreviewBox box{first[0], first[1], first[2], first[0], first[1], first[2]};
+    for (const auto& segment : segments)
+    {
+        IncludePreviewPoint(box, segment.start);
+        IncludePreviewPoint(box, segment.end);
+    }
+    return box;
+}
+
+void CheckPreviewUf(int code)
+{
+    if (code != 0) throw std::runtime_error(ToAnsi(UfError(code)));
+}
+
+double UnitMillimeters(int units)
+{
+    switch (units)
+    {
+    case 1: return 1.0;
+    case 2: return 25.4;
+    case 3: return 0.001;
+    case 4: return 1000.0;
+    default: throw std::runtime_error("Unsupported preview units");
+    }
+}
+
+// Read-only source geometry. Quiet loading never changes the work/display part;
+// already-loaded user parts are never closed by this helper.
+std::vector<PreviewSegment> LoadPlacementWireframe(const fs::path& path, int& units,
+    bool* simplified = nullptr)
+{
+    if (simplified != nullptr) *simplified = false;
+    const std::string name = ToAnsi(path.wstring());
+    const int loadState = UF_PART_is_loaded(name.c_str());
+    if (loadState < 0 || loadState > 2) CheckPreviewUf(loadState);
+    const bool wasLoaded = loadState != 0;
+    tag_t part = UF_PART_ask_part_tag(name.c_str());
+    struct PartScope
+    {
+        tag_t& part;
+        bool owned;
+        ~PartScope()
+        {
+            if (owned && part != NULL_TAG) UF_PART_close(part, 0, 2);
+        }
+    } partScope{part, !wasLoaded};
+    if (loadState != 1 || part == NULL_TAG)
+    {
+        UF_PART_load_status_t status{};
+        const int code = UF_PART_open_quiet(name.c_str(), &part, &status);
+        UF_PART_free_load_status(&status);
+        CheckPreviewUf(code);
+    }
+    CheckPreviewUf(UF_PART_ask_units(part, &units));
+    std::vector<PreviewSegment> segments;
+    std::vector<tag_t> bodies;
+    tag_t body = NULL_TAG;
+    while (true)
+    {
+        CheckPreviewUf(UF_OBJ_cycle_objs_in_part(part, UF_solid_type, &body));
+        if (body == NULL_TAG) break;
+        int type = 0, subtype = 0;
+        CheckPreviewUf(UF_OBJ_ask_type_and_subtype(body, &type, &subtype));
+        if (subtype != UF_solid_body_subtype) continue;
+        bodies.push_back(body);
+    }
+    const auto simplifiedOutline = [&]()
+    {
+        std::vector<PreviewBox> boxes;
+        for (tag_t solid : bodies)
+        {
+            PreviewBox box{};
+            CheckPreviewUf(UF_MODL_ask_bounding_box(solid, box.data()));
+            boxes.push_back(box);
+        }
+        if (simplified != nullptr) *simplified = true;
+        return PreviewBoxWireframe(boxes);
+    };
+    for (tag_t solid : bodies)
+    {
+        struct EdgeList
+        {
+            uf_list_p_t value = nullptr;
+            ~EdgeList() { if (value != nullptr) UF_MODL_delete_list(&value); }
+        } edges;
+        CheckPreviewUf(UF_MODL_ask_body_edges(solid, &edges.value));
+        int count = 0;
+        CheckPreviewUf(UF_MODL_ask_list_count(edges.value, &count));
+        for (int index = 0; index < count; ++index)
+        {
+            tag_t edge = NULL_TAG;
+            CheckPreviewUf(UF_MODL_ask_list_item(edges.value, index, &edge));
+            struct Evaluator
+            {
+                UF_EVAL_p_t value = nullptr;
+                ~Evaluator() { if (value != nullptr) UF_EVAL_free(value); }
+            } evaluator;
+            CheckPreviewUf(UF_EVAL_initialize(edge, &evaluator.value));
+            double limits[2]{};
+            CheckPreviewUf(UF_EVAL_ask_limits(evaluator.value, limits));
+            logical straight = false;
+            CheckPreviewUf(UF_EVAL_is_line(evaluator.value, &straight));
+            const int steps = straight ? 1 : 32;
+            std::array<double, 3> previous{};
+            CheckPreviewUf(UF_EVAL_evaluate(evaluator.value, 0, limits[0], previous.data(), nullptr));
+            for (int step = 1; step <= steps; ++step)
+            {
+                std::array<double, 3> point{};
+                const double parameter = limits[0] + (limits[1] - limits[0]) * step / steps;
+                CheckPreviewUf(UF_EVAL_evaluate(evaluator.value, 0, parameter, point.data(), nullptr));
+                segments.push_back({previous, point});
+                previous = point;
+                if (segments.size() > kPreviewSegmentBudget)
+                    return simplifiedOutline();
+            }
+        }
+    }
+    if (segments.empty()) throw std::runtime_error("标准件未包含可预览的实体轮廓；仍可点击确定插入。");
+    return segments;
+}
+
+std::array<double, 3> TransformPreviewPoint(const std::array<double, 3>& point,
+    const std::array<double, 3>& origin, const double matrix[9], double scale)
+{
+    std::array<double, 3> result{};
+    for (int axis = 0; axis < 3; ++axis)
+        result[axis] = origin[axis] + scale *
+            (point[0] * matrix[axis] + point[1] * matrix[axis + 3] + point[2] * matrix[axis + 6]);
+    return result;
+}
+
+std::vector<PreviewSegment> BuildPlacedPreview(const std::vector<PreviewSegment>& source,
+    const std::vector<std::array<double, 3>>& origins, const double matrix[9],
+    double scale, bool& simplified)
+{
+    if (source.empty() || origins.empty()) return {};
+    const auto* outline = &source;
+    std::vector<PreviewSegment> boxOutline;
+    if (source.size() > kPreviewSegmentBudget / origins.size())
+    {
+        boxOutline = PreviewBoxWireframe({PreviewExtent(source)});
+        outline = &boxOutline;
+        simplified = true;
+    }
+    const bool overallOnly = outline->size() > kPreviewSegmentBudget / origins.size();
+    const auto first = TransformPreviewPoint(outline->front().start, origins.front(), matrix, scale);
+    PreviewBox overall{first[0], first[1], first[2], first[0], first[1], first[2]};
+    std::vector<PreviewSegment> placed;
+    if (!overallOnly) placed.reserve(outline->size() * origins.size());
+    for (const auto& origin : origins)
+        for (const auto& segment : *outline)
+        {
+            const auto start = TransformPreviewPoint(segment.start, origin, matrix, scale);
+            const auto end = TransformPreviewPoint(segment.end, origin, matrix, scale);
+            if (overallOnly)
+            {
+                IncludePreviewPoint(overall, start);
+                IncludePreviewPoint(overall, end);
+            }
+            else placed.push_back({start, end});
+        }
+    return overallOnly ? PreviewBoxWireframe({overall}) : placed;
 }
 
 HWND AddControl(AppState* state, DWORD exStyle, const wchar_t* cls, const wchar_t* text,
@@ -1647,7 +1981,7 @@ void ShowQuickPosition(AppState* state)
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     windowClass.lpszClassName = className;
-    RegisterClassExW(&windowClass);
+    if (!RegisterOwnedWindowClass(windowClass, state->window)) return;
     auto* context = new (std::nothrow) QuickPositionContext();
     if (context == nullptr) return;
     context->state = state;
@@ -1671,6 +2005,10 @@ void ShowQuickPosition(AppState* state)
     SetForegroundWindow(quick);
 }
 
+void CaptureManagedPreview(AppState* state, HWND owner);
+void ShowParameterManager(AppState* state, bool forInsertion = false);
+void ShowParameterDefinition(AppState*,const fs::path&,std::size_t,const std::wstring&,const std::wstring&,const std::wstring&);
+
 LRESULT CALLBACK ManagerWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
     AppState* state = reinterpret_cast<AppState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -1690,6 +2028,11 @@ LRESULT CALLBACK ManagerWindowProc(HWND window, UINT message, WPARAM wParam, LPA
     constexpr int addStaticId = 2108;
     constexpr int addParamId = 2109;
     constexpr int screenshotId = 2110;
+    constexpr int parametersId = 2111;
+    constexpr int defineId = 2112;
+    constexpr int addFileId = 2113;
+    try
+    {
     if (message == WM_CREATE && state != nullptr)
     {
         const HFONT font = state->font;
@@ -1705,21 +2048,28 @@ LRESULT CALLBACK ManagerWindowProc(HWND window, UINT message, WPARAM wParam, LPA
         add(WS_EX_CLIENTEDGE, L"EDIT", LibraryRoot(state).c_str(), ES_AUTOHSCROLL,
             112, 18, 430, 26, rootId);
         add(0, L"BUTTON", L"浏览", BS_PUSHBUTTON, 550, 17, 72, 28, browseId);
-        add(0, L"STATIC", L"无参目录：根目录\\Lib", SS_LEFT, 16, 64, 260, 22, 0);
-        add(0, L"STATIC", L"有参目录：根目录\\LibParam", SS_LEFT, 16, 92, 280, 22, 0);
+        const bool param = state->libraryFilter == 2;
+        const auto folder = CurrentLibraryFolder(state).wstring();
+        add(0, L"STATIC", folder.c_str(), SS_LEFT | SS_PATHELLIPSIS, 16, 64, 606, 24, 0);
+        add(0, L"STATIC", param ? L"新建流程：选有参 PRT → 定义参数 → 创建零件族 → 管理参数另存规格。" : L"当前操作仅作用于本地无参。",
+            SS_LEFT, 16, 92, 606, 22, 0);
         add(0, L"STATIC", L"分类", SS_LEFT, 16, 126, 38, 22, 0);
-        add(WS_EX_CLIENTEDGE, L"EDIT", L"用户自定义", ES_AUTOHSCROLL, 56, 122, 132, 25, categoryId);
+        add(WS_EX_CLIENTEDGE, L"EDIT", state->selectedCategory.empty() ? L"用户自定义" : state->selectedCategory.c_str(),
+            ES_AUTOHSCROLL, 56, 122, 132, 25, categoryId);
         add(0, L"STATIC", L"零件族", SS_LEFT, 198, 126, 50, 22, 0);
         add(WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL, 250, 122, 150, 25, familyId);
         add(0, L"STATIC", L"规格", SS_LEFT, 410, 126, 38, 22, 0);
         add(WS_EX_CLIENTEDGE, L"EDIT", L"默认", ES_AUTOHSCROLL, 450, 122, 172, 25, specificationId);
-        add(0, L"BUTTON", L"当前部件加入无参库", BS_PUSHBUTTON, 16, 160, 166, 38, addStaticId);
-        add(0, L"BUTTON", L"当前部件加入有参库", BS_PUSHBUTTON, 192, 160, 166, 38, addParamId);
-        add(0, L"BUTTON", L"截图预览", BS_PUSHBUTTON, 368, 160, 112, 38, screenshotId);
-        add(0, L"BUTTON", L"管理本地无参", BS_PUSHBUTTON, 16, 210, 132, 42, openStaticId);
-        add(0, L"BUTTON", L"管理本地有参", BS_PUSHBUTTON, 158, 210, 132, 42, openParamId);
-        add(0, L"STATIC", L"PRT 与同名 PNG/JPG/BMP 放在同一目录即可显示预览。",
-            SS_LEFT, 310, 215, 310, 40, 0);
+        add(0, L"BUTTON", param ? L"用当前部件新建有参" : L"当前部件加入无参库",
+            BS_PUSHBUTTON, 16, 160, 166, 38, param ? addParamId : addStaticId);
+        add(0, L"BUTTON", L"抓取选中图档图片", BS_PUSHBUTTON, 192, 160, 166, 38, screenshotId);
+        if (param) add(0, L"BUTTON", L"管理参数", BS_PUSHBUTTON, 368, 160, 112, 38, parametersId);
+        if (param) add(0, L"BUTTON", L"定义参数", BS_PUSHBUTTON, 490, 160, 132, 38, defineId);
+        add(0, L"BUTTON", L"打开当前库目录", BS_PUSHBUTTON, 16, 210, 166, 42,
+            param ? openParamId : openStaticId);
+        if (param) add(0,L"BUTTON",L"选择 PRT 新建有参",BS_PUSHBUTTON,192,210,166,42,addFileId);
+        add(0, L"STATIC", L"同名图片自动复制，也可入库后抓图。",
+            SS_LEFT, param?370:310, 215, param?250:310, 40, 0);
         add(0, L"BUTTON", L"确定", BS_DEFPUSHBUTTON, 466, 278, 74, 30, IDOK);
         add(0, L"BUTTON", L"取消", BS_PUSHBUTTON, 548, 278, 74, 30, IDCANCEL);
         return 0;
@@ -1737,6 +2087,7 @@ LRESULT CALLBACK ManagerWindowProc(HWND window, UINT message, WPARAM wParam, LPA
         case openStaticId:
         case openParamId:
         {
+            if ((LOWORD(wParam) == openParamId) != (state->libraryFilter == 2)) return 0;
             const fs::path root = Trim(GetText(window, rootId));
             const fs::path folder = root /
                 (LOWORD(wParam) == openStaticId ? L"Lib" : L"LibParam");
@@ -1747,8 +2098,12 @@ LRESULT CALLBACK ManagerWindowProc(HWND window, UINT message, WPARAM wParam, LPA
         }
         case addStaticId:
         case addParamId:
+        case addFileId:
         {
-            const std::wstring current = CurrentPartPath();
+            const bool parameterized=LOWORD(wParam)!=addStaticId;
+            if (parameterized != (state->libraryFilter == 2)) return 0;
+            const std::wstring current = LOWORD(wParam)==addFileId?BrowsePartFile(window):CurrentPartPath();
+            if(current.empty()&&LOWORD(wParam)==addFileId)return 0;
             if (current.empty())
             {
                 MessageBoxW(window, L"当前工作部件尚未保存，请先保存 PRT。", kTitle,
@@ -1757,11 +2112,17 @@ LRESULT CALLBACK ManagerWindowProc(HWND window, UINT message, WPARAM wParam, LPA
             }
             std::wstring family = Trim(GetText(window, familyId));
             if (family.empty()) family = fs::path(current).stem().wstring();
+            if(parameterized)
+            {
+                if(fs::path(Trim(GetText(window,rootId))).lexically_normal()!=LibraryRoot(state).lexically_normal())
+                    throw std::runtime_error(ToAnsi(L"库根目录已修改，请先按确定切换库，再新建有参标准件。"));
+                ShowParameterDefinition(state,current,SIZE_MAX,Trim(GetText(window,categoryId)),family,Trim(GetText(window,specificationId)));
+                return 0;
+            }
             SetText(state->window, ID_ROOT, Trim(GetText(window, rootId)));
             SetText(state->window, ID_NAME, family);
             SetText(state->window, ID_EDIT_CATEGORY, Trim(GetText(window, categoryId)));
             SetText(state->window, ID_EDIT_SPEC, Trim(GetText(window, specificationId)));
-            state->libraryFilter = LOWORD(wParam) == addParamId ? 2 : 1;
             std::wstring error;
             if (!AddToLibrary(state, current, error))
                 MessageBoxW(window, error.c_str(), kTitle, MB_OK | MB_ICONERROR);
@@ -1772,35 +2133,17 @@ LRESULT CALLBACK ManagerWindowProc(HWND window, UINT message, WPARAM wParam, LPA
         }
         case screenshotId:
         {
-            const std::wstring current = CurrentPartPath();
-            if (current.empty())
-            {
-                MessageBoxW(window, L"当前工作部件尚未保存，不能创建同名预览图。", kTitle,
-                            MB_OK | MB_ICONWARNING);
-                return 0;
-            }
-            fs::path preview = current;
-            preview.replace_extension(L".png");
-            if (fs::exists(preview) && MessageBoxW(window,
-                (L"同名预览图已经存在，确定覆盖？\r\n" + preview.wstring()).c_str(),
-                kTitle, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
-                return 0;
-            std::string output = ToAnsi(preview.wstring());
-            ShowWindow(window, SW_HIDE);
-            ShowWindow(state->window, SW_HIDE);
-            const int code = UF_DISP_create_image(output.data(), UF_DISP_PNG, UF_DISP_WHITE);
-            ShowWindow(state->window, SW_SHOW);
-            ShowWindow(window, SW_SHOW);
-            SetForegroundWindow(window);
-            if (code == 0)
-                MessageBoxW(window, (L"预览图已创建：\r\n" + preview.wstring()).c_str(),
-                            kTitle, MB_OK | MB_ICONINFORMATION);
-            else
-            {
-                const std::wstring error = L"创建预览图失败：" + UfError(code);
-                MessageBoxW(window, error.c_str(), kTitle, MB_OK | MB_ICONERROR);
-            }
+            CaptureManagedPreview(state, window);
             return 0;
+        }
+        case parametersId: ShowParameterManager(state); return 0;
+        case defineId:
+        {
+            const auto index=SelectedIndex(state);
+            if(state->libraryFilter!=2||index>=state->items.size())throw std::runtime_error(ToAnsi(L"请先选择本地有参图档。"));
+            std::wstring error;const auto model=ResolvedModel(state,state->items[index],error);
+            if(model.empty())throw std::runtime_error(ToAnsi(error));
+            const auto& item=state->items[index];ShowParameterDefinition(state,model,index,item.category,item.name,item.specification);return 0;
         }
         case IDOK:
             SetText(state->window, ID_ROOT, Trim(GetText(window, rootId)));
@@ -1820,6 +2163,10 @@ LRESULT CALLBACK ManagerWindowProc(HWND window, UINT message, WPARAM wParam, LPA
         if (g_managerWindow == window) g_managerWindow = nullptr;
         SetWindowLongPtrW(window, GWLP_USERDATA, 0);
     }
+    }
+    catch(const NXOpen::NXException& ex){UF_print_syslog(const_cast<char*>(ex.Message()),false);MessageBoxW(window,FromAnsi(ex.Message()).c_str(),L"图档管理",MB_OK|MB_ICONERROR);}
+    catch(const std::exception& ex){UF_print_syslog(const_cast<char*>(ex.what()),false);MessageBoxW(window,FromAnsi(ex.what()).c_str(),L"图档管理",MB_OK|MB_ICONERROR);}
+    catch(...){UF_print_syslog("[StandardPartsLibrary] Manager callback failed\n",false);}
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
@@ -1843,14 +2190,21 @@ void ShowManagerConfig(AppState* state)
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     windowClass.lpszClassName = className;
-    RegisterClassExW(&windowClass);
+    if (!RegisterOwnedWindowClass(windowClass, state->window)) return;
     RECT parentRect{};
     GetWindowRect(state->window, &parentRect);
+    const auto title = std::wstring(CurrentLibraryName(state)) + L" - 图档管理";
     HWND manager = CreateWindowExW(WS_EX_DLGMODALFRAME, className,
-        L"智辉零件库管理配置", WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        title.c_str(), WS_CAPTION | WS_SYSMENU | WS_POPUP,
         parentRect.left + 10, parentRect.top + 100, 654, 355,
         state->window, nullptr, module, state);
-    if (manager == nullptr) return;
+    if (manager == nullptr)
+    {
+        UF_print_syslog("[StandardPartsLibrary] Manager window creation failed\n", false);
+        MessageBoxW(state->window, L"无法创建图档管理窗口，请关闭标准件库后重新打开。",
+                    L"图档管理", MB_OK | MB_ICONERROR);
+        return;
+    }
     g_managerWindow = manager;
     ShowWindow(manager, SW_SHOW);
 }
@@ -1859,13 +2213,13 @@ void BuildLegacyUi(AppState* state)
 {
     state->font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     const std::wstring savedRoot = LoadRootPreference();
-    AddControl(state, 0, L"BUTTON", L"全部", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP,
+    AddControl(state, 0, L"BUTTON", L"全部", BS_PUSHBUTTON,
                12, 10, 66, 27, ID_FILTER_ALL);
-    AddControl(state, 0, L"BUTTON", L"本地无参", BS_AUTORADIOBUTTON | BS_PUSHLIKE,
+    AddControl(state, 0, L"BUTTON", L"本地无参", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP,
                80, 10, 82, 27, ID_FILTER_STATIC);
     AddControl(state, 0, L"BUTTON", L"本地有参", BS_AUTORADIOBUTTON | BS_PUSHLIKE,
                164, 10, 82, 27, ID_FILTER_PARAM);
-    CheckRadioButton(state->window, ID_FILTER_ALL, ID_FILTER_PARAM, ID_FILTER_ALL);
+    CheckRadioButton(state->window, ID_FILTER_STATIC, ID_FILTER_PARAM, ID_FILTER_STATIC);
     AddControl(state, 0, L"STATIC", L"搜索", SS_LEFT, 264, 15, 38, 20, 0);
     AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL,
                304, 11, 270, 25, ID_SEARCH);
@@ -1952,7 +2306,7 @@ void BuildLegacyUi(AppState* state)
     AddControl(state, 0, L"BUTTON", L"浏览...", BS_PUSHBUTTON, 562, 701, 70, 29, ID_BROWSE_SOURCE);
     AddControl(state, 0, L"BUTTON", L"添加文件", BS_PUSHBUTTON, 640, 701, 90, 29, ID_ADD_FILE);
     AddControl(state, 0, L"BUTTON", L"删除选中", BS_PUSHBUTTON, 738, 701, 90, 29, ID_DELETE);
-    AddControl(state, 0, L"BUTTON", L"修改配置", BS_PUSHBUTTON, 14, 758, 88, 30, ID_MANAGE_CONFIG);
+    AddControl(state, 0, L"BUTTON", L"图档管理", BS_PUSHBUTTON, 14, 758, 88, 30, ID_MANAGE_CONFIG);
     AddControl(state, 0, L"STATIC", L"", SS_LEFT, 112, 762, 610, 26, ID_STATUS);
     AddControl(state, 0, L"BUTTON", L"关闭", BS_PUSHBUTTON, 824, 758, 84, 30, ID_CLOSE);
 }
@@ -1972,13 +2326,13 @@ void BuildUi(AppState* state)
         ShowWindow(hidden, SW_HIDE);
     }
 
-    AddControl(state, 0, L"BUTTON", L"全部", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP,
+    AddControl(state, 0, L"BUTTON", L"全部", BS_PUSHBUTTON,
                10, 12, 72, 30, ID_FILTER_ALL);
-    AddControl(state, 0, L"BUTTON", L"本地无参", BS_AUTORADIOBUTTON | BS_PUSHLIKE,
+    AddControl(state, 0, L"BUTTON", L"本地无参", BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP,
                10, 46, 72, 30, ID_FILTER_STATIC);
     AddControl(state, 0, L"BUTTON", L"本地有参", BS_AUTORADIOBUTTON | BS_PUSHLIKE,
                10, 80, 72, 30, ID_FILTER_PARAM);
-    CheckRadioButton(state->window, ID_FILTER_ALL, ID_FILTER_PARAM, ID_FILTER_ALL);
+    CheckRadioButton(state->window, ID_FILTER_STATIC, ID_FILTER_PARAM, ID_FILTER_STATIC);
     AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL,
                88, 13, 116, 27, ID_SEARCH);
     AddControl(state, 0, L"STATIC", L"搜索", SS_LEFT, 209, 18, 38, 20, 0);
@@ -1997,7 +2351,9 @@ void BuildUi(AppState* state)
 
     state->preview = AddControl(state, WS_EX_CLIENTEDGE, L"STATIC", L"", SS_OWNERDRAW,
                                 375, 44, 229, 190, ID_PREVIEW);
-    AddControl(state, 0, L"STATIC", L"规格", SS_LEFT, 379, 242, 54, 22, 0);
+    AddControl(state, 0, L"STATIC", L"规格", SS_LEFT, 379, 242, 54, 22, ID_SPEC_LABEL);
+    AddControl(state, 0, L"BUTTON", L"选择参数", BS_PUSHBUTTON,
+               375, 238, 64, 25, ID_INSERT_PARAMETERS);
     AddControl(state, 0, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL,
                441, 238, 158, 200, ID_SPEC);
     AddControl(state, 0, L"STATIC", L"名称", SS_LEFT, 379, 270, 58, 22, ID_PARAM_LABEL1);
@@ -2050,8 +2406,10 @@ void BuildUi(AppState* state)
     AddControl(state, 0, L"STATIC", L"Y数", SS_LEFT, 554, 489, 24, 20, 0);
     AddControl(state, WS_EX_CLIENTEDGE, L"EDIT", L"2", ES_NUMBER,
                578, 486, 26, 22, ID_PATTERN_COUNT_Y);
-    AddControl(state, 0, L"BUTTON", L"修改配置", BS_PUSHBUTTON,
+    AddControl(state, 0, L"BUTTON", L"图档管理", BS_PUSHBUTTON,
                10, 488, 72, 30, ID_MANAGE_CONFIG);
+    AddControl(state, 0, L"BUTTON", L"选择体\r\n加入库", BS_PUSHBUTTON | BS_MULTILINE,
+               10, 424, 72, 56, ID_CAPTURE_BODIES);
 
     if (state->embedded) return;
 
@@ -2089,35 +2447,316 @@ void BuildUi(AppState* state)
                526, 718, 66, 30, ID_CLOSE);
 }
 
-void DeleteSelected(AppState* state)
+bool RemoveLibraryItem(AppState* state, std::size_t index, fs::path& backup,
+    std::wstring& error)
 {
-    const std::size_t index = SelectedIndex(state);
-    if (index == SIZE_MAX) { SetStatus(state, L"请先选中要删除的标准件。"); return; }
+    if (index >= state->items.size() || !InCurrentLibrary(state, state->items[index]))
+    { error = L"请先选中当前库内要删除的标准件。"; return false; }
     const LibraryItem item = state->items[index];
-    if (MessageBoxW(state->window, (L"确定删除标准件“" + item.name + L"”及库内模型副本？").c_str(),
-                    kTitle, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    const fs::path root = fs::weakly_canonical(LibraryRoot(state));
+    const std::wstring prefix = Lower(root.wstring() + L"\\");
+    const auto withinLibrary = [&](const fs::path& path)
+    {
+        return Lower(fs::weakly_canonical(path).wstring()).rfind(prefix, 0) == 0;
+    };
+    const fs::path model = fs::weakly_canonical(root / item.relativePath);
+    if (!withinLibrary(model) || !IsPartFile(model))
+    {
+        error = L"模型路径不在标准件库内，已拒绝删除。";
+        return false;
+    }
+    // Other specifications may deliberately share the same model file.
+    bool shared = false;
+    for (std::size_t other = 0; other < state->items.size(); ++other)
+        if (other != index && Lower(fs::weakly_canonical(root / state->items[other].relativePath).wstring()) == Lower(model.wstring()))
+            shared = true;
+    std::vector<fs::path> files;
+    if (!shared)
+    {
+        if (fs::exists(model)) files.push_back(model);
+        for (const auto* extension : {L".png", L".jpg", L".jpeg", L".bmp"})
+        {
+            fs::path preview = model;
+            preview.replace_extension(extension);
+            if (fs::exists(preview)) files.push_back(preview);
+        }
+        for (const auto& file : files)
+            if (!withinLibrary(file) || !fs::is_regular_file(file))
+            {
+                error = L"模型或配图路径异常，已拒绝删除。";
+                return false;
+            }
+    }
+    backup.clear();
+    std::vector<std::pair<fs::path, fs::path>> moved;
+    const auto restore = [&]()
+    {
+        for (auto it = moved.rbegin(); it != moved.rend(); ++it)
+        {
+            std::error_code ec;
+            fs::rename(it->second, it->first, ec);
+            if (ec) error += L"\r\n恢复失败，请从备份恢复：" + it->second.wstring();
+        }
+    };
+    if (!files.empty())
+    {
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        wchar_t stamp[64]{};
+        swprintf_s(stamp, L"deleted_%04u%02u%02u_%02u%02u%02u_%03u_%llu",
+            now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond,
+            now.wMilliseconds, GetTickCount64());
+        backup = root / L"backup" / stamp;
+        if (!withinLibrary(backup)) { error = L"备份目录不在库内，已停止删除。"; return false; }
+        if (!fs::create_directories(backup)) { error = L"无法创建独立删除备份目录。"; return false; }
+        if (!WriteUtf16File(backup / L"restore.tsv",
+            L"# id\tname\tcategory\trelative_model_path\tspecification\tparameterized\r\n" +
+            item.id + L"\t" + item.name + L"\t" + item.category + L"\t" + item.relativePath +
+            L"\t" + item.specification + L"\t" + (item.parameterized ? L"1" : L"0") + L"\r\n"))
+        { error = L"无法写入删除恢复记录，已停止删除。"; return false; }
+        try
+        {
+            moved.reserve(files.size());
+            for (const auto& file : files)
+            {
+                const fs::path destination = backup / file.filename();
+                // Record before moving so allocation failure cannot strand a file.
+                moved.emplace_back(file, destination);
+                std::error_code ec;
+                fs::rename(file, destination, ec);
+                if (ec)
+                {
+                    moved.pop_back();
+                    error = L"无法移走库内文件（可能正在使用）：" + file.wstring();
+                    restore();
+                    return false;
+                }
+            }
+        }
+        catch (...) { error = L"移走文件失败。"; restore(); return false; }
+    }
     state->items.erase(state->items.begin() + static_cast<std::ptrdiff_t>(index));
-    std::wstring error;
-    if (!SaveIndex(state, error))
+    bool saved = false;
+    try { saved = SaveIndex(state, error); }
+    catch (...) { error = L"保存删除后的索引失败。"; }
+    if (!saved)
     {
         state->items.insert(state->items.begin() + static_cast<std::ptrdiff_t>(index), item);
-        SetStatus(state, error);
-        return;
+        restore();
+        return false;
     }
-    std::error_code ec;
-    const fs::path model = LibraryRoot(state) / item.relativePath;
-    const fs::path preview = FindSidecarPreview(model);
-    fs::remove(model, ec);
-    if (!preview.empty()) fs::remove(preview, ec);
-    RefreshCategories(state);
-    RefreshList(state);
-    SetStatus(state, L"已删除：" + item.name);
+    return true;
 }
 
-void InsertSelected(AppState* state)
+void DeleteSelected(AppState* state, std::size_t index = SIZE_MAX)
+{
+    if (index == SIZE_MAX) index = SelectedIndex(state);
+    if (index >= state->items.size()) { SetStatus(state, L"请先选中要删除的标准件。"); return; }
+    const LibraryItem item = state->items[index];
+    const std::wstring prompt = L"确定删除当前规格？\r\n标准件：" + item.name +
+        L"\r\n规格：" + item.specification + L"\r\n文件：" + item.relativePath +
+        L"\r\n\r\n仅删除当前规格；未被其他规格共用的库内模型和同名配图会移到库内 backup 目录，可恢复。";
+    if (MessageBoxW(state->window, prompt.c_str(), kTitle,
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    std::wstring error;
+    fs::path backup;
+    try
+    {
+        if (!RemoveLibraryItem(state, index, backup, error))
+        {
+            MessageBoxW(state->window, error.c_str(), kTitle, MB_OK | MB_ICONERROR);
+            return;
+        }
+    }
+    catch (const std::exception& ex)
+    {
+        MessageBoxW(state->window, FromAnsi(ex.what()).c_str(), kTitle, MB_OK | MB_ICONERROR);
+        return;
+    }
+    RefreshCategories(state);
+    RefreshList(state);
+    SetStatus(state, L"已删除当前规格：" + item.name + L" / " + item.specification +
+        (backup.empty() ? L"" : L"；可从备份恢复：" + backup.wstring()));
+}
+
+#include "StandardPartsCapture.inc"
+
+std::size_t SelectContextRow(AppState* state, int row)
+{
+    if (row < 0 || static_cast<std::size_t>(row) >= state->visible.size()) return SIZE_MAX;
+    if ((ListView_GetItemState(state->list, row, LVIS_SELECTED) & LVIS_SELECTED) == 0)
+    {
+        // Refresh specifications exactly once after selecting the clicked row.
+        state->refreshingList = true;
+        ListView_SetItemState(state->list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_SetItemState(state->list, row, LVIS_SELECTED | LVIS_FOCUSED,
+            LVIS_SELECTED | LVIS_FOCUSED);
+        state->refreshingList = false;
+        RefreshSpecifications(state);
+        UpdatePreview(state);
+    }
+    return SelectedIndex(state);
+}
+
+#include "StandardPartsParameterManager.inc"
+
+void OpenLibraryPartForEdit(const fs::path& model)
+{
+    const std::string name = ToAnsi(model.wstring());
+    tag_t part = UF_PART_ask_part_tag(name.c_str());
+    if (part == NULL_TAG || UF_PART_is_loaded(name.c_str()) != 1)
+    {
+        UF_PART_load_status_t status{};
+        const int code = UF_PART_open_quiet(name.c_str(), &part, &status);
+        UF_PART_free_load_status(&status);
+        CheckPreviewUf(code);
+    }
+    if (part == NULL_TAG) throw std::runtime_error("标准件 PRT 打开失败。");
+    // Do not close/save the existing work part or reopen an already-loaded model.
+    CheckPreviewUf(UF_PART_set_display_part(part));
+    CheckPreviewUf(UF_ASSEM_set_work_part(part));
+}
+
+void PostLibraryDialogCancel(AppState* state)
+{
+    // The captioned NX window is a wrapper. Its WM_CLOSE does not dispatch
+    // Block Styler Cancel. Route the real navigation button's notification to
+    // its owning dialog, asynchronously so the browser callback can return.
+    struct Search { HWND pane; HWND button = nullptr; int count = 0; } search{state->window};
+    EnumChildWindows(state->parent, [](HWND child, LPARAM parameter) -> BOOL
+    {
+        auto* result = reinterpret_cast<Search*>(parameter);
+        wchar_t className[64]{};
+        GetClassNameW(child, className, 64);
+        if (GetDlgCtrlID(child) == IDCANCEL && _wcsicmp(className, L"Button") == 0 &&
+            !IsChild(result->pane, child) && IsWindowVisible(child) && IsWindowEnabled(child))
+        {
+            result->button = child;
+            ++result->count;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&search));
+    if (search.count != 1 || !PostMessageW(GetParent(search.button), WM_COMMAND,
+        MAKEWPARAM(IDCANCEL, BN_CLICKED), reinterpret_cast<LPARAM>(search.button)))
+        throw std::runtime_error("无法找到标准件库的取消控件，未启动窗口切换。");
+    UF_print_syslog("[StandardPartsLibrary] Posted native navigation Cancel for dialog transition\n", false);
+}
+
+void RequestLibraryPartEdit(AppState* state, std::size_t index)
+{
+    if (index >= state->items.size()) return;
+    std::wstring error;
+    const fs::path model = ResolvedModel(state, state->items[index], error);
+    if (model.empty())
+    {
+        MessageBoxW(state->window, error.c_str(), kTitle, MB_OK | MB_ICONERROR);
+        return;
+    }
+    if (!state->embedded) { OpenLibraryPartForEdit(model); return; }
+    // Close only our verified Block Styler parent. Opening another work part
+    // inside a modal selection callback would leave stale NX selections alive.
+    DWORD process = 0;
+    wchar_t title[256]{};
+    GetWindowThreadProcessId(state->parent, &process);
+    GetWindowTextW(state->parent, title, 256);
+    if (!IsWindow(state->parent) || !IsChild(state->parent, state->window) ||
+        process != GetCurrentProcessId() || wcscmp(title, kTitle) != 0)
+        throw std::runtime_error("无法安全关闭标准件库对话框，未打开编辑文件。");
+    state->requestedEditModel = model;
+    try { PostLibraryDialogCancel(state); }
+    catch (...)
+    {
+        state->requestedEditModel.clear();
+        throw;
+    }
+}
+
+void RequestBodyCapture(AppState* state)
+{
+    DWORD process = 0;
+    wchar_t title[256]{};
+    GetWindowThreadProcessId(state->parent, &process);
+    GetWindowTextW(state->parent, title, 256);
+    if (!state->embedded || !IsWindow(state->parent) || !IsChild(state->parent, state->window) ||
+        process != GetCurrentProcessId() || wcscmp(title, kTitle) != 0)
+        throw std::runtime_error("无法安全结束标准件库对话框，未启动选择体入库。");
+    state->requestedCaptureRoot = fs::weakly_canonical(LibraryRoot(state));
+    state->requestedCaptureCategory = state->selectedCategory;
+    try { PostLibraryDialogCancel(state); }
+    catch (...)
+    {
+        state->requestedCaptureRoot.clear();
+        state->requestedCaptureCategory.clear();
+        throw;
+    }
+}
+
+void ShowStandardPartContextMenu(AppState* state, POINT screenPoint)
+{
+    int row = -1;
+    if (screenPoint.x == -1 && screenPoint.y == -1)
+    {
+        row = ListView_GetNextItem(state->list, -1, LVNI_SELECTED);
+        RECT bounds{};
+        if (row < 0 || !ListView_GetItemRect(state->list, row, &bounds, LVIR_BOUNDS)) return;
+        screenPoint = {bounds.left + 8, bounds.bottom};
+        ClientToScreen(state->list, &screenPoint);
+    }
+    else
+    {
+        LVHITTESTINFO hit{};
+        hit.pt = screenPoint;
+        ScreenToClient(state->list, &hit.pt);
+        row = ListView_HitTest(state->list, &hit);
+    }
+    const std::size_t index = SelectContextRow(state, row);
+    if (index == SIZE_MAX) return; // Right-clicking empty space must not delete the old selection.
+    const HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) return;
+    AppendMenuW(menu, MF_STRING, ID_EDIT_MODEL, L"编辑标准件 PRT");
+    AppendMenuW(menu, MF_STRING, ID_REPLACE_PREVIEW, L"更换预览图片...");
+    AppendMenuW(menu, MF_STRING, ID_CAPTURE_PREVIEW, L"抓图作为预览...");
+    if (state->items[index].parameterized)
+    {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, ID_INSERT_PARAMETERS, L"参数组 / 选择尺寸...");
+        AppendMenuW(menu, MF_STRING, ID_DEFINE_PARAMETERS, L"修改参数设定...");
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, ID_DELETE, L"删除当前规格...");
+    const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+        screenPoint.x, screenPoint.y, 0, state->window, nullptr);
+    DestroyMenu(menu);
+    if (command == ID_EDIT_MODEL) RequestLibraryPartEdit(state, index);
+    if (command == ID_REPLACE_PREVIEW) BrowseManagedPreview(state, state->window);
+    if (command == ID_CAPTURE_PREVIEW) CaptureManagedPreview(state, state->window);
+    if (command == ID_INSERT_PARAMETERS) ShowParameterManager(state, true);
+    if (command == ID_DEFINE_PARAMETERS)
+    {
+        std::wstring error;
+        const auto model = ResolvedModel(state, state->items[index], error);
+        if (model.empty()) throw std::runtime_error(ToAnsi(error));
+        const auto item = state->items[index];
+        ShowParameterDefinition(state, model, index, item.category, item.name, item.specification);
+    }
+    if (command == ID_DELETE) DeleteSelected(state, index);
+}
+
+bool InsertSelected(AppState* state)
 {
     const std::size_t index = SelectedIndex(state);
-    if (index == SIZE_MAX) { SetStatus(state, L"请先选中要调用的标准件。"); return; }
+    if (index == SIZE_MAX)
+    {
+        MessageBoxW(state->window, L"请先选中标准件及规格，再指定插入点。",
+                    kTitle, MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
+    if (!state->hasPlacement)
+    {
+        MessageBoxW(state->window, L"请先指定标准件插入点。", kTitle,
+                    MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
     std::wstring error;
     NXOpen::Session* session = nullptr;
     NXOpen::Session::UndoMarkId mark =
@@ -2126,6 +2765,8 @@ void InsertSelected(AppState* state)
     try
     {
         session = NXOpen::Session::GetSession();
+        if (session == nullptr)
+            throw std::runtime_error("NX session is unavailable; insertion was not started.");
         if (session != nullptr)
         {
             mark = session->SetUndoMark(
@@ -2134,10 +2775,30 @@ void InsertSelected(AppState* state)
             hasMark = true;
         }
     }
-    catch (...) {}
+    catch (const NXOpen::NXException& ex)
+    {
+        std::string log = "[StandardPartsLibrary] Undo mark failed: " + std::string(ex.Message()) + "\n";
+        UF_print_syslog(log.data(), false);
+        MessageBoxW(state->window, (L"无法创建撤销事务：" + FromAnsi(ex.Message())).c_str(),
+                    kTitle, MB_OK | MB_ICONERROR);
+        return false;
+    }
+    catch (const std::exception& ex)
+    {
+        MessageBoxW(state->window, (L"无法创建撤销事务：" + FromAnsi(ex.what())).c_str(),
+                    kTitle, MB_OK | MB_ICONERROR);
+        return false;
+    }
     const bool assembly = IsDlgButtonChecked(state->window, ID_MODE_ASSEMBLY) == BST_CHECKED;
-    const bool ok = assembly ? InsertAssembly(state, state->items[index], error)
-                             : InsertBodies(state, state->items[index], error);
+    bool ok = false;
+    try
+    {
+        ok = assembly ? InsertAssembly(state, state->items[index], error)
+                      : InsertBodies(state, state->items[index], error);
+    }
+    catch (const NXOpen::NXException& ex) { error = FromAnsi(ex.Message()); }
+    catch (const std::exception& ex) { error = FromAnsi(ex.what()); }
+    catch (...) { error = L"创建标准件时发生未知错误。"; }
     if (ok)
     {
         const auto count = PatternOrigins(
@@ -2150,11 +2811,21 @@ void InsertSelected(AppState* state)
     {
         if (hasMark && session != nullptr)
         {
-            try { session->UndoToMark(mark, "调用智辉标准件"); } catch (...) {}
-            try { session->DeleteUndoMark(mark, "调用智辉标准件"); } catch (...) {}
+            try
+            {
+                session->UndoToMark(mark, "调用智辉标准件");
+                session->DeleteUndoMark(mark, "调用智辉标准件");
+            }
+            catch (...)
+            {
+                error += L"\r\n本次回滚未完成，请使用 NX 撤销并检查模型。";
+            }
         }
+        std::string log = "[StandardPartsLibrary] Insert failed: " + ToAnsi(error) + "\n";
+        UF_print_syslog(log.data(), false);
         MessageBoxW(state->window, error.c_str(), kTitle, MB_OK | MB_ICONERROR);
     }
+    return ok;
 }
 
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
@@ -2172,8 +2843,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     case WM_CREATE:
         BuildUi(state);
         LoadIndex(state);
-        RefreshCategories(state);
-        RefreshList(state);
+        SelectLibrary(state, state->libraryFilter);
+        if (!state->resumeItemId.empty())
+            for (std::size_t i = 0; i < state->items.size(); ++i)
+                if (state->items[i].id == state->resumeItemId)
+                { SelectLibrarySpecification(state, i, state->resumeGroupName); break; }
         return 0;
     case WM_COMMAND:
         if (state == nullptr) break;
@@ -2220,14 +2894,29 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             return 0;
         }
         case ID_DELETE: DeleteSelected(state); return 0;
+        case ID_CAPTURE_BODIES:
+            if (state->libraryFilter == 2) { ShowManagerConfig(state); return 0; }
+            try { RequestBodyCapture(state); }
+            catch (const NXOpen::NXException& ex)
+            {
+                UF_print_syslog(const_cast<char*>(ex.Message()), false);
+                MessageBoxW(window, FromAnsi(ex.Message()).c_str(), kTitle, MB_OK | MB_ICONERROR);
+            }
+            catch (const std::exception& ex) { MessageBoxW(window, FromAnsi(ex.what()).c_str(), kTitle, MB_OK | MB_ICONERROR); }
+            catch (...) { MessageBoxW(window, L"启动选择体入库失败。", kTitle, MB_OK | MB_ICONERROR); }
+            return 0;
         case ID_INSERT: InsertSelected(state); return 0;
         case ID_FILTER_ALL:
+            state->selectedCategory.clear();
+            SetText(state->window, ID_SEARCH, L"");
+            RefreshCategories(state);
+            RefreshList(state);
+            return 0;
         case ID_FILTER_STATIC:
         case ID_FILTER_PARAM:
             if (HIWORD(wParam) == BN_CLICKED)
             {
-                state->libraryFilter = LOWORD(wParam) - ID_FILTER_ALL;
-                RefreshList(state);
+                SelectLibrary(state, LOWORD(wParam) == ID_FILTER_PARAM ? 2 : 1);
             }
             return 0;
         case ID_PATTERN_SINGLE:
@@ -2255,13 +2944,35 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case ID_QUICK_ORIENT: QuickOrient(state); return 0;
         case ID_SELECT_TRIM: SelectTrimTargets(state); return 0;
         case ID_MANAGE_CONFIG: ShowManagerConfig(state); return 0;
+        case ID_INSERT_PARAMETERS: ShowParameterManager(state, true); return 0;
         case ID_SPEC:
-            if (HIWORD(wParam) == CBN_SELCHANGE) UpdatePreview(state);
+            if (HIWORD(wParam) == CBN_SELCHANGE) HandleSpecificationSelection(state);
             return 0;
         case ID_SEARCH:
             if (HIWORD(wParam) == EN_CHANGE) RefreshList(state);
             return 0;
         default: break;
+        }
+        break;
+    case WM_CONTEXTMENU:
+        if (state != nullptr && reinterpret_cast<HWND>(wParam) == state->list)
+        {
+            try
+            {
+                ShowStandardPartContextMenu(state,
+                    {static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam))});
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                UF_print_syslog(const_cast<char*>(ex.Message()), false);
+                MessageBoxW(window, FromAnsi(ex.Message()).c_str(), kTitle, MB_OK | MB_ICONERROR);
+            }
+            catch (const std::exception& ex)
+            {
+                MessageBoxW(window, FromAnsi(ex.what()).c_str(), kTitle, MB_OK | MB_ICONERROR);
+            }
+            catch (...) { MessageBoxW(window, L"标准件右键操作失败。", kTitle, MB_OK | MB_ICONERROR); }
+            return 0;
         }
         break;
     case WM_NOTIFY:
@@ -2339,6 +3050,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     case WM_DESTROY:
         if (state != nullptr)
         {
+            if (g_parameterWindow != nullptr && IsWindow(g_parameterWindow))
+                DestroyWindow(g_parameterWindow);
+            if (g_quickPositionWindow != nullptr && IsWindow(g_quickPositionWindow))
+                DestroyWindow(g_quickPositionWindow);
             if (g_managerWindow != nullptr && IsWindow(g_managerWindow))
                 DestroyWindow(g_managerWindow);
             if (state->previewBitmap != nullptr)
@@ -2455,19 +3170,30 @@ std::string DialogFilePath()
 class StandardPartsDialogHost
 {
 public:
-    StandardPartsDialogHost()
+    StandardPartsDialogHost(const std::shared_ptr<ParameterSaveRequest>& resume = {})
         : ui_(NXOpen::UI::GetUI()),
-          dialog_(ui_->CreateDialog(DialogFilePath().c_str()))
+          dialog_(ui_->CreateDialog(DialogFilePath().c_str())), resume_(resume)
     {
+        if (resume)
+        {
+            state_.libraryRootOverride = resume->root;
+            state_.libraryFilter = 2;
+            state_.resumeItemId = resume->savedItemId.empty() ? resume->itemId : resume->savedItemId;
+            state_.resumeGroupName = resume->savedItemId.empty() ? L"" : resume->groupName;
+        }
         state_.embedded = true;
         state_.orientationContext = this;
         state_.orientationChanged = &StandardPartsDialogHost::OrientationChangedThunk;
+        state_.capturePreview = &StandardPartsDialogHost::CapturePreviewThunk;
+        state_.prepareParameterSave = &StandardPartsDialogHost::PrepareParameterSaveThunk;
         dialog_->AddInitializeHandler(NXOpen::make_callback(
             this, &StandardPartsDialogHost::Initialize));
         dialog_->AddDialogShownHandler(NXOpen::make_callback(
             this, &StandardPartsDialogHost::DialogShown));
         dialog_->AddUpdateHandler(NXOpen::make_callback(
             this, &StandardPartsDialogHost::Update));
+        dialog_->AddEnableOKButtonHandler(NXOpen::make_callback(
+            this, &StandardPartsDialogHost::EnableOK));
         dialog_->AddApplyHandler(NXOpen::make_callback(
             this, &StandardPartsDialogHost::Apply));
         dialog_->AddOkHandler(NXOpen::make_callback(
@@ -2480,13 +3206,18 @@ public:
     {
         if (timerId_ != 0)
             KillTimer(timerWindow_, timerId_);
+        try { ClearPlacementPreview(); }
+        catch (...) { UF_print_syslog("[StandardPartsLibrary] Preview display cleanup failed\n", false); }
         if (pendingTimerHost_ == this) pendingTimerHost_ = nullptr;
         if (g_quickPositionWindow != nullptr &&
             IsWindow(g_quickPositionWindow))
             DestroyWindow(g_quickPositionWindow);
         state_.orientationChanged = nullptr;
+        state_.capturePreview = nullptr;
+        state_.prepareParameterSave = nullptr;
         state_.orientationContext = nullptr;
         if (pane_ != nullptr && IsWindow(pane_)) DestroyWindow(pane_);
+        UnregisterOwnedWindowClasses(module_);
         if (!paneClass_.empty() && module_ != nullptr)
             UnregisterClassW(paneClass_.c_str(), module_);
         if (g_appState == &state_) g_appState = nullptr;
@@ -2497,6 +3228,11 @@ public:
     {
         return static_cast<int>(dialog_->Launch());
     }
+
+    fs::path RequestedEditModel() const { return state_.requestedEditModel; }
+    fs::path RequestedCaptureRoot() const { return state_.requestedCaptureRoot; }
+    std::wstring RequestedCaptureCategory() const { return state_.requestedCaptureCategory; }
+    std::shared_ptr<ParameterSaveRequest> RequestedParameterSave() const { return state_.requestedParameterSave; }
 
 private:
     NXOpen::UI* ui_ = nullptr;
@@ -2510,6 +3246,7 @@ private:
     NXOpen::BlockStyler::UIBlock* quickPosition_ = nullptr;
     NXOpen::BlockStyler::SelectObject* trimSelection_ = nullptr;
     AppState state_;
+    std::shared_ptr<ParameterSaveRequest> resume_;
     HWND pane_ = nullptr;
     HMODULE module_ = nullptr;
     std::wstring paneClass_;
@@ -2519,7 +3256,87 @@ private:
     int paneAttempts_ = 0;
     int pendingPlacementMode_ = -1;
     bool pendingQuickOrient_ = false;
+    bool shown_ = false;
+    bool insertedAny_ = false;
+    bool closing_ = false;
+    std::wstring previewKey_;
+    fs::path previewModel_;
+    int previewUnits_ = 1;
+    bool sourcePreviewSimplified_ = false;
+    std::vector<PreviewSegment> sourceWireframe_;
+    std::vector<PreviewSegment> placedWireframe_;
+    bool previewVisible_ = false;
+    ULONGLONG lastPreviewDraw_ = 0;
     static StandardPartsDialogHost* pendingTimerHost_;
+
+    static void PrepareParameterSaveThunk(void* context, ParameterSaveRequest& request)
+    {
+        auto* self = static_cast<StandardPartsDialogHost*>(context);
+        if (!self || !self->shown_ || self->closing_ || self->updating_)
+            throw std::runtime_error(ToAnsi(L"定位界面正在更新，请稍后选择参数。"));
+        // Called by the exception-guarded parameter window on the NX UI thread.
+        if (self->state_.hasPlacement) self->ReadOrientationBlock();
+        self->ReadTrimTargets();
+        const auto& state = self->state_;
+        auto& saved = request.placement;
+        saved.workPart = UF_ASSEM_ask_work_part();
+        saved.hasPlacement = state.hasPlacement;
+        saved.mode = state.placementMode;
+        saved.pattern = state.patternMode;
+        std::copy(std::begin(state.placementOrigin),std::end(state.placementOrigin),saved.origin);
+        std::copy(std::begin(state.placementMatrix),std::end(state.placementMatrix),saved.matrix);
+        std::copy(std::begin(state.axisLocked),std::end(state.axisLocked),saved.axisLocked);
+        for (auto* object : self->placementSelection_->GetSelectedObjects())
+            if (object) saved.selection.push_back(object->Tag());
+        saved.trim = state.trimTargets;
+        saved.assembly = IsDlgButtonChecked(state.window,ID_MODE_ASSEMBLY) == BST_CHECKED;
+        saved.autoTrim = IsDlgButtonChecked(state.window,ID_AUTO_TRIM) == BST_CHECKED;
+        saved.layer = GetText(state.window,ID_LAYER);
+        saved.spacingX = GetText(state.window,ID_PATTERN_SPACING_X);
+        saved.spacingY = GetText(state.window,ID_PATTERN_SPACING_Y);
+        saved.countX = GetText(state.window,ID_PATTERN_COUNT_X);
+        saved.countY = GetText(state.window,ID_PATTERN_COUNT_Y);
+        saved.captured = true;
+    }
+
+    void RestoreParameterPlacement()
+    {
+        const auto resume = std::move(resume_);
+        if (!resume || !resume->placement.captured ||
+            resume->placement.workPart != UF_ASSEM_ask_work_part()) return;
+        const auto& saved = resume->placement;
+        // The pane is created only after dialogShown. Suppress recursive NX
+        // updates while restoring native selections and the orientation block.
+        struct RestoreScope { bool& flag; ~RestoreScope() { flag = false; } } scope{updating_};
+        updating_ = true;
+        const auto objects = [](const std::vector<tag_t>& tags)
+        {
+            std::vector<NXOpen::TaggedObject*> result;
+            for (const auto tag : tags)
+                if (tag != NULL_TAG && UF_OBJ_ask_status(tag) == UF_OBJ_ALIVE)
+                    if (auto* object = NXOpen::NXObjectManager::Get(tag)) result.push_back(object);
+            return result;
+        };
+        SetPlacementMode(&state_,saved.mode);
+        ActivatePlacementSelection();
+        placementSelection_->SetSelectedObjects(objects(saved.selection));
+        trimSelection_->SetSelectedObjects(objects(saved.trim));
+        state_.patternMode = saved.pattern;
+        CheckRadioButton(state_.window,ID_PATTERN_SINGLE,ID_PATTERN_ARRAY,ID_PATTERN_SINGLE+saved.pattern);
+        CheckRadioButton(state_.window,ID_MODE_ASSEMBLY,ID_MODE_BODY,saved.assembly ? ID_MODE_ASSEMBLY : ID_MODE_BODY);
+        CheckDlgButton(state_.window,ID_AUTO_TRIM,saved.autoTrim ? BST_CHECKED : BST_UNCHECKED);
+        SetText(state_.window,ID_LAYER,saved.layer);
+        SetText(state_.window,ID_PATTERN_SPACING_X,saved.spacingX);
+        SetText(state_.window,ID_PATTERN_SPACING_Y,saved.spacingY);
+        SetText(state_.window,ID_PATTERN_COUNT_X,saved.countX);
+        SetText(state_.window,ID_PATTERN_COUNT_Y,saved.countY);
+        std::copy(std::begin(saved.origin),std::end(saved.origin),state_.placementOrigin);
+        std::copy(std::begin(saved.matrix),std::end(saved.matrix),state_.placementMatrix);
+        std::copy(std::begin(saved.axisLocked),std::end(saved.axisLocked),state_.axisLocked);
+        state_.hasPlacement = saved.hasPlacement;
+        SyncOrientationBlock();
+        UpdatePlacementStatus(&state_);
+    }
 
     static void OrientationChangedThunk(void* context) noexcept
     {
@@ -2544,11 +3361,40 @@ private:
         }
     }
 
+    static void CapturePreviewThunk(void* context, CapturePreviewImage& image)
+    {
+        auto* self = static_cast<StandardPartsDialogHost*>(context);
+        if (!self || !self->shown_ || self->closing_ || self->updating_)
+            throw std::runtime_error(ToAnsi(L"当前对话框正在更新，请稍后抓图。"));
+        struct CaptureUiScope
+        {
+            StandardPartsDialogHost* host;
+            bool visible;
+            ~CaptureUiScope()
+            {
+                try { host->orientation_->SetShow(visible); }
+                catch (const NXOpen::NXException& ex)
+                { UF_print_syslog(const_cast<char*>(ex.Message()), false); }
+                catch (...) { UF_print_syslog("[StandardPartsLibrary] Preview orientation restore failed\n", false); }
+                host->updating_ = false;
+            }
+        } scope{self, self->orientation_->Show()};
+        self->updating_ = true;
+        self->ClearPlacementPreview();
+        self->orientation_->SetShow(false);
+        std::vector<tag_t> highlights;
+        for (auto* selection : {self->placementSelection_, self->trimSelection_, self->orientationSelection_})
+            if (selection)
+                for (auto* object : selection->GetSelectedObjects())
+                    if (object) highlights.push_back(object->Tag());
+        image.Capture(highlights);
+    }
+
     static void CALLBACK BrowserTimerProc(HWND window, UINT, UINT_PTR timerId,
                                           DWORD)
     {
         auto* self = pendingTimerHost_;
-        if (self == nullptr) return;
+        if (self == nullptr || self->updating_ || self->closing_) return;
         if (self->pane_ != nullptr && IsWindow(self->pane_))
         {
             // NX may promote the DrawingArea again after another modal window
@@ -2574,6 +3420,7 @@ private:
                     QuickOrient(&self->state_);
                     self->SyncOrientationBlock();
                 }
+                self->RefreshPlacementPreview();
             }
             catch (const NXOpen::NXException& ex)
             {
@@ -2746,6 +3593,7 @@ private:
             placementSelection_->SetLabelString("指定圆弧");
         }
 
+        const bool wasUpdating = updating_;
         updating_ = true;
         try
         {
@@ -2755,14 +3603,14 @@ private:
             placementSelection_->SetSelectModeAsString("Single");
             placementSelection_->SetAutomaticProgression(false);
             placementSelection_->SetPointOverlay(true);
+            placementSelection_->Focus();
         }
         catch (...)
         {
-            updating_ = false;
+            updating_ = wasUpdating;
             throw;
         }
-        updating_ = false;
-        placementSelection_->Focus();
+        updating_ = wasUpdating;
     }
 
     static bool MatrixFromPlanarFace(tag_t face, double matrix[9],
@@ -2807,8 +3655,16 @@ private:
     void ReadPlacementSelection()
     {
         if (placementSelection_ == nullptr) return;
+        state_.hasPlacement = false;
         const std::vector<NXOpen::TaggedObject*> objects =
             placementSelection_->GetSelectedObjects();
+        // Clearing selection is not a new point. PickPoint may still contain
+        // the last cursor location (or zero) after NX deselects an object.
+        if (objects.empty() || objects.front() == nullptr)
+        {
+            UpdatePlacementStatus(&state_);
+            return;
+        }
         const NXOpen::Point3d picked = placementSelection_->PickPoint();
         std::wstring error;
 
@@ -2817,13 +3673,13 @@ private:
             state_.placementOrigin[0] = picked.X;
             state_.placementOrigin[1] = picked.Y;
             state_.placementOrigin[2] = picked.Z;
+            int type = 0, subtype = 0;
+            if (UF_OBJ_ask_type_and_subtype(objects.front()->Tag(), &type, &subtype) == 0 &&
+                type == UF_point_type)
+                UF_CURVE_ask_point_data(objects.front()->Tag(), state_.placementOrigin);
             double unusedOrigin[3]{};
             state_.hasPlacement = AskWcs(unusedOrigin,
                                           state_.placementMatrix, error);
-        }
-        else if (objects.empty() || objects.front() == nullptr)
-        {
-            return;
         }
         else if (state_.placementMode == 0)
         {
@@ -2882,12 +3738,16 @@ private:
         if (state_.hasPlacement) SyncOrientationBlock();
         if (!error.empty())
             ShowError(ToAnsi(error));
+        // Keep the selected point until the user presses OK/Apply. Creating
+        // geometry and clearing mandatory input here made confirmation gray.
     }
 
     void ShowError(const std::string& message) noexcept
     {
         try
         {
+            std::string log = "[StandardPartsLibrary] " + message + "\n";
+            UF_print_syslog(log.data(), false);
             ui_->NXMessageBox()->Show(
                 "智辉标准件库", NXOpen::NXMessageBox::DialogTypeError,
                 message.c_str());
@@ -2917,7 +3777,8 @@ private:
             trimSelection_ = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(
                 top->FindBlock("selectionTrim"));
             if (drawingArea_ == nullptr || group_ == nullptr ||
-                placementSelection_ == nullptr || trimSelection_ == nullptr)
+                placementSelection_ == nullptr || trimSelection_ == nullptr ||
+                orientationSelection_ == nullptr)
                 throw std::runtime_error(
                     "StandardPartsLibrary.dlx 缺少燕秀布局的必需控件。");
 
@@ -2938,10 +3799,14 @@ private:
                 bodyMasks);
             trimSelection_->SetSelectModeAsString("Multiple");
             trimSelection_->SetAutomaticProgression(false);
+            trimSelection_->SetStepStatusAsString("Optional");
+            orientationSelection_->SetStepStatusAsString("Optional");
 
             placementSelection_->SetSelectModeAsString("Single");
             placementSelection_->SetAutomaticProgression(false);
             placementSelection_->SetPointOverlay(true);
+            // EnableOK owns readiness, including OK after a successful Apply.
+            placementSelection_->SetStepStatusAsString("Optional");
         }
         catch (const NXOpen::NXException& ex) { ShowError(ex.Message()); }
         catch (const std::exception& ex) { ShowError(ex.what()); }
@@ -2957,6 +3822,8 @@ private:
             // Yanxiu's host hides this auxiliary block.  Leaving it visible
             // creates an unrelated second "指定放置" row on NX 2412.
             SetShow(orientationSelection_, false);
+            shown_ = true;
+            ActivatePlacementSelection();
             // dialogShown precedes publication of the native NX window title
             // on NX 2412.  Defer the Win32 child attachment on the same UI
             // thread until the real Block Styler window can be enumerated.
@@ -3018,6 +3885,7 @@ private:
             throw std::runtime_error("标准件库浏览区创建失败。");
         g_appState = &state_;
         BringWindowToTop(pane_);
+        RestoreParameterPlacement();
     }
 
     int Update(NXOpen::BlockStyler::UIBlock* block)
@@ -3047,7 +3915,7 @@ private:
         }
         catch (const NXOpen::NXException& ex)
         {
-            updating_ = false; ShowError(ex.Message()); return ex.ErrorCode();
+            updating_ = false; ShowError(ex.Message()); return 1;
         }
         catch (const std::exception& ex)
         {
@@ -3069,22 +3937,151 @@ private:
         }
     }
 
-    int Apply()
+    void ClearPlacementPreview()
     {
-        try
+        placedWireframe_.clear();
+        if (previewVisible_)
         {
-            if (state_.hasPlacement) ReadOrientationBlock();
-            ReadTrimTargets();
-            InsertSelected(&state_);
-            return 0;
+            CheckPreviewUf(UF_DISP_regenerate_display());
+            previewVisible_ = false;
         }
-        catch (const NXOpen::NXException& ex) { ShowError(ex.Message()); return ex.ErrorCode(); }
-        catch (const std::exception& ex) { ShowError(ex.what()); return 1; }
-        catch (...) { ShowError("调用标准件时发生未知错误。"); return 1; }
     }
 
-    int Ok() { return Apply(); }
-    int Cancel() { return 0; }
+    void RefreshPlacementPreview()
+    {
+        if (!shown_ || updating_ || closing_) return;
+        struct UpdateScope
+        {
+            bool& flag;
+            explicit UpdateScope(bool& value) : flag(value) { flag = true; }
+            ~UpdateScope() { flag = false; }
+        } updateScope(updating_);
+        const std::size_t index = SelectedIndex(&state_);
+        if (!state_.hasPlacement || index == SIZE_MAX)
+        {
+            ClearPlacementPreview();
+            previewKey_.clear();
+            return;
+        }
+        // Read native-pane settings on the NX UI thread, after update_cb.
+        // This also detects specification, pattern and direction changes.
+        ReadTrimTargets();
+        const auto origins = PatternOrigins(&state_, state_.placementOrigin, state_.placementMatrix);
+        std::wostringstream signature;
+        signature.precision(17);
+        signature << LibraryRoot(&state_).wstring() << L'|' << state_.items[index].relativePath
+                  << L'|' << state_.items[index].specification << L'|' << UF_ASSEM_ask_work_part();
+        for (double value : state_.placementMatrix) signature << L'|' << value;
+        for (const auto& origin : origins)
+            for (double value : origin) signature << L'|' << value;
+        const std::wstring key = signature.str();
+        if (key != previewKey_)
+        {
+            ClearPlacementPreview();
+            // Remember failed requests too, so timer errors cannot loop dialogs.
+            previewKey_ = key;
+            try
+            {
+                std::wstring error;
+                const fs::path model = ResolvedModel(&state_, state_.items[index], error);
+                if (model.empty()) throw std::runtime_error(ToAnsi(error));
+                if (model != previewModel_ || sourceWireframe_.empty())
+                {
+                    sourceWireframe_.clear();
+                    sourceWireframe_ = LoadPlacementWireframe(model, previewUnits_, &sourcePreviewSimplified_);
+                    previewModel_ = model;
+                }
+                int destinationUnits = 1;
+                CheckPreviewUf(UF_PART_ask_units(UF_ASSEM_ask_work_part(), &destinationUnits));
+                const double scale = UnitMillimeters(previewUnits_) / UnitMillimeters(destinationUnits);
+                bool simplified = sourcePreviewSimplified_;
+                placedWireframe_ = BuildPlacedPreview(sourceWireframe_, origins,
+                    state_.placementMatrix, scale, simplified);
+                lastPreviewDraw_ = 0;
+                SetStatus(&state_, simplified
+                    ? L"简化外形框预览（复杂零件/阵列）；确定/应用插入完整模型，取消清除预览。"
+                    : L"插入位置线框预览；点击确定/应用正式插入，取消清除预览。");
+            }
+            catch (...)
+            {
+                placedWireframe_.clear();
+                throw;
+            }
+        }
+        if (placedWireframe_.empty() || GetTickCount64() - lastPreviewDraw_ < 500) return;
+        UF_OBJ_disp_props_t attributes{};
+        attributes.color = 186;
+        attributes.font = 1;
+        attributes.line_width = -1;
+        previewVisible_ = true;
+        try
+        {
+            for (auto& segment : placedWireframe_)
+                CheckPreviewUf(UF_DISP_display_temporary_line(NULL_TAG, UF_DISP_USE_WORK_VIEW,
+                    segment.start.data(), segment.end.data(), &attributes));
+        }
+        catch (...)
+        {
+            ClearPlacementPreview();
+            throw;
+        }
+        lastPreviewDraw_ = GetTickCount64();
+    }
+
+    bool EnableOK() noexcept
+    {
+        // Read-only callback: no selection changes, focus, or nested updates.
+        return CanConfirmPlacement(shown_, closing_, state_.hasPlacement, insertedAny_);
+    }
+
+    int Apply()
+    {
+        if (updating_ || closing_) return 1;
+        // A point is consumed after successful insertion. Apply/OK must not
+        // insert another component at the previously consumed location.
+        if (!state_.hasPlacement && insertedAny_) return 0;
+        updating_ = true;
+        try
+        {
+            ClearPlacementPreview();
+            previewKey_.clear();
+            if (state_.hasPlacement) ReadOrientationBlock();
+            ReadTrimTargets();
+            if (!InsertSelected(&state_))
+            {
+                updating_ = false;
+                return 1;
+            }
+            insertedAny_ = true;
+            state_.hasPlacement = false;
+            placementSelection_->SetSelectedObjects({});
+            UpdatePlacementStatus(&state_);
+            placementSelection_->Focus();
+            updating_ = false;
+            return 0;
+        }
+        catch (const NXOpen::NXException& ex) { updating_ = false; ShowError(ex.Message()); return 1; }
+        catch (const std::exception& ex) { updating_ = false; ShowError(ex.what()); return 1; }
+        catch (...) { updating_ = false; ShowError("调用标准件时发生未知错误。"); return 1; }
+    }
+
+    int Ok()
+    {
+        const int result = Apply();
+        if (result == 0) closing_ = true;
+        return result;
+    }
+    int Cancel()
+    {
+        closing_ = true;
+        try { ClearPlacementPreview(); }
+        catch (const NXOpen::NXException& ex) { ShowError(ex.Message()); closing_ = false; return 1; }
+        catch (const std::exception& ex) { ShowError(ex.what()); closing_ = false; return 1; }
+        catch (...) { ShowError("清除插入预览失败。"); closing_ = false; return 1; }
+        pendingPlacementMode_ = -1;
+        pendingQuickOrient_ = false;
+        return 0;
+    }
 };
 
 StandardPartsDialogHost* StandardPartsDialogHost::pendingTimerHost_ = nullptr;
@@ -3107,8 +4104,35 @@ int LaunchStandardPartsLibrary(bool& keepUfInitialized)
     int result = 0;
     try
     {
-        StandardPartsDialogHost host;
-        result = host.Launch();
+        std::shared_ptr<ParameterSaveRequest> resumeParameters;
+        for (;;)
+        {
+            fs::path editModel, captureRoot;
+            std::wstring captureCategory;
+            std::shared_ptr<ParameterSaveRequest> parameterSave;
+            {
+                StandardPartsDialogHost host(resumeParameters);
+                result = host.Launch();
+                editModel = host.RequestedEditModel();
+                captureRoot = host.RequestedCaptureRoot();
+                captureCategory = host.RequestedCaptureCategory();
+                parameterSave = host.RequestedParameterSave();
+            } // Dispose dialog/timers/preview before switching part or starting selections.
+            resumeParameters.reset();
+            if (parameterSave)
+            {
+                CompleteParameterSave(*parameterSave);
+                resumeParameters = parameterSave;
+                continue;
+            }
+            if (!captureRoot.empty())
+            {
+                ShowBodyCapture(captureRoot, captureCategory);
+                continue; // Reopen the browser and rescan newly added parts.
+            }
+            if (!editModel.empty()) OpenLibraryPartForEdit(editModel);
+            break;
+        }
     }
     catch (...)
     {
