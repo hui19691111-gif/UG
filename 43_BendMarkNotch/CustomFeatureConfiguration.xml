@@ -65,4 +65,18 @@
         FeatureLibrary="BendMarkNotchCore"
         FeatureUILibrary="BendMarkNotch"
         IsWithoutBody="true"/>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::ZeWanFuZu"
+        FeatureName="&#x6298;&#x5F2F;&#x8F85;&#x52A9;&#x677F;"
+        FeatureIcon="ZeWanFuZu"
+        FeatureLibrary="ZeWanFuZuCore"
+        FeatureUILibrary="ZeWanFuZu"
+        IsWithoutBody="true"/>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::QiuMianZanKai"
+        FeatureName="&#x7403;&#x9762;&#x5C55;&#x5F00;"
+        FeatureIcon="QiuMianZanKai"
+        FeatureLibrary="QiuMianZanKaiCore"
+        FeatureUILibrary="QiuMianZanKai"
+        IsWithoutBody="true"/>
 </CustomFeatureLib>

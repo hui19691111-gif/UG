@@ -48,6 +48,9 @@ private:
 
     struct NotchControls
     {
+        NXOpen::BlockStyler::UIBlock* method = nullptr;
+        NXOpen::BlockStyler::UIBlock* lineLength = nullptr;
+        NXOpen::BlockStyler::UIBlock* lineOffset = nullptr;
         NXOpen::BlockStyler::UIBlock* type = nullptr;
         NXOpen::BlockStyler::UIBlock* diameter = nullptr;
         NXOpen::BlockStyler::UIBlock* angle = nullptr;
@@ -58,6 +61,8 @@ private:
 
     struct NotchSettings
     {
+        bool lineMark = false;
+        double edgeOffset = 0.0;
         int type = 0;
         double diameter = 1.0;
         double angle = 60.0;
@@ -99,6 +104,7 @@ private:
     std::vector<NXOpen::Body*> TargetBodies() const;
     bool IsSheetMetalBody(NXOpen::Body* body) const;
     NotchControls FindNotchControls(const std::string& prefix) const;
+    int MarkingMethod(const NotchControls& controls) const;
     int NotchType(const NotchControls& controls) const;
     NotchSettings ReadNotchSettings(const NotchControls& controls) const;
     void ValidateNotchSettings(const NotchSettings& settings,
@@ -135,10 +141,11 @@ private:
     bool CreateInternalSketchExtrudeTool(
         const NXOpen::Vector3d& normal,
         const std::vector<NotchProfile>& profiles,
-        double thickness, ToolRecord& tool) const;
+        double thickness, ToolRecord& tool, double cutDepth = 0.0) const;
     bool SubtractToolsOnce(NXOpen::Body* body,
                            const std::vector<ToolRecord>& tools,
-                           NXOpen::Features::Feature*& booleanFeature) const;
+                           NXOpen::Features::Feature*& booleanFeature,
+                           bool hasMarkingLines = false) const;
 
 private:
     NXOpen::UI* ui_;

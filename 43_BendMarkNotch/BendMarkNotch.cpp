@@ -94,6 +94,9 @@
 namespace
 {
 constexpr double kTolerance = 1.0e-6;
+constexpr double kMarkingLineWidth = 0.001;
+constexpr double kMarkingLineDepth = 0.001;
+constexpr double kMarkingLineZeroEdgeOffset = 0.001;
 constexpr double kPi = 3.14159265358979323846;
 
 void AppendDebugLog(const std::string& message) noexcept
@@ -413,6 +416,8 @@ int BendMarkNotchDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
     {
         if (block == autoSelect_ || block == distinguishBends_ ||
             block == divideLargeBend_ ||
+            block == commonNotch_.method || block == upNotch_.method ||
+            block == downNotch_.method ||
             block == commonNotch_.type || block == upNotch_.type ||
             block == downNotch_.type)
             UpdateControlState();
@@ -490,13 +495,17 @@ void BendMarkNotchDialog::UpdateControlState()
         };
         const auto showSettings = [&](const NotchControls& controls, bool show)
         {
+            const bool line = MarkingMethod(controls) == 1;
             const int type = NotchType(controls);
-            setShow(controls.type, show);
-            setShow(controls.diameter, show && type == 0);
-            setShow(controls.angle, show && type == 1);
-            setShow(controls.depth, show && type == 1);
-            setShow(controls.rectangleWidth, show && type == 2);
-            setShow(controls.rectangleDepth, show && type == 2);
+            setShow(controls.method, show);
+            setShow(controls.lineLength, show && line);
+            setShow(controls.lineOffset, show && line);
+            setShow(controls.type, show && !line);
+            setShow(controls.diameter, show && !line && type == 0);
+            setShow(controls.angle, show && !line && type == 1);
+            setShow(controls.depth, show && !line && type == 1);
+            setShow(controls.rectangleWidth, show && !line && type == 2);
+            setShow(controls.rectangleDepth, show && !line && type == 2);
         };
         setShow(bodySelect_, !automatic);
         setShow(directionHelp_, separate);
@@ -528,6 +537,9 @@ BendMarkNotchDialog::NotchControls BendMarkNotchDialog::FindNotchControls(
     const std::string& prefix) const
 {
     NotchControls controls;
+    controls.method = dialog_->TopBlock()->FindBlock((prefix + "marking_method").c_str());
+    controls.lineLength = dialog_->TopBlock()->FindBlock((prefix + "line_length").c_str());
+    controls.lineOffset = dialog_->TopBlock()->FindBlock((prefix + "line_offset").c_str());
     controls.type = dialog_->TopBlock()->FindBlock((prefix + "notch_type").c_str());
     controls.diameter = dialog_->TopBlock()->FindBlock((prefix + "diameter").c_str());
     controls.angle = dialog_->TopBlock()->FindBlock((prefix + "angle").c_str());
@@ -536,10 +548,21 @@ BendMarkNotchDialog::NotchControls BendMarkNotchDialog::FindNotchControls(
         (prefix + "rectangle_width").c_str());
     controls.rectangleDepth = dialog_->TopBlock()->FindBlock(
         (prefix + "rectangle_depth").c_str());
-    if (!controls.type || !controls.diameter || !controls.angle ||
+    if (!controls.method || !controls.lineLength || !controls.lineOffset ||
+        !controls.type || !controls.diameter || !controls.angle ||
         !controls.depth || !controls.rectangleWidth || !controls.rectangleDepth)
         throw std::runtime_error("BendMarkNotch.dlx 缺少缺口参数控件。");
     return controls;
+}
+
+int BendMarkNotchDialog::MarkingMethod(const NotchControls& controls) const
+{
+    std::unique_ptr<NXOpen::BlockStyler::PropertyList> properties(
+        controls.method->GetProperties());
+    const int value = properties->GetEnum("Value");
+    if (value != 0 && value != 1)
+        throw std::runtime_error("折弯标记方式无效。");
+    return value;
 }
 
 int BendMarkNotchDialog::NotchType(const NotchControls& controls) const
@@ -554,6 +577,19 @@ BendMarkNotchDialog::NotchSettings BendMarkNotchDialog::ReadNotchSettings(
     const NotchControls& controls) const
 {
     NotchSettings settings;
+    settings.lineMark = MarkingMethod(controls) == 1;
+    if (settings.lineMark)
+    {
+        settings.type = 2;
+        settings.width = kMarkingLineWidth;
+        settings.depth = DoubleValue(controls.lineLength);
+        settings.edgeOffset = DoubleValue(controls.lineOffset);
+        // Keep zero available in the dialog, but leave a small material bridge
+        // at the contour so the shallow groove does not open the bend end.
+        if (settings.edgeOffset == 0.0)
+            settings.edgeOffset = kMarkingLineZeroEdgeOffset;
+        return settings;
+    }
     settings.type = NotchType(controls);
     if (settings.type == 0)
         settings.diameter = DoubleValue(controls.diameter);
@@ -573,6 +609,14 @@ BendMarkNotchDialog::NotchSettings BendMarkNotchDialog::ReadNotchSettings(
 void BendMarkNotchDialog::ValidateNotchSettings(
     const NotchSettings& settings, const std::string& label) const
 {
+    if (settings.lineMark)
+    {
+        if (!std::isfinite(settings.depth) || settings.depth <= kTolerance)
+            throw std::runtime_error(label + "标记线长度必须大于 0。");
+        if (!std::isfinite(settings.edgeOffset) || settings.edgeOffset < 0.0)
+            throw std::runtime_error(label + "标记线离轮廓边距离不能小于 0。");
+        return;
+    }
     if (settings.type != 0 && settings.type != 1 && settings.type != 2)
         throw std::runtime_error(label + "缺口类型无效。");
     if (settings.type == 0 && (!std::isfinite(settings.diameter) ||
@@ -733,7 +777,7 @@ int BendMarkNotchDialog::Execute()
                     "无法在展平图样前插入缺口特征。");
             // Read the committed upward face before rolling model history back.
             // A largest-web heuristic must not choose the meaning of up/down.
-            NXOpen::Face* upwardFace = separate
+            NXOpen::Face* upwardFace = (separate || MarkingMethod(commonNotch_) == 1)
                 ? FlatPatternUpwardFace(flatPattern) : nullptr;
             {
                 std::ostringstream log;
@@ -1501,10 +1545,25 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
         // (and its normal sense) is not a reliable indication of the original
         // bend direction. The original concave skin on the upward plane is an
         // up bend; the other skin must be exactly one thickness away.
-        const NXOpen::Vector3d upwardNormal = separate
+        const NXOpen::Vector3d upwardNormal = upwardFace != nullptr
             ? ReferenceNormal(upwardFace) : normal;
-        const NXOpen::Point3d upwardPoint = separate
+        const NXOpen::Point3d upwardPoint = upwardFace != nullptr
             ? PlanarFacePoint(upwardFace) : NXOpen::Point3d{};
+        NXOpen::Vector3d markingOutward = normal;
+        if (upSettings.lineMark || downSettings.lineMark)
+        {
+            // Use the actual material envelope: a face's parameter normal can
+            // have the opposite sense after Unbend even on the upward skin.
+            const double skinProjection = upwardPoint.X * normal.X +
+                upwardPoint.Y * normal.Y + upwardPoint.Z * normal.Z;
+            const double toMinimum = std::fabs(skinProjection - minimumProjection);
+            const double toMaximum = std::fabs(skinProjection - maximumProjection);
+            if ((std::min)(toMinimum, toMaximum) > thicknessTolerance)
+                throw std::runtime_error("无法确定标记线所在的展平表面。");
+            markingOutward = toMinimum < toMaximum ? Scale(normal, -1.0) : normal;
+            AppendDebugLog("marking line skin=" + PointText(upwardPoint) +
+                " outward=" + VectorText(markingOutward));
+        }
         const double sideTolerance = (std::max)(1.0e-6, thickness * 1.0e-4);
         for (const BendRecord& bend : bends)
         {
@@ -1687,6 +1746,7 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
 
         failureStage = "build notch profiles";
         std::vector<NotchProfile> profiles;
+        std::vector<NotchProfile> lineProfiles;
         profiles.reserve(flatBends.size() * 2);
         for (const FlatBend& flat : flatBends)
         {
@@ -1695,11 +1755,23 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
                 Subtract(flat.secondEnd, flat.firstEnd));
             AppendDebugLog(std::string("notch span direction=") +
                 (separate ? (flat.upward ? "up" : "down") : "common") +
+                " method=" + (settings.lineMark ? "line" : "notch") +
                 " type=" + std::to_string(settings.type) +
                 " diameter=" + std::to_string(settings.diameter) +
                 " angle=" + std::to_string(settings.angle) +
                 " width=" + std::to_string(settings.width) +
-                " depth=" + std::to_string(settings.depth));
+                " depth=" + std::to_string(settings.depth) +
+                " edgeOffset=" + std::to_string(settings.edgeOffset) +
+                " cutDepth=" + std::to_string(settings.lineMark ? kMarkingLineDepth : thickness));
+            if (settings.lineMark)
+            {
+                if (thickness <= kMarkingLineDepth + kTolerance)
+                    throw std::runtime_error("板厚必须大于标记线固定深度 0.001。");
+                if (2.0 * (settings.edgeOffset + settings.depth) >=
+                    Distance(flat.firstEnd, flat.secondEnd) - kTolerance)
+                    throw std::runtime_error(
+                        "标记线长度与离轮廓边距离过大，两端标记线会相接或重叠，请减小参数。");
+            }
             if (settings.type == 0)
             {
                 const double radius = settings.diameter * 0.5;
@@ -1725,13 +1797,22 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
                     const NXOpen::Vector3d inward = Normalize(inwardInput);
                     const NXOpen::Vector3d baseDirection =
                         Normalize(Cross(normal, inward));
+                    NXOpen::Point3d start = Add(
+                        edgeCenter, Scale(inward, settings.edgeOffset));
+                    if (settings.lineMark)
+                    {
+                        // All shallow marks start on the flat pattern's upward
+                        // skin, including down bends whose inner skin is below it.
+                        start = Add(start, Scale(upwardNormal,
+                            -Dot(Subtract(start, upwardPoint), upwardNormal)));
+                    }
                     NotchProfile profile;
-                    profile.center = edgeCenter;
+                    profile.center = start;
                     profile.polygon = {
-                        Add(edgeCenter, Scale(baseDirection, halfWidth)),
-                        Add(edgeCenter, Scale(baseDirection, -halfWidth))};
+                        Add(start, Scale(baseDirection, halfWidth)),
+                        Add(start, Scale(baseDirection, -halfWidth))};
                     const NXOpen::Point3d innerCenter =
-                        Add(edgeCenter, Scale(inward, depth));
+                        Add(start, Scale(inward, depth));
                     if (settings.type == 1)
                         profile.polygon.push_back(innerCenter);
                     else
@@ -1741,7 +1822,7 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
                         profile.polygon.push_back(
                             Add(innerCenter, Scale(baseDirection, halfWidth)));
                     }
-                    profiles.push_back(profile);
+                    (settings.lineMark ? lineProfiles : profiles).push_back(profile);
                 };
                 appendPolygon(flat.firstEnd, lineDirection);
                 appendPolygon(flat.secondEnd, Scale(lineDirection, -1.0));
@@ -1750,16 +1831,32 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
         AppendDebugLog("notch profiles built separate=" +
             std::to_string(separate) + " count=" +
             std::to_string(profiles.size()));
-        if (profiles.empty()) throw std::runtime_error("展平状态创建缺口失败。");
-        ToolRecord groupedTool;
-        failureStage = "create combined sketch extrusion tool";
-        if (!CreateInternalSketchExtrudeTool(
-                normal, profiles, thickness, groupedTool))
-            throw std::runtime_error("全部缺口合并草图拉伸失败。");
-        const std::vector<ToolRecord> tools(1, groupedTool);
+        AppendDebugLog("marking line profiles built count=" +
+            std::to_string(lineProfiles.size()));
+        const std::size_t profileCount = profiles.size() + lineProfiles.size();
+        if (profileCount == 0) throw std::runtime_error("展平状态创建折弯标记失败。");
+        std::vector<ToolRecord> tools;
+        if (!profiles.empty())
+        {
+            ToolRecord groupedTool;
+            failureStage = "create combined notch extrusion tool";
+            if (!CreateInternalSketchExtrudeTool(
+                    normal, profiles, thickness, groupedTool))
+                throw std::runtime_error("全部缺口合并草图拉伸失败。");
+            tools.push_back(groupedTool);
+        }
+        if (!lineProfiles.empty())
+        {
+            ToolRecord lineTool;
+            failureStage = "create shallow marking line tool";
+            if (!CreateInternalSketchExtrudeTool(
+                    markingOutward, lineProfiles, thickness, lineTool, kMarkingLineDepth))
+                throw std::runtime_error("标记线浅槽拉伸失败。");
+            tools.push_back(lineTool);
+        }
         NXOpen::Features::Feature* booleanFeature = nullptr;
         failureStage = "subtract combined tool bodies";
-        if (!SubtractToolsOnce(body, tools, booleanFeature) ||
+        if (!SubtractToolsOnce(body, tools, booleanFeature, !lineProfiles.empty()) ||
             booleanFeature == nullptr)
             throw std::runtime_error("全部缺口工具体一次布尔减失败。");
 
@@ -1786,14 +1883,15 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
         if (errors != 0) throw std::runtime_error("折弯标记缺口模型更新失败。");
 
         pendingInternalFeatureTags_.push_back(unbendFeature->Tag());
-        pendingInternalFeatureTags_.push_back(groupedTool.featureTag);
+        for (const ToolRecord& tool : tools)
+            pendingInternalFeatureTags_.push_back(tool.featureTag);
         pendingInternalFeatureTags_.push_back(booleanFeature->Tag());
         pendingInternalFeatureTags_.push_back(rebendFeature->Tag());
         session_->DeleteUndoMark(mark, "折弯标记缺口内部处理");
         AppendDebugLog("ProcessBody success profiles=" +
-            std::to_string(profiles.size()) + " rebendFeature=" +
+            std::to_string(profileCount) + " rebendFeature=" +
             std::to_string(rebendFeature->Tag()));
-        return static_cast<int>(profiles.size());
+        return static_cast<int>(profileCount);
     }
     catch (const NXOpen::NXException& ex)
     {
@@ -1820,7 +1918,7 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
 
 bool BendMarkNotchDialog::SubtractToolsOnce(
     NXOpen::Body* body, const std::vector<ToolRecord>& tools,
-    NXOpen::Features::Feature*& booleanFeature) const
+    NXOpen::Features::Feature*& booleanFeature, bool hasMarkingLines) const
 {
     booleanFeature = nullptr;
     if (body == nullptr || tools.empty())
@@ -1858,6 +1956,8 @@ bool BendMarkNotchDialog::SubtractToolsOnce(
             NXOpen::Features::Feature::BooleanTypeSubtract);
         booleanBuilder->SetCopyTargets(false);
         booleanBuilder->SetCopyTools(false);
+        if (hasMarkingLines)
+            booleanBuilder->SetTolerance(1.0e-5);
 
         NXOpen::ScCollector* targetCollector =
             part->ScCollectors()->CreateCollector();
@@ -1907,7 +2007,7 @@ bool BendMarkNotchDialog::SubtractToolsOnce(
 bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
     const NXOpen::Vector3d& normalInput,
     const std::vector<NotchProfile>& profiles,
-    double thickness, ToolRecord& tool) const
+    double thickness, ToolRecord& tool, double cutDepth) const
 {
     tool = ToolRecord();
     NXOpen::Part* part = session_->Parts()->Work();
@@ -1933,6 +2033,7 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
         log.precision(16);
         log << "CreateInternalSketchExtrudeTool begin profiles="
             << profiles.size() << " thickness=" << thickness
+            << " cutDepth=" << cutDepth
             << " origin=" << PointText(origin)
             << " normal=" << VectorText(normal)
             << " xAxis=" << VectorText(xAxis)
@@ -2152,9 +2253,9 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
         const double margin = (std::max)(0.5, thickness);
         extrudeBuilder->Limits()->SetSymmetricOption(false);
         extrudeBuilder->Limits()->StartExtend()->Value()->SetFormula(
-            NumberBuffer(-(thickness + margin)).data());
+            NumberBuffer(cutDepth > 0.0 ? -cutDepth : -(thickness + margin)).data());
         extrudeBuilder->Limits()->EndExtend()->Value()->SetFormula(
-            NumberBuffer(thickness + margin).data());
+            NumberBuffer(cutDepth > 0.0 ? margin : thickness + margin).data());
         extrudeBuilder->Limits()->StartExtend()->SetTrimType(
             NXOpen::GeometricUtilities::Extend::ExtendTypeValue);
         extrudeBuilder->Limits()->EndExtend()->SetTrimType(
