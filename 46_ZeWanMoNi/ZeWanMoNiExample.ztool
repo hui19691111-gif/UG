@@ -1,0 +1,10 @@
+ZH_TOOL_V1
+# UTF-8, millimetres. X is across the bend, Z points from the tip to the holder.
+# First/last points are connected automatically; do not repeat the first point.
+# Illustrative polygon, not a certified production tool.
+name=自建直刀示例
+0,0
+5,5
+5,50
+-5,50
+-5,5
