@@ -19338,6 +19338,10 @@ int AutoCreateThreeViewsDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 const std::filesystem::path templateDirectory = CurrentModuleDirectory().parent_path() / "DATA";
                 ShellExecuteW(nullptr, L"open", templateDirectory.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             }
+            else if (blockId == "assemblySelectedOnly")
+            {
+                RenderNativeAssemblyList();
+            }
             else if (blockId == "assemblyListMode")
             {
                 PopulateNativeAssemblyList();
@@ -19508,6 +19512,7 @@ void AutoCreateThreeViewsDialog::LoadNativeDialogSettings()
 
     SetString("drawingTargetMode", text("drawingTargetMode", u8"按部件/组件出图"));
     SetString("assemblyListMode", text("assemblyListMode", u8"唯一部件清单"));
+    SetLogical("assemblySelectedOnly", logical("assemblySelectedOnly", false));
     SetString("layerRange", text("layerRange", "1-256"));
     SetString("layersPerSheet", text("layersPerSheet", "1"));
     SetString("templateName", text("templateName", u8"自动匹配模板"));
@@ -19602,6 +19607,7 @@ void AutoCreateThreeViewsDialog::SaveNativeDialogSettings() const
     const auto boolean = [](bool value) { return value ? "true" : "false"; };
     output << "drawingTargetMode=" << ReadString("drawingTargetMode", u8"按部件/组件出图") << "\n"
            << "assemblyListMode=" << ReadString("assemblyListMode", u8"唯一部件清单") << "\n"
+           << "assemblySelectedOnly=" << boolean(ReadLogical("assemblySelectedOnly", false)) << "\n"
            << "layerRange=" << ReadString("layerRange", "1-256") << "\n"
            << "layersPerSheet=" << ReadString("layersPerSheet", "1") << "\n"
            << "templateName=" << values.templateName << "\n"
@@ -19686,25 +19692,14 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
 
     const TimingClock::time_point populationStarted = TimingClock::now();
 
-    const bool hadExistingRows = !assemblyNodes_.empty();
+    const bool hadExistingRows = !assemblyRows_.empty();
     std::set<tag_t> previouslySelectedPrototypes;
-    for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
+    for (const NativeAssemblyRow& row : assemblyRows_)
     {
-        if (node == nullptr || node->GetState() != 2)
-            continue;
-        const auto found = assemblyNodeOccurrences_.find(node);
-        if (found == assemblyNodeOccurrences_.end() || found->second == NULL_TAG)
-            continue;
-        const tag_t prototype = UF_ASSEM_ask_prototype_of_occ(found->second);
-        previouslySelectedPrototypes.insert(prototype != NULL_TAG ? prototype : found->second);
+        if (row.checked)
+            previouslySelectedPrototypes.insert(row.prototype);
     }
-
-    assemblyStateUpdateInProgress_ = true;
-    assemblyTree_->Redraw(false);
-    while (assemblyTree_->RootNode() != nullptr)
-        assemblyTree_->DeleteNode(assemblyTree_->RootNode());
-    assemblyNodes_.clear();
-    assemblyNodeOccurrences_.clear();
+    std::vector<NativeAssemblyRow> newRows;
 
     const tag_t displayPart = UF_PART_ask_display_part();
     const tag_t rootOccurrence = displayPart != NULL_TAG
@@ -19737,8 +19732,8 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
     int hiddenCount = 0;
     int maximumTreeDepth = 0;
 
-    std::function<void(tag_t, NXOpen::BlockStyler::Node*, int)> appendOccurrence;
-    appendOccurrence = [&](tag_t occurrence, NXOpen::BlockStyler::Node* parentNode, int depth)
+    std::function<void(tag_t, int, int)> appendOccurrence;
+    appendOccurrence = [&](tag_t occurrence, int parentIndex, int depth)
     {
         if (occurrence == NULL_TAG)
             return;
@@ -19752,7 +19747,7 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
         if (uniquePartMode && !displayedPrototypeParts.insert(prototypeKey).second)
         {
             for (int index = 0; index < childCount; ++index)
-                appendOccurrence(children[index], nullptr, 0);
+                appendOccurrence(children[index], -1, 0);
             if (children != nullptr)
                 UF_free(children);
             return;
@@ -19828,63 +19823,49 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
         if (name.empty())
             name = std::string(u8"组件 ") + std::to_string(static_cast<unsigned long long>(occurrence));
 
-        NXOpen::BlockStyler::Node* node = assemblyTree_->CreateNode("");
-        assemblyTree_->InsertNode(
-            node, uniquePartMode ? nullptr : parentNode, nullptr,
-            NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
-        node->SetColumnDisplayText(0, "");
-        // NX 2412 renders state 2 as checked and state 1 as unchecked.
-        const bool selected = !hadExistingRows ||
+        NativeAssemblyRow row;
+        row.occurrence = occurrence;
+        row.prototype = prototypeKey;
+        row.parent = uniquePartMode ? -1 : parentIndex;
+        row.checked = !hadExistingRows ||
             previouslySelectedPrototypes.find(prototypeKey) != previouslySelectedPrototypes.end();
-        node->SetState(selected ? 2 : 1);
-        node->SetColumnDisplayText(1, NXOpen::NXString(name, NXOpen::NXString::UTF8));
-        node->SetColumnDisplayText(2, NXOpen::NXString(
-            NativeAssemblyDrawingNumber(metadata), NXOpen::NXString::UTF8));
-        node->SetColumnDisplayText(3, NXOpen::NXString(
-            metadata.assembly ? u8"装配体" : (metadata.sheetMetal ? u8"钣金" : u8"普通零件"),
-            NXOpen::NXString::UTF8));
-        node->SetColumnDisplayText(4, NXOpen::NXString(
-            NativeAssemblyMaterial(metadata), NXOpen::NXString::UTF8));
+        row.columns[1] = name;
+        row.columns[2] = NativeAssemblyDrawingNumber(metadata);
+        row.columns[3] = metadata.assembly ? u8"装配体" : (metadata.sheetMetal ? u8"钣金" : u8"普通零件");
+        row.columns[4] = NativeAssemblyMaterial(metadata);
         std::string status;
         if (metadata.hidden)
             status += u8"隐藏 ";
         status += metadata.hasDrawing ? u8"已出图" : u8"未出图";
-        node->SetColumnDisplayText(5, std::to_string(prototypeReferenceCounts[prototypeKey]));
-        node->SetColumnDisplayText(6, NXOpen::NXString(status, NXOpen::NXString::UTF8));
-        assemblyNodes_.push_back(node);
-        assemblyNodeOccurrences_[node] = occurrence;
+        row.columns[5] = std::to_string(prototypeReferenceCounts[prototypeKey]);
+        row.columns[6] = status;
+        const int rowIndex = static_cast<int>(newRows.size());
+        newRows.push_back(std::move(row));
 
         for (int index = 0; index < childCount; ++index)
             appendOccurrence(
-                children[index], uniquePartMode ? nullptr : node,
+                children[index], uniquePartMode ? -1 : rowIndex,
                 uniquePartMode ? 0 : depth + 1);
         if (children != nullptr)
             UF_free(children);
     };
 
     if (rootOccurrence != NULL_TAG)
-        appendOccurrence(rootOccurrence, nullptr, 0);
+        appendOccurrence(rootOccurrence, -1, 0);
 
-    for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
-        node->Expand(NXOpen::BlockStyler::Node::ExpandOptionExpand);
+    assemblyRows_.swap(newRows);
+    RenderNativeAssemblyList();
 
     // NX indents a node's state icon inside column zero.  The old flat list
     // fit in 55 pixels, but a real assembly hierarchy pushes leaf checkboxes
     // beyond that fixed width and clips them.  Size the state column for the
     // deepest row actually present.
     const int stateColumnWidth = uniquePartMode ? 55 : 55 + maximumTreeDepth * 18;
-    assemblyTree_->SetColumnWidth(0, stateColumnWidth);
-    assemblyTree_->Redraw(true);
-    assemblyStateUpdateInProgress_ = false;
-    if (!assemblyNodes_.empty())
-    {
-        assemblyTree_->SelectNode(assemblyNodes_.front(), true, true);
-    }
     SetBlockString("assemblyFilterStatus", "Label",
-        assemblyNodes_.empty()
+        assemblyRows_.empty()
             ? std::string(u8"过滤结果：当前部件不是装配，按当前工作部件出图")
             : std::string(uniquePartMode ? u8"唯一部件清单：" : u8"装配结构：") +
-                u8"已加载 " + std::to_string(assemblyNodes_.size()) +
+                u8"已加载 " + std::to_string(assemblyRows_.size()) +
                 u8" 行；装配 " + std::to_string(assemblyCount) +
                 u8"，普通零件 " + std::to_string(ordinaryPartCount) +
                 u8"，钣金 " + std::to_string(sheetMetalCount) +
@@ -19893,7 +19874,7 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
     const double populationElapsedMs = std::chrono::duration<double, std::milli>(
         TimingClock::now() - populationStarted).count();
     WriteLine(session_, "AutoCreateThreeViews: native assembly list populated, rows=" +
-        std::to_string(assemblyNodes_.size()) +
+        std::to_string(assemblyRows_.size()) +
         ", assemblies=" + std::to_string(assemblyCount) +
         ", ordinaryParts=" + std::to_string(ordinaryPartCount) +
         ", sheetMetal=" + std::to_string(sheetMetalCount) +
@@ -19906,6 +19887,66 @@ void AutoCreateThreeViewsDialog::PopulateNativeAssemblyList()
         ", elapsedMs=" + std::to_string(populationElapsedMs) + ".");
 }
 
+void AutoCreateThreeViewsDialog::RenderNativeAssemblyList()
+{
+    if (assemblyTree_ == nullptr || assemblyStateUpdateInProgress_)
+        return;
+
+    assemblyStateUpdateInProgress_ = true;
+    try
+    {
+        const bool selectedOnly = ReadLogical("assemblySelectedOnly", false);
+        assemblyTree_->Redraw(false);
+        assemblyNodeRows_.clear();
+        assemblyNodes_.clear();
+        while (assemblyTree_->RootNode() != nullptr)
+            assemblyTree_->DeleteNode(assemblyTree_->RootNode());
+
+        std::vector<NXOpen::BlockStyler::Node*> visibleNodes(assemblyRows_.size(), nullptr);
+        std::vector<int> depths(assemblyRows_.size(), 0);
+        int maximumDepth = 0;
+        for (size_t index = 0; index < assemblyRows_.size(); ++index)
+        {
+            const NativeAssemblyRow& row = assemblyRows_[index];
+            if (selectedOnly && !row.checked)
+                continue;
+
+            // Keep checked descendants even when their parent is unchecked.
+            // Attach them to the nearest visible ancestor, or to the root.
+            int parent = row.parent;
+            while (parent >= 0 && visibleNodes[parent] == nullptr)
+                parent = assemblyRows_[parent].parent;
+            NXOpen::BlockStyler::Node* node = assemblyTree_->CreateNode("");
+            assemblyTree_->InsertNode(node, parent >= 0 ? visibleNodes[parent] : nullptr,
+                nullptr, NXOpen::BlockStyler::Tree::NodeInsertOptionLast);
+            visibleNodes[index] = node;
+            depths[index] = parent >= 0 ? depths[parent] + 1 : 0;
+            maximumDepth = (std::max)(maximumDepth, depths[index]);
+            assemblyNodes_.push_back(node);
+            assemblyNodeRows_[node] = index;
+            node->SetState(row.checked ? 2 : 1);
+            for (int column = 0; column < 7; ++column)
+                node->SetColumnDisplayText(column,
+                    NXOpen::NXString(row.columns[column], NXOpen::NXString::UTF8));
+        }
+        for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
+            node->Expand(NXOpen::BlockStyler::Node::ExpandOptionExpand);
+        assemblyTree_->SetColumnWidth(0, 55 + maximumDepth * 18);
+        assemblyTree_->Redraw(true);
+        WriteLine(session_, "AutoCreateThreeViews: assembly display filter selectedOnly=" +
+            std::string(selectedOnly ? "true" : "false") +
+            ", visibleRows=" + std::to_string(assemblyNodes_.size()) +
+            ", totalRows=" + std::to_string(assemblyRows_.size()) + ".");
+    }
+    catch (...)
+    {
+        try { assemblyTree_->Redraw(true); } catch (...) {}
+        assemblyStateUpdateInProgress_ = false;
+        throw;
+    }
+    assemblyStateUpdateInProgress_ = false;
+}
+
 void AutoCreateThreeViewsDialog::OnNativeAssemblyStateChange(
     NXOpen::BlockStyler::Tree*,
     NXOpen::BlockStyler::Node* node,
@@ -19913,36 +19954,45 @@ void AutoCreateThreeViewsDialog::OnNativeAssemblyStateChange(
 {
     if (node == nullptr || assemblyStateUpdateInProgress_)
         return;
-    const int targetState = node->GetState() == 2 ? 1 : 2;
-    tag_t targetPrototype = NULL_TAG;
-    const auto selectedOccurrence = assemblyNodeOccurrences_.find(node);
-    if (selectedOccurrence != assemblyNodeOccurrences_.end())
+    try
     {
-        targetPrototype = UF_ASSEM_ask_prototype_of_occ(selectedOccurrence->second);
-        if (targetPrototype == NULL_TAG)
-            targetPrototype = selectedOccurrence->second;
+        const auto found = assemblyNodeRows_.find(node);
+        if (found == assemblyNodeRows_.end())
+            return;
+        const NativeAssemblyRow& selected = assemblyRows_[found->second];
+        const bool checked = !selected.checked;
+        const tag_t prototype = selected.prototype;
+        for (NativeAssemblyRow& row : assemblyRows_)
+            if (row.prototype == prototype)
+                row.checked = checked;
+
+        if (ReadLogical("assemblySelectedOnly", false))
+        {
+            RenderNativeAssemblyList();
+        }
+        else
+        {
+            assemblyStateUpdateInProgress_ = true;
+            for (const auto& entry : assemblyNodeRows_)
+                entry.first->SetState(assemblyRows_[entry.second].checked ? 2 : 1);
+            assemblyStateUpdateInProgress_ = false;
+        }
+        const size_t count = SelectedNativeOccurrenceTags().size();
+        SetBlockString("assemblyFilterStatus", "Label",
+            std::string(u8"已选择 ") + std::to_string(count) +
+            u8" 个唯一部件，预计生成 " + std::to_string(count) + u8" 份图纸");
     }
-    assemblyStateUpdateInProgress_ = true;
-    assemblyTree_->Redraw(false);
-    for (NXOpen::BlockStyler::Node* row : assemblyNodes_)
+    catch (const NXOpen::NXException& ex)
     {
-        if (row == nullptr)
-            continue;
-        const auto occurrence = assemblyNodeOccurrences_.find(row);
-        if (occurrence == assemblyNodeOccurrences_.end())
-            continue;
-        tag_t prototype = UF_ASSEM_ask_prototype_of_occ(occurrence->second);
-        if (prototype == NULL_TAG)
-            prototype = occurrence->second;
-        if (prototype == targetPrototype)
-            row->SetState(targetState);
+        assemblyStateUpdateInProgress_ = false;
+        WriteLine(session_, "AutoCreateThreeViews: assembly checkbox update failed, NX " +
+            std::to_string(ex.ErrorCode()) + ", " + ex.Message());
     }
-    assemblyTree_->Redraw(true);
-    assemblyStateUpdateInProgress_ = false;
-    const size_t checked = SelectedNativeOccurrenceTags().size();
-    SetBlockString("assemblyFilterStatus", "Label",
-        std::string(u8"已选择 ") + std::to_string(checked) +
-        u8" 个唯一部件，预计生成 " + std::to_string(checked) + u8" 份图纸");
+    catch (...)
+    {
+        assemblyStateUpdateInProgress_ = false;
+        WriteLine(session_, "AutoCreateThreeViews: assembly checkbox update failed.");
+    }
 }
 
 std::vector<tag_t> AutoCreateThreeViewsDialog::SelectedNativeOccurrenceTags() const
@@ -19951,18 +20001,12 @@ std::vector<tag_t> AutoCreateThreeViewsDialog::SelectedNativeOccurrenceTags() co
     std::set<tag_t> selectedPrototypeParts;
     if (assemblyTree_ == nullptr)
         return tags;
-    for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
+    for (const NativeAssemblyRow& row : assemblyRows_)
     {
-        if (node == nullptr || node->GetState() != 2)
+        if (!row.checked || row.occurrence == NULL_TAG)
             continue;
-        const auto found = assemblyNodeOccurrences_.find(node);
-        if (found == assemblyNodeOccurrences_.end() || found->second == NULL_TAG)
-            continue;
-        tag_t prototype = UF_ASSEM_ask_prototype_of_occ(found->second);
-        if (prototype == NULL_TAG)
-            prototype = found->second;
-        if (selectedPrototypeParts.insert(prototype).second)
-            tags.push_back(found->second);
+        if (selectedPrototypeParts.insert(row.prototype).second)
+            tags.push_back(row.occurrence);
     }
     return tags;
 }
@@ -20035,18 +20079,13 @@ void AutoCreateThreeViewsDialog::ApplyNativeAssemblyFilters()
         static_cast<int>(removeWithoutAttributeValue);
     if (ruleCount == 0)
     {
-        assemblyStateUpdateInProgress_ = true;
-        assemblyTree_->Redraw(false);
         int restored = 0;
-        for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
+        for (NativeAssemblyRow& row : assemblyRows_)
         {
-            if (node == nullptr)
-                continue;
-            node->SetState(2);
+            row.checked = true;
             ++restored;
         }
-        assemblyTree_->Redraw(true);
-        assemblyStateUpdateInProgress_ = false;
+        RenderNativeAssemblyList();
         const size_t uniqueSelected = SelectedNativeOccurrenceTags().size();
         SetBlockString("assemblyFilterStatus", "Label",
             std::string(u8"过滤结果：未选择过滤条件，已恢复全部 ") +
@@ -20063,33 +20102,16 @@ void AutoCreateThreeViewsDialog::ApplyNativeAssemblyFilters()
     int detectedWithoutDrawing = 0;
     int keywordMatchesHitCount = 0;
     int keywordNonMatchesHitCount = 0;
-    assemblyStateUpdateInProgress_ = true;
-    assemblyTree_->Redraw(false);
     // Every application starts from a clean, fully checked list. Previous
     // filter results and manual states do not participate in this calculation.
-    for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
+    // Iterate the complete model, not just the currently displayed rows.
+    for (NativeAssemblyRow& row : assemblyRows_)
     {
-        if (node != nullptr)
-            node->SetState(2);
-    }
-    for (NXOpen::BlockStyler::Node* node : assemblyNodes_)
-    {
-        const auto occurrenceFound = assemblyNodeOccurrences_.find(node);
-        if (occurrenceFound == assemblyNodeOccurrences_.end())
-            continue;
-        const tag_t occurrence = occurrenceFound->second;
         NativeAssemblyFilterMetadata metadata =
-            ClassifyNativeAssemblyOccurrence(occurrence);
+            ClassifyNativeAssemblyOccurrence(row.occurrence);
         // Keyword rules are intentionally limited to the displayed part name.
         // Other visible columns have their own dedicated filter rules.
-        std::string visiblePartName;
-        try
-        {
-            visiblePartName = node->GetColumnDisplayText(1).GetText();
-        }
-        catch (...)
-        {
-        }
+        const std::string& visiblePartName = row.columns[1];
         detectedWithDrawing += metadata.hasDrawing ? 1 : 0;
         detectedWithoutDrawing += metadata.hasDrawing ? 0 : 1;
         const bool hasAttribute =
@@ -20125,14 +20147,13 @@ void AutoCreateThreeViewsDialog::ApplyNativeAssemblyFilters()
             (removeMissingAttribute && missingAttribute) ||
             (removeAttributeEquals && attributeEquals) ||
             (removeWithoutAttributeValue && !hasAttributeValue);
-        node->SetState(remove ? 1 : 2);
+        row.checked = !remove;
         if (remove)
             ++removed;
         else
             ++kept;
     }
-    assemblyTree_->Redraw(true);
-    assemblyStateUpdateInProgress_ = false;
+    RenderNativeAssemblyList();
     const size_t uniqueSelected = SelectedNativeOccurrenceTags().size();
     SetBlockString("assemblyFilterStatus", "Label",
         std::string(u8"过滤结果：按 ") + std::to_string(ruleCount) + u8" 项条件取消 " +
@@ -21383,7 +21404,7 @@ int AutoCreateThreeViewsDialog::ExecuteCreateDrawing()
             // as permission to draw the entire current part.
             const bool requiresAssemblySelection = workPartIsAssembly ||
                 (displayPart != nativeWorkPart->Tag() && partHasComponents(displayPart)) ||
-                !assemblyNodes_.empty();
+                !assemblyRows_.empty();
             if (requiresAssemblySelection && selectedOccurrences.empty())
             {
                 if (ui_ != nullptr && ui_->NXMessageBox() != nullptr)

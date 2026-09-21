@@ -87,6 +87,7 @@ private:
     void SaveNativeDialogSettings() const;
     void InitializeNativeAssemblyList();
     void PopulateNativeAssemblyList();
+    void RenderNativeAssemblyList();
     void OnNativeAssemblyStateChange(
         NXOpen::BlockStyler::Tree* tree,
         NXOpen::BlockStyler::Node* node,
@@ -125,8 +126,19 @@ private:
     bool projectionLayoutThirdAngle_;
     NXOpen::BlockStyler::Tree* assemblyTree_;
     bool assemblyStateUpdateInProgress_;
+    // Keep all rows independently of the visible tree, including unchecked
+    // rows hidden by the display-only filter.
+    struct NativeAssemblyRow
+    {
+        tag_t occurrence = NULL_TAG;
+        tag_t prototype = NULL_TAG;
+        int parent = -1;
+        bool checked = true;
+        std::string columns[7];
+    };
+    std::vector<NativeAssemblyRow> assemblyRows_;
     std::vector<NXOpen::BlockStyler::Node*> assemblyNodes_;
-    std::map<NXOpen::BlockStyler::Node*, tag_t> assemblyNodeOccurrences_;
+    std::map<NXOpen::BlockStyler::Node*, size_t> assemblyNodeRows_;
     NXOpen::BlockStyler::Tree* technicalRequirementTree_;
     NXOpen::BlockStyler::Node* technicalRequirementSelectedNode_;
     std::map<NXOpen::BlockStyler::Node*, bool> technicalRequirementDetailNodes_;
