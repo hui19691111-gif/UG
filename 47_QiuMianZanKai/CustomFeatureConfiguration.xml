@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CustomFeatureLib xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="CustomFeatureConfiguration_schema.xsd">
+  <CustomFeature FeatureClass="NXOpen::CustomFeature::QiuMianZanKai" FeatureName="球面展开" FeatureIcon="QiuMianZanKai" FeatureLibrary="QiuMianZanKaiCore" FeatureUILibrary="QiuMianZanKai" IsWithoutBody="true" />
+</CustomFeatureLib>
