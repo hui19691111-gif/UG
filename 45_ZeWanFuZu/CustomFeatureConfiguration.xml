@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CustomFeatureLib xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="CustomFeatureConfiguration_schema.xsd">
+    <CustomFeature FeatureClass="NXOpen::CustomFeature::ZeWanFuZu" FeatureName="折弯辅助板" FeatureIcon="ZeWanFuZu" FeatureLibrary="ZeWanFuZuCore" FeatureUILibrary="ZeWanFuZu" IsWithoutBody="true"/>
+</CustomFeatureLib>
