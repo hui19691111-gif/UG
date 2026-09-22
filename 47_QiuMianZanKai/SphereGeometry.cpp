@@ -59,8 +59,8 @@ struct Eval {
     ~Eval(){if(value)UF_EVAL_free(value);}
     Vec At(double t){double p[3];Check(UF_EVAL_evaluate(value,0,t,p,nullptr));return V(p);}
 };
-struct Surface {int type=0,sign=0;Vec point,axis;double radius=0;};
-Surface Data(tag_t face){Surface f;double p[3],d[3],box[6],r2;Check(UF_MODL_ask_face_data(face,&f.type,p,d,box,&f.radius,&r2,&f.sign));f.point=V(p);f.axis=V(d);return f;}
+struct Surface {int type=0,sign=0;Vec point,axis;double radius=0,minorRadius=0;};
+Surface Data(tag_t face){Surface f;double p[3],d[3],box[6];Check(UF_MODL_ask_face_data(face,&f.type,p,d,box,&f.radius,&f.minorRadius,&f.sign));f.point=V(p);f.axis=V(d);return f;}
 std::vector<Vec> EdgePoints(Face* face){
     std::vector<Vec> out;
     for(auto* e:face->GetEdges()){Eval eval(e->Tag());double limits[2];Check(UF_EVAL_ask_limits(eval.value,limits));for(int i=0;i<=24;++i)out.push_back(eval.At(limits[0]+(limits[1]-limits[0])*i/24));}
@@ -73,7 +73,7 @@ bool OnSide(const Source& s,Vec q){
 }
 // Only rotational patches with two meridians and level end boundaries are
 // accepted. Reject holes, arbitrary trims, and partial source geometry rather
-// than silently constructing the untrimmed underlying sphere/cylinder.
+// than silently constructing the untrimmed underlying sphere/torus/cylinder.
 void ValidateBoundary(const Source& s,Face* face,bool spherical){
     double tol=std::max(1e-5*s.unitsPerMm,s.radius*1e-7);
     for(auto* e:face->GetEdges()){
@@ -81,11 +81,11 @@ void ValidateBoundary(const Source& s,Face* face,bool spherical){
         bool equator=true,end=true,side=true;
         for(int i=0;i<=32;++i){Vec p=eval.At(limits[0]+(limits[1]-limits[0])*i/32),q=p-s.center;double h=Dot(q,s.z);
             equator=equator&&std::abs(h)<tol;
-            end=end&&std::abs(h-(spherical?s.radius*std::sin(s.latitude):-s.height))<tol;
+            end=end&&std::abs(h-(spherical?s.bendRadius*std::sin(s.latitude):-s.height))<tol;
             side=side&&OnSide(s,p);
-            if(h<(spherical?-tol:-s.height-tol)||h>(spherical?s.radius*std::sin(s.latitude)+tol:tol))throw std::runtime_error("所选面的轴向范围不一致。");
+            if(h<(spherical?-tol:-s.height-tol)||h>(spherical?s.bendRadius*std::sin(s.latitude)+tol:tol))throw std::runtime_error("所选面的轴向范围不一致。");
             Vec radial=q-s.z*h;
-            if(Length(radial)>tol&&s.sweep<2*pi-1e-6&&Theta(s,p)>s.sweep+1e-6&&Theta(s,p)<2*pi-1e-6)throw std::runtime_error("圆柱面与球面的周向范围不一致。");
+            if(Length(radial)>tol&&s.sweep<2*pi-1e-6&&Theta(s,p)>s.sweep+1e-6&&Theta(s,p)<2*pi-1e-6)throw std::runtime_error("圆柱面与相接曲面的周向范围不一致。");
         }
         if(!equator&&!end&&!side)throw std::runtime_error("当前支持完整的回转面片：圆形端口与经线边界；请先处理孔槽或不规则裁剪。");
     }
@@ -153,16 +153,18 @@ tag_t Petal(const Plan& p,int index){
     // Bound the petal by the root band's inner-face pitch. A slit measured
     // only on the outer radius can be narrower than the bend setback: after
     // flattening those wide cylindrical petal roots overlap each other.
-    double half=p.rootGap>p.gap+1e-8*s.unitsPerMm?p.outer*std::tan(p.step/2)-p.rootGap/(2*std::cos(p.step/2)):p.outer*std::tan(p.step/2)+s.unitsPerMm;
+    // An inward torus widens away from the root. Cap its entire petal to the
+    // root pitch so the wider crown cannot overlap its neighbors when flat.
+    double half=s.bendDirection<0||p.rootGap>p.gap+1e-8*s.unitsPerMm?p.outer*std::tan(p.step/2)-p.rootGap/(2*std::cos(p.step/2)):p.outer*std::tan(p.step/2)+s.unitsPerMm;
     double low=-p.relief-s.unitsPerMm*.1;
     std::vector<tag_t> curves;
     auto line=[&](double x,double z,double x2,double z2){curves.push_back(Line(at(x,-half,z),at(x2,-half,z2)));};
-    auto arc=[&](double r){curves.push_back(Arc(at(r,-half,0),at(r*std::cos(s.latitude/2),-half,r*std::sin(s.latitude/2)),at(r*std::cos(s.latitude),-half,r*std::sin(s.latitude))));};
+    auto arc=[&](double r){curves.push_back(Arc(at(r,-half,0),at(s.RadialAt(r,s.latitude/2),-half,s.HeightAt(r,s.latitude/2)),at(s.RadialAt(r,s.latitude),-half,s.HeightAt(r,s.latitude))));};
     line(p.outer,low,p.outer,0);arc(p.outer);
-    line(p.outer*std::cos(s.latitude),p.outer*std::sin(s.latitude),p.inner*std::cos(s.latitude),p.inner*std::sin(s.latitude));
+    line(s.RadialAt(p.outer,s.latitude),s.HeightAt(p.outer,s.latitude),s.RadialAt(p.inner,s.latitude),s.HeightAt(p.inner,s.latitude));
     arc(p.inner);line(p.inner,0,p.inner,low);line(p.inner,low,p.outer,low);
     tag_t petal=Extrude(curves,tangent,half*2,s.unitsPerMm);
-    double slope=std::tan(p.step/2),inset=p.gap/(2*std::cos(p.step/2)),extent=p.outer*2;
+    double slope=std::tan(p.step/2),inset=p.gap/(2*std::cos(p.step/2)),extent=std::max(p.outer,s.majorRadius)*2;
     tag_t wedge=Prism({at(inset/slope,0,low-s.unitsPerMm),at(extent,-extent*slope+inset,low-s.unitsPerMm),at(extent,extent*slope-inset,low-s.unitsPerMm)},s.z,extent+p.relief+2*s.unitsPerMm,s.unitsPerMm);
     petal=Intersect(petal,wedge);
     tag_t band=Prism({at(p.inner,-p.inner*slope,-s.height),at(p.outer,-p.outer*slope,-s.height),at(p.outer,p.outer*slope,-s.height),at(p.inner,p.inner*slope,-s.height)},s.z,s.height-p.relief,s.unitsPerMm);
@@ -177,45 +179,61 @@ Face* BaseFace(tag_t bodyTag,const Plan& p){
 static Source InspectPair(tag_t cylinder,tag_t sphere){
     auto* work=Session::GetSession()->Parts()->Work();if(!work)throw std::runtime_error("请先打开零件。");
     auto* c=dynamic_cast<Face*>(NXObjectManager::Get(cylinder));auto* f=dynamic_cast<Face*>(NXObjectManager::Get(sphere));
-    if(!c||!f||c->IsOccurrence()||f->IsOccurrence()||c->OwningPart()!=work||f->OwningPart()!=work)throw std::runtime_error("请选择当前工作零件中的圆柱面和球面。");
-    if(c->GetBody()!=f->GetBody())throw std::runtime_error("圆柱面和球面必须属于同一个参考体并共享圆弧边。");
-    auto cd=Data(cylinder),sd=Data(sphere);if(cd.type!=16||sd.type!=18)throw std::runtime_error("第一个输入必须是圆柱面，第二个必须是真正的球面；暂不支持环面或样条拟合面。");
-    Source s;s.cylinder=cylinder;s.sphere=sphere;s.body=c->GetBody()->Tag();s.center=sd.point;s.radius=sd.radius;s.z=Unit(cd.axis);
+    if(!c||!f||c->IsOccurrence()||f->IsOccurrence()||c->OwningPart()!=work||f->OwningPart()!=work)throw std::runtime_error("请选择当前工作零件中的圆柱面和球面或环面。");
+    if(c->GetBody()!=f->GetBody())throw std::runtime_error("圆柱面与相接曲面必须属于同一个参考体并共享圆弧边。");
+    auto cd=Data(cylinder),sd=Data(sphere);if(cd.type!=16||(sd.type!=18&&sd.type!=19))throw std::runtime_error("第一个输入必须是圆柱面，第二个必须是标准球面或环面；暂不支持样条拟合面。");
+    Source s;s.cylinder=cylinder;s.sphere=sphere;s.body=c->GetBody()->Tag();s.center=sd.point;s.radius=cd.radius;s.z=Unit(cd.axis);
+    s.majorRadius=sd.type==19?sd.radius:0;s.bendRadius=sd.type==19?sd.minorRadius:sd.radius;
     s.unitsPerMm=work->PartUnits()==BasePart::UnitsInches?1/25.4:1.;double tol=std::max(1e-5*s.unitsPerMm,s.radius*1e-7);
-    if(std::abs(cd.radius-s.radius)>tol||Length((sd.point-cd.point)-s.z*Dot(sd.point-cd.point,s.z))>tol)throw std::runtime_error("需要同轴、同半径且在球面赤道处相切的圆柱面与球面。");
+    if(s.IsTorus()&&(s.bendRadius<=tol||s.majorRadius<=s.bendRadius+tol||std::abs(Dot(Unit(sd.axis),s.z))<1-1e-7))throw std::runtime_error("需要与圆柱同轴的标准圆环面，且环面大半径须大于小半径。");
+    s.bendDirection=s.radius>=s.majorRadius?1:-1;
+    if(std::abs(std::abs(s.radius-s.majorRadius)-s.bendRadius)>tol||Length((sd.point-cd.point)-s.z*Dot(sd.point-cd.point,s.z))>tol)throw std::runtime_error("圆柱面须与球面或环面同轴，并在圆弧截面的最大或最小径处相切。");
     std::set<tag_t> edges;for(auto* e:c->GetEdges())edges.insert(e->Tag());std::vector<tag_t> shared;
     for(auto* e:f->GetEdges())if(edges.count(e->Tag()))shared.push_back(e->Tag());
     if(shared.size()!=1)throw std::runtime_error("当前要求两个面共享一条完整圆弧边；请先合并被拆分的面或边。");
     Eval seam(shared[0]);logical circular=false;Check(UF_EVAL_is_arc(seam.value,&circular));if(!circular)throw std::runtime_error("相接边不是圆弧。");
     UF_EVAL_arc_t arc={};Check(UF_EVAL_ask_arc(seam.value,&arc));double lim[2];Check(UF_EVAL_ask_limits(seam.value,lim));s.sweep=lim[1]-lim[0];
-    if(Length(V(arc.center)-s.center)>tol||std::abs(arc.radius-s.radius)>tol)throw std::runtime_error("相接圆弧不在球面赤道处。");
+    if((!s.IsTorus()&&Length(V(arc.center)-s.center)>tol)||std::abs(arc.radius-s.radius)>tol)throw std::runtime_error("相接圆弧不在球面或环面的相切位置。");
+    // UF reports an arbitrary point on the revolution axis for trimmed tori,
+    // not necessarily the center plane of the generating circle. The shared
+    // tangent circle determines that plane; validate every boundary against it.
+    if(s.IsTorus())s.center=V(arc.center);
     auto cp=EdgePoints(c);double minz=0,maxz=0;for(auto point:cp){double z=Dot(point-s.center,s.z);minz=std::min(minz,z);maxz=std::max(maxz,z);}
-    if(minz<-tol&&maxz>tol)throw std::runtime_error("圆柱面跨过球面赤道，无法确定展开方向。");
+    if(minz<-tol&&maxz>tol)throw std::runtime_error("圆柱面跨过相接圆，无法确定展开方向。");
     if(maxz>tol)s.z=s.z*-1;s.height=std::max(-minz,maxz);
     s.x=Unit(seam.At(lim[0])-s.center);s.y=Unit(Cross(s.z,s.x));
     Vec next=seam.At(lim[0]+s.sweep*.01);if(Dot(next-s.center,s.y)<0){s.x=Unit(seam.At(lim[1])-s.center);s.y=Unit(Cross(s.z,s.x));}
-    double top=0;for(auto point:EdgePoints(f)){double z=Dot(point-s.center,s.z);if(z<-tol)throw std::runtime_error("球面与圆柱面位于相接圆的同一侧。");top=std::max(top,z);}
-    s.latitude=std::asin(std::clamp(top/s.radius,0.,1.));
-    if(s.height<tol||s.latitude<pi/180||s.sweep<pi/180||s.sweep>2*pi+1e-7)throw std::runtime_error("所选面范围过小或无法识别球冠边界。");
+    for(auto point:EdgePoints(f)){
+        Vec q=point-s.center;double z=Dot(q,s.z),rho=Length(q-s.z*z);
+        if(std::abs(std::hypot(rho-s.majorRadius,z)-s.bendRadius)>tol)throw std::runtime_error("相接曲面不是与圆柱相切的标准圆弧回转面。");
+        if(z<-tol)throw std::runtime_error("曲面与圆柱面位于相接圆的同一侧。");
+        double phi=std::atan2(std::max(0.,z),s.bendDirection*(rho-s.majorRadius));
+        if(phi>pi/2+1e-6)throw std::runtime_error("当前支持从相接圆起不超过 90° 的球面或环面圆弧；请先分割跨过顶部的曲面。");
+        s.latitude=std::max(s.latitude,std::min(phi,pi/2));
+    }
+    if(s.height<tol||s.latitude<pi/180||s.sweep<pi/180||s.sweep>2*pi+1e-7)throw std::runtime_error("所选面范围过小或无法识别曲面边界。");
     ValidateBoundary(s,c,false);ValidateBoundary(s,f,true);return s;
 }
 Source Inspect(tag_t cylinder,tag_t sphere){
     auto s=InspectPair(cylinder,sphere);
     auto* body=dynamic_cast<Body*>(NXObjectManager::Get(s.body));
-    if(!body->IsSolidBody())throw std::runtime_error("自动识别板厚需要等厚实体，请选择实体上的圆柱面和球面。");
+    if(!body->IsSolidBody())throw std::runtime_error("自动识别板厚需要等厚实体，请选择实体上的圆柱面和球面或环面。");
     const double tol=std::max(1e-5*s.unitsPerMm,s.radius*1e-7);
     std::vector<Source> matches;
     for(auto* oppositeSphere:body->GetFaces()){
         auto sd=Data(oppositeSphere->Tag());
-        if(sd.type!=18||Length(sd.point-s.center)>tol||std::abs(sd.radius-s.radius)<tol)continue;
+        if(sd.type!=(s.IsTorus()?19:18)||(!s.IsTorus()&&Length(sd.point-s.center)>tol))continue;
+        if(s.IsTorus()&&std::abs(sd.radius-s.majorRadius)>tol)continue;
+        const double oppositeRadius=s.majorRadius+s.bendDirection*(s.IsTorus()?sd.minorRadius:sd.radius);
+        if(std::abs(oppositeRadius-s.radius)<tol)continue;
         for(auto* oppositeCylinder:body->GetFaces()){
             auto cd=Data(oppositeCylinder->Tag());
-            if(cd.type!=16||std::abs(cd.radius-sd.radius)>tol)continue;
+            if(cd.type!=16||std::abs(cd.radius-oppositeRadius)>tol)continue;
             Source other;
             try{other=InspectPair(oppositeCylinder->Tag(),oppositeSphere->Tag());}catch(const std::exception&){continue;}
-            if(Dot(other.z,s.z)<1-1e-7||std::abs(other.height-s.height)>tol||std::abs(other.sweep-s.sweep)>1e-6||std::abs(other.latitude-s.latitude)>1e-6)continue;
+            if(Length(other.center-s.center)>tol||other.bendDirection!=s.bendDirection||Dot(other.z,s.z)<1-1e-7||std::abs(other.height-s.height)>tol||std::abs(other.sweep-s.sweep)>1e-6||std::abs(other.latitude-s.latitude)>1e-6)continue;
             if(s.sweep<2*pi-1e-6&&Dot(other.x,s.x)<1-1e-7)continue;
-            const double lo=std::min(sd.radius,s.radius),hi=std::max(sd.radius,s.radius),t=hi-lo;
+            const double lo=std::min(other.radius,s.radius),hi=std::max(other.radius,s.radius),t=hi-lo;
             bool valid=true;
             // Check both walls and the material between them in several sections.
             // This rejects separate concentric shells and nonuniform wall pairs.
@@ -224,7 +242,7 @@ Source Inspect(tag_t cylinder,tag_t sphere){
                 for(int sample=0;sample<5;++sample){
                     double r=sample==0?lo-t*.1:sample==4?hi+t*.1:lo+t*sample/4;
                     double phi=s.latitude*b;
-                    Vec q=s.center+radial*(spherical?r*std::cos(phi):r)+s.z*(spherical?r*std::sin(phi):-s.height*b);
+                    Vec q=s.center+radial*(spherical?s.RadialAt(r,phi):r)+s.z*(spherical?s.HeightAt(r,phi):-s.height*b);
                     double xyz[]={q.x,q.y,q.z};int state=0;Check(UF_MODL_ask_point_containment(xyz,s.body,&state));
                     if(state!=((sample==0||sample==4)?2:1))valid=false;
                 }
@@ -232,7 +250,7 @@ Source Inspect(tag_t cylinder,tag_t sphere){
             if(valid)matches.push_back(other);
         }
     }
-    if(matches.size()!=1)throw std::runtime_error("无法唯一识别等厚内外壁：圆柱段与球面段须具有同轴、同心且厚度一致的对应面。");
+    if(matches.size()!=1)throw std::runtime_error("无法唯一识别等厚内外壁：圆柱段与球面或环面段须具有同轴、同心且厚度一致的对应面。");
     s.thickness=std::abs(matches[0].radius-s.radius);s.innerSurface=matches[0].radius>s.radius;
     return s;
 }
@@ -242,7 +260,7 @@ Plan MakePlan(const Source& source,const Settings& settings){
     for(double v:{source.thickness,settings.gap,settings.relief,source.radius,source.height,source.sweep,source.latitude,u})if(!std::isfinite(v)||v<=0)throw std::runtime_error("板厚、缝宽和根部避让必须是正数。");
     if(source.thickness/u<.05-1e-8||settings.gap<.05)throw std::runtime_error("板厚与缝宽不得小于 0.05 mm。");
     p.outer=source.radius+(source.innerSurface?source.thickness:0);p.inner=p.outer-source.thickness;p.gap=settings.gap*u;p.relief=settings.relief*u;
-    if(p.inner<=0||source.thickness>source.radius*.2)throw std::runtime_error("板厚相对于球面半径过大。");
+    if(p.inner<=0||source.bendDirection*(p.inner-source.majorRadius)<=0||source.bendDirection*(p.outer-source.majorRadius)<=0||source.thickness>source.bendRadius*.2)throw std::runtime_error("板厚相对于曲面圆弧半径过大。");
     if(p.relief<p.gap)throw std::runtime_error("根部避让深度不能小于瓣间隙。");
     if(p.relief+source.thickness>=source.height)throw std::runtime_error("根部避让深度须小于圆柱高度减板厚，以保留底部连接带。");
     // A full revolution requires an open seam through the root band as well.
@@ -252,12 +270,12 @@ Plan MakePlan(const Source& source,const Settings& settings){
     if(p.gap>=p.inner*2*std::sin(p.step/2)*.8)throw std::runtime_error("瓣间隙过大；请减小缝宽或减少瓣数。");
     p.rootGap=std::max(p.gap,2*(p.outer-p.inner+.02*u)*std::sin(p.step/2)+.1*u);
     if(p.rootGap>=p.inner*2*std::sin(p.step/2)*.8)throw std::runtime_error("根部折弯避让后连接过窄；请减少瓣数或板厚。");
-    p.errorMm=p.outer*(1/std::cos(p.step/2)-1)/u;return p;
+    p.errorMm=std::max(p.outer,source.RadialAt(p.outer,source.latitude))*(1/std::cos(p.step/2)-1)/u;return p;
 }
 std::vector<std::pair<Vec,Vec>> Preview(const Plan& p){
     std::vector<std::pair<Vec,Vec>> result;const auto& s=p.source;
     for(int i=0;i<p.settings.petals;++i){double a=p.step*(i+.5);Vec r=s.x*std::cos(a)+s.y*std::sin(a),t=s.x*(-std::sin(a))+s.y*std::cos(a);
-        auto at=[&](double phi,int side){double radius=p.outer*std::cos(phi),rootHalf=p.outer*std::tan(p.step/2)-p.rootGap/(2*std::cos(p.step/2));double width=std::max(0.,std::min(rootHalf,radius*std::tan(p.step/2)-p.gap/(2*std::cos(p.step/2))));return s.center+r*radius+t*(side*width)+s.z*(p.outer*std::sin(phi));};
+        auto at=[&](double phi,int side){double radius=s.RadialAt(p.outer,phi),rootHalf=p.outer*std::tan(p.step/2)-p.rootGap/(2*std::cos(p.step/2));double width=std::max(0.,std::min(rootHalf,radius*std::tan(p.step/2)-p.gap/(2*std::cos(p.step/2))));return s.center+r*radius+t*(side*width)+s.z*s.HeightAt(p.outer,phi);};
         for(int side:{-1,1}){result.emplace_back(at(0,side)-s.z*p.relief,at(0,side));for(int j=0;j<40;++j)result.emplace_back(at(s.latitude*j/40,side),at(s.latitude*(j+1)/40,side));}
         result.emplace_back(at(s.latitude,-1),at(s.latitude,1));
     }return result;

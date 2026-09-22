@@ -1,13 +1,13 @@
 <?xml version='1.0' encoding='utf-8'?>
-<Dialog NX="2412" id="Dialog" icon="QiuMianZanKai.bmp" name="Dialog" type="uicomp" title="球面展开" creator="Zhihui" version="1.0.0" Expanded="1" languageInfo="Language and Codeset: simplified chinese 936" ContainerItems="1">
+<Dialog NX="2412" id="Dialog" icon="FanTonSenZi.bmp" name="Dialog" type="uicomp" title="方通 / 圆管伸直" creator="Zhihui" version="1.0.0" Expanded="1" languageInfo="Language and Codeset: simplified chinese 936" ContainerItems="1">
   <item id="main_group" icon="styler_block_sc.bmp" name="main_group" type="uicomp" class="UGS::UICOMP_group" notes="" Expanded="1" hierarchy="" presentation="Group" ContainerItems="1">
     <PropertyList>
       <Property id="Members" mask="0" name="Members" type="array" class="UGS::UI::Comp::Container" group="Block Specific::" sname="Members" source="1" dynamic="1" hierarchy="UGS::UICOMP_group">
         <PropertyList id="ContainerItems" icon="tiles_palette.bmp" mode="1" class="UGS::UI::Comp::Container" Expanded="1" hierarchy="UGS::UICOMP_group">
-          <Property id="cylinder" mask="256" name="cylinder" type="uicomp" class="UICOMP_selection" hierarchy="UGS::UICOMP_group" presentation="Select Object">
-            <item id="cylinder" icon="select_body.bmp" name="cylinder" type="uicomp" class="UICOMP_selection" notes="" Expanded="1" hierarchy="" presentation="Select Object">
+          <Property id="path_edges" mask="256" name="path_edges" type="uicomp" class="UICOMP_selection" hierarchy="UGS::UICOMP_group" presentation="Select Object">
+            <item id="path_edges" icon="select_body.bmp" name="path_edges" type="uicomp" class="UICOMP_selection" notes="" Expanded="1" hierarchy="" presentation="Select Object">
               <PropertyList id="id" mode="0">
-                <Property id="API Name" mask="16656" name="API Name" type="string" sname="BlockID" value="cylinder" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
+                <Property id="API Name" mask="16656" name="API Name" type="string" sname="BlockID" value="path_edges" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
                 <Property id="Visibility" mask="0" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
                 <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
                 <Property id="StepStatus" mask="16384" name="StepStatus" type="enum" sname="StepStatus" source="1" ClassID="UGS::UICOMP_selection" dynamic="0" selected="1" hierarchy="UGS::UICOMP_selection">
@@ -15,8 +15,8 @@
                   <Option name="Optional" value="1" />
                   <Option name="Satisfied" value="2" />
                 </Property>
-                <Property id="Cue" mask="0" name="Cue" type="utfstring" sname="Cue" value="选择圆柱面" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
-                <Property id="Label" mask="0" name="Label" type="utfstring" sname="LabelString" value="选择圆柱面" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Cue" mask="0" name="Cue" type="utfstring" sname="Cue" value="选择方通侧平面 / 圆管面" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Label" mask="0" name="Label" type="utfstring" sname="LabelString" value="选择方通侧平面 / 圆管面" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
                 <Property id="Many" mask="256" name="Many" type="enum" sname="SelectMode" source="3" ClassID="UGS::UICOMP_selection" dynamic="0" selected="0" hierarchy="UGS::UICOMP_selection">
                   <Option name="Single" value="0" />
                   <Option name="Multiple" value="1" />
@@ -30,37 +30,11 @@
               </PropertyList>
             </item>
           </Property>
-          <Property id="sphere" mask="256" name="sphere" type="uicomp" class="UICOMP_selection" hierarchy="UGS::UICOMP_group" presentation="Select Object">
-            <item id="sphere" icon="select_body.bmp" name="sphere" type="uicomp" class="UICOMP_selection" notes="" Expanded="1" hierarchy="" presentation="Select Object">
+          <Property id="divisions" mask="256" name="divisions" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
+            <item id="divisions" icon="styler_double" name="divisions" type="uicomp" class="UICOMP_double" notes="" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
               <PropertyList id="id" mode="0">
-                <Property id="API Name" mask="16656" name="API Name" type="string" sname="BlockID" value="sphere" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
-                <Property id="Visibility" mask="0" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
-                <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
-                <Property id="StepStatus" mask="16384" name="StepStatus" type="enum" sname="StepStatus" source="1" ClassID="UGS::UICOMP_selection" dynamic="0" selected="1" hierarchy="UGS::UICOMP_selection">
-                  <Option name="Required" value="0" />
-                  <Option name="Optional" value="1" />
-                  <Option name="Satisfied" value="2" />
-                </Property>
-                <Property id="Cue" mask="0" name="Cue" type="utfstring" sname="Cue" value="选择相接球面或环面" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
-                <Property id="Label" mask="0" name="Label" type="utfstring" sname="LabelString" value="选择相接球面或环面" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
-                <Property id="Many" mask="256" name="Many" type="enum" sname="SelectMode" source="3" ClassID="UGS::UICOMP_selection" dynamic="0" selected="0" hierarchy="UGS::UICOMP_selection">
-                  <Option name="Single" value="0" />
-                  <Option name="Multiple" value="1" />
-                </Property>
-                <Property id="AutoProgress" mask="256" name="AutoProgress" type="logical" sname="AutomaticProgression" value="False" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
-                <Property id="MaximumScope" mask="0" name="MaximumScope" type="enum" sname="MaximumScope" source="1" ClassID="UGS::UICOMP_selection" dynamic="0" selected="10" hierarchy="UGS::UICOMP_selection">
-                  <Option name="Entire Assembly" value="3" />
-                  <Option name="Within Work Part Only" value="10" />
-                  <Option name="Within Work Part and Components" value="11" />
-                </Property>
-              </PropertyList>
-            </item>
-          </Property>
-          <Property id="petals" mask="256" name="petals" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
-            <item id="petals" icon="styler_double" name="petals" type="uicomp" class="UICOMP_double" notes="" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
-              <PropertyList id="id" mode="0">
-                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="petals" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
-                <Property id="Title" name="Title" type="utfstring" sname="Label" value="分瓣数量" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="divisions" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="每条圆弧切口数" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
                 <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
                 <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
                 <Property id="Value" name="Value" type="double" sname="Value" value="12" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
@@ -70,41 +44,69 @@
               </PropertyList>
             </item>
           </Property>
-          <Property id="gap" mask="256" name="gap" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
-            <item id="gap" icon="styler_double" name="gap" type="uicomp" class="UICOMP_double" notes="" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
+          <Property id="radius" mask="256" name="radius" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
+            <item id="radius" icon="styler_double" name="radius" type="uicomp" class="UICOMP_double" notes="" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
               <PropertyList id="id" mode="0">
-                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gap" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
-                <Property id="Title" name="Title" type="utfstring" sname="Label" value="瓣间隙 (mm)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="radius" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="连接壁内弯半径 (mm)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
                 <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
                 <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
-                <Property id="Value" name="Value" type="double" sname="Value" value="0.5" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
-                <Property id="MinimumValue" name="MinimumValue" type="double" sname="MinimumValue" value="0.05" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
-                <Property id="MaximumValue" name="MaximumValue" type="double" sname="MaximumValue" value="1000" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
-                <Property id="Increment" name="Increment" type="double" sname="Increment" value="0.1" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
-              </PropertyList>
-            </item>
-          </Property>
-          <Property id="relief" mask="256" name="relief" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
-            <item id="relief" icon="styler_double" name="relief" type="uicomp" class="UICOMP_double" notes="" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
-              <PropertyList id="id" mode="0">
-                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="relief" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
-                <Property id="Title" name="Title" type="utfstring" sname="Label" value="根部避让深度 (mm)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
-                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
-                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
-                <Property id="Value" name="Value" type="double" sname="Value" value="3" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
-                <Property id="MinimumValue" name="MinimumValue" type="double" sname="MinimumValue" value="0.05" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="Value" name="Value" type="double" sname="Value" value="1" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MinimumValue" name="MinimumValue" type="double" sname="MinimumValue" value="0" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
                 <Property id="MaximumValue" name="MaximumValue" type="double" sname="MaximumValue" value="10000" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
                 <Property id="Increment" name="Increment" type="double" sname="Increment" value="0.1" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
               </PropertyList>
             </item>
           </Property>
-          <Property id="create_flat" mask="256" name="create_flat" type="uicomp" class="UICOMP_toggle" hierarchy="UGS::UICOMP_group" presentation="Toggle">
-            <item id="create_flat" icon="styler_toggle.bmp" name="create_flat" type="uicomp" class="UICOMP_toggle" notes="" Expanded="1" hierarchy="" presentation="Toggle">
+          <Property id="kfactor" mask="256" name="kfactor" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
+            <item id="kfactor" icon="styler_double" name="kfactor" type="uicomp" class="UICOMP_double" notes="" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
               <PropertyList id="id" mode="0">
-                <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" id="API Name" name="API Name" sname="BlockID" source="3" type="string" value="create_flat" />
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="kfactor" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="连接壁 K 系数" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Value" name="Value" type="double" sname="Value" value="0.4" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MinimumValue" name="MinimumValue" type="double" sname="MinimumValue" value="0.01" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MaximumValue" name="MaximumValue" type="double" sname="MaximumValue" value="1" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="Increment" name="Increment" type="double" sname="Increment" value="0.01" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="gap" mask="256" name="gap" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
+            <item id="gap" icon="styler_double" name="gap" type="uicomp" class="UICOMP_double" notes="" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gap" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="切口间隙 (mm)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Value" name="Value" type="double" sname="Value" value="0.2" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MinimumValue" name="MinimumValue" type="double" sname="MinimumValue" value="0" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MaximumValue" name="MaximumValue" type="double" sname="MaximumValue" value="100" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="Increment" name="Increment" type="double" sname="Increment" value="0.1" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="bridge_width" mask="256" name="bridge_width" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
+            <item id="bridge_width" icon="styler_double" name="bridge_width" type="uicomp" class="UICOMP_double" notes="" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="bridge_width" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="圆管连接带弧宽 (mm)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Value" name="Value" type="double" sname="Value" value="6" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MinimumValue" name="MinimumValue" type="double" sname="MinimumValue" value="0.1" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MaximumValue" name="MaximumValue" type="double" sname="MaximumValue" value="10000" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="Increment" name="Increment" type="double" sname="Increment" value="0.1" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="cut_source" mask="256" name="cut_source" type="uicomp" class="UICOMP_toggle" hierarchy="UGS::UICOMP_group" presentation="Toggle">
+            <item id="cut_source" icon="styler_toggle.bmp" name="cut_source" type="uicomp" class="UICOMP_toggle" notes="" Expanded="1" hierarchy="" presentation="Toggle">
+              <PropertyList id="id" mode="0">
+                <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" id="API Name" name="API Name" sname="BlockID" source="3" type="string" value="cut_source" />
                 <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" id="Visibility" name="Visibility" sname="Show" source="1" type="logical" value="True" />
                 <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" id="Sensitivity" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
-                <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" id="Title" name="Title" sname="Label" source="1" type="utfstring" value="同时生成展开实体" />
+                <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" id="Title" name="Title" sname="Label" source="1" type="utfstring" value="在原管件上切间隙槽（同时伸直）" />
                 <Property ClassID="UGS::UICOMP_toggle" hierarchy="UGS::UICOMP_toggle" id="Value" name="Value" sname="Value" source="4" type="logical" value="False" />
               </PropertyList>
             </item>
@@ -115,8 +117,8 @@
                 <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" id="API Name" name="API Name" sname="BlockID" source="3" type="string" value="hide_source" />
                 <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" id="Visibility" name="Visibility" sname="Show" source="1" type="logical" value="True" />
                 <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" id="Sensitivity" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
-                <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" id="Title" name="Title" sname="Label" source="1" type="utfstring" value="完成后隐藏参考体" />
-                <Property ClassID="UGS::UICOMP_toggle" hierarchy="UGS::UICOMP_toggle" id="Value" name="Value" sname="Value" source="4" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" id="Title" name="Title" sname="Label" source="1" type="utfstring" value="完成后隐藏原管" />
+                <Property ClassID="UGS::UICOMP_toggle" hierarchy="UGS::UICOMP_toggle" id="Value" name="Value" sname="Value" source="4" type="logical" value="False" />
               </PropertyList>
             </item>
           </Property>
@@ -124,7 +126,7 @@
             <item id="result_status" icon="styler_label.bmp" name="result_status" type="uicomp" class="UICOMP_label" notes="" Expanded="1" hierarchy="" presentation="Label">
               <PropertyList id="id" mode="0">
                 <Property id="API Name" name="API Name" type="string" sname="BlockID" value="result_status" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Title" name="Title" type="utfstring" sname="Label" value="选择圆柱面及球面或环面，自动识别板厚。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="方通选完整侧平面；圆管选管面或圆环端口。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
               </PropertyList>
@@ -134,7 +136,7 @@
             <item id="result_detail" icon="styler_label.bmp" name="result_detail" type="uicomp" class="UICOMP_label" notes="" Expanded="1" hierarchy="" presentation="Label">
               <PropertyList id="id" mode="0">
                 <Property id="API Name" name="API Name" type="string" sname="BlockID" value="result_detail" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Title" name="Title" type="utfstring" sname="Label" value=" " source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="开槽开关默认关闭；开启后原管同步切槽。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
               </PropertyList>
@@ -144,7 +146,7 @@
             <item id="notice" icon="styler_label.bmp" name="notice" type="uicomp" class="UICOMP_label" notes="" Expanded="1" hierarchy="" presentation="Label">
               <PropertyList id="id" mode="0">
                 <Property id="API Name" name="API Name" type="string" sname="BlockID" value="notice" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Title" name="Title" type="utfstring" sname="Label" value="分瓣近似球面或环面；生成可展开钣金。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="方通保留外侧整壁；圆管保留外侧连接带的原壁厚。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
               </PropertyList>
@@ -154,7 +156,17 @@
             <item id="scope" icon="styler_label.bmp" name="scope" type="uicomp" class="UICOMP_label" notes="" Expanded="1" hierarchy="" presentation="Label">
               <PropertyList id="id" mode="0">
                 <Property id="API Name" name="API Name" type="string" sname="BlockID" value="scope" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Title" name="Title" type="utfstring" sname="Label" value="折弯补偿采用当前零件的钣金设置。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="平面、同向、等厚；圆管暂不支持孔槽。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="forming" mask="256" name="forming" type="uicomp" class="UICOMP_label" hierarchy="UGS::UICOMP_group" presentation="Label">
+            <item id="forming" icon="styler_label.bmp" name="forming" type="uicomp" class="UICOMP_label" notes="" Expanded="1" hierarchy="" presentation="Label">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="forming" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="弧形为分段近似；半径及 K 系数需按工艺设定。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
               </PropertyList>
@@ -166,7 +178,7 @@
       <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
       <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
       <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="True" source="2" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
-      <Property id="Title" name="Title" type="utfstring" sname="Label" value="分瓣钣金" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Title" name="Title" type="utfstring" sname="Label" value="方通 / 圆管切口下料" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
       <Property id="Group" name="Group" type="logical" sname="Group" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
     </PropertyList>
   </item>
@@ -174,8 +186,8 @@
     <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
     <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
     <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
-    <Property id="HelpTag" name="HelpTag" type="string" sname="HelpTag" value="Zhihui_QiuMianZanKai" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
+    <Property id="HelpTag" name="HelpTag" type="string" sname="HelpTag" value="Zhihui_FanTonSenZi" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
     <Property id="HideApply" name="HideApply" type="logical" sname="HideApply" value="False" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
-    <Property id="Title" name="Title" type="utfstring" sname="Label" value="球面展开" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
+    <Property id="Title" name="Title" type="utfstring" sname="Label" value="方通 / 圆管伸直" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
   </PropertyList>
 </Dialog>

@@ -21,7 +21,13 @@ struct Source {
     tag_t cylinder=0,sphere=0,body=0;
     Vec center,x,y,z;
     double radius=0,height=0,sweep=0,latitude=0,unitsPerMm=1,thickness=0;
+    // radius is the selected cylinder radius; majorRadius is zero for spheres.
+    double majorRadius=0,bendRadius=0;
+    int bendDirection=1; // +1 outer rim, -1 inner rim of a ring torus
     bool innerSurface=false;
+    double RadialAt(double baseRadius,double angle)const{return majorRadius+(baseRadius-majorRadius)*std::cos(angle);}
+    double HeightAt(double baseRadius,double angle)const{return bendDirection*(baseRadius-majorRadius)*std::sin(angle);}
+    bool IsTorus()const{return majorRadius>0;}
 };
 struct Settings {
     int petals=12;

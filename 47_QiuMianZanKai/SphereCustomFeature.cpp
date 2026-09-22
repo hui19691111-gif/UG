@@ -36,7 +36,7 @@ void RequireFeatureClass(){
 Settings ReadFeature(CustomFeature* feature,tag_t& cylinder,tag_t& sphere){
     auto* data=feature->FeatureData();Settings s;
     auto* c=data->CustomTagAttributeByName("Cylinder")->Value();auto* f=data->CustomTagAttributeByName("Sphere")->Value();
-    if(!c||!f)throw std::runtime_error("原参考面已失效，请重新选择圆柱面和球面。");
+    if(!c||!f)throw std::runtime_error("原参考面已失效，请重新选择圆柱面和球面或环面。");
     cylinder=c->Tag();sphere=f->Tag();
     s.petals=data->CustomIntegerAttributeByName("Petals")->Value();
     s.gap=data->CustomDoubleAttributeByName("GapMm")->Value();s.relief=data->CustomDoubleAttributeByName("ReliefMm")->Value();
@@ -67,7 +67,7 @@ Result CreateFeature(const Plan& p,CustomFeature* edited,Session::UndoMarkId mar
         builder->SetFeatureData(data);
         auto* feature=dynamic_cast<CustomFeature*>(builder->CommitFeature());builder->Destroy();builder=nullptr;
         if(!feature)throw std::runtime_error("创建球面展开自定义特征失败。");
-        feature->SetName(NXString("球面展开_"+std::to_string(p.settings.petals)+"瓣",NXString::UTF8));
+        feature->SetName(NXString(std::string(p.source.IsTorus()?"环面展开_":"球面展开_")+std::to_string(p.settings.petals)+"瓣",NXString::UTF8));
         result.feature=feature->Tag();
         // NX owns rollback during a double-click edit and runs PreUpdate after
         // the Edit dialog closes. Do not start a nested rollback manager or

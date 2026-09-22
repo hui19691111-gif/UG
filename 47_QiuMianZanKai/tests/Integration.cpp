@@ -38,19 +38,21 @@ using namespace sphere_unfold;
 using namespace NXOpen;
 void Require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 struct Fixture{tag_t body=0,cylinder=0,sphere=0,innerSphere=0,innerCylinder=0;};
-Fixture MakeFixture(bool rotated,bool inches,double sweep,double latitude,double thickness=2){
+Fixture MakeFixture(bool rotated,bool inches,double sweep,double latitude,double thickness=2,double major=0,int bendDirection=1){
     double u=inches?1/25.4:1;Vec origin=rotated?Vec{30*u,-45*u,75*u}:Vec{},x=rotated?sphere_unfold::Unit({1,2,1}):Vec{1,0,0},z=rotated?sphere_unfold::Unit({-1,0,1}):Vec{0,0,1};Vec y=Cross(z,x);
     auto at=[&](double r,double h){return origin+x*(r*u)+z*(h*u);};std::vector<tag_t> curves;
     auto line=[&](double r,double h,double r2,double h2){auto a=at(r,h),b=at(r2,h2);UF_CURVE_line_t l={{a.x,a.y,a.z},{b.x,b.y,b.z}};tag_t t=0;Check(UF_CURVE_create_line(&l,&t));curves.push_back(t);};
-    auto arc=[&](double r){auto a=at(r,0),b=at(r*cos(latitude/2),r*sin(latitude/2)),c=at(r*cos(latitude),r*sin(latitude));double p[]={a.x,a.y,a.z},q[]={b.x,b.y,b.z},v[]={c.x,c.y,c.z};tag_t t=0;Check(UF_CURVE_create_arc_thru_3pts(1,p,q,v,&t));curves.push_back(t);};
-    double inner=100-thickness;
-    line(100,-40,100,0);arc(100);line(100*cos(latitude),100*sin(latitude),inner*cos(latitude),inner*sin(latitude));arc(inner);line(inner,0,inner,-40);line(inner,-40,100,-40);
+    auto radial=[&](double r,double phi){return major+(r-major)*cos(phi);};
+    auto height=[&](double r,double phi){return bendDirection*(r-major)*sin(phi);};
+    auto arc=[&](double r){auto a=at(r,0),b=at(radial(r,latitude/2),height(r,latitude/2)),c=at(radial(r,latitude),height(r,latitude));double p[]={a.x,a.y,a.z},q[]={b.x,b.y,b.z},v[]={c.x,c.y,c.z};tag_t t=0;Check(UF_CURVE_create_arc_thru_3pts(1,p,q,v,&t));curves.push_back(t);};
+    double outer=major+bendDirection*100,inner=outer-thickness;
+    line(outer,-40,outer,0);arc(outer);line(radial(outer,latitude),height(outer,latitude),radial(inner,latitude),height(inner,latitude));arc(inner);line(inner,0,inner,-40);line(inner,-40,outer,-40);
     char zero[]="0";std::string angle=std::to_string(sweep*180/pi);char* limits[]={zero,angle.data()},*offsets[]={zero,zero};double point[]={origin.x,origin.y,origin.z},axis[]={z.x,z.y,z.z},region[3]={};tag_t* features=nullptr;int count=0;
     Check(UF_MODL_create_revolution(curves.data(),static_cast<int>(curves.size()),nullptr,limits,offsets,region,false,true,point,axis,UF_NULLSIGN,&features,&count));
     Require(count==1,"fixture revolve count");Fixture f;Check(UF_MODL_ask_feat_body(features[0],&f.body));UF_free(features);
     for(auto t:curves)Check(UF_OBJ_set_blank_status(t,UF_OBJ_BLANKED));
     auto* body=dynamic_cast<Body*>(NXObjectManager::Get(f.body));
-    for(auto* face:body->GetFaces()){int type,sign;double p[3],d[3],box[6],r,r2;Check(UF_MODL_ask_face_data(face->Tag(),&type,p,d,box,&r,&r2,&sign));if(type==16&&std::abs(r-100*u)<1e-6*u)f.cylinder=face->Tag();if(type==18&&std::abs(r-100*u)<1e-6*u)f.sphere=face->Tag();if(type==18&&std::abs(r-inner*u)<1e-6*u)f.innerSphere=face->Tag();}
+    for(auto* face:body->GetFaces()){int type,sign;double p[3],d[3],box[6],r,r2;Check(UF_MODL_ask_face_data(face->Tag(),&type,p,d,box,&r,&r2,&sign));if(type==16&&std::abs(r-outer*u)<1e-6*u)f.cylinder=face->Tag();double bend=major?r2:r;if(type==(major?19:18)&&std::abs(bend-100*u)<1e-6*u)f.sphere=face->Tag();if(type==(major?19:18)&&std::abs(bend-std::abs(inner-major)*u)<1e-6*u)f.innerSphere=face->Tag();}
     for(auto* face:body->GetFaces()){int type,sign;double p[3],d[3],box[6],r,r2;Check(UF_MODL_ask_face_data(face->Tag(),&type,p,d,box,&r,&r2,&sign));if(type==16&&std::abs(r-inner*u)<1e-6*u)f.innerCylinder=face->Tag();}
     Require(f.cylinder&&f.sphere&&f.innerSphere&&f.innerCylinder,"fixture analytic faces missing");return f;
 }
@@ -87,10 +89,11 @@ void CheckProfiles(Part* part,int petals,int originalLooseCurves){
     Require(sketches==3*petals&&extrusions==sketches,"missing sketch/extrusion history");
     Require(owners.size()==static_cast<size_t>(sketches),"unreferenced internal sketch");for(auto owner:owners)Require(owner.second==1,"profile is shared between extrusions");
 }
-void Case(const std::string& path,bool rotated,bool inches,double sweep,double latitude,bool inner=false,bool flat=true,int petals=0,double thickness=2,double gap=.5,double relief=4){
+void Case(const std::string& path,bool rotated,bool inches,double sweep,double latitude,bool inner=false,bool flat=true,int petals=0,double thickness=2,double gap=.5,double relief=4,double major=0,int bendDirection=1){
     tag_t partTag=0;Check(UF_PART_new(path.c_str(),inches?ENGLISH:METRIC,&partTag));auto* session=Session::GetSession();auto* part=session->Parts()->Work();
-    auto f=MakeFixture(rotated,inches,sweep,latitude,thickness);Source source=Inspect(inner?f.innerCylinder:f.cylinder,inner?f.innerSphere:f.sphere);double u=inches?1/25.4:1;
-    Require(std::abs(source.radius/u-(inner?100-thickness:100))<1e-7&&std::abs(source.height/u-40)<1e-7,"radius/height/units mismatch");
+    auto f=MakeFixture(rotated,inches,sweep,latitude,thickness,major,bendDirection);Source source=Inspect(inner?f.innerCylinder:f.cylinder,inner?f.innerSphere:f.sphere);double u=inches?1/25.4:1;
+    Require(std::abs(source.radius/u-(major+bendDirection*100-(inner?thickness:0)))<1e-7&&std::abs(source.height/u-40)<1e-7,"radius/height/units mismatch");
+    Require(std::abs(source.majorRadius/u-major)<1e-7&&source.bendDirection==bendDirection,"torus centerline or bend direction mismatch");
     Require(std::abs(source.thickness/u-thickness)<1e-7&&source.innerSurface==inner,"automatic thickness/side mismatch");
     auto opposite=Inspect(inner?f.cylinder:f.innerCylinder,inner?f.sphere:f.innerSphere);
     Require(std::abs(opposite.thickness-source.thickness)<1e-7*u&&opposite.innerSurface!=inner,"opposite wall recognition mismatch");
@@ -102,7 +105,7 @@ void Case(const std::string& path,bool rotated,bool inches,double sweep,double l
     Require(result.body&&result.convert&&result.feature&&(flat?result.flatBody!=0:result.flatBody==0),"missing output");
     auto* custom=dynamic_cast<Features::CustomFeature*>(NXObjectManager::Get(result.feature));Require(custom!=nullptr,"not a custom feature");
     Require(custom->GetConstructionFeatures().size()==result.members.size(),"custom construction ownership missing");
-    Require(std::string(custom->Name().GetUTF8Text())=="球面展开_"+std::to_string(settings.petals)+"瓣","feature name encoding mismatch");
+    Require(std::string(custom->Name().GetUTF8Text())==std::string(major?"环面展开_":"球面展开_")+std::to_string(settings.petals)+"瓣","feature name encoding mismatch");
     Require(std::abs(Volume(f.body)-before)<before*1e-8,"source changed");if(flat)Require(Volume(result.flatBody)>0,"flat volume zero");
     try{CheckProfiles(part,settings.petals,originalLooseCurves);}catch(...){UF_PART_save_as((path+"-profiles-failed.prt").c_str());throw;}
     // Open and recommit an extrusion to check that the stored internal section is editable.
@@ -115,10 +118,10 @@ void Case(const std::string& path,bool rotated,bool inches,double sweep,double l
     // Check center material and the radial slits against the actual NX solid.
     for(int i=0;i<settings.petals;++i){
         double theta=(i+.5)*plan.step,phi=latitude*.5,r=(plan.inner+plan.outer)/2;
-        Vec q=source.center+(source.x*cos(theta)+source.y*sin(theta))*(r*cos(phi))+source.z*(r*sin(phi));double point[]={q.x,q.y,q.z};int contains=0;Check(UF_MODL_ask_point_containment(point,result.body,&contains));Require(contains==1,"missing petal material");
-        if(i>0){theta=i*plan.step;Vec radial=source.x*cos(theta)+source.y*sin(theta);q=source.center+radial*(r*cos(phi)/cos(plan.step/2))+source.z*(r*sin(phi));double slitPoint[]={q.x,q.y,q.z};Check(UF_MODL_ask_point_containment(slitPoint,result.body,&contains));Require(contains==2,"petal slit obstructed");}
+        Vec q=source.center+(source.x*cos(theta)+source.y*sin(theta))*source.RadialAt(r,phi)+source.z*source.HeightAt(r,phi);double point[]={q.x,q.y,q.z};int contains=0;Check(UF_MODL_ask_point_containment(point,result.body,&contains));Require(contains==1,"missing petal material");
+        if(i>0){theta=i*plan.step;Vec radial=source.x*cos(theta)+source.y*sin(theta);q=source.center+radial*(source.RadialAt(r,phi)/cos(plan.step/2))+source.z*source.HeightAt(r,phi);double slitPoint[]={q.x,q.y,q.z};Check(UF_MODL_ask_point_containment(slitPoint,result.body,&contains));Require(contains==2,"petal slit obstructed");}
     }
-    if(path.find("profiles.prt")!=std::string::npos||path.find("quarter-mm.prt")!=std::string::npos){
+    if(path.find("profiles.prt")!=std::string::npos||path.find("quarter-mm.prt")!=std::string::npos||path.find("torus-outer.prt")!=std::string::npos){
         auto editMark=session->SetUndoMark(Session::MarkVisibilityVisible,"test custom edit");auto changed=settings;changed.petals+=2;changed.flat=!flat;
         auto updated=CreateFeature(MakePlan(source,changed),custom,editMark);Require(updated.feature==result.feature,"edit changed custom identity");
         Require(custom->GetConstructionFeatures().size()==updated.members.size(),"edited construction ownership missing");
@@ -140,6 +143,15 @@ void Case(const std::string& path,bool rotated,bool inches,double sweep,double l
 }
 int main(int argc,char** argv){
     try{Require(argc==2||argc==3,"Provide new output directory and optional root-relief or shallow-relief mode");std::filesystem::create_directories(argv[1]);Check(UF_initialize());std::string out=argv[1];
+        if(argc==3&&std::string(argv[2])=="torus"){
+            Case(out+"/torus-outer.prt",false,false,pi/2,pi/2,false,true,18,1.5,.1,.5,300);
+            Case(out+"/torus-inner-wall.prt",false,false,pi/2,1.2,true,true,12,2,.5,1,300);
+            Case(out+"/torus-inch.prt",true,true,pi/2,1.2,false,true,12,2,.5,1,300);
+            Case(out+"/torus-inward.prt",false,false,pi/2,pi/2,false,true,12,2,.5,1,300,-1);
+            Case(out+"/torus-inward-inner.prt",true,false,pi/2,1.2,true,false,12,2,.5,1,300,-1);
+            Case(out+"/torus-full.prt",false,false,2*pi,1.2,false,true,24,2,.5,1,300);
+            UF_terminate();return 0;
+        }
         if(argc==3&&std::string(argv[2])=="shallow-relief"){
             Case(out+"/equal-gap-thick.prt",false,false,pi/2,1.2,false,true,12,5,.5,.5);
             Case(out+"/below-thickness.prt",false,false,pi,1.2,false,true,8,2,.5,1);

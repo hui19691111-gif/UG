@@ -26,6 +26,8 @@ foreach(resource QiuMianZanKai.dlx QiuMianZanKai.bmp CustomFeatureConfiguration.
 endforeach()
 option(ZH_SPHERE_TESTS "Build external NX tests; never deploy test executables" OFF)
 if(ZH_SPHERE_TESTS)
+  add_executable(SphereUnfoldModelTest tests/ModelRegression.cpp SphereGeometry.cpp SphereCustomFeature.cpp)
+  configure_nx(SphereUnfoldModelTest)
   add_library(SphereUnfoldUIAudit SHARED tests/InspectUI.cpp)
   configure_nx(SphereUnfoldUIAudit)
   add_library(SphereUnfoldUITest SHARED tests/LaunchUI.cpp)

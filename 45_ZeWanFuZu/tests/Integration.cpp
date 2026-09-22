@@ -4,6 +4,13 @@
 #include <NXOpen/Features_CustomFeatureData.hxx>
 #include <NXOpen/Features_CustomTagArrayAttribute.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_ConstructionFeatureData.hxx>
+#include <NXOpen/Features_FlatPattern.hxx>
+#include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
+#include <NXOpen/Features_SheetMetal_ConvertToSheetmetalBuilder.hxx>
+#include <NXOpen/Features_SheetMetal_FlatPatternBuilder.hxx>
+#include <NXOpen/Features_SheetMetal_FlatSolidBuilder.hxx>
+#include <NXOpen/SelectFace.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/Session.hxx>
 #include <NXOpen/Part.hxx>
@@ -254,10 +261,104 @@ static void Test(const std::string& path,bool rotate,bool inch,int curved=0,bool
     Check(UF_PART_close(part,0,1));
     std::cout<<"PASS custom edit, zero inset, stable internal feature tags, undo and reopen\n";
 }
+static NXOpen::Features::Feature* MakeFlat(Fixture& f,bool solidOnly=false) {
+    using namespace NXOpen;
+    auto* part=Session::GetSession()->Parts()->Work();
+    auto* manager=part->Features()->SheetmetalManager();
+    auto* convert=manager->CreateConvertToSheetmetalFeatureBuilder(nullptr);
+    convert->SetApplicationContext(Features::SheetMetal::ApplicationContextNxSheetMetal);
+    convert->SetBaseFace(dynamic_cast<Face*>(NXObjectManager::Get(f.broad)));
+    convert->CommitFeature();convert->Destroy();
+    if(solidOnly) {
+        auto* builder=manager->CreateFlatSolidFeatureBuilder(nullptr);
+        builder->SetApplicationContext(Features::SheetMetal::ApplicationContextNxSheetMetal);
+        builder->StationaryFace()->SetValue(dynamic_cast<Face*>(NXObjectManager::Get(f.broad)));
+        auto* result=builder->CommitFeature();builder->Destroy();return result;
+    }
+    auto* flatBuilder=manager->CreateFlatPatternBuilder(nullptr);
+    flatBuilder->SetApplicationContext(Features::SheetMetal::ApplicationContextNxSheetMetal);
+    flatBuilder->SetKeepFlatSolidExternal(false);
+    flatBuilder->SetOrientation(Features::SheetMetal::FlatSolidBuilder::OrientationTypeDefault);
+    flatBuilder->UpwardFace()->SetValue(dynamic_cast<Face*>(NXObjectManager::Get(f.broad)));
+    auto* flat=flatBuilder->CommitFeature();flatBuilder->Destroy();
+    Require(flat && flat->GetFeatureErrorMessages().empty(),"Fixture flat pattern failed");
+    return flat;
+}
+static tag_t FlatBody(NXOpen::Features::Feature* flat) {
+    if(auto* pattern=dynamic_cast<NXOpen::Features::FlatPattern*>(flat)) {
+        std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> faces;
+        pattern->GetBendUpCenterLines(faces);
+        if(faces.empty()) pattern->GetBendDownCenterLines(faces);
+        Require(!faces.empty() && faces.front().FlatSolidObject,"Missing flat solid bend data");
+        return faces.front().FlatSolidObject->GetBody()->Tag();
+    }
+    return flat->GetBodies().front()->Tag();
+}
+static void TestFlatHistory(const std::string& path,int curved=0,bool multipleBodies=false,bool solidOnly=false) {
+    using namespace NXOpen;
+    tag_t partTag=0;Check(UF_PART_new(path.c_str(),UF_PART_METRIC,&partTag));
+    auto* session=Session::GetSession();auto* part=session->Parts()->Work();
+    Features::Feature* foreignFlat=nullptr;double foreignVolume=0;
+    if(multipleBodies) {
+        auto other=MakeFixture(true);foreignFlat=MakeFlat(other);foreignVolume=Volume(FlatBody(foreignFlat));
+    }
+    auto f=MakeFixture(false,1,curved);auto* flat=MakeFlat(f,solidOnly);
+    auto info=Inspect(f.sloped);Settings s;
+    const double sourceVolume=Volume(f.body),sourceFlatVolume=Volume(FlatBody(flat));
+    auto originalCurrent=part->CurrentFeature()->Tag();
+    Check(UF_PART_save_as((path+"-source.prt").c_str()));
+    auto createMark=session->SetUndoMark(Session::MarkVisibilityVisible,"flat history create");
+    std::cout<<"HISTORY curved="<<curved<<" stage=create\n";
+    auto* custom=dynamic_cast<Features::CustomFeature*>(NXObjectManager::Get(CreateFeature(PlanFaces({info},s).front(),s)));
+    Require(custom->Timestamp()<flat->Timestamp(),"Bend assist was appended after existing flat pattern");
+    for(auto* member:custom->GetConstructionFeatures())
+        Require(member->GetFeature()->Timestamp()<flat->Timestamp(),"Construction member left after flat pattern");
+    Require(part->CurrentFeature()->Tag()==originalCurrent,"Creation changed original current feature");
+    Require(Volume(FlatBody(flat))>sourceFlatVolume,"Existing flat pattern omitted new helper geometry");
+    const double helperVolume=Volume(f.body),helperFlatVolume=Volume(FlatBody(flat));
+    // Match the rollback around a native double-click edit. Keep the existing
+    // downstream flat feature alive while NX rolls backward and forward.
+    auto editMark=session->SetUndoMark(Session::MarkVisibilityVisible,"flat history edit");
+    std::cout<<"HISTORY stage=rollback edit\n";
+    s.width=20;EditFeature(custom,s);
+    Check(UF_MODL_update());
+    Require(FeatureSettings(custom).width==20 && Volume(f.body)>helperVolume,"Edit did not change the folded body");
+    Require(Volume(FlatBody(flat))>helperFlatVolume,"Flat pattern did not update after helper edit");
+    Require(custom->GetFeatureErrorMessages().empty() && flat->GetFeatureErrorMessages().empty(),"Edit broke downstream flat pattern");
+    Require(part->CurrentFeature()->Tag()==originalCurrent,"Editing changed original current feature");
+    session->UndoToMark(editMark,nullptr);session->DeleteUndoMark(editMark,nullptr);
+    Require(FeatureSettings(custom).width==10 && std::abs(Volume(FlatBody(flat))-helperFlatVolume)<helperFlatVolume*1e-8,"Undo edit did not restore flat pattern");
+    s.width=10;s.endDistance=30;s.reverseEnd=true;
+    std::cout<<"HISTORY stage=repeat create\n";
+    auto* second=dynamic_cast<Features::CustomFeature*>(NXObjectManager::Get(CreateFeature(PlanFaces({info},s).front(),s)));
+    Require(second->Timestamp()>custom->Timestamp() && second->Timestamp()<flat->Timestamp(),"Repeated creation did not stay before flat pattern");
+    if(foreignFlat) {
+        Require(foreignFlat->Timestamp()<custom->Timestamp(),"Unrelated body's flat pattern used as insertion anchor");
+        Require(std::abs(Volume(FlatBody(foreignFlat))-foreignVolume)<foreignVolume*1e-8,"Unrelated flat geometry changed");
+    }
+    session->UndoToMark(createMark,nullptr);session->DeleteUndoMark(createMark,nullptr);
+    Require(std::abs(Volume(f.body)-sourceVolume)<sourceVolume*1e-8 && std::abs(Volume(FlatBody(flat))-sourceFlatVolume)<sourceFlatVolume*1e-8,"Undo create did not restore folded and flat bodies");
+    std::cout<<"HISTORY stage=recreate after undo\n";
+    s.reverseEnd=false;s.endDistance=5;CreateFeature(PlanFaces({info},s).front(),s);
+    Check(UF_PART_save_as(path.c_str()));Check(UF_PART_close(partTag,0,1));
+    UF_PART_load_status_t load={};Check(UF_PART_open(path.c_str(),&partTag,&load));UF_PART_free_load_status(&load);
+    part=session->Parts()->Work();custom=nullptr;
+    for(auto* feature:part->Features()->GetFeatures()) if(auto* c=dynamic_cast<Features::CustomFeature*>(feature)) custom=c;
+    Require(custom,"Reopened auxiliary custom feature missing");
+    std::cout<<"HISTORY stage=reopened edit\n";
+    s.width=20;EditFeature(custom,s);Check(UF_MODL_update());
+    for(auto* feature:part->Features()->GetFeatures()) Require(feature->GetFeatureErrorMessages().empty(),"Reopened history has dependency errors");
+    Check(UF_PART_close(partTag,0,1));
+    std::cout<<"PASS existing flat "<<(solidOnly?"solid":"pattern")<<" curved="<<curved<<" multibody="<<multipleBodies<<": ordered construction, regenerated flat geometry, rollback edit, repeat create, undo and reopen\n";
+}
 int main(int argc,char** argv) {
     try {
         Require(argc==2,"Provide a unique output directory");Check(UF_initialize());
         std::string out=argv[1];
+        TestFlatHistory(out+"/bend-assist-flat-history.prt");
+        TestFlatHistory(out+"/bend-assist-flat-arc.prt",1);
+        TestFlatHistory(out+"/bend-assist-flat-multibody.prt",0,true);
+        TestFlatHistory(out+"/bend-assist-flat-solid.prt",0,false,true);
         Test(out+"/bend-assist-mm.prt",false,false);
         Test(out+"/bend-assist-rotated.prt",true,false);
         Test(out+"/bend-assist-inch.prt",false,true);

@@ -9,6 +9,15 @@
 #include <NXOpen/Features_CustomDoubleArrayAttribute.hxx>
 #include <NXOpen/Features_CustomTagArrayAttribute.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_EditWithRollbackManager.hxx>
+#include <NXOpen/Features_FlatPattern.hxx>
+#include <NXOpen/Features_FlatSolid.hxx>
+#include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
+#include <NXOpen/Features_SheetMetal_FlatPatternBuilder.hxx>
+#include <NXOpen/Features_SheetMetal_FlatSolidBuilder.hxx>
+#include <NXOpen/Body.hxx>
+#include <NXOpen/Face.hxx>
+#include <NXOpen/SelectFace.hxx>
 #include <NXOpen/NXObjectManager.hxx>
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
@@ -35,6 +44,50 @@ Construction Members(Features::CustomFeature* f) {
     for(auto* c:d->CustomTagArrayAttributeByName(curvesAttribute)->GetValues()) if(c) r.curves.push_back(c->Tag());
     return r;
 }
+bool SameBody(Face* face,tag_t body) {return face && face->GetBody()->Tag()==body;}
+Features::Feature* FirstFlatFeature(Part* part,tag_t body) {
+    Features::Feature* first=nullptr;
+    auto* manager=part->Features()->SheetmetalManager();
+    for(auto* feature:part->Features()->GetFeatures()) {
+        bool matches=false;
+        if(auto* flat=dynamic_cast<Features::FlatPattern*>(feature)) {
+            auto* builder=manager->CreateFlatPatternBuilder(flat);
+            try {matches=SameBody(builder->UpwardFace()->Value(),body);builder->Destroy();}
+            catch(...) {builder->Destroy();throw;}
+        } else if(auto* flatSolid=dynamic_cast<Features::FlatSolid*>(feature)) {
+            auto* builder=manager->CreateFlatSolidFeatureBuilder(flatSolid);
+            try {matches=SameBody(builder->StationaryFace()->Value(),body);builder->Destroy();}
+            catch(...) {builder->Destroy();throw;}
+        }
+        if(matches && (!first || feature->Timestamp()<first->Timestamp())) first=feature;
+    }
+    return first;
+}
+// Inserting the entire construction at its proper timestamp also keeps the
+// flat pattern's internal extract/flat-solid chain downstream. Moving only the
+// visible CustomFeature node cannot fix its boolean dependencies.
+class InsertBeforeFlat {
+    Features::Feature* original_=nullptr;
+    bool moved_=false;
+public:
+    Features::Feature* flat=nullptr;
+    InsertBeforeFlat(Part* part,tag_t body):original_(part->CurrentFeature()) {
+        flat=FirstFlatFeature(part,body);
+        if(!flat) return;
+        Features::Feature* previous=nullptr;
+        for(auto* feature:part->Features()->GetFeatures())
+            if(!feature->IsInternal() && feature->Timestamp()<flat->Timestamp() &&
+                (!previous || feature->Timestamp()>previous->Timestamp())) previous=feature;
+        if(!previous) throw std::runtime_error("无法确定展开之前的辅助板插入位置。");
+        moved_=true;
+        try {previous->MakeCurrentFeature();} catch(...) {try {Restore();} catch(...) {} throw;}
+    }
+    void Restore() {
+        if(moved_ && original_) original_->MakeCurrentFeature();
+        moved_=false;
+    }
+    ~InsertBeforeFlat() {try {Restore();} catch(...) {}}
+};
 }
 void RequireFeatureClass() {
     try { if(Session::GetSession()->CustomFeatureClassManager()->GetClassFromName(featureClass)) return; } catch(...) {}
@@ -54,6 +107,7 @@ FaceInfo FeatureFace(Features::CustomFeature* f) {
 }
 tag_t CreateFeature(const Plan& plan,const Settings& settings) {
     RequireFeatureClass(); auto* session=Session::GetSession();auto* part=session->Parts()->Work();
+    InsertBeforeFlat insertion(part,plan.face.body);
     auto construction=CreateConstruction(plan);
     auto* attributes=part->Features()->CustomAttributeCollection();
     using P=Features::CustomAttribute;
@@ -72,29 +126,51 @@ tag_t CreateFeature(const Plan& plan,const Settings& settings) {
     try {
         builder->SetFeatureData(data);auto* result=builder->CommitFeature();builder->Destroy();builder=nullptr;
         if(!result) throw std::runtime_error("创建折弯辅助板自定义特征失败。");
-        result->SetName("折弯辅助板");return result->Tag();
+        result->SetName("折弯辅助板");
+        if(insertion.flat && result->Timestamp()>=insertion.flat->Timestamp())
+            throw std::runtime_error("辅助板未能插入展开特征之前，已停止创建。");
+        insertion.Restore();Check(UF_MODL_update());
+        return result->Tag();
     } catch(...) {if(builder) builder->Destroy();throw;}
 }
 void EditFeature(Features::CustomFeature* feature,const Settings& settings) {
-    auto face=FeatureFace(feature);auto plans=PlanFaces({face},settings);
-    if(plans.size()!=1) throw std::runtime_error("辅助板定位数据无效。");
-    auto c=Members(feature);auto oldCurves=c.curves;
-    EditConstruction(plans.front(),c);
-    auto* part=Session::GetSession()->Parts()->Work();
-    auto* builder=part->Features()->CreateCustomFeatureBuilder(feature);
+    auto* session=Session::GetSession();auto* part=session->Parts()->Work();
+    const bool interactive=session->CustomFeatureClassManager()->GetEditedCustomFeature()==feature;
+    auto mark=session->SetUndoMark(interactive?Session::MarkVisibilityInvisible:Session::MarkVisibilityVisible,"Edit bend assist history");
+    Features::EditWithRollbackManager* rollback=nullptr;
+    Features::CustomFeatureBuilder* builder=nullptr;
     try {
+        // NX already owns rollback during a native double-click edit. Other
+        // callers need the same history position before querying the body.
+        if(!interactive) rollback=part->Features()->StartEditWithRollbackManager(feature,mark);
+        auto face=FeatureFace(feature);auto plans=PlanFaces({face},settings);
+        if(plans.size()!=1) throw std::runtime_error("辅助板定位数据无效。");
+        auto c=Members(feature);auto oldCurves=c.curves;
+        EditConstruction(plans.front(),c);
+        builder=part->Features()->CreateCustomFeatureBuilder(feature);
         auto* data=feature->FeatureData();
         data->CustomDoubleArrayAttributeByName("parametersMm")->SetValues(Values(settings));
         data->CustomTagArrayAttributeByName(curvesAttribute)->SetValues(Objects(c.curves));
         builder->SetFeatureData(data);builder->CommitFeature();builder->Destroy();builder=nullptr;
         Check(UF_MODL_update());
+        if(rollback) {rollback->UpdateFeature(false);rollback->Stop();rollback->Destroy();rollback=nullptr;}
+        if(!interactive) Check(UF_MODL_update());
         // Remove detached profile curves after replacing the owned outputs.
-        // They are no longer referenced by the edited extrusion.
+        // Roll forward first: NX may restore the old curves while ending edit.
         for(auto curve:oldCurves) {
             int status=UF_OBJ_ask_status(curve);
             if(status==UF_OBJ_ALIVE) Check(UF_OBJ_delete_object(curve));
         }
         Check(UF_MODL_update());
-    } catch(...) {if(builder) builder->Destroy();throw;}
+        session->DeleteUndoMark(mark,nullptr);
+    } catch(...) {
+        if(builder) {try {builder->Destroy();} catch(...) {}}
+        if(rollback) {
+            try {rollback->UpdateFeature(true);} catch(...) {}
+            try {rollback->Stop();} catch(...) {}
+            try {rollback->Destroy();} catch(...) {}
+        }
+        session->UndoToMark(mark,nullptr);session->DeleteUndoMark(mark,nullptr);throw;
+    }
 }
 }

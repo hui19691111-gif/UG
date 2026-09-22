@@ -1,16 +1,23 @@
 """Deploy only the reviewed Release artifacts; preserve licensing and manifests."""
 from pathlib import Path
+import argparse
 import datetime
 import hashlib
 import json
 import shutil
 import struct
+import re
 import xml.etree.ElementTree as ET
 
 source = Path(__file__).resolve().parents[1]
 repo = source.parents[1]
 root = Path(r'D:\UG智辉钣金插件')
-build = source / 'build-codex/Release'
+parser = argparse.ArgumentParser()
+parser.add_argument('--verify-only', action='store_true')
+parser.add_argument('--build-dir', default='build-release')
+args = parser.parse_args()
+build_root = source / args.build_dir
+build = build_root / 'Release'
 def digest(data):
     return hashlib.sha256(data).hexdigest().upper()
 
@@ -35,45 +42,36 @@ def verify_pe(data, ui=True):
         assert b'Z\0H\0I\0H\0U\0I\0.\0C\0H\0A\0I\0J\0I\0J\0I\0A\0' in data
     return {'checksum': checksum, 'ASLR': True, 'DEP': True, 'licenseGate': ui}
 
-def merge_configuration(data):
-    # The deployment file is shared by all commands. Preserve every existing
-    # class and replace/add only our own declaration.
-    current = ET.fromstring(data)
-    addition = ET.parse(build/'CustomFeatureConfiguration.xml').getroot()[0]
-    matches = [e for e in current if e.get('FeatureClass') == addition.get('FeatureClass')]
-    assert len(matches) <= 1
-    for entry in matches:
-        current.remove(entry)
-    current.append(addition)
-    ET.register_namespace('xsi','http://www.w3.org/2001/XMLSchema-instance')
-    ET.indent(current,space='    ')
-    return ET.tostring(current,encoding='utf-8',xml_declaration=True)
-
 def add_menu(data, ribbon=False):
     text = data.decode('gb18030')
-    if 'BUTTON  ZeWanFuZu' in text:
-        return data
+    if 'BUTTON  FanTonSenZi' in text:
+        return re.sub(r'(BUTTON  FanTonSenZi\s+LABEL\s+)[^\r\n]+',r'\g<1>方通/圆管伸直',text).encode('gb18030')
     newline = '\r\n' if '\r\n' in text else '\n'
-    block = [' BUTTON  ZeWanFuZu', ' LABEL   折弯辅助板']
+    block = [' BUTTON  FanTonSenZi', ' LABEL   方通/圆管伸直']
     if not ribbon:
-        block += [' BITMAP  ZeWanFuZu.bmp', ' ACTIONS ZeWanFuZu']
+        block += [' BITMAP  FanTonSenZi.bmp', ' ACTIONS FanTonSenZi']
     anchor = ' BUTTON  StandardPartsLibrary'
     assert text.count(anchor) == 1
     return text.replace(anchor, newline.join(block)+newline+newline+anchor).encode('gb18030')
 
-names = ['ZeWanFuZu.dll', 'ZeWanFuZuCore.dll', 'ZeWanFuZu.dlx', 'ZeWanFuZu.bmp']
+names = ['FanTonSenZi.dll', 'FanTonSenZi.dlx', 'FanTonSenZi.bmp']
 payload = {'application/'+name: (build/name).read_bytes() for name in names}
-payload['application/CustomFeatureConfiguration.xml'] = merge_configuration((root/'application/CustomFeatureConfiguration.xml').read_bytes())
-protection = {name:verify_pe(payload['application/'+name],name=='ZeWanFuZu.dll') for name in names if name.endswith('.dll')}
+for name in names:
+    if not name.endswith('.dll'):
+        assert payload['application/'+name] == (source/name).read_bytes(), 'Release resource is stale; rebuild first'
+protection = {name:verify_pe(payload['application/'+name],name=='FanTonSenZi.dll') for name in names if name.endswith('.dll')}
 ns = {'v':'http://schemas.microsoft.com/developer/msbuild/2003'}
-for target in ['ZeWanFuZu','ZeWanFuZuCore']:
-    project = ET.parse(source/('build-codex/'+target+'.vcxproj'))
+for target in ['FanTonSenZi']:
+    project = ET.parse(build_root/(target+'.vcxproj'))
     release = next(g for g in project.findall('v:ItemDefinitionGroup',ns) if "=='Release|x64'" in g.get('Condition',''))
     assert 'ZH_PROTECTED_BUILD=1' in release.findtext('v:ClCompile/v:PreprocessorDefinitions',namespaces=ns)
     assert 'NDEBUG' in release.findtext('v:ClCompile/v:PreprocessorDefinitions',namespaces=ns)
     assert release.findtext('v:ClCompile/v:Optimization',namespaces=ns) == 'MaxSpeed'
     for flag in ['SetChecksum','DataExecutionPrevention','RandomizedBaseAddress']:
         assert release.findtext('v:Link/v:'+flag,namespaces=ns) == 'true'
+if args.verify_only:
+    print(json.dumps({'protection': protection, 'artifacts': {r: {'sha256': digest(d), 'bytes':len(d)} for r,d in payload.items()}}, indent=2))
+    raise SystemExit(0)
 assert (root/'application/ZhaoFuNxLicenseGate.dll').is_file()
 manifest_paths = [root/'manifest/file-hashes.json', root/'manifest/zhihui-package.json']
 old_manifests = {p: p.read_bytes() for p in manifest_paths}
@@ -91,21 +89,21 @@ for rel, data in payload.items():
     else:
         hashes.append(entry)
 command = {
-    'launcherName': 'ZeWanFuZu', 'nativeDll': 'ZeWanFuZu.dll',
-    'featureCode': 'ZHIHUI.CHAIJIJIA', 'displayName': '折弯辅助板',
+    'launcherName': 'FanTonSenZi', 'nativeDll': 'FanTonSenZi.dll',
+    'featureCode': 'ZHIHUI.CHAIJIJIA', 'displayName': '方通/圆管伸直',
     'entryPoint': 'ufusr', 'authorizationGate': 'native-multi-entry',
-    'menuButton': 'ZeWanFuZu', 'actionsName': 'ZeWanFuZu',
-    'exportsVerified': True, 'sha256': digest(payload['application/ZeWanFuZu.dll']),
-    'dlxFiles': 'application/ZeWanFuZu.dlx', 'iconFiles': 'application/ZeWanFuZu.bmp',
-    'runtimeFiles': ['application/ZeWanFuZuCore.dll','application/CustomFeatureConfiguration.xml'],
+    'menuButton': 'FanTonSenZi', 'actionsName': 'FanTonSenZi',
+    'exportsVerified': True, 'sha256': digest(payload['application/FanTonSenZi.dll']),
+    'dlxFiles': 'application/FanTonSenZi.dlx', 'iconFiles': 'application/FanTonSenZi.bmp',
+    'runtimeFiles': [],
 }
-existing = [c for c in package['commands'] if c.get('launcherName') == 'ZeWanFuZu']
+existing = [c for c in package['commands'] if c.get('launcherName') == 'FanTonSenZi']
 assert len(existing) <= 1
 if existing:
     existing[0].update(command)
 else:
     package['commands'].append(command)
-backup = root/'backup'/datetime.datetime.now().strftime('before-ZeWanFuZu_%Y%m%d_%H%M%S')
+backup = root/'backup'/datetime.datetime.now().strftime('before-FanTonSenZi_%Y%m%d_%H%M%S')
 backup.mkdir(parents=True, exist_ok=False)
 old_files = {rel: (root/rel).read_bytes() if (root/rel).exists() else None for rel in payload}
 for rel, data in old_files.items():
@@ -120,33 +118,6 @@ for p, data in old_manifests.items():
 (backup/'created-files.json').write_text(json.dumps([r for r,d in old_files.items() if d is None],indent=2),encoding='utf-8')
 changed = []
 written_manifests = []
-resident_replacements = 0
-def write_artifact(rel, data):
-    global resident_replacements
-    target = root/rel
-    assert target.resolve().is_relative_to(root.resolve())
-    try:
-        target.write_bytes(data)
-    except PermissionError:
-        if target.suffix.lower() != '.dll':
-            raise
-        # Windows can keep a loaded DLL mapped while allowing its file to be
-        # renamed. Preserve that image in the timestamped backup; the running
-        # NX session continues using it and new loads use the replacement.
-        resident_replacements += 1
-        retained = backup/('loaded-'+str(resident_replacements))/rel
-        pending = backup/('pending-'+str(resident_replacements))/rel
-        assert retained.resolve().is_relative_to(root.resolve())
-        assert pending.resolve().is_relative_to(root.resolve())
-        retained.parent.mkdir(parents=True, exist_ok=True)
-        pending.parent.mkdir(parents=True, exist_ok=True)
-        pending.write_bytes(data)
-        target.rename(retained)
-        try:
-            pending.rename(target)
-        except Exception:
-            retained.rename(target)
-            raise
 try:
     for p, data in old_manifests.items():
         assert p.read_bytes() == data, 'Manifest changed concurrently'
@@ -155,7 +126,8 @@ try:
         assert target.resolve().is_relative_to(root.resolve())
         assert (target.read_bytes() if target.exists() else None) == old_files[rel], 'Artifact changed concurrently'
         if data != old_files[rel]:
-            write_artifact(rel,data)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
             changed.append(rel)
     for p, value in zip(manifest_paths, [hashes,package]):
         assert p.read_bytes() == old_manifests[p], 'Manifest changed concurrently'
@@ -166,23 +138,20 @@ try:
         assert (root/rel).read_bytes() == data
         actual = next(e for e in installed_hashes if e['path']==rel)
         assert actual['sha256'] == digest(data) and actual['bytes'] == len(data)
-    verify_pe((root/'application/ZeWanFuZu.dll').read_bytes())
-    verify_pe((root/'application/ZeWanFuZuCore.dll').read_bytes(),False)
+    verify_pe((root/'application/FanTonSenZi.dll').read_bytes())
     actual_package = json.loads(manifest_paths[1].read_text(encoding='utf-8'))
-    assert next(c for c in actual_package['commands'] if c.get('launcherName')=='ZeWanFuZu')['sha256'] == command['sha256']
+    assert next(c for c in actual_package['commands'] if c.get('launcherName')=='FanTonSenZi')['sha256'] == command['sha256']
 except Exception:
     for rel in reversed(changed):
         if old_files[rel] is None:
             (root/rel).unlink()
         else:
-            write_artifact(rel,old_files[rel])
+            (root/rel).write_bytes(old_files[rel])
     for p in written_manifests:
         p.write_bytes(old_manifests[p])
     raise
 
 # Source menu references track the added command without replacing other work.
-p = repo/'deployment_reference/application/CustomFeatureConfiguration.xml'
-p.write_bytes(merge_configuration(p.read_bytes()))
 for name in ['UGZH_design.men','UGZH_design.rtb']:
     p = repo/'deployment_reference/startup'/name
     p.write_bytes(add_menu(p.read_bytes(),name.endswith('.rtb')))
@@ -200,7 +169,7 @@ while position < end:
     if position >= end:
         break
     value, after = decoder.raw_decode(raw,position)
-    if value.get('launcherName') == 'ZeWanFuZu':
+    if value.get('launcherName') == 'FanTonSenZi':
         raw = raw[:position]+json.dumps(command,ensure_ascii=False,indent=4)+raw[after:]
         replaced = True
         break
@@ -208,8 +177,8 @@ while position < end:
 if not replaced:
     prefix = raw[:end].rstrip()
     raw = prefix+',\n'+json.dumps(command,ensure_ascii=False,indent=4)+'\n'+raw[end:]
-assert json.loads(raw)['commands'][-1].get('launcherName')=='ZeWanFuZu' or replaced
+assert json.loads(raw)['commands'][-1].get('launcherName')=='FanTonSenZi' or replaced
 p.write_text(raw,encoding='utf-8')
 report={'backup':str(backup),'protection':protection,'artifacts':{r:{'sha256':digest(d),'bytes':len(d)} for r,d in payload.items()}}
-(source/'build-codex/deployment-verification.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+(build_root/'deployment-verification.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
 print(json.dumps(report,ensure_ascii=True,indent=2))

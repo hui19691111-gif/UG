@@ -47,7 +47,8 @@ extern "C" __declspec(dllexport) void ufusr(char*,int* rc,int){
         Require(custom->GetFeatureErrorMessages().empty(),"feature has update errors");
         Require(sketches==petals*3&&extrudes==sketches,"old profile history leaked");
         for(auto* curve:*part->Curves())if(!part->Sketches()->GetOwningSketch(curve))++loose;
-        Require(loose==6,"loose profile curves leaked"); // source revolve's six curves
+        const bool importedFixture=std::string(part->FullPath().GetUTF8Text()).find("SameBody_08")!=std::string::npos;
+        Require(loose==(importedFixture?0:6),"loose profile curves leaked"); // imported solid or source revolve's six curves
         for(auto* body:*part->Bodies())if(body->IsSolidBody())++solids;
         Require(solids==(flat?3:2),"old bodies leaked");
         log<<"PASS part="<<part->FullPath().GetUTF8Text()<<" custom="<<custom->Tag()<<" petals="<<petals<<" flat="<<flat<<" members="<<actual.size()<<" internal_sketches="<<sketches<<" source_curves="<<loose<<" solids="<<solids<<'\n';

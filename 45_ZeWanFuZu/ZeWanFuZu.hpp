@@ -30,5 +30,6 @@ private:
     NXOpen::BlockStyler::UIBlock* reverse_=nullptr;
     NXOpen::BlockStyler::UIBlock* status_=nullptr;
     bool initialized_=false,shown_=false,updating_=false;
+    std::vector<tag_t> selectedFaceTags_;
     NXOpen::Features::CustomFeature* edited_=nullptr;
 };

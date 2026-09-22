@@ -23,6 +23,7 @@
 #include <uf_ui_types.h>
 #include <Windows.h>
 #include <array>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -176,10 +177,24 @@ void ZeWanFuZuDialog::Preview() {
     if(edited_) Status("编辑当前辅助板；确定后更新尺寸。");
     else Status("待创建 "+std::to_string(plans.size())+" 块；平行跳过 "+std::to_string(faces.size()-plans.size())+" 面。");
 }
-int ZeWanFuZuDialog::Update(NXOpen::BlockStyler::UIBlock*) {
+int ZeWanFuZuDialog::Update(NXOpen::BlockStyler::UIBlock* block) {
     if(!initialized_ || !shown_ || updating_) return 0;
     Guard guard(updating_);
     try {
+        if(!edited_ && block==faces_) {
+            std::vector<tag_t> current;
+            bool added=false;
+            for(auto* object:Selected(faces_)) {
+                current.push_back(object->Tag());
+                if(std::find(selectedFaceTags_.begin(),selectedFaceTags_.end(),object->Tag())==selectedFaceTags_.end()) added=true;
+            }
+            selectedFaceTags_=std::move(current);
+            // Advance only after an actual addition. Merely returning to the
+            // face selector must leave it active so more faces can be added.
+            // Keep focus changes inside the callback re-entry guard, before
+            // preview: ambiguous bend directions still need this next input.
+            if(added) reference_->Focus();
+        }
         Properties(numbers_[5]->GetProperties())->SetLogical("Enable",!Toggle(align_));
         Preview(); return 0;
     } catch(const NXOpen::NXException& e){Log(e.Message());try{Status(e.Message());}catch(...){} }
@@ -205,6 +220,7 @@ int ZeWanFuZuDialog::Apply() {
         // Clear selection while guarded: consumed face references must never be
         // reused after Apply, and programmatic changes can call Update again.
         dynamic_cast<NXOpen::BlockStyler::SelectObject*>(faces_)->SetSelectedObjects({});
+        selectedFaceTags_.clear();
         dynamic_cast<NXOpen::BlockStyler::SelectObject*>(reference_)->SetSelectedObjects({});
         for(int i=0;i<6;++i) zhihui_dialog_memory::SaveDouble(memoryFile,numberKeys[i],numbers_[i]);
         zhihui_dialog_memory::SaveLogical(memoryFile,L"AutoAlign",align_);

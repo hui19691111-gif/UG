@@ -84,7 +84,7 @@ int InformationCallback(
     try{
         if (event != nullptr)
             event->SetInformation(
-                "球面展开：自动识别板厚和内外侧，内部包含分瓣、根部连接、钣金转换及展开。双击编辑参数并重新生成；参考体变化后需编辑确认。\n");
+                "球面/环面展开：自动识别板厚和内外侧，内部包含分瓣、根部连接、钣金转换及展开。双击编辑参数并重新生成；参考体变化后需编辑确认。\n");
         return 0;
     }catch(const NXOpen::NXException& ex){Log(ex.Message());return 1;}
     catch(...){Log("Information callback failed");return 1;}

@@ -93,7 +93,7 @@ void QiuMianZanKaiDialog::Shown(){
     catch(const NXOpen::NXException& e){Error(e.Message());}catch(const std::exception& e){Error(e.what());}catch(...){Error("显示球面展开失败。");}
 }
 int QiuMianZanKaiDialog::Filter(NXOpen::BlockStyler::UIBlock* block,NXOpen::TaggedObject* object){
-    try{auto* f=dynamic_cast<NXOpen::Face*>(object);if(f&&!f->IsOccurrence()&&((block==cylinder_&&f->SolidFaceType()==NXOpen::Face::FaceTypeCylindrical)||(block==sphere_&&f->SolidFaceType()==NXOpen::Face::FaceTypeSpherical)))return UF_UI_SEL_ACCEPT;}
+    try{auto* f=dynamic_cast<NXOpen::Face*>(object);if(f&&!f->IsOccurrence()&&((block==cylinder_&&f->SolidFaceType()==NXOpen::Face::FaceTypeCylindrical)||(block==sphere_&&(f->SolidFaceType()==NXOpen::Face::FaceTypeSpherical||f->SolidFaceType()==NXOpen::Face::FaceTypeSurfaceOfRevolution))))return UF_UI_SEL_ACCEPT;}
     catch(const NXOpen::NXException& e){Log(e.Message());}catch(...){Log("Face filter failed");}return UF_UI_SEL_REJECT;
 }
 sphere_unfold::Settings QiuMianZanKaiDialog::ReadSettings(){
@@ -105,11 +105,11 @@ void QiuMianZanKaiDialog::Status(const std::string& s){auto split=s.find('\n');P
 void QiuMianZanKaiDialog::Error(const std::string& s)noexcept{Log(s);try{NXOpen::UI::GetUI()->NXMessageBox()->Show("球面展开",NXOpen::NXMessageBox::DialogTypeError,s.c_str());}catch(...){}}
 void QiuMianZanKaiDialog::Preview(){
     UF_DISP_refresh();auto c=Select(cylinder_)->GetSelectedObjects(),f=Select(sphere_)->GetSelectedObjects();
-    if(c.empty()||f.empty()){Status("请选择相接的圆柱面、球面。");return;}
+    if(c.empty()||f.empty()){Status("请选择圆柱面及相接的球面或环面。");return;}
     auto plan=sphere_unfold::MakePlan(sphere_unfold::Inspect(c[0]->Tag(),f[0]->Tag()),ReadSettings());
     UF_OBJ_disp_props_t props={};props.color=186;props.font=1;props.line_width=2;
     for(auto line:sphere_unfold::Preview(plan)){double a[]={line.first.x,line.first.y,line.first.z},b[]={line.second.x,line.second.y,line.second.z};UF_DISP_display_temporary_line(NULL_TAG,UF_DISP_USE_ACTIVE_PLUS,a,b,&props);}
-    std::ostringstream info;info<<std::fixed<<std::setprecision(3)<<"自动板厚 "<<plan.source.thickness/plan.source.unitsPerMm<<" mm；"<<(plan.source.innerSurface?"内侧面":"外侧面")<<"\n偏差 ≤ "<<plan.errorMm<<" mm；根部缝 "<<plan.rootGap/plan.source.unitsPerMm<<" mm";Status(info.str());
+    std::ostringstream info;info<<std::fixed<<std::setprecision(3)<<"自动板厚 "<<plan.source.thickness/plan.source.unitsPerMm<<" mm；"<<(plan.source.IsTorus()?"环面":"球面")<<" / "<<(plan.source.innerSurface?"内侧面":"外侧面")<<"\n偏差 ≤ "<<plan.errorMm<<" mm；根部缝 "<<plan.rootGap/plan.source.unitsPerMm<<" mm";Status(info.str());
 }
 int QiuMianZanKaiDialog::Update(NXOpen::BlockStyler::UIBlock* block){
     if(!initialized_||!shown_||updating_)return 0;Guard guard(updating_);
@@ -119,9 +119,9 @@ int QiuMianZanKaiDialog::Update(NXOpen::BlockStyler::UIBlock* block){
 int QiuMianZanKaiDialog::Apply(){
     if(!initialized_||!shown_||updating_)return 1;Guard guard(updating_);auto* session=NXOpen::Session::GetSession();
     try{
-        auto c=Select(cylinder_)->GetSelectedObjects(),f=Select(sphere_)->GetSelectedObjects();if(c.size()!=1||f.size()!=1)throw std::runtime_error("请分别选择一个圆柱面和一个相接球面。");
+        auto c=Select(cylinder_)->GetSelectedObjects(),f=Select(sphere_)->GetSelectedObjects();if(c.size()!=1||f.size()!=1)throw std::runtime_error("请分别选择一个圆柱面和一个相接的球面或环面。");
         auto settings=ReadSettings();auto plan=sphere_unfold::MakePlan(sphere_unfold::Inspect(c[0]->Tag(),f[0]->Tag()),settings);
-        std::ostringstream diagnostic;diagnostic<<"Create: petals="<<settings.petals<<" auto_thickness_mm="<<plan.source.thickness/plan.source.unitsPerMm<<" gap_mm="<<settings.gap<<" relief_mm="<<settings.relief<<" auto_inner="<<plan.source.innerSurface<<" flat="<<settings.flat<<" edit="<<(edited_!=nullptr);Log(diagnostic.str());
+        std::ostringstream diagnostic;diagnostic<<"Create: petals="<<settings.petals<<" auto_thickness_mm="<<plan.source.thickness/plan.source.unitsPerMm<<" gap_mm="<<settings.gap<<" relief_mm="<<settings.relief<<" auto_inner="<<plan.source.innerSurface<<" flat="<<settings.flat<<" edit="<<(edited_!=nullptr)<<" torus="<<plan.source.IsTorus()<<" major_radius_mm="<<plan.source.majorRadius/plan.source.unitsPerMm;Log(diagnostic.str());
         auto mark=session->SetUndoMark(NXOpen::Session::MarkVisibilityVisible,"球面分瓣展开");UF_DISP_refresh();QuietDisplay quiet;
         try{sphere_unfold::CreateFeature(plan,edited_,mark);}
         catch(...){try{session->UndoToMark(mark,nullptr);session->DeleteUndoMark(mark,nullptr);}catch(const NXOpen::NXException& e){Log("回滚失败："+std::string(e.Message()));}throw;}
