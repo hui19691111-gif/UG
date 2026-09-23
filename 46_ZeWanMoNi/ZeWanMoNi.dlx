@@ -253,26 +253,6 @@
               </PropertyList>
             </item>
           </Property>
-          <Property id="scope_notice" mask="256" name="scope_notice" type="uicomp" class="UICOMP_label" hierarchy="UGS::UICOMP_group" presentation="Label">
-            <item id="scope_notice" icon="styler_label.bmp" name="scope_notice" type="uicomp" class="UICOMP_label" notes="" Expanded="1" hierarchy="" presentation="Label">
-              <PropertyList id="id" mode="0">
-                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="scope_notice" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Title" name="Title" type="utfstring" sname="Label" value="仅当前姿态；未检查运动路径、下模及整机。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-              </PropertyList>
-            </item>
-          </Property>
-          <Property id="sample_notice" mask="256" name="sample_notice" type="uicomp" class="UICOMP_label" hierarchy="UGS::UICOMP_group" presentation="Label">
-            <item id="sample_notice" icon="styler_label.bmp" name="sample_notice" type="uicomp" class="UICOMP_label" notes="" Expanded="1" hierarchy="" presentation="Label">
-              <PropertyList id="id" mode="0">
-                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="sample_notice" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Title" name="Title" type="utfstring" sname="Label" value="自定义刀具选中后按 F2 改名；内置刀具仅为示例。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-              </PropertyList>
-            </item>
-          </Property>
         </PropertyList>
       </Property>
       <Property id="API Name" name="API Name" type="string" sname="BlockID" value="main_group" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />

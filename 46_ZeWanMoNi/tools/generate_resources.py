@@ -70,8 +70,6 @@ block(button_template,'delete_tool','删除选中刀具')
 block(button_template,'tool_folder','打开智辉刀图目录')
 block(templates['result_status'],'result_status','请选择折弯位置，自动检查干涉。')
 block(templates['result_status'],'color_notice','黄色：刀具轮廓；红色：实际重叠边界。')
-block(templates['result_status'],'scope_notice','仅当前姿态；未检查运动路径、下模及整机。')
-block(templates['result_status'],'sample_notice','自定义刀具选中后按 F2 改名；内置刀具仅为示例。')
 dialog.set('title','折弯模拟 · 单刀干涉')
 dialog.set('icon','ZeWanMoNi.bmp')
 for e in group.find('PropertyList'):
