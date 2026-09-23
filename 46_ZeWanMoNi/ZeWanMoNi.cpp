@@ -62,15 +62,27 @@ void ZeWanMoNiDialog::Launch(){dialog_->Launch();}
 void ZeWanMoNiDialog::Status(const std::string& s){Props(status_->GetProperties())->SetString("Label",s.c_str());}
 void ZeWanMoNiDialog::Error(const std::string& s) noexcept {Log(s);try{NXOpen::UI::GetUI()->NXMessageBox()->Show("折弯模拟",NXOpen::NXMessageBox::DialogTypeError,s.c_str());}catch(...) {}}
 void ZeWanMoNiDialog::LoadTools(){
+    std::filesystem::path previousPath;
+    std::string previousName;
+    int previousPreview=-1;
+    if(activeTool_>=0&&static_cast<size_t>(activeTool_)<tools_.size()){
+        previousName=tools_[activeTool_].name;
+        if(static_cast<size_t>(activeTool_)<toolPaths_.size())previousPath=toolPaths_[activeTool_];
+        if(static_cast<size_t>(activeTool_)>=previewStart_)previousPreview=activeTool_-static_cast<int>(previewStart_);
+    }
     auto items=bend_sim::BuiltinTools();auto dir=ToolDir();std::vector<std::filesystem::path> paths;
     std::vector<std::filesystem::path> itemPaths(items.size());
     if(std::filesystem::exists(dir))for(const auto& entry:std::filesystem::directory_iterator(dir))if(entry.is_regular_file()&&entry.path().extension()==L".ztool")paths.push_back(entry.path());
     std::sort(paths.begin(),paths.end());if(paths.size()>100)throw std::runtime_error("自定义刀具最多加载 100 把。");
     for(const auto& path:paths){try{items.push_back(bend_sim::ReadTool(path));itemPaths.push_back(path);}catch(const std::exception& e){throw std::runtime_error(path.filename().u8string()+"："+e.what());}}
     previewStart_=items.size();
-    for(const auto& candidate:dwgCandidates_){auto tool=candidate.tool;tool.name="待保存："+tool.name;items.push_back(std::move(tool));itemPaths.emplace_back();}
-    std::string previous=activeTool_>=0&&static_cast<size_t>(activeTool_)<tools_.size()?tools_[activeTool_].name:"";
-    activeTool_=0;for(size_t i=0;i<items.size();++i)if(items[i].name==previous){activeTool_=static_cast<int>(i);break;}
+    for(const auto& candidate:dwgCandidates_){items.push_back(candidate.tool);itemPaths.emplace_back();}
+    activeTool_=0;
+    if(previousPreview>=0&&static_cast<size_t>(previousPreview)<dwgCandidates_.size())
+        activeTool_=static_cast<int>(previewStart_)+previousPreview;
+    else if(!previousPath.empty()){
+        for(size_t i=0;i<itemPaths.size();++i)if(itemPaths[i]==previousPath){activeTool_=static_cast<int>(i);break;}
+    }else for(size_t i=0;i<items.size();++i)if(items[i].name==previousName){activeTool_=static_cast<int>(i);break;}
     tools_=std::move(items);toolPaths_=std::move(itemPaths);if(shown_)PopulateTools();
 }
 void ZeWanMoNiDialog::OpenDwg(){
@@ -85,11 +97,14 @@ void ZeWanMoNiDialog::OpenDwg(){
     }
     auto selected=std::filesystem::path(file);
     auto candidates=bend_sim::ReadDwgCandidates(selected);
+    const auto name=selected.filename().u8string();
+    if(name.empty()||name.size()>160)throw std::runtime_error("DWG 文件名太长，无法作为刀具名称（最多 160 字节）。");
+    for(auto& candidate:candidates){candidate.tool.name=name;bend_sim::ValidateTool(candidate.tool);}
     dwgSource_=selected;
     tools_.resize(previewStart_);
     dwgCandidates_=std::move(candidates);
     toolPaths_.resize(previewStart_);
-    for(const auto& candidate:dwgCandidates_){auto tool=candidate.tool;tool.name="待保存："+tool.name;tools_.push_back(std::move(tool));toolPaths_.emplace_back();}
+    for(const auto& candidate:dwgCandidates_){tools_.push_back(candidate.tool);toolPaths_.emplace_back();}
     activeTool_=static_cast<int>(previewStart_);PopulateTools();
     UF_DISP_refresh();Status("已识别 "+std::to_string(dwgCandidates_.size())+" 个候选轮廓；预览后点击“保存当前预览刀具”。图纸坐标按毫米使用。");
 }
@@ -145,9 +160,15 @@ void ZeWanMoNiDialog::PopulateTools(){
     // Apply recreates NX's tree; never reuse node handles from the previous UI.
     toolNodes_.clear();while(auto* node=tree->RootNode())tree->DeleteNode(node);
     auto cache=ToolDir()/L"thumbnails";
-    for(const auto& tool:tools_){
+    for(size_t i=0;i<tools_.size();++i){
+        const auto& tool=tools_[i];
         auto file=ToolThumbnail(tool,cache).u8string();
-        auto* node=tree->CreateNode(NXOpen::NXString(tool.name.c_str(),NXOpen::NXString::UTF8));
+        std::string label=tool.name;
+        if(i>=previewStart_){
+            const auto& candidate=dwgCandidates_.at(i-previewStart_);
+            label="待保存："+label+"（图块 "+std::filesystem::path(candidate.block).u8string()+"）";
+        }
+        auto* node=tree->CreateNode(NXOpen::NXString(label.c_str(),NXOpen::NXString::UTF8));
         tree->InsertNode(node,nullptr,nullptr,Tree::NodeInsertOptionLast);
         toolNodes_.push_back(node);
         node->SetColumnDisplayText(1,NXOpen::NXString(file.c_str(),NXOpen::NXString::UTF8));
