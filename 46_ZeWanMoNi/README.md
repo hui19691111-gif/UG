@@ -10,6 +10,8 @@
 
 2026-09-21 DWG 刀库更新：从用户提供的 `折弯模拟.dwg` 提取 10 个刀型，包括 RZ8895、RZ30104、RW8867、RW8890、RW88100、RW88120 和原图编号 000、001、003、004。按毫米原尺寸安装到用户刀库，源图不变。[刀库与转换记录](tool-library/dwg-20260921/README.md)说明定位基准、尺寸、圆弧误差和源图处理。临时刀具实体改用带独立公差的 NX ExtrudeBuilder，解决英寸旋转放置时短线段导致旧拉伸接口失败的问题，不修改零件建模公差。
 
+2026-09-23 DWG 界面预览：选择本机 DWG 后通过 AutoCAD ObjectDBX 枚举闭合轮廓，在刀具列表中先看截面图和宽高，再将选中的上刀保存到 `D:\UG智辉钣金插件\刀图`，原图留存于 `刀图\原图`。旧用户刀库安装时迁移到新目录。导入阶段按毫米图纸处理，不自动猜测缩放或修补断线。
+
 **目前检查当前姿态；完整工序动画、连续运动碰撞、下模和整机模拟尚未实现。** 内置刀具为演示尺寸，应以实际刀具截面检查真实零件。
 
 ## 使用与交付
@@ -29,6 +31,7 @@
 | ZeWanMoNi.cpp / .hpp | 原生 Block Styler 对话框、回调、预览和视角恢复 |
 | BendSimulation.cpp / .hpp | 折弯位置识别、临时刀具实体、精确干涉与回滚 |
 | ToolProfiles.cpp | 示例刀具、自定义截面校验、定位及轮廓 |
+| DwgImport.cpp / .hpp | AutoCAD ObjectDBX 只读提取候选闭合截面 |
 | ToolThumbnails.cpp / .hpp | 从同一刀具截面生成列表缩略图及选中项大图 |
 | tests/Integration.cpp | 在 NX 环境中创建样件并验证真实几何接口 |
 | tools/generate_resources.py | 生成对话框及图标资源 |
@@ -51,6 +54,6 @@ cmake --build build-codex --config Release
 
 测试程序创建自己的零件和截面文件，不能将已有生产零件目录作为输出目录。
 
-运行期修改后须先完成 Release 构建与 NX 验证，再运行 `python tools/deploy.py`。脚本只安装列出的资源和已审核的 10 个刀具，保留现有授权/防篡改元数据；在 `D:\UG智辉钣金插件\backup` 备份原资源及清单，并更新菜单、清单与仓库部署参考。详细文件哈希和备份路径写入 `build-codex/deployment-verification.json`。再运行 `python tools/install_tool_library.py` 安装到当前用户刀具目录，记录写入 `build-codex/tool-library-installation.json`。
+运行期修改后须先完成 Release 构建与 NX 验证，再运行 `python tools/deploy.py`。脚本只安装列出的资源和已审核的 10 个刀具，保留现有授权/防篡改元数据；在 `D:\UG智辉钣金插件\backup` 备份原资源及清单，并更新菜单、清单与仓库部署参考。详细文件哈希和备份路径写入 `build-codex/deployment-verification.json`。再运行 `python tools/install_tool_library.py` 安装到智辉目录下的 `刀图` 并迁移旧用户刀库，记录写入 `build-codex/tool-library-installation.json`。
 
 DWG 刀库几何测试：`BendSimulationIntegration.exe 新输出目录 tool-library/dwg-20260921/tools`，验证 10 把刀的毫米及旋转英寸实体、体积、正反向检查、回滚和公差不变。测试 EXE 不部署。

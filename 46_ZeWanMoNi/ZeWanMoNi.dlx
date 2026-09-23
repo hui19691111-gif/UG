@@ -177,6 +177,62 @@
               </PropertyList>
             </item>
           </Property>
+          <Property class="UICOMP_button" hierarchy="UGS::UICOMP_group" id="import_dwg" mask="256" name="import_dwg" presentation="Action Button" type="uicomp">
+            <item Expanded="1" class="UICOMP_button" hierarchy="UGS::UI::Comp::Container" icon="styler_browser_pushbutton.bmp" id="import_dwg" name="import_dwg" notes="" presentation="Action Button" type="uicomp">
+              <PropertyList id="id" mode="0">
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="API Name" mask="16656" name="API Name" sname="BlockID" source="3" type="string" value="import_dwg" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="HideGroup" mask="69636" name="HideGroup" sname="HideGroup" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Focus" mask="69636" name="Focus" sname="Focus" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="CanFocus" mask="69636" name="CanFocus" sname="CanFocus" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="KeyboardFocus" mask="69636" name="KeyboardFocus" sname="KeyboardFocus" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="CanKeyboardFocus" mask="69636" name="CanKeyboardFocus" sname="CanKeyboardFocus" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_button" id="UIOnly" mask="69636" name="UIOnly" sname="RetainValueInUIOnly" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP_widget" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="HQBitmap" mask="16384" name="HQBitmap" sname="HighQualityBitmap" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_button" id="Translated" mask="16384" name="Translated" sname="Localize" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP_button" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="Tooltip" mask="0" name="Tooltip" sname="Tooltip" source="1" type="utfstring" value="" />
+                <Property ClassID="UGS::UICOMP_button" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="BalloonTooltipText" mask="0" name="BalloonTooltipText" sname="BalloonTooltipText" source="1" type="utfstring" value="" />
+                <Property ClassID="UGS::UICOMP_button" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="BalloonTooltipImage" mask="0" name="BalloonTooltipImage" sname="BalloonTooltipImage" source="1" type="string" value="" />
+                <Property ClassID="UGS::UICOMP_button" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="BalloonTooltipLayout" mask="0" name="BalloonTooltipLayout" selected="0" sname="BalloonTooltipLayout" source="1" type="enum">
+                  <Option name="Horizontal" value="0" />
+                  <Option name="Vertical" value="1" />
+                </Property>
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="选择 DWG 并预览轮廓" />
+                <Property ClassID="UGS::UICOMP_button" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="Icon" mask="384" name="Icon" sname="Bitmap" source="3" type="string" value="" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property class="UICOMP_button" hierarchy="UGS::UICOMP_group" id="save_dwg" mask="256" name="save_dwg" presentation="Action Button" type="uicomp">
+            <item Expanded="1" class="UICOMP_button" hierarchy="UGS::UI::Comp::Container" icon="styler_browser_pushbutton.bmp" id="save_dwg" name="save_dwg" notes="" presentation="Action Button" type="uicomp">
+              <PropertyList id="id" mode="0">
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="API Name" mask="16656" name="API Name" sname="BlockID" source="3" type="string" value="save_dwg" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="HideGroup" mask="69636" name="HideGroup" sname="HideGroup" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Focus" mask="69636" name="Focus" sname="Focus" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="CanFocus" mask="69636" name="CanFocus" sname="CanFocus" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="KeyboardFocus" mask="69636" name="KeyboardFocus" sname="KeyboardFocus" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="CanKeyboardFocus" mask="69636" name="CanKeyboardFocus" sname="CanKeyboardFocus" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_button" id="UIOnly" mask="69636" name="UIOnly" sname="RetainValueInUIOnly" source="1" type="logical" value="False" />
+                <Property ClassID="UGS::UICOMP_widget" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="HQBitmap" mask="16384" name="HQBitmap" sname="HighQualityBitmap" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_button" id="Translated" mask="16384" name="Translated" sname="Localize" source="1" type="logical" value="True" />
+                <Property ClassID="UGS::UICOMP_button" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="Tooltip" mask="0" name="Tooltip" sname="Tooltip" source="1" type="utfstring" value="" />
+                <Property ClassID="UGS::UICOMP_button" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="BalloonTooltipText" mask="0" name="BalloonTooltipText" sname="BalloonTooltipText" source="1" type="utfstring" value="" />
+                <Property ClassID="UGS::UICOMP_button" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="BalloonTooltipImage" mask="0" name="BalloonTooltipImage" sname="BalloonTooltipImage" source="1" type="string" value="" />
+                <Property ClassID="UGS::UICOMP_button" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="BalloonTooltipLayout" mask="0" name="BalloonTooltipLayout" selected="0" sname="BalloonTooltipLayout" source="1" type="enum">
+                  <Option name="Horizontal" value="0" />
+                  <Option name="Vertical" value="1" />
+                </Property>
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="保存当前预览刀具" />
+                <Property ClassID="UGS::UICOMP_button" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="Icon" mask="384" name="Icon" sname="Bitmap" source="3" type="string" value="" />
+              </PropertyList>
+            </item>
+          </Property>
           <Property class="UICOMP_button" hierarchy="UGS::UICOMP_group" id="tool_folder" mask="256" name="tool_folder" presentation="Action Button" type="uicomp">
             <item Expanded="1" class="UICOMP_button" hierarchy="UGS::UI::Comp::Container" icon="styler_browser_pushbutton.bmp" id="tool_folder" name="tool_folder" notes="" presentation="Action Button" type="uicomp">
               <PropertyList id="id" mode="0">
@@ -200,7 +256,7 @@
                   <Option name="Horizontal" value="0" />
                   <Option name="Vertical" value="1" />
                 </Property>
-                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="打开自定义刀具目录" />
+                <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_button" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="打开智辉刀图目录" />
                 <Property ClassID="UGS::UICOMP_button" group="Block Specific::" hierarchy="UGS::UICOMP_button" id="Icon" mask="384" name="Icon" sname="Bitmap" source="3" type="string" value="" />
               </PropertyList>
             </item>

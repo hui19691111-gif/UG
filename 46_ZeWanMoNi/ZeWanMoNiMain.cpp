@@ -30,7 +30,6 @@ struct LicenseGateHandle
 LicenseGateHandle LoadLicenseGate()
 {
     constexpr const wchar_t* name = L"ZhaoFuNxLicenseGate.dll";
-    if (HMODULE existing = GetModuleHandleW(name)) return {existing, false};
     HMODULE self = nullptr;
     if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -48,29 +47,35 @@ LicenseGateHandle LoadLicenseGate()
             }
         }
     }
-    return {LoadLibraryW(name), true};
+    return {};
 }
 
-bool EnsureAuthorized()
+bool EnsureAuthorized(std::wstring& error)
 {
 #ifndef ZH_PROTECTED_BUILD
     return true;
 #else
     const LicenseGateHandle gate = LoadLicenseGate();
-    if (gate.module == nullptr) return false;
+    if (gate.module == nullptr)
+    {
+        error = L"无法加载折弯模拟授权模块。";
+        return false;
+    }
     const auto procedure = reinterpret_cast<EnsureAuthorizedProc>(
         GetProcAddress(gate.module, "ZfnxEnsureAuthorized"));
     if (procedure == nullptr)
     {
         if (gate.owned) FreeLibrary(gate.module);
+        error = L"折弯模拟授权模块缺少校验入口。";
         return false;
     }
     wchar_t message[1024] = {};
-    const bool authorized =
-        procedure(L"ZHIHUI.CHAIJIJIA", L"折弯模拟",
-                  message, 1024) == 1;
+    const int result = procedure(L"ZHIHUI.CHAIJIJIA", L"折弯模拟",
+                                 message, 1024);
     if (gate.owned) FreeLibrary(gate.module);
-    return authorized;
+    if (result == 1) return true;
+    error = message[0] ? message : L"折弯模拟授权校验未通过。";
+    return false;
 #endif
 }
 }
@@ -78,8 +83,10 @@ bool EnsureAuthorized()
 extern "C" DllExport void ufusr(char*, int* returnCode, int)
 {
     if (returnCode != nullptr) *returnCode = 0;
-    if (!EnsureAuthorized())
+    std::wstring authorizationError;
+    if (!EnsureAuthorized(authorizationError))
     {
+        MessageBoxW(nullptr, authorizationError.c_str(), L"折弯模拟", MB_OK | MB_ICONERROR);
         if (returnCode != nullptr) *returnCode = 1;
         return;
     }

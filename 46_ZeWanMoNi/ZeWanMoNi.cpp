@@ -23,6 +23,7 @@
 #include <uf_ui_types.h>
 #include <Windows.h>
 #include <shellapi.h>
+#include <commdlg.h>
 #ifdef CreateDialog
 #undef CreateDialog
 #endif
@@ -31,6 +32,8 @@
 #include <fstream>
 #include <iomanip>
 #include <memory>
+#include <locale>
+#include <cwctype>
 #include <sstream>
 #include <stdexcept>
 
@@ -38,7 +41,7 @@ namespace {
 using Props=std::unique_ptr<NXOpen::BlockStyler::PropertyList>;
 struct Guard{bool& value;Guard(bool& b):value(b){value=true;}~Guard(){value=false;}};
 std::filesystem::path ModuleDir(){HMODULE m=nullptr;GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(&ModuleDir),&m);wchar_t p[32768]={};if(!GetModuleFileNameW(m,p,32768))throw std::runtime_error("无法定位折弯模拟资源。");return std::filesystem::path(p).parent_path();}
-std::filesystem::path ToolDir(){const wchar_t* p=_wgetenv(L"APPDATA");if(!p||!*p)throw std::runtime_error("无法定位用户刀具目录。");return std::filesystem::path(p)/L"Zhihui"/L"ZeWanMoNi"/L"tools";}
+std::filesystem::path ToolDir(){return ModuleDir().parent_path()/L"刀图";}
 void Log(const std::string& s) noexcept {try{wchar_t p[MAX_PATH]={};GetTempPathW(MAX_PATH,p);std::ofstream(std::filesystem::path(p)/L"Zhihui-ZeWanMoNi.log",std::ios::app)<<s<<'\n';}catch(...) {}}
 bool Toggle(NXOpen::BlockStyler::UIBlock* b){return Props(b->GetProperties())->GetLogical("Value");}
 NXOpen::BlockStyler::SelectObject* Selector(NXOpen::BlockStyler::UIBlock* b){auto* s=dynamic_cast<NXOpen::BlockStyler::SelectObject*>(b);if(!s)throw std::runtime_error("选择控件不可用。");return s;}
@@ -63,9 +66,72 @@ void ZeWanMoNiDialog::LoadTools(){
     if(std::filesystem::exists(dir))for(const auto& entry:std::filesystem::directory_iterator(dir))if(entry.is_regular_file()&&entry.path().extension()==L".ztool")paths.push_back(entry.path());
     std::sort(paths.begin(),paths.end());if(paths.size()>100)throw std::runtime_error("自定义刀具最多加载 100 把。");
     for(const auto& path:paths){try{auto t=bend_sim::ReadTool(path);t.name="自定义："+t.name;items.push_back(t);}catch(const std::exception& e){throw std::runtime_error(path.filename().u8string()+"："+e.what());}}
+    previewStart_=items.size();
+    for(const auto& candidate:dwgCandidates_){auto tool=candidate.tool;tool.name="待保存："+tool.name;items.push_back(std::move(tool));}
     std::string previous=activeTool_>=0&&static_cast<size_t>(activeTool_)<tools_.size()?tools_[activeTool_].name:"";
     activeTool_=0;for(size_t i=0;i<items.size();++i)if(items[i].name==previous){activeTool_=static_cast<int>(i);break;}
     tools_=std::move(items);if(shown_)PopulateTools();
+}
+void ZeWanMoNiDialog::OpenDwg(){
+    wchar_t file[32768]={};
+    const wchar_t filter[]=L"AutoCAD 图纸 (*.dwg)\0*.dwg\0\0";
+    OPENFILENAMEW options={};options.lStructSize=sizeof(options);options.hwndOwner=GetActiveWindow();
+    options.lpstrFilter=filter;options.lpstrFile=file;options.nMaxFile=32768;
+    options.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
+    if(!GetOpenFileNameW(&options)){
+        if(CommDlgExtendedError()!=0)throw std::runtime_error("无法打开 DWG 文件选择窗口。");
+        return;
+    }
+    auto selected=std::filesystem::path(file);
+    auto candidates=bend_sim::ReadDwgCandidates(selected);
+    dwgSource_=selected;
+    tools_.resize(previewStart_);
+    dwgCandidates_=std::move(candidates);
+    for(const auto& candidate:dwgCandidates_){auto tool=candidate.tool;tool.name="待保存："+tool.name;tools_.push_back(std::move(tool));}
+    activeTool_=static_cast<int>(previewStart_);PopulateTools();
+    UF_DISP_refresh();Status("已识别 "+std::to_string(dwgCandidates_.size())+" 个候选轮廓；预览后点击“保存当前预览刀具”。图纸坐标按毫米使用。");
+}
+void ZeWanMoNiDialog::SaveDwgTool(){
+    if(activeTool_<0||static_cast<size_t>(activeTool_)<previewStart_||
+       static_cast<size_t>(activeTool_)-previewStart_>=dwgCandidates_.size())
+        throw std::runtime_error("请先选择“待保存”刀具并预览截面。");
+    auto selected=dwgCandidates_.at(static_cast<size_t>(activeTool_)-previewStart_);
+    bend_sim::ValidateTool(selected.tool);
+    auto dir=ToolDir();std::filesystem::create_directories(dir);
+    std::wstring stem=dwgSource_.stem().wstring();
+    for(wchar_t& c:stem)if(!iswalnum(c)&&c!=L'-'&&c!=L'_')c=L'_';
+    if(stem.size()>48)stem.resize(48);
+    if(stem.empty())stem=L"Tool";
+    size_t sourceIndex=static_cast<size_t>(activeTool_)-previewStart_;
+    std::filesystem::path target,original;
+    for(int suffix=0;suffix<10000;++suffix){
+        auto name=L"DWG_"+stem+L"_"+std::to_wstring(sourceIndex+1)+
+                  (suffix?L"_"+std::to_wstring(suffix):L"");
+        target=dir/(name+L".ztool");original=dir/L"原图"/(name+L".dwg");
+        if(!std::filesystem::exists(target)&&!std::filesystem::exists(original))break;
+        if(suffix==9999)throw std::runtime_error("刀具文件名已用尽。");
+    }
+    std::filesystem::create_directories(original.parent_path());
+    auto temporary=target;temporary+=L".tmp";
+    if(std::filesystem::exists(temporary))throw std::runtime_error("刀具临时文件已存在，请稍后重试。");
+    try{
+        std::filesystem::copy_file(dwgSource_,original);
+        {
+            std::ofstream out(temporary,std::ios::binary|std::ios::trunc);out.imbue(std::locale::classic());
+            out<<"ZH_TOOL_V1\nname="<<selected.tool.name<<"\n";
+            out<<std::fixed<<std::setprecision(8);
+            for(auto point:selected.tool.profile)out<<point.x<<","<<point.z<<"\n";
+            if(!out)throw std::runtime_error("写入刀具定义失败。");
+        }
+        auto checked=bend_sim::ReadTool(temporary);
+        if(checked.profile.size()!=selected.tool.profile.size())throw std::runtime_error("刀具写入校验失败。");
+        std::filesystem::rename(temporary,target);
+    }catch(...){std::error_code ec;std::filesystem::remove(temporary,ec);std::filesystem::remove(original,ec);throw;}
+    std::string saved="自定义："+selected.tool.name;
+    dwgCandidates_.clear();dwgSource_.clear();LoadTools();
+    for(size_t i=0;i<tools_.size();++i)if(tools_[i].name==saved){activeTool_=static_cast<int>(i);break;}
+    PopulateTools();Preview();
+    Status("已保存刀具及原图到智辉刀图目录。"+(checkedStatus_.empty()?std::string():" "+checkedStatus_));
 }
 void ZeWanMoNiDialog::PopulateTools(){
     using Tree=NXOpen::BlockStyler::Tree;auto* tree=ToolTree(tool_);
@@ -77,7 +143,7 @@ void ZeWanMoNiDialog::PopulateTools(){
     }
     // Apply recreates NX's tree; never reuse node handles from the previous UI.
     toolNodes_.clear();while(auto* node=tree->RootNode())tree->DeleteNode(node);
-    auto cache=ToolDir().parent_path()/L"thumbnails";
+    auto cache=ToolDir()/L"thumbnails";
     for(const auto& tool:tools_){
         auto file=ToolThumbnail(tool,cache).u8string();
         auto* node=tree->CreateNode(NXOpen::NXString(tool.name.c_str(),NXOpen::NXString::UTF8));
@@ -92,7 +158,7 @@ void ZeWanMoNiDialog::ShowToolProfile(){
     const auto& tool=tools_.at(activeTool_);
     auto* image=dynamic_cast<NXOpen::BlockStyler::DrawingArea*>(toolImage_);
     if(!image)throw std::runtime_error("截面预览控件不可用。");
-    auto file=ToolThumbnail(tool,ToolDir().parent_path()/L"thumbnails",true).u8string();
+    auto file=ToolThumbnail(tool,ToolDir()/L"thumbnails",true).u8string();
     image->SetImage(NXOpen::NXString(file.c_str(),NXOpen::NXString::UTF8));
     double xmin=0,xmax=0,height=0;for(auto p:tool.profile){xmin=std::min(xmin,p.x);xmax=std::max(xmax,p.x);height=std::max(height,p.z);}
     std::ostringstream info;info<<std::fixed<<std::setprecision(1)<<"截面预览：宽 "<<xmax-xmin<<" × 高 "<<height<<" mm";
@@ -112,10 +178,13 @@ void ZeWanMoNiDialog::Initialize(){
     initialized_=false;shown_=false;toolNodes_.clear();
     try{
         auto find=[&](const char* id){auto* b=dialog_->TopBlock()->FindBlock(id);if(!b)throw std::runtime_error(std::string("缺少对话框控件：")+id);return b;};
-        selection_=find("bend_selection");tool_=find("tool_choice");reverse_=find("reverse_tool");check_=find("check_button");reload_=find("reload_tools");folder_=find("tool_folder");status_=find("result_status");detail_=find("bend_detail");
+        selection_=find("bend_selection");tool_=find("tool_choice");reverse_=find("reverse_tool");check_=find("check_button");reload_=find("reload_tools");folder_=find("tool_folder");importDwg_=find("import_dwg");saveDwg_=find("save_dwg");status_=find("result_status");detail_=find("bend_detail");
         toolImage_=find("tool_profile_image");toolInfo_=find("tool_profile_info");
         ToolTree(tool_)->SetOnSelectHandler(NXOpen::make_callback(this,&ZeWanMoNiDialog::ToolSelected));
-        auto* s=Selector(selection_);s->SetSelectionFilter(NXOpen::Selection::SelectionActionClearAndEnableSpecific,{{UF_solid_type,0,UF_UI_SEL_FEATURE_ANY_FACE},{UF_solid_type,0,UF_UI_SEL_FEATURE_ANY_EDGE}});s->SetSelectModeAsString("Single");s->SetAutomaticProgression(false);
+        auto* s=Selector(selection_);
+        s->SetSelectionFilter(NXOpen::Selection::SelectionActionClearAndEnableSpecific,{{UF_solid_type,0,UF_UI_SEL_FEATURE_ANY_FACE},{UF_solid_type,0,UF_UI_SEL_FEATURE_ANY_EDGE}});
+        s->SetSelectModeAsString("Single");
+        s->SetAutomaticProgression(false);
         LoadTools();initialized_=true;
     }catch(const NXOpen::NXException& e){Error(e.Message());}catch(const std::exception& e){Error(e.what());}catch(...){Error("初始化失败。");}
 }
@@ -151,6 +220,8 @@ bend_sim::Settings ZeWanMoNiDialog::Settings() const {
     bend_sim::Settings s;s.innerRadius=0;s.reverse=Toggle(reverse_);return s;
 }
 bend_sim::Placement ZeWanMoNiDialog::Placement() const {
+    if(static_cast<size_t>(activeTool_)>=previewStart_)
+        throw std::runtime_error("请先保存预览中的 DWG 刀具。");
     auto selected=Selector(selection_)->GetSelectedObjects();if(selected.size()!=1)throw std::runtime_error("请选择一处折弯内圆柱面或内侧锐边。");
     auto settings=Settings();auto b=bend_sim::Inspect(selected[0]->Tag(),settings.innerRadius);
     int choice=activeTool_;if(choice<0||static_cast<size_t>(choice)>=tools_.size())throw std::runtime_error("刀具选择无效。");
@@ -173,6 +244,7 @@ void ZeWanMoNiDialog::DescribePlacement(const bend_sim::Placement& p){
 }
 void ZeWanMoNiDialog::Preview(){
     UF_DISP_refresh();checkedResult_={};checkedStatus_.clear();Status("请选择折弯位置，自动检查干涉。");Props(detail_->GetProperties())->SetString("Label","自动识别内圆柱面或内侧锐边。");
+    if(static_cast<size_t>(activeTool_)>=previewStart_){Status("正在预览 DWG 截面；选择满意的轮廓后点击保存。");return;}
     if(Selector(selection_)->GetSelectedObjects().empty())return;
     auto p=Placement();
     if(view_){auto x=p.x,y=p.up,z=bend_sim::Unit(bend_sim::Cross(x,y));NXOpen::Matrix3x3 m={x.x,x.y,x.z,y.x,y.y,y.z,z.x,z.y,z.z};viewChanged_=true;view_->Orient(m);}
@@ -186,6 +258,8 @@ void ZeWanMoNiDialog::RunCheck(){
 int ZeWanMoNiDialog::Update(NXOpen::BlockStyler::UIBlock* block){
     if(!initialized_||!shown_||updating_||block==tool_)return 0;Guard guard(updating_);
     try{
+        if(block==importDwg_){OpenDwg();return 0;}
+        if(block==saveDwg_){SaveDwgTool();return 0;}
         if(block==check_){RunCheck();return 0;}
         if(block==folder_){auto dir=ToolDir();std::filesystem::create_directories(dir);auto sample=dir/L"example.ztool";if(!std::filesystem::exists(sample))std::filesystem::copy_file(ModuleDir()/L"ZeWanMoNiExample.ztool",sample);if(reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr,L"open",dir.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)throw std::runtime_error("无法打开刀具目录。");return 0;}
         if(block==reload_)LoadTools();
