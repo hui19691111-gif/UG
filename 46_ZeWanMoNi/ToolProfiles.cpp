@@ -1,7 +1,9 @@
 #include "BendSimulation.hpp"
+#include <Windows.h>
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iterator>
 #include <locale>
 #include <sstream>
 #include <stdexcept>
@@ -55,6 +57,52 @@ Tool ReadTool(const std::filesystem::path& path){
         t.profile.push_back(p);if(t.profile.size()>256)throw std::runtime_error("刀具点数超过 256。");
     }
     ValidateTool(t);return t;
+}
+void RenameTool(const std::filesystem::path& path,const std::string& name){
+    if(name.empty()||name.size()>160||name.front()==' '||name.back()==' '||
+       std::any_of(name.begin(),name.end(),[](unsigned char c){return c<32||c==127;}))
+        throw std::runtime_error("刀具名称不能为空、超过 160 字节或包含首尾空格与控制字符。");
+    Tool original=ReadTool(path);
+    if(original.name==name)return;
+    Tool renamed=original;renamed.name=name;ValidateTool(renamed);
+    std::ifstream input(path,std::ios::binary);
+    if(!input)throw std::runtime_error("无法读取刀具文件。");
+    std::string data((std::istreambuf_iterator<char>(input)),std::istreambuf_iterator<char>());
+    input.close();
+    size_t valueStart=std::string::npos,valueEnd=std::string::npos;
+    for(size_t start=0;start<data.size();){
+        size_t end=data.find('\n',start),lineEnd=end==std::string::npos?data.size():end;
+        if(lineEnd>start&&data[lineEnd-1]=='\r')--lineEnd;
+        if(data.compare(start,5,"name=")==0){
+            if(valueStart!=std::string::npos)throw std::runtime_error("刀具文件存在重复名称行。");
+            valueStart=start+5;valueEnd=lineEnd;
+        }
+        if(end==std::string::npos)break;
+        start=end+1;
+    }
+    if(valueStart==std::string::npos)throw std::runtime_error("刀具文件缺少名称行。");
+    data.replace(valueStart,valueEnd-valueStart,name);
+    auto temporary=path;
+    temporary+=L".rename-"+std::to_wstring(GetCurrentProcessId())+L"-"+
+               std::to_wstring(GetTickCount64())+L".tmp";
+    if(std::filesystem::exists(temporary))throw std::runtime_error("刀具临时文件已存在，请重试。");
+    try{
+        {
+            std::ofstream output(temporary,std::ios::binary|std::ios::trunc);
+            output.write(data.data(),static_cast<std::streamsize>(data.size()));
+            if(!output)throw std::runtime_error("写入刀具名称失败。");
+        }
+        Tool checked=ReadTool(temporary);
+        if(checked.name!=name||checked.profile.size()!=original.profile.size())
+            throw std::runtime_error("刀具名称写入校验失败。");
+        for(size_t i=0;i<original.profile.size();++i)
+            if(checked.profile[i].x!=original.profile[i].x||
+               checked.profile[i].z!=original.profile[i].z)
+                throw std::runtime_error("刀具截面写入校验失败。");
+        if(!ReplaceFileW(path.c_str(),temporary.c_str(),nullptr,
+                         REPLACEFILE_IGNORE_MERGE_ERRORS,nullptr,nullptr))
+            throw std::runtime_error("无法替换刀具文件，请检查写入权限。");
+    }catch(...){std::error_code ec;std::filesystem::remove(temporary,ec);throw;}
 }
 Placement Place(const Bend& b,const Tool& t,const Settings& s){
     ValidateTool(t);

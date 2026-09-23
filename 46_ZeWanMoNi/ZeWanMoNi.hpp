@@ -2,7 +2,9 @@
 #include "BendSimulation.hpp"
 #include "DwgImport.hpp"
 #include <NXOpen/BlockStyler_BlockDialog.hxx>
+#include <NXOpen/BlockStyler_Tree.hxx>
 #include <NXOpen/BlockStyler_UIBlock.hxx>
+#include <NXOpen/NXString.hxx>
 #include <NXOpen/ugmath.hxx>
 namespace NXOpen {class TaggedObject;class ModelingView;namespace BlockStyler {class Tree;class Node;}}
 class ZeWanMoNiDialog {
@@ -25,6 +27,8 @@ private:
     void PopulateTools();
     void ShowToolProfile();
     void ToolSelected(NXOpen::BlockStyler::Tree*,NXOpen::BlockStyler::Node*,int,bool);
+    NXOpen::BlockStyler::Tree::BeginLabelEditState BeginToolNameEdit(NXOpen::BlockStyler::Tree*,NXOpen::BlockStyler::Node*,int);
+    NXOpen::BlockStyler::Tree::EndLabelEditState EndToolNameEdit(NXOpen::BlockStyler::Tree*,NXOpen::BlockStyler::Node*,int,NXOpen::NXString);
     void Draw(const bend_sim::Placement&,const bend_sim::Result&);
     void DescribePlacement(const bend_sim::Placement&);
     void Status(const std::string&);
@@ -38,6 +42,7 @@ private:
     NXOpen::ModelingView* view_=nullptr;
     NXOpen::Matrix3x3 originalMatrix_={};
     std::vector<bend_sim::Tool> tools_;
+    std::vector<std::filesystem::path> toolPaths_;
     std::vector<bend_sim::DwgCandidate> dwgCandidates_;
     std::filesystem::path dwgSource_;
     size_t previewStart_=0;

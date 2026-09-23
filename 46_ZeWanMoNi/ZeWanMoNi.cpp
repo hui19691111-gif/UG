@@ -63,14 +63,15 @@ void ZeWanMoNiDialog::Status(const std::string& s){Props(status_->GetProperties(
 void ZeWanMoNiDialog::Error(const std::string& s) noexcept {Log(s);try{NXOpen::UI::GetUI()->NXMessageBox()->Show("折弯模拟",NXOpen::NXMessageBox::DialogTypeError,s.c_str());}catch(...) {}}
 void ZeWanMoNiDialog::LoadTools(){
     auto items=bend_sim::BuiltinTools();auto dir=ToolDir();std::vector<std::filesystem::path> paths;
+    std::vector<std::filesystem::path> itemPaths(items.size());
     if(std::filesystem::exists(dir))for(const auto& entry:std::filesystem::directory_iterator(dir))if(entry.is_regular_file()&&entry.path().extension()==L".ztool")paths.push_back(entry.path());
     std::sort(paths.begin(),paths.end());if(paths.size()>100)throw std::runtime_error("自定义刀具最多加载 100 把。");
-    for(const auto& path:paths){try{auto t=bend_sim::ReadTool(path);t.name="自定义："+t.name;items.push_back(t);}catch(const std::exception& e){throw std::runtime_error(path.filename().u8string()+"："+e.what());}}
+    for(const auto& path:paths){try{items.push_back(bend_sim::ReadTool(path));itemPaths.push_back(path);}catch(const std::exception& e){throw std::runtime_error(path.filename().u8string()+"："+e.what());}}
     previewStart_=items.size();
-    for(const auto& candidate:dwgCandidates_){auto tool=candidate.tool;tool.name="待保存："+tool.name;items.push_back(std::move(tool));}
+    for(const auto& candidate:dwgCandidates_){auto tool=candidate.tool;tool.name="待保存："+tool.name;items.push_back(std::move(tool));itemPaths.emplace_back();}
     std::string previous=activeTool_>=0&&static_cast<size_t>(activeTool_)<tools_.size()?tools_[activeTool_].name:"";
     activeTool_=0;for(size_t i=0;i<items.size();++i)if(items[i].name==previous){activeTool_=static_cast<int>(i);break;}
-    tools_=std::move(items);if(shown_)PopulateTools();
+    tools_=std::move(items);toolPaths_=std::move(itemPaths);if(shown_)PopulateTools();
 }
 void ZeWanMoNiDialog::OpenDwg(){
     wchar_t file[32768]={};
@@ -87,7 +88,8 @@ void ZeWanMoNiDialog::OpenDwg(){
     dwgSource_=selected;
     tools_.resize(previewStart_);
     dwgCandidates_=std::move(candidates);
-    for(const auto& candidate:dwgCandidates_){auto tool=candidate.tool;tool.name="待保存："+tool.name;tools_.push_back(std::move(tool));}
+    toolPaths_.resize(previewStart_);
+    for(const auto& candidate:dwgCandidates_){auto tool=candidate.tool;tool.name="待保存："+tool.name;tools_.push_back(std::move(tool));toolPaths_.emplace_back();}
     activeTool_=static_cast<int>(previewStart_);PopulateTools();
     UF_DISP_refresh();Status("已识别 "+std::to_string(dwgCandidates_.size())+" 个候选轮廓；预览后点击“保存当前预览刀具”。图纸坐标按毫米使用。");
 }
@@ -127,9 +129,8 @@ void ZeWanMoNiDialog::SaveDwgTool(){
         if(checked.profile.size()!=selected.tool.profile.size())throw std::runtime_error("刀具写入校验失败。");
         std::filesystem::rename(temporary,target);
     }catch(...){std::error_code ec;std::filesystem::remove(temporary,ec);std::filesystem::remove(original,ec);throw;}
-    std::string saved="自定义："+selected.tool.name;
     dwgCandidates_.clear();dwgSource_.clear();LoadTools();
-    for(size_t i=0;i<tools_.size();++i)if(tools_[i].name==saved){activeTool_=static_cast<int>(i);break;}
+    for(size_t i=0;i<toolPaths_.size();++i)if(toolPaths_[i]==target){activeTool_=static_cast<int>(i);break;}
     PopulateTools();Preview();
     Status("已保存刀具及原图到智辉刀图目录。"+(checkedStatus_.empty()?std::string():" "+checkedStatus_));
 }
@@ -173,6 +174,44 @@ void ZeWanMoNiDialog::ToolSelected(NXOpen::BlockStyler::Tree*,NXOpen::BlockStyle
     catch(const std::exception& e){Log(e.what());try{UF_DISP_refresh();Status(std::string("未完成：")+e.what());}catch(...) {}}
     catch(...){Log("tool selection failed");try{UF_DISP_refresh();Status("刀具选择失败，请重新选择。");}catch(...) {}}
 }
+NXOpen::BlockStyler::Tree::BeginLabelEditState ZeWanMoNiDialog::BeginToolNameEdit(
+    NXOpen::BlockStyler::Tree*,NXOpen::BlockStyler::Node* node,int column){
+    using Tree=NXOpen::BlockStyler::Tree;
+    try{
+        if(!initialized_||!shown_||updating_||column!=0)return Tree::BeginLabelEditStateDisallow;
+        auto it=std::find(toolNodes_.begin(),toolNodes_.end(),node);
+        if(it==toolNodes_.end())return Tree::BeginLabelEditStateDisallow;
+        const size_t index=static_cast<size_t>(it-toolNodes_.begin());
+        return index<toolPaths_.size()&&!toolPaths_[index].empty()
+            ?Tree::BeginLabelEditStateAllow:Tree::BeginLabelEditStateDisallow;
+    }catch(const NXOpen::NXException& e){Log(e.Message());}
+    catch(const std::exception& e){Log(e.what());}
+    catch(...){Log("begin tool name edit failed");}
+    return Tree::BeginLabelEditStateDisallow;
+}
+NXOpen::BlockStyler::Tree::EndLabelEditState ZeWanMoNiDialog::EndToolNameEdit(
+    NXOpen::BlockStyler::Tree*,NXOpen::BlockStyler::Node* node,int column,NXOpen::NXString edited){
+    using Tree=NXOpen::BlockStyler::Tree;
+    if(!initialized_||!shown_||updating_||column!=0)return Tree::EndLabelEditStateRejectText;
+    Guard guard(updating_);
+    try{
+        auto it=std::find(toolNodes_.begin(),toolNodes_.end(),node);
+        if(it==toolNodes_.end())return Tree::EndLabelEditStateRejectText;
+        const size_t index=static_cast<size_t>(it-toolNodes_.begin());
+        if(index>=toolPaths_.size()||toolPaths_[index].empty())return Tree::EndLabelEditStateRejectText;
+        const char* text=edited.GetUTF8Text();
+        const std::string name=text?text:"";
+        for(size_t i=0;i<tools_.size();++i)
+            if(i!=index&&tools_[i].name==name)throw std::runtime_error("已有同名刀具，请换一个名称。");
+        bend_sim::RenameTool(toolPaths_[index],name);
+        tools_[index].name=name;
+        Status("刀具名称已保存到智辉刀图目录。"+(checkedStatus_.empty()?std::string():" "+checkedStatus_));
+        return Tree::EndLabelEditStateAcceptText;
+    }catch(const NXOpen::NXException& e){Log(e.Message());try{Status(std::string("重命名失败：")+e.Message());}catch(...) {}}
+    catch(const std::exception& e){Log(e.what());try{Status(std::string("重命名失败：")+e.what());}catch(...) {}}
+    catch(...){Log("end tool name edit failed");try{Status("重命名失败，原名称未改变。");}catch(...) {}}
+    return Tree::EndLabelEditStateRejectText;
+}
 void ZeWanMoNiDialog::Initialize(){
     // NX invokes Initialize again after Apply, before the new tree is usable.
     initialized_=false;shown_=false;toolNodes_.clear();
@@ -181,6 +220,8 @@ void ZeWanMoNiDialog::Initialize(){
         selection_=find("bend_selection");tool_=find("tool_choice");reverse_=find("reverse_tool");check_=find("check_button");reload_=find("reload_tools");folder_=find("tool_folder");importDwg_=find("import_dwg");saveDwg_=find("save_dwg");status_=find("result_status");detail_=find("bend_detail");
         toolImage_=find("tool_profile_image");toolInfo_=find("tool_profile_info");
         ToolTree(tool_)->SetOnSelectHandler(NXOpen::make_callback(this,&ZeWanMoNiDialog::ToolSelected));
+        ToolTree(tool_)->SetOnBeginLabelEditHandler(NXOpen::make_callback(this,&ZeWanMoNiDialog::BeginToolNameEdit));
+        ToolTree(tool_)->SetOnEndLabelEditHandler(NXOpen::make_callback(this,&ZeWanMoNiDialog::EndToolNameEdit));
         auto* s=Selector(selection_);
         s->SetSelectionFilter(NXOpen::Selection::SelectionActionClearAndEnableSpecific,{{UF_solid_type,0,UF_UI_SEL_FEATURE_ANY_FACE},{UF_solid_type,0,UF_UI_SEL_FEATURE_ANY_EDGE}});
         s->SetSelectModeAsString("Single");

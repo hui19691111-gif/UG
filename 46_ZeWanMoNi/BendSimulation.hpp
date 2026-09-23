@@ -19,6 +19,7 @@ struct Tool {std::string name; std::vector<Point> profile;};
 void ValidateTool(const Tool&);
 std::vector<Tool> BuiltinTools();
 Tool ReadTool(const std::filesystem::path&);
+void RenameTool(const std::filesystem::path&, const std::string& name);
 struct Bend {
     tag_t body=0,selection=0;
     Vec tip,x,axis,up;

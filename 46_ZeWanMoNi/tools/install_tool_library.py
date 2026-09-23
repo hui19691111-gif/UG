@@ -27,7 +27,7 @@ for name, data in old.items():
         (backup/name).write_bytes(data)
 report = {'destination': str(destination), 'backup': str(backup),
           'created': [n for n, d in old.items() if d is None],
-          'replaced': [n for n, d in old.items() if d is not None and d != payload[n]],
+          'preserved': [n for n, d in old.items() if d is not None and d != payload[n]],
           'migrated': [],
           'tools': {t['file']: t['sha256'] for t in catalog['tools']}}
 (backup/'installation.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -36,11 +36,11 @@ try:
     for name, data in payload.items():
         target = destination/name
         assert (target.read_bytes() if target.exists() else None) == old[name], 'File changed concurrently'
-        if old[name] != data:
+        if old[name] is None:
             target.write_bytes(data)
             changed.append(name)
     for name, data in payload.items():
-        assert (destination/name).read_bytes() == data
+        assert (destination/name).read_bytes() == (old[name] if old[name] is not None else data)
     for previous in legacy_files:
         target = destination/previous.name
         if not target.exists():

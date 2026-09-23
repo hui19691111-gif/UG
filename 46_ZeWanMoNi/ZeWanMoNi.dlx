@@ -295,7 +295,7 @@
             <item id="sample_notice" icon="styler_label.bmp" name="sample_notice" type="uicomp" class="UICOMP_label" notes="" Expanded="1" hierarchy="" presentation="Label">
               <PropertyList id="id" mode="0">
                 <Property id="API Name" name="API Name" type="string" sname="BlockID" value="sample_notice" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Title" name="Title" type="utfstring" sname="Label" value="内置刀具为示例；实用检查请录入实际刀具截面。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="自定义刀具选中后按 F2 改名；内置刀具仅为示例。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
               </PropertyList>
