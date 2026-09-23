@@ -24,6 +24,7 @@ private:
     void LoadTools();
     void OpenDwg();
     void SaveDwgTool();
+    void DeleteTool();
     void PopulateTools();
     void ShowToolProfile();
     void ToolSelected(NXOpen::BlockStyler::Tree*,NXOpen::BlockStyler::Node*,int,bool);
@@ -37,7 +38,7 @@ private:
     bend_sim::Settings Settings() const;
     bend_sim::Placement Placement() const;
     NXOpen::BlockStyler::BlockDialog* dialog_=nullptr;
-    NXOpen::BlockStyler::UIBlock *selection_=nullptr,*tool_=nullptr,*reverse_=nullptr,*check_=nullptr,*reload_=nullptr,*folder_=nullptr,*importDwg_=nullptr,*saveDwg_=nullptr,*status_=nullptr,*detail_=nullptr;
+    NXOpen::BlockStyler::UIBlock *selection_=nullptr,*tool_=nullptr,*reverse_=nullptr,*deleteTool_=nullptr,*folder_=nullptr,*importDwg_=nullptr,*saveDwg_=nullptr,*status_=nullptr,*detail_=nullptr;
     NXOpen::BlockStyler::UIBlock *toolImage_=nullptr,*toolInfo_=nullptr;
     NXOpen::ModelingView* view_=nullptr;
     NXOpen::Matrix3x3 originalMatrix_={};

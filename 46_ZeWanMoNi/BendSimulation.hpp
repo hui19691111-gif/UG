@@ -20,6 +20,8 @@ void ValidateTool(const Tool&);
 std::vector<Tool> BuiltinTools();
 Tool ReadTool(const std::filesystem::path&);
 void RenameTool(const std::filesystem::path&, const std::string& name);
+std::string Utf8(const std::wstring&);
+std::filesystem::path ArchiveTool(const std::filesystem::path& path,const std::filesystem::path& directory);
 struct Bend {
     tag_t body=0,selection=0;
     Vec tip,x,axis,up;

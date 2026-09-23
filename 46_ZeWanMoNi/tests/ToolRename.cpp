@@ -40,8 +40,23 @@ int main(int argc,char** argv) {
             try{bend_sim::RenameTool(target,bad);}catch(const std::exception&){rejected=true;}
             if(!rejected||Bytes(target)!=stable)throw std::runtime_error("invalid name altered tool");
         }
+        const auto chinese=temporary/L"大弯刀.dwg";
+        if(bend_sim::Utf8(chinese.filename().wstring())!=u8"大弯刀.dwg")
+            throw std::runtime_error("Chinese DWG filename was not UTF-8");
+        const auto archived=bend_sim::ArchiveTool(target,temporary);
+        if(std::filesystem::exists(target)||!std::filesystem::exists(archived)||Bytes(archived)!=stable)
+            throw std::runtime_error("tool archive did not preserve the definition");
+        std::filesystem::copy_file(source,target);
+        const auto archivedAgain=bend_sim::ArchiveTool(target,temporary);
+        if(archivedAgain==archived||std::filesystem::exists(target)||
+           Bytes(archivedAgain)!=sourceBytes||Bytes(archived)!=stable)
+            throw std::runtime_error("repeated deletion overwrote a previous archive");
+        bool outsideRejected=false;
+        try{bend_sim::ArchiveTool(source,temporary);}catch(const std::exception&){outsideRejected=true;}
+        if(!outsideRejected||Bytes(source)!=sourceBytes)
+            throw std::runtime_error("tool archive accepted a file outside the tool directory");
         std::filesystem::remove_all(temporary);
-        std::cout<<"rename persistence and geometry preservation passed\n";
+        std::cout<<"rename, Unicode filename and reversible deletion passed\n";
         return 0;
     }catch(const std::exception& e){
         std::error_code ec;std::filesystem::remove_all(temporary,ec);

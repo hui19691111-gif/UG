@@ -97,7 +97,7 @@ void ZeWanMoNiDialog::OpenDwg(){
     }
     auto selected=std::filesystem::path(file);
     auto candidates=bend_sim::ReadDwgCandidates(selected);
-    const auto name=selected.filename().u8string();
+    const auto name=bend_sim::Utf8(selected.filename().wstring());
     if(name.empty()||name.size()>160)throw std::runtime_error("DWG 文件名太长，无法作为刀具名称（最多 160 字节）。");
     for(auto& candidate:candidates){candidate.tool.name=name;bend_sim::ValidateTool(candidate.tool);}
     dwgSource_=selected;
@@ -149,6 +149,14 @@ void ZeWanMoNiDialog::SaveDwgTool(){
     PopulateTools();Preview();
     Status("已保存刀具及原图到智辉刀图目录。"+(checkedStatus_.empty()?std::string():" "+checkedStatus_));
 }
+void ZeWanMoNiDialog::DeleteTool(){
+    if(activeTool_<0||static_cast<size_t>(activeTool_)>=toolPaths_.size()||toolPaths_[activeTool_].empty())
+        throw std::runtime_error("请选择已保存的自定义刀具；内置刀具和待保存预览不能删除。");
+    bend_sim::ArchiveTool(toolPaths_[activeTool_],ToolDir());
+    activeTool_=0;
+    LoadTools();Preview();
+    Status("已从刀具列表移除；定义保存在“刀图\\已删除”，原 DWG 保留。");
+}
 void ZeWanMoNiDialog::PopulateTools(){
     using Tree=NXOpen::BlockStyler::Tree;auto* tree=ToolTree(tool_);
     if(tree->NumberOfColumns()==0){
@@ -166,7 +174,7 @@ void ZeWanMoNiDialog::PopulateTools(){
         std::string label=tool.name;
         if(i>=previewStart_){
             const auto& candidate=dwgCandidates_.at(i-previewStart_);
-            label="待保存："+label+"（图块 "+std::filesystem::path(candidate.block).u8string()+"）";
+            label="待保存："+label+"（图块 "+bend_sim::Utf8(candidate.block)+"）";
         }
         auto* node=tree->CreateNode(NXOpen::NXString(label.c_str(),NXOpen::NXString::UTF8));
         tree->InsertNode(node,nullptr,nullptr,Tree::NodeInsertOptionLast);
@@ -238,7 +246,7 @@ void ZeWanMoNiDialog::Initialize(){
     initialized_=false;shown_=false;toolNodes_.clear();
     try{
         auto find=[&](const char* id){auto* b=dialog_->TopBlock()->FindBlock(id);if(!b)throw std::runtime_error(std::string("缺少对话框控件：")+id);return b;};
-        selection_=find("bend_selection");tool_=find("tool_choice");reverse_=find("reverse_tool");check_=find("check_button");reload_=find("reload_tools");folder_=find("tool_folder");importDwg_=find("import_dwg");saveDwg_=find("save_dwg");status_=find("result_status");detail_=find("bend_detail");
+        selection_=find("bend_selection");tool_=find("tool_choice");reverse_=find("reverse_tool");deleteTool_=find("delete_tool");folder_=find("tool_folder");importDwg_=find("import_dwg");saveDwg_=find("save_dwg");status_=find("result_status");detail_=find("bend_detail");
         toolImage_=find("tool_profile_image");toolInfo_=find("tool_profile_info");
         ToolTree(tool_)->SetOnSelectHandler(NXOpen::make_callback(this,&ZeWanMoNiDialog::ToolSelected));
         ToolTree(tool_)->SetOnBeginLabelEditHandler(NXOpen::make_callback(this,&ZeWanMoNiDialog::BeginToolNameEdit));
@@ -322,9 +330,8 @@ int ZeWanMoNiDialog::Update(NXOpen::BlockStyler::UIBlock* block){
     try{
         if(block==importDwg_){OpenDwg();return 0;}
         if(block==saveDwg_){SaveDwgTool();return 0;}
-        if(block==check_){RunCheck();return 0;}
+        if(block==deleteTool_){DeleteTool();return 0;}
         if(block==folder_){auto dir=ToolDir();std::filesystem::create_directories(dir);auto sample=dir/L"example.ztool";if(!std::filesystem::exists(sample))std::filesystem::copy_file(ModuleDir()/L"ZeWanMoNiExample.ztool",sample);if(reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr,L"open",dir.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)throw std::runtime_error("无法打开刀具目录。");return 0;}
-        if(block==reload_)LoadTools();
         Preview();
     }catch(const NXOpen::NXException& e){Log(e.Message());try{UF_DISP_refresh();Status(std::string("未完成：")+e.Message());}catch(...) {}}
     catch(const std::exception& e){Log(e.what());try{UF_DISP_refresh();Status(std::string("未完成：")+e.what());}catch(...) {}}

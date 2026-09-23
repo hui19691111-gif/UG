@@ -6,7 +6,7 @@ import json
 import os
 
 source = Path(__file__).resolve().parents[1]
-root = Path(r'D:\UG智辉钣金插件')
+root = Path(os.environ.get('ZH_ZEWANMONI_INSTALL_ROOT', r'D:\UG智辉钣金插件'))
 catalog = json.loads((source/'tool-library/dwg-20260921/catalog.json').read_text(encoding='utf-8'))
 destination = root/'刀图'
 legacy = Path(os.environ['APPDATA'])/'Zhihui/ZeWanMoNi/tools'
@@ -18,6 +18,7 @@ for tool in catalog['tools']:
     assert hashlib.sha256(data).hexdigest() == tool['sha256']
     payload[name] = data
 destination.mkdir(parents=True, exist_ok=True)
+archived = {p.name for p in (destination/'已删除').rglob('*.ztool')}
 legacy_files = list(legacy.glob('*.ztool')) if legacy.is_dir() else []
 old = {name: (destination/name).read_bytes() if (destination/name).exists() else None for name in payload}
 backup = root/'backup'/datetime.datetime.now().strftime('before-ZeWanMoNi-user-tools_%Y%m%d_%H%M%S')
@@ -26,7 +27,8 @@ for name, data in old.items():
     if data is not None:
         (backup/name).write_bytes(data)
 report = {'destination': str(destination), 'backup': str(backup),
-          'created': [n for n, d in old.items() if d is None],
+          'created': [n for n, d in old.items() if d is None and n not in archived],
+          'skipped_deleted': [n for n, d in old.items() if d is None and n in archived],
           'preserved': [n for n, d in old.items() if d is not None and d != payload[n]],
           'migrated': [],
           'tools': {t['file']: t['sha256'] for t in catalog['tools']}}
@@ -36,14 +38,15 @@ try:
     for name, data in payload.items():
         target = destination/name
         assert (target.read_bytes() if target.exists() else None) == old[name], 'File changed concurrently'
-        if old[name] is None:
+        if old[name] is None and name not in archived:
             target.write_bytes(data)
             changed.append(name)
     for name, data in payload.items():
-        assert (destination/name).read_bytes() == (old[name] if old[name] is not None else data)
+        if name not in archived or old[name] is not None:
+            assert (destination/name).read_bytes() == (old[name] if old[name] is not None else data)
     for previous in legacy_files:
         target = destination/previous.name
-        if not target.exists():
+        if not target.exists() and previous.name not in archived:
             target.write_bytes(previous.read_bytes())
             changed.append(previous.name)
             report['migrated'].append(previous.name)

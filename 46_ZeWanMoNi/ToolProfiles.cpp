@@ -9,6 +9,32 @@
 #include <stdexcept>
 
 namespace bend_sim {
+std::string Utf8(const std::wstring& value){
+    if(value.empty())return {};
+    const int length=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,value.data(),static_cast<int>(value.size()),nullptr,0,nullptr,nullptr);
+    if(length<=0)throw std::runtime_error("无法转换 Unicode 刀具名称。");
+    std::string result(static_cast<size_t>(length),'\0');
+    if(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,value.data(),static_cast<int>(value.size()),result.data(),length,nullptr,nullptr)!=length)
+        throw std::runtime_error("无法转换 Unicode 刀具名称。");
+    return result;
+}
+std::filesystem::path ArchiveTool(const std::filesystem::path& path,const std::filesystem::path& directory){
+    if(path.parent_path()!=directory||path.extension()!=L".ztool"||!std::filesystem::is_regular_file(path))
+        throw std::runtime_error("刀具文件位置无效，未删除。");
+    const auto archive=directory/L"已删除";
+    std::filesystem::create_directories(archive);
+    auto target=archive/path.filename();
+    if(std::filesystem::exists(target)){
+        for(int suffix=1;suffix<10000;++suffix){
+            auto backup=archive/std::to_wstring(suffix);
+            target=backup/path.filename();
+            if(!std::filesystem::exists(target)){std::filesystem::create_directories(backup);break;}
+            if(suffix==9999)throw std::runtime_error("已删除刀具备份目录已满。");
+        }
+    }
+    std::filesystem::rename(path,target);
+    return target;
+}
 double Dot(Vec a,Vec b){return a.x*b.x+a.y*b.y+a.z*b.z;}
 Vec Cross(Vec a,Vec b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
 Vec Unit(Vec a){double d=std::sqrt(Dot(a,a));if(d<1e-12)throw std::runtime_error("无法确定方向，请检查折弯区域。");return a*(1/d);}
