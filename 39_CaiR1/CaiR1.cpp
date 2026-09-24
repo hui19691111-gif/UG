@@ -433,6 +433,93 @@ bool EdgePointAtFraction(NXOpen::Edge* edge, double fraction,
     return succeeded;
 }
 
+// Probe only evaluated surface points inside the trimmed face. Boundary
+// points, UF errors and ambiguous classifications never count as outside.
+bool PlanarInwardNormal(NXOpen::Face* face, NXOpen::Body* body,
+                        double thickness, NXOpen::Vector3d& inward)
+{
+    NXOpen::Point3d origin;
+    NXOpen::Vector3d normal;
+    if (!FacePlaneData(face, origin, normal) || body == nullptr ||
+        !std::isfinite(thickness) || thickness <= 0.0)
+        return false;
+    double tolerance = 0.001;
+    UF_MODL_ask_distance_tolerance(&tolerance);
+    tolerance = (std::max)(tolerance, 1.0e-7);
+    int votes = 0, direction = 0, tested = 0;
+    bool conflict = false;
+    const auto classify = [](const NXOpen::Point3d& p, tag_t object) {
+        double xyz[3] = {p.X, p.Y, p.Z};
+        int status = 0;
+        return UF_MODL_ask_point_containment(xyz, object, &status) == 0
+            ? status : 0;
+    };
+    const auto probe = [&](const NXOpen::Point3d& p) {
+        if (votes >= 5 || conflict || classify(p, face->Tag()) != 1)
+            return;
+        ++tested;
+        int localDirection = 0, confirmations = 0;
+        for (double scale : {0.1, 0.03, 0.01, 0.003})
+        {
+            const double distance = thickness * scale;
+            if (distance < tolerance * 3.0) continue;
+            const int plus = classify(Move(p, normal, distance), body->Tag());
+            const int minus = classify(Move(p, normal, -distance), body->Tag());
+            const int sign = plus == 1 && minus == 2 ? 1 :
+                             plus == 2 && minus == 1 ? -1 : 0;
+            if (!sign) continue;
+            if (localDirection && localDirection != sign) { conflict = true; return; }
+            localDirection = sign;
+            ++confirmations;
+        }
+        if (confirmations < 2) return;
+        if (direction && direction != localDirection) { conflict = true; return; }
+        direction = localDirection;
+        ++votes;
+    };
+    double uv[4] = {};
+    if (UF_MODL_ask_face_uv_minmax(face->Tag(), uv) == 0)
+    {
+        for (double u : {0.5, 0.25, 0.75, 0.1, 0.9})
+            for (double v : {0.5, 0.25, 0.75, 0.1, 0.9})
+            {
+                double param[2] = {uv[0] + u * (uv[1] - uv[0]),
+                                   uv[2] + v * (uv[3] - uv[2])};
+                double p[3], du[3], dv[3], duu[3], dvv[3], n[3], radii[2];
+                if (UF_MODL_ask_face_props(face->Tag(), param, p, du, dv,
+                                          duu, dvv, n, radii) == 0)
+                    probe(NXOpen::Point3d(p[0], p[1], p[2]));
+            }
+    }
+    // Narrow, concave or perforated faces can miss the UV grid. Sample
+    // locally beside real boundary edges in both in-plane directions.
+    if (votes < 5 && !conflict)
+        for (NXOpen::Edge* edge : face->GetEdges())
+            for (double f : {0.25, 0.5, 0.75})
+            {
+                NXOpen::Point3d p, a, b;
+                if (!EdgePointAtFraction(edge, f, p) ||
+                    !EdgePointAtFraction(edge, f - 0.001, a) ||
+                    !EdgePointAtFraction(edge, f + 0.001, b)) continue;
+                const NXOpen::Vector3d t = Subtract(b, a);
+                NXOpen::Vector3d side(normal.Y*t.Z-normal.Z*t.Y,
+                    normal.Z*t.X-normal.X*t.Z, normal.X*t.Y-normal.Y*t.X);
+                if (!Normalize(side)) continue;
+                for (double scale : {0.01, 0.05, 0.2, 1.0})
+                    for (double sign : {-1.0, 1.0})
+                        probe(Move(p, side, sign * (std::max)(
+                            tolerance * 5.0, thickness * scale)));
+            }
+    std::ostringstream log;
+    log << "CaiR1 planar inward: face=" << face->Tag()
+        << ", tested=" << tested << ", votes=" << votes
+        << ", conflict=" << conflict << ", sign=" << direction;
+    NXOpen::Session::GetSession()->LogFile()->WriteLine(log.str().c_str());
+    if (conflict || votes < 2) return false;
+    inward = NXOpen::Vector3d(normal.X*direction, normal.Y*direction, normal.Z*direction);
+    return true;
+}
+
 NXOpen::Face* AdjacentPlanarFace(NXOpen::Edge* edge,
                                  NXOpen::Face* excludedFace,
                                  NXOpen::Body* body)
@@ -2156,26 +2243,9 @@ bool CaiR1Dialog::BuildSplitCorner(
             NXOpen::Vector3d p2PlaneInward(
                 -p2PlaneOutward.X, -p2PlaneOutward.Y,
                 -p2PlaneOutward.Z);
-            const NXOpen::Point3d planeProbeOrigin =
-                FaceBoxCenter(p2EdgePlane);
-            const double planeProbeDistance =
-                (std::max)(1.0e-3, thickness * 0.1);
-            const bool planePlusInside = PointInsideBody(
-                sourceBody,
-                Move(planeProbeOrigin, p2PlaneOutward,
-                     planeProbeDistance));
-            const bool planeMinusInside = PointInsideBody(
-                sourceBody,
-                Move(planeProbeOrigin, p2PlaneOutward,
-                     -planeProbeDistance));
-            if (planePlusInside != planeMinusInside)
+            if (!PlanarInwardNormal(p2EdgePlane, sourceBody, thickness, p2PlaneInward))
             {
-                const double inwardSign =
-                    planePlusInside ? 1.0 : -1.0;
-                p2PlaneInward = NXOpen::Vector3d(
-                    p2PlaneOutward.X * inwardSign,
-                    p2PlaneOutward.Y * inwardSign,
-                    p2PlaneOutward.Z * inwardSign);
+                throw std::runtime_error("P2 连接平面未能取得一致的多点内法向，请检查实体厚度和几何公差。");
             }
 
             NXOpen::Point3d cylinderEdgeFirst;
@@ -2514,29 +2584,12 @@ bool CaiR1Dialog::BuildSplitCorner(
             -straightPlaneOutward.X, -straightPlaneOutward.Y,
             -straightPlaneOutward.Z);
 
-        // Confirm the material-side direction from the source solid.  This
-        // avoids relying only on the planar face's normal_direction flag at
-        // a trimmed cylindrical corner.
-        const NXOpen::Point3d probeOrigin =
-            FaceBoxCenter(p1StraightPlane);
-        const double probeDistance =
-            (std::max)(1.0e-3, thickness * 0.1);
-        const bool plusIsInside = PointInsideBody(
-            sourceBody,
-            Move(probeOrigin, straightPlaneOutward, probeDistance));
-        const bool minusIsInside = PointInsideBody(
-            sourceBody,
-            Move(probeOrigin, straightPlaneOutward, -probeDistance));
-        if (plusIsInside == minusIsInside)
+        if (!PlanarInwardNormal(p1StraightPlane, sourceBody, thickness,
+                                straightPlaneInward))
         {
             throw std::runtime_error(
-                "无法用 P1 连接平面正、负法向取样确定实体内侧。");
+                "P1 连接平面未能取得一致的多点内法向，请检查实体厚度和几何公差。");
         }
-        const double sign = plusIsInside ? 1.0 : -1.0;
-        straightPlaneInward =
-            NXOpen::Vector3d(straightPlaneOutward.X * sign,
-                             straightPlaneOutward.Y * sign,
-                             straightPlaneOutward.Z * sign);
         straightPlaneOutward =
             NXOpen::Vector3d(-straightPlaneInward.X,
                              -straightPlaneInward.Y,
