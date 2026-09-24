@@ -178,15 +178,32 @@ static bool AddSourceSlots(Plan& p){
     }
     return true;
 }
+Vec RoundEndNormal(const Plan& p,bool end){
+    const auto& s=p.source;Vec normal=end?s.endCutNormal:s.startCutNormal;
+    if(Length(normal)<1e-9)return {1,0,0};Vec axis=end?s.spans.back().Tangent(1):s.spans.front().Tangent(0);
+    return {Dot(normal,axis),Dot(normal,Cross(s.normal,axis)),Dot(normal,s.widthDirection)};
+}
+double RoundEndX(const Plan& p,bool end,double y,double z){
+    Vec n=RoundEndNormal(p,end);double r=p.source.depth/2;return (end?p.length:0)-(n.y*(y-r)+n.z*(z-r))/n.x;
+}
+double RoundEndExtent(const Plan& p,bool end){Vec n=RoundEndNormal(p,end);return p.source.depth/2*std::hypot(n.y,n.z)/std::abs(n.x);}
+static void ValidateEnds(const Plan& p){
+    if(!p.source.round)return;
+    for(bool end:{false,true}){double extent=RoundEndExtent(p,end);if(extent<1e-8)continue;
+        if(p.segments.empty())throw std::runtime_error("斜端口须位于平直管段。");const auto& seg=end?p.segments.back():p.segments.front();int index=end?seg.beforeBend:seg.afterBend;
+        double cut=index<0?0:p.gap/2+std::max(0.,p.source.depth-p.source.thickness-p.radius)*std::tan(p.bends[index].angle/2);
+        if(extent+cut+.01*p.source.unitsPerMm>=seg.length)throw std::runtime_error("斜端口与弯曲区或切口相交，请加长端部直段或调整切口参数。");
+    }
+}
 Plan MakePlan(const Source& source,const Settings& settings){
     if(!settings.segmentArcs){auto p=BuildMachinePlan(source,settings);
         if(!AssignHoles(p))throw std::runtime_error("整体弯管模式仅保留直段内的完整孔槽；弯曲区或跨弯孔槽不能保证成型后孔形孔位，请改用圆弧多段伸直。");
-        if(!AddSourceSlots(p))throw std::runtime_error("转角切口与原孔槽冲突，已取消生成。");return p;
+        if(!AddSourceSlots(p))throw std::runtime_error("转角切口与原孔槽冲突，已取消生成。");ValidateEnds(p);return p;
     }
     // Keep the requested count and both end tangents. Shift interior tangent
     // stations together only when this avoids a hole without moving that hole.
     for(double phase:{0.,.1,-.1,.2,-.2,.3,-.3,.4,-.4,.48,-.48}){
-        auto p=BuildPlan(source,settings,phase);if(AssignHoles(p)&&AddSourceSlots(p)){p.adjustedCuts=phase!=0;return p;}
+        auto p=BuildPlan(source,settings,phase);if(AssignHoles(p)&&AddSourceSlots(p)){p.adjustedCuts=phase!=0;ValidateEnds(p);return p;}
     }
     throw std::runtime_error("孔槽与切口、连接折弯区或截面圆角冲突，无法保持原孔位。请减小/调整切口数；程序不会移动或删掉原孔。");
 }
@@ -227,8 +244,9 @@ std::vector<std::pair<Vec,Vec>> Preview(const Plan& p){
     if(p.source.round){
         double r=p.source.depth/2,ri=r-p.source.thickness,alpha=BridgeHalfAngle(p);
         auto at=[&](double x,double radius,double angle){return FlatPoint(p,x,r-radius*std::cos(angle),r+radius*std::sin(angle));};
-        for(double radius:{r,ri})for(double x:{0.,p.length})for(int i=0;i<64;++i)lines.push_back({at(x,radius,2*pi*i/64),at(x,radius,2*pi*(i+1)/64)});
-        for(int i=0;i<8;++i)lines.push_back({at(0,r,2*pi*i/8),at(p.length,r,2*pi*i/8)});
+        auto endPoint=[&](bool end,double radius,double angle){double y=r-radius*cos(angle),z=r+radius*sin(angle);return FlatPoint(p,RoundEndX(p,end,y,z),y,z);};
+        for(double radius:{r,ri})for(bool end:{false,true})for(int i=0;i<64;++i)lines.push_back({endPoint(end,radius,2*pi*i/64),endPoint(end,radius,2*pi*(i+1)/64)});
+        for(int i=0;i<8;++i)lines.push_back({endPoint(false,r,2*pi*i/8),endPoint(true,r,2*pi*i/8)});
         for(const auto& b:p.bends)for(double radius:{r,ri}){
             auto x=[&](double angle,bool right){double y=r-radius*cos(angle),spread=std::max(0.,y-p.source.thickness-p.radius)*std::tan(b.angle/2);return right?b.start+b.allowance+p.gap/2+spread:b.start-p.gap/2-spread;};
             for(bool right:{false,true})for(int i=0;i<64;++i){double a=alpha+(2*pi-2*alpha)*i/64,c=alpha+(2*pi-2*alpha)*(i+1)/64;lines.push_back({at(x(a,right),radius,a),at(x(c,right),radius,c)});}

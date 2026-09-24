@@ -41,6 +41,7 @@
 #include <uf_part.h>
 #include <algorithm>
 #include <iomanip>
+
 #include <locale>
 #include <set>
 #include <sstream>
@@ -152,6 +153,21 @@ tag_t RevolvedTriangle(const std::vector<Vec>& points,Vec center,Vec normal,doub
     for(auto curve:curves)Check(UF_OBJ_set_blank_status(curve,UF_OBJ_BLANKED));return body;
 }
 int Contains(tag_t body,Vec q){double xyz[]={q.x,q.y,q.z};int status=0;Check(UF_MODL_ask_point_containment(xyz,body,&status));return status;}
+void TrimRoundEnds(const Plan& p,tag_t body){
+    if(!p.source.round)return;double r=p.source.depth/2,u=p.source.unitsPerMm;Vec axis=p.source.spans.front().Tangent(0),inside=Cross(p.source.normal,axis);
+    for(bool end:{false,true}){double extent=RoundEndExtent(p,end);if(extent<1e-8*u)continue;
+        Vec local=RoundEndNormal(p,end),normal=axis*local.x+inside*local.y+p.source.widthDirection*local.z,center=FlatPoint(p,end?p.length:0,r,r);
+        double q[]={center.x,center.y,center.z},n[]={normal.x,normal.y,normal.z};tag_t plane=0,feature=0;Check(UF_MODL_create_plane(q,n,&plane));Check(UF_OBJ_set_blank_status(plane,UF_OBJ_BLANKED));
+        Vec keep=FlatPoint(p,end?p.length-extent-.005*u:extent+.005*u,p.source.thickness/2,r);
+        auto* session=Session::GetSession();auto mark=session->SetUndoMark(Session::MarkVisibilityInvisible,"round end trim direction");
+        try{Check(UF_MODL_trim_body(body,plane,0,&feature));if(Contains(body,keep)!=1){session->UndoToMark(mark,nullptr);Check(UF_MODL_trim_body(body,plane,1,&feature));}
+            if(Contains(body,keep)!=1)throw std::runtime_error("圆管斜端口裁切方向检查失败。");session->DeleteUndoMark(mark,nullptr);
+        }catch(...){session->DeleteUndoMark(mark,nullptr);throw;}
+        for(int i=0;i<24;++i){double angle=2*pi*(i+.17)/24,rho=r-p.source.thickness/2,y=r-rho*cos(angle),z=r+rho*sin(angle),x=RoundEndX(p,end,y,z);
+            if(Contains(body,FlatPoint(p,x,y,z))!=3||Contains(body,FlatPoint(p,x+(end?-.002:.002)*u,y,z))!=1||Contains(body,FlatPoint(p,x+(end?.002:-.002)*u,y,z))!=2)throw std::runtime_error("圆管斜端口形状或壁厚检查失败。");
+        }
+    }
+}
 Vec SourceMaterialPoint(const Plan& p,const SourceSlot& s,double x,double depth,double z){
     double y=s.pathRadius?s.pathRadius-std::sqrt((s.pathRadius-depth)*(s.pathRadius-depth)-x*x):(depth+std::abs(x)*std::sqrt(1-s.cornerCos*s.cornerCos))/s.cornerCos;
     return SourceSlotPoint(p,s,x,y,z);
@@ -208,15 +224,17 @@ void CutSourceSlots(const Plan& p){
 }
 
 }
-tag_t Create(const Plan& p){
+tag_t Create(const Plan& p,std::vector<tag_t>* construction){
     auto* part=Session::GetSession()->Parts()->Work();
     std::set<tag_t> before;for(auto* f:part->Features()->GetFeatures())before.insert(f->Tag());
     double w=p.source.width,d=p.source.depth,t=p.source.thickness,u=p.source.unitsPerMm;
     Vec axis=p.source.spans.front().Tangent(0),width=p.source.widthDirection;
     auto at=[&](double x,double y,double z){return FlatPoint(p,x,y,z);};
-    tag_t body=RoundedPrism(p,0,0,d,w,p.source.cornerRadius,0,p.length);
-    tag_t hollow=RoundedPrism(p,t,t,d-2*t,w-2*t,std::max(0.,p.source.cornerRadius-t),-u,p.length+2*u);
-    tag_t feature=0;Check(UF_MODL_subtract_bodies_with_retained_options(body,hollow,false,false,&feature));
+    double start=p.source.round?RoundEndExtent(p,false):0,end=p.source.round?RoundEndExtent(p,true):0;
+    tag_t body=RoundedPrism(p,0,0,d,w,p.source.cornerRadius,-start,p.length+start+end);
+    tag_t hollow=RoundedPrism(p,t,t,d-2*t,w-2*t,std::max(0.,p.source.cornerRadius-t),-start-u,p.length+start+end+2*u);
+    tag_t feature=0;try{Check(UF_MODL_subtract_bodies_with_retained_options(body,hollow,false,false,&feature));}catch(const std::exception& e){throw std::runtime_error(std::string("伸直空心管体创建失败：")+e.what());}
+    TrimRoundEnds(p,body);
     for(const auto& bend:p.bends){
         auto points=Notch(p,bend,u);for(auto& q:points)q=at(q.x,q.y,-u);
         tag_t cut=Prism(points,width,w+2*u,u);
@@ -246,18 +264,18 @@ tag_t Create(const Plan& p){
     }
     double removed=volumeBefore-Volume(body)*1e9*std::pow(u,3);
     if(std::abs(removed-holeVolume)>std::max(.0001*u*u*u,holeVolume*1e-6))throw std::runtime_error("展开后的孔槽去料体积不一致，已取消生成。");
-    CutSourceSlots(p);
+    try{CutSourceSlots(p);}catch(const std::exception& e){throw std::runtime_error(std::string("原管间隙槽创建失败：")+e.what());}
     output->SetName(NXString(p.source.round?"圆管伸直_下料实体":"方通伸直_下料实体",NXString::UTF8));
     std::vector<tag_t> members;for(auto* f:part->Features()->GetFeatures())if(!before.count(f->Tag())&&!f->IsInternal())members.push_back(f->Tag());
-    char groupName[]="FanTonSenZi";tag_t group=0;Check(UF_MODL_create_set_of_feature(groupName,members.data(),static_cast<int>(members.size()),false,&group));
-    auto* object=dynamic_cast<NXObject*>(NXObjectManager::Get(group));
-    object->SetName(NXString(std::string(p.source.round?"圆管伸直_":"方通伸直_")+(p.machineArcs.empty()?"":"弯管机_")+std::to_string(p.bends.size())+"切口",NXString::UTF8));
+    if(construction)*construction=std::move(members);
+    auto* object=output;
     object->SetUserAttribute("FTSZ_HoleWallCount",-1,static_cast<int>(p.source.holes.size()),Update::OptionNow);
     object->SetUserAttribute("FTSZ_RoundTube",-1,p.source.round?1:0,Update::OptionNow);
     object->SetUserAttribute("FTSZ_SourceSlots",-1,p.settings.cutSource?1:0,Update::OptionNow);
     object->SetUserAttribute("FTSZ_SegmentArcs",-1,p.settings.segmentArcs?1:0,Update::OptionNow);
     object->SetUserAttribute("FTSZ_TubeKFactor",-1,p.settings.tubeKFactor,Update::OptionNow);
     object->SetUserAttribute("FTSZ_MachineArcCount",-1,static_cast<int>(p.machineArcs.size()),Update::OptionNow);
+    if(p.source.round)object->SetUserAttribute("FTSZ_EndTipLengthMm",-1,(p.length+start+end)/u,Update::OptionNow);
     if(p.source.round)object->SetUserAttribute("FTSZ_BridgeWidth_mm",-1,p.settings.bridgeWidthMm,Update::OptionNow);
     object->SetUserAttribute("FTSZ_SectionRadius_mm",-1,p.source.cornerRadius/u,Update::OptionNow);
     object->SetUserAttribute("FTSZ_Length_mm",-1,p.length/u,Update::OptionNow);
@@ -266,8 +284,7 @@ tag_t Create(const Plan& p){
     object->SetUserAttribute("FTSZ_KFactor",-1,p.settings.kFactor,Update::OptionNow);
     object->SetUserAttribute("FTSZ_Gap_mm",-1,p.settings.gapMm,Update::OptionNow);
     object->SetUserAttribute("FTSZ_Approximation_mm",-1,p.errorMm,Update::OptionNow);
-    if(p.settings.hideSource&&!p.settings.cutSource)Check(UF_OBJ_set_blank_status(p.source.body,UF_OBJ_BLANKED));
-    if(p.settings.cutSource)Check(UF_OBJ_set_blank_status(p.source.body,UF_OBJ_NOT_BLANKED));
+    Check(UF_OBJ_set_blank_status(p.source.body,p.settings.hideSource&&!p.settings.cutSource?UF_OBJ_BLANKED:UF_OBJ_NOT_BLANKED));
     Check(UF_OBJ_set_color(body,186));return body;
 }
 }

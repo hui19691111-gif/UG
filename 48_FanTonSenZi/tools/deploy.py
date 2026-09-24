@@ -54,14 +54,28 @@ def add_menu(data, ribbon=False):
     assert text.count(anchor) == 1
     return text.replace(anchor, newline.join(block)+newline+newline+anchor).encode('gb18030')
 
-names = ['FanTonSenZi.dll', 'FanTonSenZi.dlx', 'FanTonSenZi.bmp']
+def merge_configuration(data):
+    current = ET.fromstring(data)
+    assert (build/'CustomFeatureConfiguration.xml').read_bytes() == (source/'CustomFeatureConfiguration.xml').read_bytes()
+    addition = ET.parse(build/'CustomFeatureConfiguration.xml').getroot()[0]
+    matches = [e for e in current if e.get('FeatureClass') == addition.get('FeatureClass')]
+    assert len(matches) <= 1
+    for entry in matches:
+        current.remove(entry)
+    current.append(addition)
+    ET.register_namespace('xsi','http://www.w3.org/2001/XMLSchema-instance')
+    ET.indent(current,space='    ')
+    return ET.tostring(current,encoding='utf-8',xml_declaration=True)
+
+names = ['FanTonSenZi.dll', 'FanTonSenZiCore.dll', 'FanTonSenZi.dlx', 'FanTonSenZi.bmp']
 payload = {'application/'+name: (build/name).read_bytes() for name in names}
+payload['application/CustomFeatureConfiguration.xml'] = merge_configuration((root/'application/CustomFeatureConfiguration.xml').read_bytes())
 for name in names:
     if not name.endswith('.dll'):
         assert payload['application/'+name] == (source/name).read_bytes(), 'Release resource is stale; rebuild first'
 protection = {name:verify_pe(payload['application/'+name],name=='FanTonSenZi.dll') for name in names if name.endswith('.dll')}
 ns = {'v':'http://schemas.microsoft.com/developer/msbuild/2003'}
-for target in ['FanTonSenZi']:
+for target in ['FanTonSenZi','FanTonSenZiCore']:
     project = ET.parse(build_root/(target+'.vcxproj'))
     release = next(g for g in project.findall('v:ItemDefinitionGroup',ns) if "=='Release|x64'" in g.get('Condition',''))
     assert 'ZH_PROTECTED_BUILD=1' in release.findtext('v:ClCompile/v:PreprocessorDefinitions',namespaces=ns)
@@ -95,7 +109,7 @@ command = {
     'menuButton': 'FanTonSenZi', 'actionsName': 'FanTonSenZi',
     'exportsVerified': True, 'sha256': digest(payload['application/FanTonSenZi.dll']),
     'dlxFiles': 'application/FanTonSenZi.dlx', 'iconFiles': 'application/FanTonSenZi.bmp',
-    'runtimeFiles': [],
+    'runtimeFiles': ['application/FanTonSenZiCore.dll','application/CustomFeatureConfiguration.xml'],
 }
 existing = [c for c in package['commands'] if c.get('launcherName') == 'FanTonSenZi']
 assert len(existing) <= 1
@@ -138,7 +152,8 @@ try:
         assert (root/rel).read_bytes() == data
         actual = next(e for e in installed_hashes if e['path']==rel)
         assert actual['sha256'] == digest(data) and actual['bytes'] == len(data)
-    verify_pe((root/'application/FanTonSenZi.dll').read_bytes())
+    for name in ['FanTonSenZi','FanTonSenZiCore']:
+        verify_pe((root/('application/'+name+'.dll')).read_bytes(),name=='FanTonSenZi')
     actual_package = json.loads(manifest_paths[1].read_text(encoding='utf-8'))
     assert next(c for c in actual_package['commands'] if c.get('launcherName')=='FanTonSenZi')['sha256'] == command['sha256']
 except Exception:
@@ -150,6 +165,9 @@ except Exception:
     for p in written_manifests:
         p.write_bytes(old_manifests[p])
     raise
+
+configuration = repo/'deployment_reference/application/CustomFeatureConfiguration.xml'
+configuration.write_bytes(merge_configuration(configuration.read_bytes()))
 
 # Source menu references track the added command without replacing other work.
 for name in ['UGZH_design.men','UGZH_design.rtb']:

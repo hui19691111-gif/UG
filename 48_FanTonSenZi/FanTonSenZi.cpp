@@ -1,4 +1,8 @@
 #include "FanTonSenZi.hpp"
+#include "TubeCustomFeature.hpp"
+#include <NXOpen/Features_CustomFeature.hxx>
+#include <NXOpen/Features_CustomFeatureClassManager.hxx>
+#include <NXOpen/NXObjectManager.hxx>
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_Label.hxx>
 #include <NXOpen/BlockStyler_SelectObject.hxx>
@@ -40,6 +44,8 @@ struct QuietDisplay {
 };
 }
 FanTonSenZiDialog::FanTonSenZiDialog(){
+    tube_straighten::RequireFeatureClass();
+    edited_=NXOpen::Session::GetSession()->CustomFeatureClassManager()->GetEditedCustomFeature();
     dialog_=NXOpen::UI::GetUI()->CreateDialog((ModuleDir()/"FanTonSenZi.dlx").u8string().c_str());
     dialog_->AddInitializeHandler(NXOpen::make_callback(this,&FanTonSenZiDialog::Initialize));
     dialog_->AddDialogShownHandler(NXOpen::make_callback(this,&FanTonSenZiDialog::Shown));
@@ -50,7 +56,7 @@ FanTonSenZiDialog::FanTonSenZiDialog(){
     dialog_->AddCancelHandler(NXOpen::make_callback(this,&FanTonSenZiDialog::Cancel));
 }
 FanTonSenZiDialog::~FanTonSenZiDialog(){UF_DISP_refresh();delete dialog_;}
-void FanTonSenZiDialog::Launch(){dialog_->Launch();}
+void FanTonSenZiDialog::Launch(){dialog_->LaunchInDialogMode(edited_?NXOpen::BlockStyler::BlockDialog::DialogModeEdit:NXOpen::BlockStyler::BlockDialog::DialogModeCreate);}
 void FanTonSenZiDialog::Initialize(){
     shown_=false;initialized_=false;
     try{
@@ -65,18 +71,30 @@ void FanTonSenZiDialog::Initialize(){
     }catch(const NXOpen::NXException& e){Error(e.Message());}catch(const std::exception& e){Error(e.what());}catch(...){Error("初始化方通伸直失败。");}
 }
 void FanTonSenZiDialog::Shown(){
-    try{if(!initialized_)return;shown_=true;Guard guard(updating_);for(int i=0;i<6;++i)Props(numbers_[i]->GetProperties())->SetDouble("Value",zhihui_dialog_memory::ReadDouble(memory,keys[i],defaults[i]));edges_->Focus();Preview();}
+    try{if(!initialized_)return;shown_=true;Guard guard(updating_);
+        if(edited_){
+            tag_t face=0;auto s=tube_straighten::ReadFeature(edited_,face);
+            double values[]={static_cast<double>(s.divisions),s.radiusMm,s.kFactor,s.gapMm,s.bridgeWidthMm,s.tubeKFactor};
+            for(int i=0;i<6;++i)Props(numbers_[i]->GetProperties())->SetDouble("Value",values[i]);
+            Props(segmentArcs_->GetProperties())->SetLogical("Value",s.segmentArcs);Props(cutSource_->GetProperties())->SetLogical("Value",s.cutSource);Props(hide_->GetProperties())->SetLogical("Value",s.hideSource);
+            Select(edges_)->SetSelectedObjects({NXOpen::NXObjectManager::Get(face)});
+        }else for(int i=0;i<6;++i)Props(numbers_[i]->GetProperties())->SetDouble("Value",zhihui_dialog_memory::ReadDouble(memory,keys[i],defaults[i]));
+        edges_->Focus();Preview();}
     catch(const NXOpen::NXException& e){Error(e.Message());}catch(const std::exception& e){Error(e.what());}catch(...){Error("显示方通伸直失败。");}
 }
 int FanTonSenZiDialog::Filter(NXOpen::BlockStyler::UIBlock*,NXOpen::TaggedObject* object){
     try{auto* face=dynamic_cast<NXOpen::Face*>(object);if(face&&!face->IsOccurrence())return UF_UI_SEL_ACCEPT;}
     catch(const NXOpen::NXException& e){Log(e.Message());}catch(...){Log("Face filter failed");}return UF_UI_SEL_REJECT;
 }
-tube_straighten::Plan FanTonSenZiDialog::ReadPlan(){
-    std::vector<tag_t> tags;for(auto* o:Select(edges_)->GetSelectedObjects())tags.push_back(o->Tag());tube_straighten::Settings s;
+tube_straighten::Settings FanTonSenZiDialog::ReadSettings(){
+    tube_straighten::Settings s;
     s.segmentArcs=Props(segmentArcs_->GetProperties())->GetLogical("Value");
-    if(s.segmentArcs){double n=Props(numbers_[0]->GetProperties())->GetDouble("Value");if(!std::isfinite(n)||n<2||n>180||std::abs(n-std::round(n))>1e-8)throw std::runtime_error("圆弧分段数须为 2–180 的整数。");s.divisions=static_cast<int>(n);}
-    s.radiusMm=Props(numbers_[1]->GetProperties())->GetDouble("Value");s.kFactor=Props(numbers_[2]->GetProperties())->GetDouble("Value");s.gapMm=Props(numbers_[3]->GetProperties())->GetDouble("Value");s.bridgeWidthMm=Props(numbers_[4]->GetProperties())->GetDouble("Value");s.tubeKFactor=Props(numbers_[5]->GetProperties())->GetDouble("Value");s.cutSource=Props(cutSource_->GetProperties())->GetLogical("Value");s.hideSource=Props(hide_->GetProperties())->GetLogical("Value");if(tags.size()!=1)throw std::runtime_error("请选择方通完整侧平面，或圆管上的一个面。");return tube_straighten::MakePlan(tube_straighten::InspectFace(tags.front()),s);
+    {double n=Props(numbers_[0]->GetProperties())->GetDouble("Value");if(!std::isfinite(n)||n<2||n>180||std::abs(n-std::round(n))>1e-8)throw std::runtime_error("圆弧分段数须为 2–180 的整数。");s.divisions=static_cast<int>(n);}
+    s.radiusMm=Props(numbers_[1]->GetProperties())->GetDouble("Value");s.kFactor=Props(numbers_[2]->GetProperties())->GetDouble("Value");s.gapMm=Props(numbers_[3]->GetProperties())->GetDouble("Value");s.bridgeWidthMm=Props(numbers_[4]->GetProperties())->GetDouble("Value");s.tubeKFactor=Props(numbers_[5]->GetProperties())->GetDouble("Value");s.cutSource=Props(cutSource_->GetProperties())->GetLogical("Value");s.hideSource=Props(hide_->GetProperties())->GetLogical("Value");return s;
+}
+tube_straighten::Plan FanTonSenZiDialog::ReadPlan(){
+    auto selected=Select(edges_)->GetSelectedObjects();if(selected.size()!=1)throw std::runtime_error("请选择方通完整侧平面，或圆管上的一个面。");
+    return tube_straighten::MakePlan(tube_straighten::InspectFace(selected.front()->Tag()),ReadSettings());
 }
 void FanTonSenZiDialog::Status(const std::string& s){auto split=s.find('\n');Props(status_->GetProperties())->SetString("Label",s.substr(0,split).c_str());Props(detail_->GetProperties())->SetString("Label",split==std::string::npos?" ":s.substr(split+1).c_str());}
 void FanTonSenZiDialog::Error(const std::string& s)noexcept{Log(s);try{NXOpen::UI::GetUI()->NXMessageBox()->Show("方通伸直",NXOpen::NXMessageBox::DialogTypeError,s.c_str());}catch(...){}}
@@ -95,6 +113,7 @@ void FanTonSenZiDialog::Preview(){
     else info<<"方通 "<<p.source.width/u<<" × "<<p.source.depth/u;
     info<<"；壁厚 "<<p.source.thickness/u<<" mm\n伸直长度 "<<p.length/u<<" mm；"<<p.bends.size()<<" 切口";
     if(segmented)info<<"；分段偏差 ≤ "<<p.errorMm<<" mm";else info<<"；"<<p.machineArcs.size()<<" 段圆弧整体伸直；弯管 K="<<p.settings.tubeKFactor;
+    if(p.source.round&&(Length(p.source.startCutNormal)>.1||Length(p.source.endCutNormal)>.1))info<<"；保留斜端口，含尖端总长 "<<(p.length+tube_straighten::RoundEndExtent(p,false)+tube_straighten::RoundEndExtent(p,true))/u<<" mm";
     if(!p.source.round)info<<"；保留 "<<p.source.holes.size()<<" 处管壁孔槽"<<(p.adjustedCuts?"（已避孔调整分段）":"");if(p.settings.cutSource)info<<"；原管同步开槽 "<<p.settings.gapMm<<" mm";Status(info.str());
 }
 int FanTonSenZiDialog::Update(NXOpen::BlockStyler::UIBlock*){
@@ -104,11 +123,12 @@ int FanTonSenZiDialog::Update(NXOpen::BlockStyler::UIBlock*){
 int FanTonSenZiDialog::Apply(){
     if(!initialized_||!shown_||updating_)return 1;Guard guard(updating_);auto* session=NXOpen::Session::GetSession();
     try{
-        auto plan=ReadPlan();auto mark=session->SetUndoMark(NXOpen::Session::MarkVisibilityVisible,"方通伸直");
-        {QuietDisplay quiet;try{tube_straighten::Create(plan);}catch(...){try{session->UndoToMark(mark,nullptr);session->DeleteUndoMark(mark,nullptr);}catch(const NXOpen::NXException& e){Log("回滚失败："+std::string(e.Message()));}throw;}}
-        for(int i=0;i<6;++i)zhihui_dialog_memory::SaveDouble(memory,keys[i],numbers_[i]);Select(edges_)->SetSelectedObjects({});UF_DISP_refresh();Controls(plan.settings.segmentArcs,true,true);
+        auto selected=Select(edges_)->GetSelectedObjects();if(selected.size()!=1)throw std::runtime_error("请选择方通完整侧平面，或圆管上的一个面。");
+        auto settings=ReadSettings();tube_straighten::Plan plan;auto mark=session->SetUndoMark(NXOpen::Session::MarkVisibilityVisible,"方通伸直");
+        {QuietDisplay quiet;try{plan=tube_straighten::CreateFeature(selected[0]->Tag(),settings,edited_,mark).plan;}catch(...){try{session->UndoToMark(mark,nullptr);session->DeleteUndoMark(mark,nullptr);}catch(const NXOpen::NXException& e){Log("回滚失败："+std::string(e.Message()));}throw;}}
+        for(int i=0;i<6;++i)zhihui_dialog_memory::SaveDouble(memory,keys[i],numbers_[i]);if(!edited_)Select(edges_)->SetSelectedObjects({});UF_DISP_refresh();Controls(plan.settings.segmentArcs,true,true);
         if(!plan.machineArcs.empty())Status(plan.bends.empty()?"已生成供弯管机成型的连续直管，圆弧区域未开槽。\n原管已保留；起始端与原管重合，直段孔槽保持原尺寸。":(plan.settings.cutSource?"已整体伸直圆弧并切出转角切口，原管仅在转角同步开槽。\n圆弧区域保持连续管壁；整次操作可一次撤销。":"已整体伸直圆弧，真实转角保留原开槽方式。\n圆弧区域保持连续管壁；原模型已保留。"));
-        else Status(plan.settings.cutSource?"已在原管切间隙槽，并生成伸直下料件。\n原管保持原形状和连接壁厚；可一次撤销两项结果。":(plan.source.round?"已生成圆管伸直实体，外侧连接带保留完整壁厚。\n起始端与原管重合；连接带宽按外圆弧长计。":"已生成方通伸直实体，保留外侧整面连接壁。\n原模型已保留；孔槽随所在段展开，切口避开孔槽。"));edges_->Focus();return 0;
+        else Status(plan.settings.cutSource?"已在原管切间隙槽，并生成伸直下料件。\n原管保持原形状和连接壁厚；可一次撤销两项结果。":(plan.source.round?"已生成圆管伸直实体，外侧连接带保留完整壁厚。\n起始端与原管重合；连接带宽按外圆弧长计。":"已生成方通伸直实体，保留外侧整面连接壁。\n原模型已保留；孔槽随所在段展开，切口避开孔槽。"));if(edited_)Status("已更新方通/圆管伸直自定义特征。\n参数已保存，原管开槽与下料件已同步更新。");edges_->Focus();return 0;
     }catch(const NXOpen::NXException& e){Error(e.Message());}catch(const std::exception& e){Error(e.what());}catch(...){Error("创建方通伸直失败。");}UF_DISP_refresh();return 1;
 }
 int FanTonSenZiDialog::Cancel(){try{UF_DISP_refresh();return 0;}catch(const NXOpen::NXException& e){Log(e.Message());}catch(...){Log("Cancel failed");}return 0;}

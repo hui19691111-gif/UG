@@ -8,6 +8,6 @@ Source InspectFace(tag_t face);
 Source InspectRoundFace(tag_t face);
 bool IsRoundCap(tag_t face);
 // Caller owns the NX undo transaction, including failure rollback.
-tag_t Create(const Plan&);
+tag_t Create(const Plan&,std::vector<tag_t>* construction=nullptr);
 double Volume(tag_t body);
 }

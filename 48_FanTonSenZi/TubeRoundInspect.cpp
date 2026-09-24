@@ -18,7 +18,7 @@ namespace {
 using namespace NXOpen;
 Vec V(const double* p){return {p[0],p[1],p[2]};}
 struct Surface {int type=0;Vec p,n;double r=0,minor=0;};
-Surface Data(tag_t face){int type,sign;double p[3],n[3],box[6],r=0,minor=0;Check(UF_MODL_ask_face_data(face,&type,p,n,box,&r,&minor,&sign));return {type,V(p),Unit(V(n)),r,type==19?minor:0};}
+Surface Data(tag_t face);
 struct Circle {Vec center,normal;double radius=0,angle=0;};
 bool CircleEdge(tag_t edge,Circle& c){
     struct Owner{UF_EVAL_p_t p=nullptr;~Owner(){if(p)UF_EVAL_free(p);}} e;
@@ -26,24 +26,49 @@ bool CircleEdge(tag_t edge,Circle& c){
     UF_EVAL_arc_t a;double limits[2];Check(UF_EVAL_ask_arc(e.p,&a));Check(UF_EVAL_ask_limits(e.p,limits));
     c={V(a.center),Unit(Cross(V(a.x_axis),V(a.y_axis))),a.radius,std::abs(limits[1]-limits[0])};return true;
 }
-bool CircleLoop(uf_list_p_t edges,Circle& circle,double tol){
+Surface Data(tag_t face){
+    int type,sign;double p[3],n[3],box[6],r=0,minor=0;Check(UF_MODL_ask_face_data(face,&type,p,n,box,&r,&minor,&sign));Surface s={type,V(p),Unit(V(n)),r,type==19?minor:0};
+    // Imported revolved tori can report a point displaced along their axis.
+    // Exact minor-circle rims locate the torus equatorial plane independently.
+    if(type==19){auto* f=dynamic_cast<Face*>(NXObjectManager::Get(face));for(auto* edge:f->GetEdges()){Circle c;if(CircleEdge(edge->Tag(),c)&&std::abs(c.radius-minor)<1e-7&&std::abs(Dot(c.normal,s.n))<1e-7){s.p=s.p+s.n*Dot(c.center-s.p,s.n);break;}}}
+    return s;
+}
+struct Rim {Vec center,normal,x;double minor=0,major=0;};
+bool RimEdge(tag_t edge,Rim& c,double& angle){
+    Circle circle;if(CircleEdge(edge,circle)){c={circle.center,circle.normal,{},circle.radius,circle.radius};angle=circle.angle;return true;}
+    struct Owner{UF_EVAL_p_t p=nullptr;~Owner(){if(p)UF_EVAL_free(p);}} e;Check(UF_EVAL_initialize_2(edge,&e.p));logical ellipse=false;Check(UF_EVAL_is_ellipse(e.p,&ellipse));if(!ellipse)return false;
+    UF_EVAL_ellipse_t a;double limits[2];Check(UF_EVAL_ask_ellipse(e.p,&a));Check(UF_EVAL_ask_limits(e.p,limits));
+    c={V(a.center),Unit(Cross(V(a.x_axis),V(a.y_axis))),Unit(V(a.x_axis)),a.minor,a.major};angle=std::abs(limits[1]-limits[0]);return true;
+}
+bool RimLoop(uf_list_p_t edges,Rim& circle,double tol){
     int count=0;Check(UF_MODL_ask_list_count(edges,&count));if(!count)return false;double angle=0;
-    for(int i=0;i<count;++i){tag_t edge=0;Circle c;Check(UF_MODL_ask_list_item(edges,i,&edge));if(!CircleEdge(edge,c))return false;
-        if(i&&(Length(c.center-circle.center)>tol||std::abs(c.radius-circle.radius)>tol||std::abs(Dot(c.normal,circle.normal))<1-1e-7))return false;
-        if(!i)circle=c;angle+=c.angle;
+    for(int i=0;i<count;++i){tag_t edge=0;Rim c;double sweep=0;Check(UF_MODL_ask_list_item(edges,i,&edge));if(!RimEdge(edge,c,sweep))return false;
+        if(i&&(Length(c.center-circle.center)>tol||std::abs(c.minor-circle.minor)>tol||std::abs(c.major-circle.major)>tol||std::abs(Dot(c.normal,circle.normal))<1-1e-7||(c.major-c.minor>tol&&std::abs(Dot(c.x,circle.x))<1-1e-7)))return false;
+        if(!i)circle=c;angle+=sweep;
     }return std::abs(angle-2*pi)<1e-6;
 }
 struct End {tag_t face=0;Vec center,normal;double outer=0,inner=0;};
+bool ObliqueSupport(uf_list_p_t edges,const Rim& rim,double tol){
+    int count=0;Check(UF_MODL_ask_list_count(edges,&count));
+    for(int i=0;i<count;++i){tag_t edge=0;Check(UF_MODL_ask_list_item(edges,i,&edge));
+        struct Owner{uf_list_p_t p=nullptr;~Owner(){if(p)UF_MODL_delete_list(&p);}} faces;Check(UF_MODL_ask_edge_faces(edge,&faces.p));int n=0;Check(UF_MODL_ask_list_count(faces.p,&n));bool found=false;
+        for(int j=0;j<n;++j){tag_t tag=0;Check(UF_MODL_ask_list_item(faces.p,j,&tag));auto f=Data(tag);if(f.type!=16)continue;
+            double cosine=std::abs(Dot(f.n,rim.normal));Vec projected=f.n-rim.normal*Dot(f.n,rim.normal);
+            if(cosine>1e-6&&std::abs(f.r-rim.minor)<tol&&Length(Cross(rim.center-f.p,f.n))<tol&&std::abs(rim.major*cosine-rim.minor)<tol&&Length(projected)>1e-7&&std::abs(Dot(Unit(projected),rim.x))>1-1e-7)found=true;
+        }if(!found)return false;
+    }return true;
+}
 bool EndCap(tag_t face,double tol,End& cap){
     auto fd=Data(face);if(fd.type!=22)return false;
     struct Owner{uf_loop_p_t p=nullptr;~Owner(){if(p)UF_MODL_delete_loop_list(&p);}} loops;
     Check(UF_MODL_ask_face_loops(face,&loops.p));int count=0;Check(UF_MODL_ask_loop_list_count(loops.p,&count));if(count!=2)return false;
-    Circle a,b;bool outer=false,inner=false;
+    Rim a,b;bool outer=false,inner=false;uf_list_p_t outerEdges=nullptr,innerEdges=nullptr;
     for(int i=0;i<count;++i){int type=0;uf_list_p_t edges=nullptr;Check(UF_MODL_ask_loop_list_item(loops.p,i,&type,&edges));
-        if(type==1)outer=CircleLoop(edges,a,tol);else if(type==2)inner=CircleLoop(edges,b,tol);
+        if(type==1){outer=RimLoop(edges,a,tol);outerEdges=edges;}else if(type==2){inner=RimLoop(edges,b,tol);innerEdges=edges;}
     }
-    if(!outer||!inner||a.radius-b.radius<=tol||b.radius<=tol||Length(a.center-b.center)>tol||std::abs(Dot(a.normal,fd.n))<1-1e-7)return false;
-    cap={face,a.center,fd.n,a.radius,b.radius};return true;
+    if(!outer||!inner||a.minor-b.minor<=tol||b.minor<=tol||Length(a.center-b.center)>tol||std::abs(Dot(a.normal,fd.n))<1-1e-7||std::abs(Dot(b.normal,fd.n))<1-1e-7||std::abs(a.major/a.minor-b.major/b.minor)>1e-7)return false;
+    if(a.major-a.minor>tol&&(!ObliqueSupport(outerEdges,a,tol)||!ObliqueSupport(innerEdges,b,tol)))return false;
+    cap={face,a.center,fd.n,a.minor,b.minor};return true;
 }
 bool SameSurface(const Surface& a,const Surface& b,double tol){
     if(a.type!=b.type||std::abs(a.r-b.r)>tol||std::abs(a.minor-b.minor)>tol||std::abs(Dot(a.n,b.n))<1-1e-7)return false;
@@ -72,7 +97,7 @@ Source InspectRoundFace(tag_t tag){
     if(!part||!face||face->IsOccurrence()||face->OwningPart()!=part||!face->GetBody()->IsSolidBody())throw std::runtime_error("请选择工作零件内圆管上的一个面。");
     auto* body=face->GetBody();Source s;s.body=body->Tag();s.round=true;int units=0;Check(UF_PART_ask_units(part->Tag(),&units));s.unitsPerMm=units==ENGLISH?1/25.4:1;double tol=1e-4*s.unitsPerMm;
     std::vector<End> ends;for(auto* f:body->GetFaces()){End e;if(EndCap(f->Tag(),tol,e))ends.push_back(e);}
-    if(ends.size()!=2)throw std::runtime_error("圆管须有两个完整的圆环端口；暂不支持封口、分支、斜端口或孔槽。");
+    if(ends.size()!=2)throw std::runtime_error("圆管须有两个完整的平面环形端口（支持直段斜切口）；暂不支持封口、分支、缺口或孔槽。");
     if(ends[1].face==tag)std::swap(ends[0],ends[1]);
     double r=ends[0].outer,ri=ends[0].inner;if(std::abs(r-ends[1].outer)>tol||std::abs(ri-ends[1].inner)>tol)throw std::runtime_error("圆管两端外径或壁厚不一致。");
     s.width=s.depth=2*r;s.cornerRadius=r;s.thickness=r-ri;
@@ -110,7 +135,12 @@ Source InspectRoundFace(tag_t tag){
     }
     Vec normal;for(size_t i=0;i<s.spans.size();++i){if(s.spans[i].radius){normal=s.spans[i].normal;break;}if(i){auto n=Cross(s.spans[i-1].Tangent(1),s.spans[i].Tangent(0));if(Length(n)>1e-7){normal=Unit(n);break;}}}
     if(Length(normal)<.9)throw std::runtime_error("圆管已是直管，无需伸直。");s.normal=s.widthDirection=normal;
-    if(std::abs(Dot(ends[0].normal,s.spans.front().Tangent(0)))<1-1e-7||std::abs(Dot(ends[1].normal,s.spans.back().Tangent(1)))<1-1e-7)throw std::runtime_error("圆管端口须垂直轴线。");
+    for(int i=0;i<2;++i){const auto& span=i?s.spans.back():s.spans.front();double cosine=std::abs(Dot(ends[i].normal,span.Tangent(i?1:0)));
+        if(cosine<1-1e-7){if(span.radius||cosine<1e-6)throw std::runtime_error("斜端口须位于平直管段且不能平行轴线。");
+            double extent=r*std::sqrt(1-cosine*cosine)/cosine;if(extent+.01*s.unitsPerMm>=Length(span.b-span.a))throw std::runtime_error("斜端口延伸到弯曲区，暂不支持。");
+            (i?s.endCutNormal:s.startCutNormal)=ends[i].normal;
+        }
+    }
     double length=0;for(size_t i=0;i<s.spans.size();++i){const auto& span=s.spans[i];for(double f:{0.,.5,1.})if(std::abs(Dot(span.Point(f)-s.spans.front().a,normal))>tol||(span.radius&&Dot(span.normal,normal)<1-1e-7))throw std::runtime_error("圆管目前支持同一平面同向弯曲，不支持 S 形和空间管。");
         if(i){auto a=s.spans[i-1].Tangent(1),b=span.Tangent(0);if((span.radius||s.spans[i-1].radius)&&Length(a-b)>1e-7)throw std::runtime_error("圆弧与相邻管段须相切。");}
         length+=span.radius?span.radius*span.angle:Length(span.b-span.a);

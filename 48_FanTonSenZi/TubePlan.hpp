@@ -32,6 +32,8 @@ struct Source {
     bool round=false;
     std::vector<Span> spans;
     Vec normal,widthDirection;
+    // Original planar round-tube end normals. Zero means a square end.
+    Vec startCutNormal,endCutNormal;
     double width=0,depth=0,thickness=0,cornerRadius=0,unitsPerMm=1;
     std::vector<Hole> holes;
 };
@@ -70,6 +72,9 @@ Vec ToFlatLocal(const Plan&,size_t segment,Vec point);
 Vec ToFolded(const Plan&,size_t segment,Vec local);
 Hole FlatHole(const Plan&,size_t hole);
 double BridgeHalfAngle(const Plan&);
+Vec RoundEndNormal(const Plan&,bool end);
+double RoundEndX(const Plan&,bool end,double y,double z);
+double RoundEndExtent(const Plan&,bool end);
 Vec SourceSlotPoint(const Plan&,const SourceSlot&,double x,double y,double z);
 double SourceSlotTop(const Plan&,const SourceSlot&,double x);
 std::pair<double,double> ProjectRange(const Hole&,Vec direction);
