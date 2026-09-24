@@ -51,6 +51,8 @@
 #include "ZiDonCuTuCurve.hpp"
 #include "ZiDonCuTuDimension.hpp"
 #include "ZiDonCuTuDrawing.hpp"
+#include "AssemblyDraftFilters.hpp"
+#include <iomanip>
 #include <NXOpen/Annotations_DimensionStyleBuilder.hxx>
 #include <NXOpen/Expression.hxx>
 #include <NXOpen/ExpressionCollection.hxx>
@@ -252,6 +254,7 @@ struct AssemblyDraftCandidate
 	std::string quantity;
 	std::string category;
 	int drawingSheetCount;
+	assembly_draft_filters::Metadata filterMetadata;
 };
 
 static std::vector<AssemblyDraftCandidate> g_selectedAssemblyDraftCandidates;
@@ -5413,6 +5416,65 @@ static const std::vector<FlatPatternDraftingInfo>& GetFlatPatternDraftingInfos(N
 	return g_flatPatternDraftingInfos;
 }
 
+static void KeepOnlySheetMetalBodiesForDrawing(
+	std::vector<NXOpen::TaggedObject*>& objects, NXOpen::Part* modelPart)
+{
+	const size_t inputCount = objects.size();
+	objects.erase(std::remove_if(objects.begin(), objects.end(),
+		[&](NXOpen::TaggedObject* object)
+		{
+			const char* reason = "not_solid_body";
+			std::string detail;
+			try
+			{
+				NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(object);
+				if (body != NULL && body->IsSolidBody())
+				{
+					reason = "not_valid_sheet_metal";
+					if (IsSheetMetalBodyInPart(modelPart, body))
+					{
+						reason = "no_usable_flat_pattern";
+						const std::vector<FlatPatternDraftingInfo>& infos = GetFlatPatternDraftingInfos(modelPart);
+						for (size_t i = 0; i < infos.size(); ++i)
+						{
+							const FlatPatternDraftingInfo& info = infos[i];
+							if (info.upwardBody != NULL && info.upwardBody->Tag() == body->Tag() &&
+								info.upwardFace != NULL && info.flatPattern != NULL &&
+								info.feature != NULL && !info.feature->Suppressed())
+							{
+								// Validate before independent-part creation and sheet grouping.
+								reason = "inner_bend_query_failed";
+								std::vector<NXOpen::Face*> faces;
+								std::vector<NXOpen::Features::SheetMetal::SheetmetalBendState> states;
+								modelPart->Features()->SheetmetalManager()->GetInnerBendFaces(body, faces, states);
+								return false;
+							}
+						}
+					}
+				}
+			}
+			catch (const NXOpen::NXException& ex)
+			{
+				detail = ex.what();
+			}
+			catch (const std::exception& ex)
+			{
+				detail = ex.what();
+			}
+			std::ostringstream log;
+			log << "[drawing.skip] reason=" << reason
+				<< " objectTag=" << (object != NULL ? object->Tag() : NULL_TAG)
+				<< " modelPart=" << PartIdentityForLog(modelPart)
+				<< " detail=" << detail;
+			SideDimensionDebugLog(log.str());
+			return true;
+		}), objects.end());
+	std::ostringstream summary;
+	summary << "[drawing.filter] input=" << inputCount << " accepted=" << objects.size()
+		<< " skipped=" << (inputCount - objects.size());
+	SideDimensionDebugLog(summary.str());
+}
+
 static bool IsDrawableSheetMetalBody(NXOpen::Body* body)
 {
 	if (body == NULL)
@@ -5679,6 +5741,32 @@ static void CollectLeafAssemblyDraftCandidates(
 		candidate.quantity = ReadPartQuantity(prototypePart);
 		candidate.category = sheetMetalCount > 0 ? "\xE9\x92\xA3\xE9\x87\x91" : "";
 		candidate.drawingSheetCount = CountDrawingSheets(prototypePart);
+		candidate.filterMetadata.hasDrawing = candidate.drawingSheetCount > 0;
+		candidate.filterMetadata.sheetMetal = sheetMetalCount > 0;
+		candidate.filterMetadata.partName = Utf8ToWideText(candidate.partName);
+		try
+		{
+			candidate.filterMetadata.hidden = component->IsBlanked();
+			for (const auto& attribute : prototypePart->GetUserAttributes())
+			{
+				if (attribute.Unset) continue;
+				std::ostringstream value;
+				switch (attribute.Type)
+				{
+				case NXOpen::NXObject::AttributeTypeString: value << NxStringToUtf8(attribute.StringValue); break;
+				case NXOpen::NXObject::AttributeTypeInteger: value << attribute.IntegerValue; break;
+				case NXOpen::NXObject::AttributeTypeReal: value << std::setprecision(15) << attribute.RealValue; break;
+				case NXOpen::NXObject::AttributeTypeBoolean: value << (attribute.BooleanValue ? "true" : "false"); break;
+				case NXOpen::NXObject::AttributeTypeTime: value << NxStringToUtf8(attribute.TimeValue); break;
+				default: break;
+				}
+				candidate.filterMetadata.attributes[Utf8ToWideText(NxStringToUtf8(attribute.Title))] = Utf8ToWideText(value.str());
+			}
+		}
+		catch (const NXOpen::NXException& ex)
+		{
+			SideDimensionDebugLog(std::string("[assembly.filter.metadata] ") + ex.what());
+		}
 		candidates.push_back(candidate);
 		return;
 	}
@@ -5754,9 +5842,19 @@ struct AssemblyDraftPickerState
 	std::vector<size_t> visibleCandidateIndices;
 	std::vector<bool> checkedCandidates;
 	HWND listView;
-	HWND noDrawingFilterCheck;
+	HWND filterChecks[assembly_draft_filters::RuleCount];
+	HWND filterText[assembly_draft_filters::RuleCount];
+	HWND filterEqualsValue;
+	HWND filterStatus;
+	HWND filterHeading;
+	HWND filterHint;
+	HWND advancedToggle;
+	HWND advancedHint;
+	HWND listHint;
+	bool advancedExpanded;
 	std::vector<HWND> childControls;
 	HFONT dialogFont;
+	HFONT headingFont;
 	HBRUSH backgroundBrush;
 	COLORREF backgroundColor;
 	int lastCheckRow;
@@ -5863,6 +5961,15 @@ static void SetListViewText(HWND listView, int row, int column, const std::wstri
 	ListView_SetItem(listView, &item);
 }
 
+static void UpdateAssemblyDraftPickerStatus(AssemblyDraftPickerState* state)
+{
+	if (state == NULL || state->filterStatus == NULL) return;
+	const size_t selected = static_cast<size_t>(std::count(state->checkedCandidates.begin(), state->checkedCandidates.end(), true));
+	const std::wstring text = L"共 " + std::to_wstring(state->checkedCandidates.size()) + L" 个部件    ·    已勾选 " +
+		std::to_wstring(selected) + L" 个    ·    未勾选 " + std::to_wstring(state->checkedCandidates.size() - selected) + L" 个";
+	SetWindowTextW(state->filterStatus, text.c_str());
+}
+
 static void PopulateAssemblyDraftListView(AssemblyDraftPickerState* state)
 {
 	if (state == NULL || state->listView == NULL || state->candidates == NULL)
@@ -5892,13 +5999,6 @@ static void PopulateAssemblyDraftListView(AssemblyDraftPickerState* state)
 fillRows:
 	for (size_t i = 0; i < candidates.size(); ++i)
 	{
-		if (state->noDrawingFilterCheck != NULL &&
-			SendMessageW(state->noDrawingFilterCheck, BM_GETCHECK, 0, 0) == BST_CHECKED &&
-			candidates[i].drawingSheetCount > 0)
-		{
-			continue;
-		}
-
 		const int row = static_cast<int>(state->visibleCandidateIndices.size());
 		state->visibleCandidateIndices.push_back(i);
 
@@ -5921,6 +6021,7 @@ fillRows:
 	}
 	state->suppressCheckNotifications = false;
 	state->lastCheckRow = -1;
+	UpdateAssemblyDraftPickerStatus(state);
 }
 
 static int AssemblyDraftListCandidateIndex(HWND listView, int row)
@@ -5971,6 +6072,7 @@ static void SetAssemblyDraftCheckRange(
 		}
 	}
 	state->suppressCheckNotifications = false;
+	UpdateAssemblyDraftPickerStatus(state);
 }
 
 static LRESULT CALLBACK AssemblyDraftListSubclassProc(
@@ -6047,12 +6149,126 @@ static void SyncAssemblyDraftVisibleChecksToModel(AssemblyDraftPickerState* stat
 	}
 }
 
+static const wchar_t* const kAssemblyFilterLabels[assembly_draft_filters::RuleCount] = {
+	L"移除有工程图", L"移除无工程图", L"移除钣金", L"移除非钣金", L"移除隐藏件",
+	L"移除部件名包含关键词", L"移除部件名不含关键词", L"移除具有属性名",
+	L"移除缺少属性名", L"移除属性名和值相等", L"移除没有该属性值"
+};
+
+static const wchar_t* const kAssemblyFilterShortLabels[assembly_draft_filters::RuleCount] = {
+	L"有工程图", L"无工程图", L"钣金", L"非钣金", L"隐藏件",
+	L"名称包含", L"名称不含", L"具有属性名", L"缺少属性名", L"属性等于", L"没有属性值"
+};
+
+static void LayoutAssemblyDraftPicker(HWND hwnd, AssemblyDraftPickerState* state)
+{
+	if (state == NULL || state->listView == NULL) return;
+	RECT bounds = {};
+	GetClientRect(hwnd, &bounds);
+	const UINT dpi = GetDpiForWindow(hwnd);
+	const int width = MulDiv(bounds.right, 96, dpi > 0 ? dpi : 96);
+	const int height = MulDiv(bounds.bottom, 96, dpi > 0 ? dpi : 96);
+	auto place = [&](HWND control, int x, int y, int w, int h)
+	{
+		if (control != NULL) MoveWindow(control, MulDiv(x, dpi, 96), MulDiv(y, dpi, 96),
+			MulDiv(w, dpi, 96), MulDiv(h, dpi, 96), TRUE);
+	};
+	place(state->filterHeading, 20, 16, 150, 24);
+	place(state->filterHint, 176, 18, width - 196, 22);
+	const int cell = (width - 40) / 5;
+	for (int i = 0; i < assembly_draft_filters::KeywordMatches; ++i)
+		place(state->filterChecks[i], 20 + cell * i, 51, cell - 12, 24);
+	place(state->advancedToggle, 20, 88, 154, 30);
+	place(GetDlgItem(hwnd, 1005), width - 226, 88, 94, 30);
+	place(GetDlgItem(hwnd, 1004), width - 120, 88, 100, 30);
+	const int columnWidth = (width - 64) / 2;
+	for (int i = assembly_draft_filters::KeywordMatches; i < assembly_draft_filters::RuleCount; ++i)
+	{
+		const int index = i - assembly_draft_filters::KeywordMatches;
+		const int x = 20 + (index % 2) * (columnWidth + 24);
+		const int y = 138 + (index / 2) * 38;
+		const int inputWidth = columnWidth - 116;
+		const bool equals = i == assembly_draft_filters::AttributeEquals;
+		place(state->filterChecks[i], x, y, 108, 26);
+		place(state->filterText[i], x + 116, y, equals ? (inputWidth - 10) / 2 : inputWidth, 26);
+		ShowWindow(state->filterChecks[i], state->advancedExpanded ? SW_SHOW : SW_HIDE);
+		ShowWindow(state->filterText[i], state->advancedExpanded ? SW_SHOW : SW_HIDE);
+		EnableWindow(state->filterText[i], SendMessageW(state->filterChecks[i], BM_GETCHECK, 0, 0) == BST_CHECKED);
+		if (equals)
+		{
+			place(state->filterEqualsValue, x + 126 + (inputWidth - 10) / 2, y, (inputWidth - 10) / 2, 26);
+			ShowWindow(state->filterEqualsValue, state->advancedExpanded ? SW_SHOW : SW_HIDE);
+			EnableWindow(state->filterEqualsValue, SendMessageW(state->filterChecks[i], BM_GETCHECK, 0, 0) == BST_CHECKED);
+		}
+	}
+	place(state->advancedHint, 20, 250, width - 40, 20);
+	ShowWindow(state->advancedHint, state->advancedExpanded ? SW_SHOW : SW_HIDE);
+	int active = 0;
+	for (int i = assembly_draft_filters::KeywordMatches; i < assembly_draft_filters::RuleCount; ++i)
+		if (SendMessageW(state->filterChecks[i], BM_GETCHECK, 0, 0) == BST_CHECKED) ++active;
+	std::wstring toggleText = state->advancedExpanded ? L"高级筛选  −" : L"高级筛选  +";
+	if (active > 0) toggleText += L"  (" + std::to_wstring(active) + L")";
+	SetWindowTextW(state->advancedToggle, toggleText.c_str());
+	const int listY = state->advancedExpanded ? 306 : 158;
+	place(state->listHint, 20, listY - 28, width - 40, 22);
+	place(state->listView, 20, listY, width - 40, std::max(120, height - listY - 94));
+	place(state->filterStatus, 20, height - 82, width - 40, 22);
+	place(GetDlgItem(hwnd, 1002), 20, height - 44, 78, 28);
+	place(GetDlgItem(hwnd, 1003), 108, height - 44, 78, 28);
+	place(GetDlgItem(hwnd, IDOK), width - 206, height - 44, 90, 28);
+	place(GetDlgItem(hwnd, IDCANCEL), width - 106, height - 44, 86, 28);
+	ListView_SetColumnWidth(state->listView, 2, MulDiv(std::max(200, width - 498), dpi, 96));
+	InvalidateRect(hwnd, NULL, TRUE);
+}
+
+static std::wstring ReadPickerEdit(HWND control)
+{
+	if (control == NULL) return L"";
+	const int length = GetWindowTextLengthW(control);
+	std::vector<wchar_t> text(static_cast<size_t>(length) + 1, L'\0');
+	GetWindowTextW(control, text.data(), static_cast<int>(text.size()));
+	return text.data();
+}
+
+static void ApplyAssemblyDraftFilters(HWND hwnd, AssemblyDraftPickerState* state, bool clear)
+{
+	if (state == NULL || state->candidates == NULL) return;
+	assembly_draft_filters::Rules rules;
+	for (int i = 0; i < assembly_draft_filters::RuleCount; ++i)
+	{
+		if (clear) SendMessageW(state->filterChecks[i], BM_SETCHECK, BST_UNCHECKED, 0);
+		rules.enabled[i] = SendMessageW(state->filterChecks[i], BM_GETCHECK, 0, 0) == BST_CHECKED;
+		rules.text[i] = ReadPickerEdit(state->filterText[i]);
+	}
+	rules.equalsValue = ReadPickerEdit(state->filterEqualsValue);
+	const int invalid = assembly_draft_filters::InvalidRule(rules);
+	if (invalid >= 0)
+	{
+		const std::wstring message = std::wstring(L"请填写“") + kAssemblyFilterLabels[invalid] + L"”所需的条件；属性相等需要填写属性名和属性值。";
+		MessageBoxW(hwnd, message.c_str(), L"筛选条件", MB_OK | MB_ICONINFORMATION);
+		return;
+	}
+	size_t kept = 0;
+	for (size_t i = 0; i < state->candidates->size(); ++i)
+	{
+		// Recompute from the complete list, as in AutoCreateThreeViews.
+		state->checkedCandidates[i] = !assembly_draft_filters::Remove((*state->candidates)[i].filterMetadata, rules);
+		if (state->checkedCandidates[i]) ++kept;
+	}
+	PopulateAssemblyDraftListView(state);
+	state->lastCheckRow = -1;
+	UpdateAssemblyDraftPickerStatus(state);
+	LayoutAssemblyDraftPicker(hwnd, state);
+}
+
 static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
 	const int kIdList = 1001;
 	const int kIdSelectAll = 1002;
 	const int kIdClearAll = 1003;
-	const int kIdNoDrawingFilter = 1004;
+	const int kIdApplyFilters = 1004;
+	const int kIdClearFilters = 1005;
+	const int kIdAdvanced = 1006;
 	const int kIdOk = IDOK;
 	const int kIdCancel = IDCANCEL;
 
@@ -6066,7 +6282,7 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 		SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
 		if (state != NULL)
 		{
-			state->backgroundColor = RGB(236, 236, 236);
+			state->backgroundColor = RGB(247, 248, 250);
 			state->backgroundBrush = CreateSolidBrush(state->backgroundColor);
 			state->dialogFont = CreateNxLikeDialogFont();
 			if (state->dialogFont != NULL)
@@ -6076,11 +6292,64 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 		}
 
 		HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
-		AddPickerControl(state, CreateWindowW(L"STATIC", L"单击行勾选，Shift+单击行可连续勾选或取消：", WS_CHILD | WS_VISIBLE, 14, 12, 500, 22, hwnd, NULL, instance, NULL));
+		state->filterHeading = CreateWindowW(L"STATIC", L"部件筛选", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, NULL, instance, NULL);
+		AddPickerControl(state, state->filterHeading);
+		LOGFONTW heading = {};
+		GetObjectW(state->dialogFont, sizeof(heading), &heading);
+		heading.lfWeight = FW_SEMIBOLD;
+		heading.lfHeight = -MulDiv(11, GetDpiForWindow(hwnd), 72);
+		state->headingFont = CreateFontIndirectW(&heading);
+		if (state->headingFont != NULL) SendMessageW(state->filterHeading, WM_SETFONT, reinterpret_cast<WPARAM>(state->headingFont), TRUE);
+		state->filterHint = CreateWindowW(L"STATIC", L"移除符合以下任一条件的部件", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, NULL, instance, NULL);
+		AddPickerControl(state, state->filterHint);
+		state->advancedToggle = CreateWindowW(L"BUTTON", L"高级筛选  +", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+			0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdAdvanced)), instance, NULL);
+		AddPickerControl(state, state->advancedToggle);
 		if (state != NULL)
 		{
-			state->noDrawingFilterCheck = CreateWindowW(L"BUTTON", L"无工程图", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 590, 12, 96, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdNoDrawingFilter)), instance, NULL);
-			AddPickerControl(state, state->noDrawingFilterCheck);
+			for (int i = 0; i < assembly_draft_filters::RuleCount; ++i)
+			{
+				const bool simple = i < assembly_draft_filters::KeywordMatches;
+				const int x = simple ? 14 + i * 164 : 14;
+				const int y = simple ? 40 : 70 + (i - assembly_draft_filters::KeywordMatches) * 29;
+				state->filterChecks[i] = CreateWindowW(L"BUTTON", kAssemblyFilterShortLabels[i],
+					WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, x, y, simple ? 158 : 214, 24,
+					hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1100 + i)), instance, NULL);
+				AddPickerControl(state, state->filterChecks[i]);
+				if (!simple)
+				{
+					const bool equals = i == assembly_draft_filters::AttributeEquals;
+					state->filterText[i] = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+						WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 230, y, equals ? 214 : 442, 24,
+						hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1200 + i)), instance, NULL);
+					AddPickerControl(state, state->filterText[i]);
+					SendMessageW(state->filterText[i], EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(
+						i <= assembly_draft_filters::KeywordNonMatches ? L"输入关键词" :
+						(i == assembly_draft_filters::WithoutAttributeValue ? L"输入属性值" : L"输入属性名")));
+					if (equals)
+					{
+						state->filterEqualsValue = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+							WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 458, y, 214, 24,
+							hwnd, reinterpret_cast<HMENU>(1300), instance, NULL);
+						AddPickerControl(state, state->filterEqualsValue);
+						SendMessageW(state->filterText[i], EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"属性名"));
+						SendMessageW(state->filterEqualsValue, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"属性值"));
+					}
+				}
+			}
+			AddPickerControl(state, CreateWindowW(L"BUTTON", L"应用筛选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+				704, 70, 150, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdApplyFilters)), instance, NULL));
+			AddPickerControl(state, CreateWindowW(L"BUTTON", L"清除筛选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+				704, 106, 150, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClearFilters)), instance, NULL));
+			state->advancedHint = CreateWindowW(L"STATIC", L"关键词匹配部件名；属性读取部件属性。每次应用将重新计算全部行。",
+				WS_CHILD, 0, 0, 0, 0, hwnd, NULL, instance, NULL);
+			AddPickerControl(state, state->advancedHint);
+			state->listHint = CreateWindowW(L"STATIC", L"部件列表    单击行勾选，Shift + 单击连续选择",
+				WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, NULL, instance, NULL);
+			AddPickerControl(state, state->listHint);
+			state->filterStatus = CreateWindowW(L"STATIC", L"勾选条件后点击“应用筛选”，也可直接在列表中选择部件。",
+				WS_CHILD | WS_VISIBLE, 14, 250, 850, 24, hwnd, NULL, instance, NULL);
+			AddPickerControl(state, state->filterStatus);
 		}
 		state->listView = CreateWindowExW(
 			WS_EX_CLIENTEDGE,
@@ -6088,9 +6357,9 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 			L"",
 			WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
 			14,
-			44,
-			674,
-			308,
+			280,
+			850,
+			270,
 			hwnd,
 			reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdList)),
 			instance,
@@ -6106,10 +6375,31 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 		{
 			PopulateAssemblyDraftListView(state);
 		}
-		AddPickerControl(state, CreateWindowW(L"BUTTON", L"全选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 14, 366, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSelectAll)), instance, NULL));
-		AddPickerControl(state, CreateWindowW(L"BUTTON", L"全不选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 96, 366, 84, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClearAll)), instance, NULL));
-		AddPickerControl(state, CreateWindowW(L"BUTTON", L"确定", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 526, 366, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdOk)), instance, NULL));
-		AddPickerControl(state, CreateWindowW(L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 612, 366, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCancel)), instance, NULL));
+		AddPickerControl(state, CreateWindowW(L"BUTTON", L"全选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 14, 568, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSelectAll)), instance, NULL));
+		AddPickerControl(state, CreateWindowW(L"BUTTON", L"全不选", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 96, 568, 84, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClearAll)), instance, NULL));
+		AddPickerControl(state, CreateWindowW(L"BUTTON", L"确定", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 702, 568, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdOk)), instance, NULL));
+		AddPickerControl(state, CreateWindowW(L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 788, 568, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCancel)), instance, NULL));
+		LayoutAssemblyDraftPicker(hwnd, state);
+		return 0;
+	}
+	case WM_SIZE:
+		LayoutAssemblyDraftPicker(hwnd, state);
+		return 0;
+	case WM_ERASEBKGND:
+		if (state != NULL && state->backgroundBrush != NULL)
+		{
+			RECT area = {};
+			GetClientRect(hwnd, &area);
+			FillRect(reinterpret_cast<HDC>(wParam), &area, state->backgroundBrush);
+			return 1;
+		}
+		break;
+	case WM_GETMINMAXINFO:
+	{
+		const UINT dpi = GetDpiForWindow(hwnd);
+		MINMAXINFO* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+		limits->ptMinTrackSize.x = MulDiv(850, dpi, 96);
+		limits->ptMinTrackSize.y = MulDiv(620, dpi, 96);
 		return 0;
 	}
 	case WM_CTLCOLORSTATIC:
@@ -6117,7 +6407,8 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 		if (state != NULL && state->backgroundBrush != NULL)
 		{
 			SetBkColor(reinterpret_cast<HDC>(wParam), state->backgroundColor);
-			SetTextColor(reinterpret_cast<HDC>(wParam), RGB(30, 30, 30));
+			SetTextColor(reinterpret_cast<HDC>(wParam),
+				reinterpret_cast<HWND>(lParam) == state->filterHeading ? RGB(30, 48, 68) : RGB(86, 98, 112));
 			return reinterpret_cast<LRESULT>(state->backgroundBrush);
 		}
 		break;
@@ -6129,10 +6420,20 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 		{
 			break;
 		}
-		if (commandId == kIdNoDrawingFilter)
+		if (commandId == kIdApplyFilters || commandId == kIdClearFilters)
 		{
-			SyncAssemblyDraftVisibleChecksToModel(state);
-			PopulateAssemblyDraftListView(state);
+			ApplyAssemblyDraftFilters(hwnd, state, commandId == kIdClearFilters);
+			return 0;
+		}
+		if (commandId == kIdAdvanced)
+		{
+			state->advancedExpanded = !state->advancedExpanded;
+			LayoutAssemblyDraftPicker(hwnd, state);
+			return 0;
+		}
+		if (commandId >= 1100 && commandId < 1100 + assembly_draft_filters::RuleCount)
+		{
+			LayoutAssemblyDraftPicker(hwnd, state);
 			return 0;
 		}
 		if (commandId == kIdSelectAll || commandId == kIdClearAll)
@@ -6151,6 +6452,7 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 			}
 			state->suppressCheckNotifications = false;
 			state->lastCheckRow = -1;
+			UpdateAssemblyDraftPickerStatus(state);
 			return 0;
 		}
 		if (commandId == kIdOk)
@@ -6234,6 +6536,7 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 
 		state->suppressCheckNotifications = false;
 		state->lastCheckRow = clickedRow;
+		UpdateAssemblyDraftPickerStatus(state);
 		return 0;
 	}
 	case WM_CLOSE:
@@ -6246,6 +6549,11 @@ static LRESULT CALLBACK AssemblyDraftPickerWndProc(HWND hwnd, UINT message, WPAR
 	case WM_DESTROY:
 		if (state != NULL)
 		{
+			if (state->headingFont != NULL)
+			{
+				DeleteObject(state->headingFont);
+				state->headingFont = NULL;
+			}
 			if (state->dialogFont != NULL)
 			{
 				DeleteObject(state->dialogFont);
@@ -6304,7 +6612,6 @@ static bool ShowAssemblyDraftPicker(
 	state.candidates = &candidates;
 	state.checkedCandidates.resize(candidates.size(), false);
 	state.listView = NULL;
-	state.noDrawingFilterCheck = NULL;
 	state.dialogFont = NULL;
 	state.backgroundBrush = NULL;
 	state.backgroundColor = RGB(236, 236, 236);
@@ -6317,11 +6624,11 @@ static bool ShowAssemblyDraftPicker(
 		WS_EX_DLGMODALFRAME,
 		className.c_str(),
 		L"批量出图部件列表",
-		WS_CAPTION | WS_SYSMENU | WS_BORDER,
+		WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX,
 		CW_USEDEFAULT,
 		CW_USEDEFAULT,
-		718,
-		442,
+		894,
+		642,
 		parent,
 		NULL,
 		instance,
@@ -11303,6 +11610,8 @@ int ZiDonCuTu::apply_cb()
 				? DrawingModelPart()
 				: workPart;
 			KeepOnlyObjectsInPart(objectsToProcess, selectionPart);
+			// Filter before grouping: unsupported solids must not consume sheet slots.
+			KeepOnlySheetMetalBodiesForDrawing(objectsToProcess, selectionPart);
 			{
 				std::ostringstream log;
 				log << "[process.selection]"
@@ -11409,6 +11718,7 @@ int ZiDonCuTu::apply_cb()
 					ApplyBodyGroupLayerIsolation(batchBodies);
 					automaticLayerIsolated = true;
 				}
+				bool batchHasDrawing = false;
 				for (size_t bodyIndex = batchStart; bodyIndex < batchEnd; ++bodyIndex)
 				{
 					NXOpen::Body* currentBody = dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(objectsToProcess[bodyIndex]->Tag()));
@@ -11438,7 +11748,7 @@ int ZiDonCuTu::apply_cb()
 						perf << "[perf] PrepareBodyDraftingContext failed bodyTag=" << PerfTagOf(currentBody)
 							<< " elapsedMs=" << (PerfNowMs() - prepareStart);
 						PerfDebugLog(perf.str());
-						if (automaticLayerIsolated)
+						if (automaticLayerIsolated && automaticOneBodyPerSheet)
 						{
 							RestoreLayerStates(automaticLayerSnapshot);
 							automaticLayerIsolated = false;
@@ -11460,9 +11770,12 @@ int ZiDonCuTu::apply_cb()
 					toggle0->SetValue(
 						manualUseExistingSheet
 							? false
-							: (bodyIndex == batchStart));
+							: !batchHasDrawing);
 					unsigned long long aaaaStart = PerfNowMs();
-					aaaa_cb();
+					if (aaaa_cb() == 0)
+					{
+						batchHasDrawing = true;
+					}
 					{
 						std::ostringstream perf;
 						perf << "[perf] aaaa_cb call bodyTag=" << PerfTagOf(currentBody)
@@ -11585,13 +11898,11 @@ int ZiDonCuTu::apply_cb()
 				LogPartContextForDrawingDebug("assembly.batch.afterVisibleWorkPart");
 				ApplyDraftingDimensionStartupPreferences(workPart);
 				std::vector<NXOpen::TaggedObject*> objectsToProcess = CollectDrawableBodiesForPart(workPart);
+				KeepOnlySheetMetalBodiesForDrawing(objectsToProcess, workPart);
 				if (objectsToProcess.empty())
 				{
-					NXOpen::Body* largestBody = FindLargestSolidBody(workPart);
-					if (largestBody != NULL)
-					{
-						objectsToProcess.push_back(largestBody);
-					}
+					SideDimensionDebugLog("[assembly.batch.skip] no drawable sheet metal: " + PartIdentityForLog(workPart));
+					continue;
 				}
 				{
 					std::ostringstream perf;
@@ -11716,6 +12027,12 @@ int ZiDonCuTu::apply_cb()
 						displayPart = theSession->Parts()->Display();
 						ApplyDraftingDimensionStartupPreferences(workPart);
 						std::vector<NXOpen::TaggedObject*> objectsToProcess = CollectDrawableBodiesForPart(workPart);
+						KeepOnlySheetMetalBodiesForDrawing(objectsToProcess, workPart);
+						if (objectsToProcess.empty())
+						{
+							SideDimensionDebugLog("[assembly.auto.skip] no drawable sheet metal: " + PartIdentityForLog(workPart));
+							continue;
+						}
 						if (independentDrawingPart)
 						{
 							NXOpen::Part* sourceModelPart = workPart;
@@ -11785,6 +12102,11 @@ int ZiDonCuTu::apply_cb()
 			}
 		}
 
+		KeepOnlySheetMetalBodiesForDrawing(selectedObjects, workPart);
+		if (selectedObjects.empty())
+		{
+			return 0;
+		}
 		if (independentDrawingPart)
 		{
 			NXOpen::Part* sourceModelPart = workPart;
@@ -12123,6 +12445,11 @@ static bool PrepareBodyDraftingContext(NXOpen::Body* targetBody, NXOpen::BlockSt
 	preparePhase = "GetFlatPatternDraftingInfos";
 	logPreparePhase(preparePhase);
 	NXOpen::Part* modelPart = DrawingModelPart();
+	if (!IsSheetMetalBodyInPart(modelPart, targetBody))
+	{
+		logPreparePhase("skip.notValidSheetMetal");
+		return false;
+	}
 	const std::vector<FlatPatternDraftingInfo>& flatPatternInfos = GetFlatPatternDraftingInfos(modelPart);
 	{
 		std::ostringstream oss;
@@ -12137,7 +12464,17 @@ static bool PrepareBodyDraftingContext(NXOpen::Body* targetBody, NXOpen::BlockSt
 	std::vector<NXOpen::Features::SheetMetal::SheetmetalBendState> cdcd;
 	preparePhase = "GetInnerBendFaces";
 	logPreparePhase(preparePhase);
-	modelPart->Features()->SheetmetalManager()->GetInnerBendFaces(Body1, vFaces, cdcd);
+	try
+	{
+		modelPart->Features()->SheetmetalManager()->GetInnerBendFaces(Body1, vFaces, cdcd);
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		// No WCS changes or views exist yet; skip this body without aborting the batch.
+		SideDimensionDebugLog(std::string("[drawing.skip] innerBendQueryFailed bodyTag=") +
+			std::to_string(targetBody->Tag()) + " message=" + ex.what());
+		return false;
+	}
 	{
 		std::ostringstream oss;
 		oss << "[PrepareBodyDraftingContext.innerBends]"

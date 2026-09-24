@@ -251,10 +251,13 @@ tag_t Create(const Plan& p){
     std::vector<tag_t> members;for(auto* f:part->Features()->GetFeatures())if(!before.count(f->Tag())&&!f->IsInternal())members.push_back(f->Tag());
     char groupName[]="FanTonSenZi";tag_t group=0;Check(UF_MODL_create_set_of_feature(groupName,members.data(),static_cast<int>(members.size()),false,&group));
     auto* object=dynamic_cast<NXObject*>(NXObjectManager::Get(group));
-    object->SetName(NXString(std::string(p.source.round?"圆管伸直_":"方通伸直_")+std::to_string(p.bends.size())+"切口",NXString::UTF8));
+    object->SetName(NXString(std::string(p.source.round?"圆管伸直_":"方通伸直_")+(p.machineArcs.empty()?"":"弯管机_")+std::to_string(p.bends.size())+"切口",NXString::UTF8));
     object->SetUserAttribute("FTSZ_HoleWallCount",-1,static_cast<int>(p.source.holes.size()),Update::OptionNow);
     object->SetUserAttribute("FTSZ_RoundTube",-1,p.source.round?1:0,Update::OptionNow);
     object->SetUserAttribute("FTSZ_SourceSlots",-1,p.settings.cutSource?1:0,Update::OptionNow);
+    object->SetUserAttribute("FTSZ_SegmentArcs",-1,p.settings.segmentArcs?1:0,Update::OptionNow);
+    object->SetUserAttribute("FTSZ_TubeKFactor",-1,p.settings.tubeKFactor,Update::OptionNow);
+    object->SetUserAttribute("FTSZ_MachineArcCount",-1,static_cast<int>(p.machineArcs.size()),Update::OptionNow);
     if(p.source.round)object->SetUserAttribute("FTSZ_BridgeWidth_mm",-1,p.settings.bridgeWidthMm,Update::OptionNow);
     object->SetUserAttribute("FTSZ_SectionRadius_mm",-1,p.source.cornerRadius/u,Update::OptionNow);
     object->SetUserAttribute("FTSZ_Length_mm",-1,p.length/u,Update::OptionNow);

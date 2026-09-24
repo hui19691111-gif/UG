@@ -1,5 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
-<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Release|x64">
       <Configuration>Release</Configuration>
@@ -9,13 +8,13 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{E8A92D1D-E21B-4C32-B10A-66AC995E17DD}</ProjectGuid>
-    <RootNamespace>TiaoZenBanLeiCiCun</RootNamespace>
+    <ProjectGuid>{EA369D38-7CE1-45B6-8CDF-0A43A19D6C58}</ProjectGuid>
+    <RootNamespace>SkirtGeometryTests</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
-    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
@@ -23,9 +22,9 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(ProjectDir)bin\Release\</OutDir>
-    <IntDir>$(ProjectDir)obj\Release\$(ProjectName)\</IntDir>
-    <TargetName>TiaoZenBanLeiCiCun</TargetName>
+    <OutDir>$(ProjectDir)..\bin\Tests\</OutDir>
+    <IntDir>$(ProjectDir)..\obj\Tests\</IntDir>
+    <TargetName>SkirtGeometryTests</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -41,7 +40,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
-      <SubSystem>Windows</SubSystem>
+      <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
@@ -52,22 +51,9 @@
       <AdditionalLibraryDirectories>$(UGII_BASE_DIR)\UGOPEN;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>libugopenint.lib;libufun.lib;libnxopencpp.lib;libnxopencpp_gateway.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopenuicpp.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)TiaoZenBanLeiCiCun.dlx" "$(OutDir)TiaoZenBanLeiCiCun.dlx" &amp;&amp; copy /Y "$(ProjectDir)TiaoZenBanLeiCiCun.bmp" "$(OutDir)TiaoZenBanLeiCiCun.bmp" &amp;&amp; copy /Y "$(ProjectDir)TiaoZenBanLeiCiCunGuide.bmp" "$(OutDir)TiaoZenBanLeiCiCunGuide.bmp"</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
-  <ItemGroup>
-    <ClCompile Include="TiaoZenBanLeiCiCun.cpp" />
-    <ClCompile Include="TiaoZenBanLeiCiCunMain.cpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="TiaoZenBanLeiCiCun.hpp" />
-    <ClInclude Include="PanelSkirtGeometry.hpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="TiaoZenBanLeiCiCun.dlx" />
-    <None Include="TiaoZenBanLeiCiCun.bmp" />
-    <None Include="TiaoZenBanLeiCiCunGuide.bmp" />
-  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ItemGroup>
+    <ClCompile Include="SkirtGeometryTests.cpp" />
+  </ItemGroup>
 </Project>

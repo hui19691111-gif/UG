@@ -1,4 +1,5 @@
 #include "TiaoZenBanLeiCiCun.hpp"
+#include "PanelSkirtGeometry.hpp"
 #include "../../common/ZhihuiContextHelp.hpp"
 
 #ifdef CreateDialog
@@ -18,8 +19,7 @@
 #include <NXOpen/FaceDumbRule.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
-#include <NXOpen/Features_PullFaceBuilder.hxx>
-#include <NXOpen/GeometricUtilities_ModlMotion.hxx>
+#include <NXOpen/Features_MoveFaceBuilder.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObjectManager.hxx>
@@ -2487,491 +2487,20 @@ std::vector<NXOpen::Face*> PanelSizeDialog::FindBoundaryFaces(
     const NXOpen::Vector3d& outwardDirection,
     double boundaryCoordinate) const
 {
-    std::vector<NXOpen::Face*> result;
-    NXOpen::Face* mainFace = CachedFace();
-    if (body == nullptr || mainFace == nullptr)
-    {
-        return result;
-    }
-
-    const double modelSize =
-        (std::max)(frame_.Length(), frame_.Width());
-    const double tolerance =
-        (std::max)(1.0e-3, modelSize * 1.0e-6);
-    const double thicknessTolerance =
-        (std::max)(tolerance * 5.0,
-                   (std::max)(0.02, frame_.thickness * 0.03));
-
-    const auto readLinearEdge =
-        [](NXOpen::Edge* edge,
-           NXOpen::Point3d& first,
-           NXOpen::Point3d& second,
-           NXOpen::Point3d& middle,
-           NXOpen::Vector3d& direction) -> bool
-    {
-        if (edge == nullptr ||
-            edge->SolidEdgeType() != NXOpen::Edge::EdgeTypeLinear)
-        {
-            return false;
-        }
-        edge->GetVertices(&first, &second);
-        direction = Subtract(second, first);
-        if (!Normalize(direction))
-        {
-            return false;
-        }
-        middle = NXOpen::Point3d(
-            (first.X + second.X) * 0.5,
-            (first.Y + second.Y) * 0.5,
-            (first.Z + second.Z) * 0.5);
-        return true;
-    };
-
-    const auto findParallelEdges =
-        [&readLinearEdge, tolerance](
-            NXOpen::Face* face,
-            NXOpen::Edge* referenceEdge,
-            double& minimumDistance,
-            double& maximumDistance,
-            NXOpen::Edge*& farthestEdge) -> bool
-    {
-        minimumDistance = std::numeric_limits<double>::max();
-        maximumDistance = 0.0;
-        farthestEdge = nullptr;
-
-        NXOpen::Point3d referenceFirst;
-        NXOpen::Point3d referenceSecond;
-        NXOpen::Point3d referenceMiddle;
-        NXOpen::Vector3d referenceDirection;
-        if (!readLinearEdge(
-                referenceEdge, referenceFirst, referenceSecond,
-                referenceMiddle, referenceDirection))
-        {
-            return false;
-        }
-
-        for (NXOpen::Edge* candidate : face->GetEdges())
-        {
-            if (candidate == referenceEdge)
-            {
-                continue;
-            }
-            NXOpen::Point3d first;
-            NXOpen::Point3d second;
-            NXOpen::Point3d middle;
-            NXOpen::Vector3d direction;
-            if (!readLinearEdge(
-                    candidate, first, second, middle, direction) ||
-                std::abs(Dot(direction, referenceDirection)) <
-                    kParallelTolerance)
-            {
-                continue;
-            }
-
-            const NXOpen::Vector3d between =
-                Subtract(middle, referenceMiddle);
-            const double along =
-                Dot(between, referenceDirection);
-            const NXOpen::Vector3d perpendicular(
-                between.X - referenceDirection.X * along,
-                between.Y - referenceDirection.Y * along,
-                between.Z - referenceDirection.Z * along);
-            const double distance = Length(perpendicular);
-            if (distance <= tolerance)
-            {
-                continue;
-            }
-            minimumDistance =
-                (std::min)(minimumDistance, distance);
-            if (distance > maximumDistance)
-            {
-                maximumDistance = distance;
-                farthestEdge = candidate;
-            }
-        }
-        return farthestEdge != nullptr;
-    };
-
-    const auto otherFace =
-        [](NXOpen::Edge* edge,
-           const std::set<tag_t>& excluded) -> NXOpen::Face*
-    {
-        if (edge == nullptr)
-        {
-            return nullptr;
-        }
-        for (NXOpen::Face* face : edge->GetFaces())
-        {
-            if (face != nullptr &&
-                excluded.find(face->Tag()) == excluded.end())
-            {
-                return face;
-            }
-        }
-        return nullptr;
-    };
-
-    const auto addUnique =
-        [&result](NXOpen::Face* face) -> bool
-    {
-        if (face == nullptr)
-        {
-            return false;
-        }
-        for (NXOpen::Face* existing : result)
-        {
-            if (existing->Tag() == face->Tag())
-            {
-                return false;
-            }
-        }
-        result.push_back(face);
-        return true;
-    };
-
-    double mainMinimum = 0.0;
-    double mainMaximum = 0.0;
-    if (!FaceProjectionRange(
-            mainFace, frame_.origin, outwardDirection,
-            mainMinimum, mainMaximum))
-    {
-        return result;
-    }
-
-    std::vector<NXOpen::Edge*> outerEdges;
-    for (NXOpen::Edge* edge : mainFace->GetEdges())
-    {
-        NXOpen::Point3d first;
-        NXOpen::Point3d second;
-        NXOpen::Point3d middle;
-        NXOpen::Vector3d direction;
-        if (!readLinearEdge(
-                edge, first, second, middle, direction))
-        {
-            continue;
-        }
-        const double firstCoordinate =
-            Dot(Subtract(first, frame_.origin), outwardDirection);
-        const double secondCoordinate =
-            Dot(Subtract(second, frame_.origin), outwardDirection);
-        if (std::abs(firstCoordinate - mainMaximum) <= tolerance &&
-            std::abs(secondCoordinate - mainMaximum) <= tolerance &&
-            std::abs(Dot(direction, outwardDirection)) <=
-                1.0 - kParallelTolerance)
-        {
-            outerEdges.push_back(edge);
-        }
-    }
-
-    TiaoZenWriteLog(
-        "INFO",
-        "拓扑选面开始：bodyTag=" +
-            std::to_string(body->Tag()) +
-            "，mainFaceTag=" + std::to_string(mainFace->Tag()) +
-            "，direction=" + VectorText(outwardDirection) +
-            "，bodyBoundary=" + Fixed(boundaryCoordinate) +
-            "，mainFaceBoundary=" + Fixed(mainMaximum) +
-            "，thickness=" + Fixed(frame_.thickness) +
-            "，outerLinearEdgeCount=" +
-            std::to_string(outerEdges.size()));
-
-    int plane1Count = 0;
-    int plane2Count = 0;
-    int terminalThicknessCount = 0;
-
-    for (NXOpen::Edge* outerEdge : outerEdges)
-    {
-        NXOpen::Face* plane1 = nullptr;
-        NXOpen::Point3d plane1Point;
-        NXOpen::Vector3d plane1Normal;
-        for (NXOpen::Face* adjacent : outerEdge->GetFaces())
-        {
-            NXOpen::Point3d point;
-            NXOpen::Vector3d normal;
-            if (adjacent == nullptr ||
-                adjacent->Tag() == mainFace->Tag() ||
-                !FacePlaneData(adjacent, point, normal))
-            {
-                continue;
-            }
-            const double mainAngleCosine =
-                std::abs(Dot(normal, frame_.normal));
-            const double outwardAlignment =
-                Dot(normal, outwardDirection);
-            TiaoZenWriteLog(
-                "TRACE",
-                "PLANE1候选：edgeTag=" +
-                    std::to_string(outerEdge->Tag()) +
-                    "，faceTag=" +
-                    std::to_string(adjacent->Tag()) +
-                    "，mainAngleCos=" +
-                    Number(mainAngleCosine) +
-                    "，outwardAlignment=" +
-                    Number(outwardAlignment));
-            if (mainAngleCosine <=
-                    1.0 - kParallelTolerance &&
-                std::abs(outwardAlignment) >=
-                    kParallelTolerance)
-            {
-                plane1 = adjacent;
-                plane1Point = point;
-                plane1Normal = normal;
-                break;
-            }
-        }
-
-        if (plane1 == nullptr)
-        {
-            TiaoZenWriteLog(
-                "WARN",
-                "外轮廓直边没有找到与主平面成90度的PLANE1：edgeTag=" +
-                    std::to_string(outerEdge->Tag()));
-            continue;
-        }
-        if (addUnique(plane1))
-        {
-            ++plane1Count;
-        }
-
-        double plane1Minimum = 0.0;
-        double plane1Maximum = 0.0;
-        NXOpen::Edge* plane1FarthestEdge = nullptr;
-        if (!findParallelEdges(
-                plane1, outerEdge, plane1Minimum,
-                plane1Maximum, plane1FarthestEdge))
-        {
-            TiaoZenWriteLog(
-                "WARN",
-                "PLANE1没有找到平行于连接边的直边：faceTag=" +
-                    std::to_string(plane1->Tag()));
-            continue;
-        }
-
-        const bool plane1IsThicknessFace =
-            frame_.thickness > tolerance &&
-            std::abs(plane1Maximum - frame_.thickness) <=
-                thicknessTolerance;
-        TiaoZenWriteLog(
-            "INFO",
-            "找到PLANE1：faceTag=" +
-                std::to_string(plane1->Tag()) +
-                "，normal=" + VectorText(plane1Normal) +
-                "，平行边最小距离=" + Fixed(plane1Minimum) +
-                "，平行边最大距离=" + Fixed(plane1Maximum) +
-                "，最远边Tag=" +
-                std::to_string(plane1FarthestEdge->Tag()) +
-                "，自身是否板厚端面=" +
-                std::string(
-                    plane1IsThicknessFace ? "true" : "false"));
-
-        NXOpen::Point3d outerFirst;
-        NXOpen::Point3d outerSecond;
-        NXOpen::Point3d outerMiddle;
-        NXOpen::Vector3d outerEdgeDirection;
-        readLinearEdge(
-            outerEdge, outerFirst, outerSecond, outerMiddle,
-            outerEdgeDirection);
-
-        if (!plane1IsThicknessFace &&
-            frame_.thickness > tolerance)
-        {
-            double plane1AlongMinimum = 0.0;
-            double plane1AlongMaximum = 0.0;
-            double plane1HeightMinimum = 0.0;
-            double plane1HeightMaximum = 0.0;
-            FaceProjectionRange(
-                plane1, frame_.origin, outerEdgeDirection,
-                plane1AlongMinimum, plane1AlongMaximum);
-            FaceProjectionRange(
-                plane1, frame_.origin, frame_.normal,
-                plane1HeightMinimum, plane1HeightMaximum);
-
-            NXOpen::Face* plane2 = nullptr;
-            double bestError =
-                std::numeric_limits<double>::max();
-            double bestDistance = 0.0;
-            for (NXOpen::Face* candidate : body->GetFaces())
-            {
-                if (candidate == nullptr ||
-                    candidate->Tag() == plane1->Tag())
-                {
-                    continue;
-                }
-                NXOpen::Point3d point;
-                NXOpen::Vector3d normal;
-                if (!FacePlaneData(candidate, point, normal) ||
-                    std::abs(Dot(normal, plane1Normal)) <
-                        kParallelTolerance)
-                {
-                    continue;
-                }
-
-                const double distance = std::abs(
-                    Dot(Subtract(point, plane1Point),
-                        plane1Normal));
-                const double error =
-                    std::abs(distance - frame_.thickness);
-                if (error > thicknessTolerance ||
-                    Dot(Subtract(point, plane1Point),
-                        outwardDirection) >= -tolerance)
-                {
-                    continue;
-                }
-
-                double alongMinimum = 0.0;
-                double alongMaximum = 0.0;
-                double heightMinimum = 0.0;
-                double heightMaximum = 0.0;
-                if (!FaceProjectionRange(
-                        candidate, frame_.origin,
-                        outerEdgeDirection,
-                        alongMinimum, alongMaximum) ||
-                    !FaceProjectionRange(
-                        candidate, frame_.origin, frame_.normal,
-                        heightMinimum, heightMaximum))
-                {
-                    continue;
-                }
-                const bool alongOverlap =
-                    alongMaximum >=
-                        plane1AlongMinimum - tolerance &&
-                    alongMinimum <=
-                        plane1AlongMaximum + tolerance;
-                const bool heightOverlap =
-                    heightMaximum >=
-                        plane1HeightMinimum - tolerance &&
-                    heightMinimum <=
-                        plane1HeightMaximum + tolerance;
-                if (alongOverlap && heightOverlap &&
-                    error < bestError)
-                {
-                    plane2 = candidate;
-                    bestError = error;
-                    bestDistance = distance;
-                }
-            }
-
-            if (addUnique(plane2))
-            {
-                ++plane2Count;
-                TiaoZenWriteLog(
-                    "INFO",
-                    "找到PLANE2：plane1Tag=" +
-                        std::to_string(plane1->Tag()) +
-                        "，plane2Tag=" +
-                        std::to_string(plane2->Tag()) +
-                        "，面间距=" + Fixed(bestDistance));
-            }
-            else if (plane2 == nullptr)
-            {
-                TiaoZenWriteLog(
-                    "WARN",
-                    "PLANE1内侧未找到板厚距离的PLANE2：plane1Tag=" +
-                        std::to_string(plane1->Tag()));
-            }
-        }
-
-        if (plane1IsThicknessFace)
-        {
-            continue;
-        }
-
-        NXOpen::Edge* incomingEdge = plane1FarthestEdge;
-        std::set<tag_t> walkedFaces{
-            mainFace->Tag(), plane1->Tag()};
-        NXOpen::Face* currentFace =
-            otherFace(incomingEdge, walkedFaces);
-        for (int depth = 0;
-             depth < 16 && currentFace != nullptr;
-             ++depth)
-        {
-            if (!walkedFaces.insert(
-                    currentFace->Tag()).second)
-            {
-                break;
-            }
-
-            NXOpen::Point3d currentPoint;
-            NXOpen::Vector3d currentNormal;
-            if (!FacePlaneData(
-                    currentFace, currentPoint, currentNormal))
-            {
-                TiaoZenWriteLog(
-                    "WARN",
-                    "裙边拓扑追踪遇到非平面并停止：faceTag=" +
-                        std::to_string(currentFace->Tag()));
-                break;
-            }
-
-            double minimumDistance = 0.0;
-            double maximumDistance = 0.0;
-            NXOpen::Edge* farthestEdge = nullptr;
-            if (!findParallelEdges(
-                    currentFace, incomingEdge,
-                    minimumDistance, maximumDistance,
-                    farthestEdge))
-            {
-                break;
-            }
-
-            const bool isThicknessEnd =
-                frame_.thickness > tolerance &&
-                std::abs(
-                    minimumDistance - frame_.thickness) <=
-                    thicknessTolerance;
-            TiaoZenWriteLog(
-                "INFO",
-                "裙边拓扑追踪：depth=" +
-                    std::to_string(depth) +
-                    "，faceTag=" +
-                    std::to_string(currentFace->Tag()) +
-                    "，incomingEdgeTag=" +
-                    std::to_string(incomingEdge->Tag()) +
-                    "，平行边最小距离=" +
-                    Fixed(minimumDistance) +
-                    "，平行边最大距离=" +
-                    Fixed(maximumDistance) +
-                    "，是否板厚端面=" +
-                    std::string(
-                        isThicknessEnd ? "true" : "false"));
-
-            if (isThicknessEnd)
-            {
-                if (addUnique(currentFace))
-                {
-                    ++terminalThicknessCount;
-                }
-                break;
-            }
-            if (farthestEdge == nullptr)
-            {
-                break;
-            }
-            incomingEdge = farthestEdge;
-            currentFace =
-                otherFace(incomingEdge, walkedFaces);
-        }
-    }
-
-    std::ostringstream faceTags;
-    for (NXOpen::Face* face : result)
-    {
-        if (faceTags.tellp() > 0)
-        {
-            faceTags << ",";
-        }
-        faceTags << face->Tag();
-    }
-    TiaoZenWriteLog(
-        "INFO",
-        "拓扑选面完成：selectedCount=" +
-            std::to_string(result.size()) +
-            "，PLANE1=" + std::to_string(plane1Count) +
-            "，PLANE2=" + std::to_string(plane2Count) +
-            "，板厚端面=" +
-            std::to_string(terminalThicknessCount) +
-            "，faceTags=[" + faceTags.str() + "]");
-    return result;
+    if (body == nullptr)
+        return {};
+    const double tolerance = (std::max)(1.0e-3,
+        (std::max)(frame_.Length(), frame_.Width()) * 1.0e-6);
+    const panel_skirt::Selection selection = panel_skirt::Collect(
+        CachedFace(), frame_.origin, frame_.normal, outwardDirection,
+        frame_.thickness, tolerance);
+    TiaoZenWriteLog(selection.error.empty() ? "INFO" : "ERROR",
+        "完整裙边截面选面：bodyTag=" + std::to_string(body->Tag()) +
+        "，boundary=" + Fixed(boundaryCoordinate) +
+        "，direction=" + VectorText(outwardDirection) +
+        "，selectedCount=" + std::to_string(selection.faces.size()) +
+        "，error=" + selection.error);
+    return selection.faces;
 }
 
 bool PanelSizeDialog::PullBoundaryFaces(
@@ -3003,7 +2532,8 @@ bool PanelSizeDialog::PullBoundaryFaces(
     if (faces.empty())
     {
         error =
-            "未找到板件边界侧面。请选择能代表板件整体长宽的主平面。";
+            "未能完整识别该侧折回裙边，已取消调整以保持原宽度。"
+            "请选择能代表板件整体长宽的主平面。";
         TiaoZenWriteLog(
             "ERROR", side + "侧未找到可移动边界面。");
         return false;
@@ -3023,19 +2553,32 @@ bool PanelSizeDialog::PullBoundaryFaces(
             std::to_string(faces.size()) +
             "，faceTags=[" + faceTags.str() + "]");
 
+    std::vector<panel_skirt::SurfacePosition> originalSurfaces;
+    for (NXOpen::Face* face : faces)
+    {
+        panel_skirt::SurfacePosition position;
+        if (!panel_skirt::Measure(face, frame_.origin, frame_.normal,
+                                  outwardDirection, position))
+        {
+            error = "无法记录原裙边截面尺寸，已取消调整。";
+            return false;
+        }
+        originalSurfaces.push_back(position);
+    }
+
     NXOpen::Part* workPart = session_->Parts()->Work();
-    NXOpen::Features::PullFaceBuilder* builder = nullptr;
+    NXOpen::Features::MoveFaceBuilder* builder = nullptr;
     try
     {
         NXOpen::Direction* direction =
             workPart->Directions()->CreateDirection(
                 frame_.origin, outwardDirection,
                 NXOpen::SmartObject::UpdateOptionWithinModeling);
-        builder = workPart->Features()->CreatePullFaceBuilder(nullptr);
-        builder->Motion()->SetOption(
-            NXOpen::GeometricUtilities::ModlMotion::OptionsDistance);
-        builder->Motion()->SetDistanceVector(direction);
-        builder->Motion()->DistanceValue()->SetFormula(
+        builder = workPart->Features()->CreateMoveFaceBuilder(nullptr);
+        builder->SetType(
+            NXOpen::Features::MoveFaceBuilder::TypesTranslateDirectionAndDistance);
+        builder->SetDirection(direction);
+        builder->Distance()->SetFormula(
             Number(distance).c_str());
 
         NXOpen::SelectionIntentRuleOptions* options =
@@ -3044,36 +2587,31 @@ bool PanelSizeDialog::PullBoundaryFaces(
         NXOpen::FaceDumbRule* rule =
             workPart->ScRuleFactory()->CreateRuleFaceDumb(faces, options);
         delete options;
-        builder->FaceToPull()->ReplaceRules(
+        builder->MoveFaceCollector()->ReplaceRules(
             std::vector<NXOpen::SelectionIntentRule*>{rule}, false);
 
-        NXOpen::NXObject* committed = builder->Commit();
-        NXOpen::Features::Feature* feature =
-            dynamic_cast<NXOpen::Features::Feature*>(committed);
-        if (feature == nullptr)
-        {
-            for (NXOpen::NXObject* object : builder->GetCommittedObjects())
-            {
-                feature = dynamic_cast<NXOpen::Features::Feature*>(object);
-                if (feature != nullptr)
-                {
-                    break;
-                }
-            }
-        }
+        const double tolerance = (std::max)(1.0e-3,
+            (std::max)(frame_.Length(), frame_.Width()) * 1.0e-6);
+        const panel_skirt::MoveResult result = panel_skirt::CommitAndVerifyMove(
+            builder, originalSurfaces, frame_.origin, frame_.normal,
+            outwardDirection, distance, tolerance);
+        // A direct edit has no feature to delete; the preview undo mark owns
+        // its rollback. Retain actual feature tags only as additional cleanup.
+        if (result.featureTag != NULL_TAG)
+            createdFeatures.push_back(result.featureTag);
         builder->Destroy();
         builder = nullptr;
-        if (feature == nullptr)
+        if (!result.error.empty())
         {
-            error = "NX 未返回有效的拉动面特征。";
+            error = side + "侧" + result.error + "，已取消调整。";
+            TiaoZenWriteLog("ERROR", error);
             return false;
         }
-        createdFeatures.push_back(feature->Tag());
         TiaoZenWriteLog(
             "INFO",
-            side + "侧 PullFace 提交成功：featureTag=" +
-                std::to_string(feature->Tag()) +
-                "，distance=" + SignedFixed(distance));
+            side + "侧 MoveFace 提交成功：featureTag=" +
+                std::to_string(result.featureTag) +
+                "，geometryVerified=true，distance=" + SignedFixed(distance));
         return true;
     }
     catch (const NXOpen::NXException& ex)
@@ -3083,10 +2621,10 @@ bool PanelSizeDialog::PullBoundaryFaces(
             builder->Destroy();
         }
         error = ex.Message() != nullptr ? ex.Message()
-                                       : "拉动板件边界面失败。";
+                                       : "移动板件边界面失败。";
         TiaoZenWriteLog(
             "ERROR",
-            side + "侧 PullFace 失败：" + error);
+            side + "侧 MoveFace 失败：" + error);
         return false;
     }
 }

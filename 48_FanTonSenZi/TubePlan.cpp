@@ -6,19 +6,25 @@ Vec Unit(Vec v){double n=Length(v);if(n<1e-12)throw std::runtime_error("无效�
 Vec Span::Point(double f)const {if(!radius)return a+(b-a)*f;Vec r=a-center;return center+r*std::cos(angle*f)+Cross(normal,r)*std::sin(angle*f);}
 Vec Span::Tangent(double f)const {return radius?Unit(Cross(normal,Point(f)-center)):Unit(b-a);}
 void Span::Reverse(){std::swap(a,b);normal=normal*(-1);}
-static Plan BuildPlan(const Source& source,const Settings& settings,double phase){
+static Plan BasePlan(const Source& source,const Settings& settings,bool hasCuts){
     Plan p;p.source=source;p.settings=settings;
     double u=source.unitsPerMm,t=source.thickness,d=source.depth,w=source.width;
     if(!std::isfinite(u)||u<=0||!std::isfinite(t)||!std::isfinite(d)||!std::isfinite(w)||t<=0||d<=2*t||w<=2*t)throw std::runtime_error("方通截面或壁厚无效。");
     if(source.spans.empty())throw std::runtime_error("请选择方通外侧的连续边。");
-    if(settings.divisions<2||settings.divisions>180)throw std::runtime_error("圆弧分段数须为 2–180。");
-    if(!std::isfinite(settings.radiusMm)||settings.radiusMm<0||!std::isfinite(settings.kFactor)||settings.kFactor<=0||settings.kFactor>1||!std::isfinite(settings.gapMm)||settings.gapMm<0)throw std::runtime_error("内弯半径、切缝不得为负；K 系数须大于 0 且不大于 1。");
-    p.radius=settings.radiusMm*u;p.gap=settings.gapMm*u;
+    if(hasCuts&&(!std::isfinite(settings.radiusMm)||settings.radiusMm<0||!std::isfinite(settings.kFactor)||settings.kFactor<=0||settings.kFactor>1||!std::isfinite(settings.gapMm)||settings.gapMm<0))throw std::runtime_error("内弯半径、切缝不得为负；连接壁 K 系数须大于 0 且不大于 1。");
+    p.radius=hasCuts?settings.radiusMm*u:0;p.gap=hasCuts?settings.gapMm*u:0;
+    if(!hasCuts)p.settings.cutSource=false;
+    if(p.settings.cutSource)p.settings.hideSource=false;
     if(source.round){
-        if(!std::isfinite(settings.bridgeWidthMm)||settings.bridgeWidthMm<=0||settings.bridgeWidthMm*u>pi*d/4)throw std::runtime_error("圆管连接带宽须大于 0，且不超过外圆周长的四分之一。");
+        if(hasCuts&&(!std::isfinite(settings.bridgeWidthMm)||settings.bridgeWidthMm<=0||settings.bridgeWidthMm*u>pi*d/4))throw std::runtime_error("圆管连接带宽须大于 0，且不超过外圆周长的四分之一。");
         if(!source.holes.empty())throw std::runtime_error("带孔槽圆管暂不支持展开，已取消生成以免丢孔。");
     }
-    if(p.radius+t>=d-t)throw std::runtime_error("内弯半径过大，切口无法在对侧管壁闭合。");
+    if(hasCuts&&p.radius+t>=d-t)throw std::runtime_error("内弯半径过大，切口无法在对侧管壁闭合。");
+    return p;
+}
+static Plan BuildPlan(const Source& source,const Settings& settings,double phase){
+    auto p=BasePlan(source,settings,true);double u=source.unitsPerMm,t=source.thickness,d=source.depth;
+    if(settings.divisions<2||settings.divisions>180)throw std::runtime_error("圆弧分段数须为 2–180。");
     auto append=[&](Vec v){if(p.polygon.empty()||Length(v-p.polygon.back())>1e-6*u)p.polygon.push_back(v);};
     double totalAngle=0;
     for(const auto& s:source.spans){
@@ -54,12 +60,45 @@ static Plan BuildPlan(const Source& source,const Settings& settings,double phase
         // At the opposite wall adjacent mitres must leave positive material.
         double cuts=(i?std::max(0.,d-p.radius-t)*std::tan(angles[i]/2)+p.gap/2:0)+(i+2<p.polygon.size()?std::max(0.,d-p.radius-t)*std::tan(angles[i+1]/2)+p.gap/2:0);
         if(straight-cuts<=.01*u)throw std::runtime_error("切口重叠或切到端部；请增大段长、减小转角/切缝，或检查外侧边选择。");
-        p.segments.push_back({p.polygon[i]+Unit(p.polygon[i+1]-p.polygon[i])*setbacks[i],Unit(p.polygon[i+1]-p.polygon[i]),p.length,straight});
+        p.segments.push_back({p.polygon[i]+Unit(p.polygon[i+1]-p.polygon[i])*setbacks[i],Unit(p.polygon[i+1]-p.polygon[i]),p.length,straight,i?int(i)-1:-1,i+2<p.polygon.size()?int(i):-1});
         p.length+=straight;
         if(i+2<p.polygon.size()){
-            p.bends.push_back({angles[i+1],p.length,allowances[i+1],setbacks[i+1],p.polygon[i+1]});
+            p.bends.push_back({angles[i+1],p.length,allowances[i+1],setbacks[i+1],p.polygon[i+1],Unit(p.polygon[i+1]-p.polygon[i]),Unit(p.polygon[i+2]-p.polygon[i+1])});
             p.length+=allowances[i+1];
         }
+    }
+    return p;
+}
+static Plan BuildMachinePlan(const Source& input,const Settings& settings){
+    Source source=input;source.spans.clear();
+    for(const auto& span:input.spans){
+        if(!source.spans.empty()&&!span.radius&&!source.spans.back().radius&&Length(source.spans.back().b-span.a)<1e-6*input.unitsPerMm&&Length(source.spans.back().Tangent(1)-span.Tangent(0))<1e-7)source.spans.back().b=span.b;
+        else source.spans.push_back(span);
+    }
+    const size_t count=source.spans.size();double totalAngle=0;bool hasCuts=false,hasArcs=false;
+    std::vector<double> angles(count+1,0);std::vector<int> bendIndex(count+1,-1);
+    for(size_t i=0;i<count;++i){const auto& s=source.spans[i];
+        if(s.radius){if(!std::isfinite(s.radius)||s.radius<=source.depth||!std::isfinite(s.angle)||s.angle<=0||s.angle>pi+1e-7)throw std::runtime_error("圆弧须小于等于 180°，且外侧半径须大于管高。");hasArcs=true;totalAngle+=s.angle;}
+        if(i){Vec a=source.spans[i-1].Tangent(1),b=s.Tangent(0);double angle=std::atan2(Dot(Cross(a,b),source.normal),Dot(a,b));
+            if(angle< -1e-8||angle>pi*.75)throw std::runtime_error("当前支持同一平面内同向弯曲；单个转角须不超过 135°。");
+            if(Length(a-b)>1e-7){if(s.radius||source.spans[i-1].radius)throw std::runtime_error("圆弧与相邻管段须相切。");angles[i]=angle;totalAngle+=angle;hasCuts=true;}
+        }
+    }
+    auto p=BasePlan(source,settings,hasCuts);double u=source.unitsPerMm,t=source.thickness,d=source.depth;
+    if(!hasCuts&&!hasArcs)throw std::runtime_error("选择中没有圆弧或转角，无需伸直。");
+    if(totalAngle>pi+1e-6)throw std::runtime_error("当前支持总转向不超过 180° 的开口管件。");
+    if(hasArcs&&(!std::isfinite(settings.tubeKFactor)||settings.tubeKFactor<=0||settings.tubeKFactor>1))throw std::runtime_error("弯管 K 因子须大于 0 且不大于 1；0.5 表示按截面中心线展开。");
+    std::vector<double> setbacks(count+1,0),allowances(count+1,0);int nextBend=0;
+    for(size_t i=1;i<count;++i)if(angles[i]>0){setbacks[i]=(p.radius+t)*std::tan(angles[i]/2);allowances[i]=(p.radius+settings.kFactor*t)*angles[i];bendIndex[i]=nextBend++;}
+    for(size_t i=0;i<count;++i){const auto& s=source.spans[i];
+        if(s.radius){double r=s.radius-(1-settings.tubeKFactor)*d,length=r*s.angle;p.machineArcs.push_back({s,p.length,length,r});p.length+=length;}
+        else{
+            double length=Length(s.b-s.a)-setbacks[i]-setbacks[i+1];
+            double cuts=(angles[i]>0?std::max(0.,d-p.radius-t)*std::tan(angles[i]/2)+p.gap/2:0)+(angles[i+1]>0?std::max(0.,d-p.radius-t)*std::tan(angles[i+1]/2)+p.gap/2:0);
+            if(length-cuts<=.01*u)throw std::runtime_error("切口重叠或切到圆弧/端部；请检查转角附近的直段长度。");
+            p.segments.push_back({s.a+s.Tangent(0)*setbacks[i],s.Tangent(0),p.length,length,bendIndex[i],bendIndex[i+1]});p.length+=length;
+        }
+        if(angles[i+1]>0){p.bends.push_back({angles[i+1],p.length,allowances[i+1],setbacks[i+1],s.b,s.Tangent(1),source.spans[i+1].Tangent(0)});p.length+=allowances[i+1];}
     }
     return p;
 }
@@ -96,8 +135,8 @@ static bool AssignHoles(Plan& p){
             if(std::abs(h.direction.z)>.99&&(y.first<p.source.cornerRadius+clearance||y.second>p.source.depth-p.source.cornerRadius-clearance))continue;
             if(std::abs(h.direction.y)>.99&&(z.first<p.source.cornerRadius+clearance||z.second>p.source.width-p.source.cornerRadius-clearance))continue;
             double root=p.source.thickness+p.radius;
-            if(i){double slope=std::tan(p.bends[i-1].angle/2);if(x.first<seg.start+p.gap/2+clearance||ProjectRange(h,{1,-slope,0}).first<seg.start-slope*root+p.gap/2+clearance)continue;}
-            if(i<p.bends.size()){double slope=std::tan(p.bends[i].angle/2);if(x.second>seg.start+seg.length-p.gap/2-clearance||ProjectRange(h,{1,slope,0}).second>seg.start+seg.length+slope*root-p.gap/2-clearance)continue;}
+            if(seg.beforeBend>=0){double slope=std::tan(p.bends[seg.beforeBend].angle/2);if(x.first<seg.start+p.gap/2+clearance||ProjectRange(h,{1,-slope,0}).first<seg.start-slope*root+p.gap/2+clearance)continue;}
+            if(seg.afterBend>=0){double slope=std::tan(p.bends[seg.afterBend].angle/2);if(x.second>seg.start+seg.length-p.gap/2-clearance||ProjectRange(h,{1,slope,0}).second>seg.start+seg.length+slope*root-p.gap/2-clearance)continue;}
             p.holeSegments.push_back(i);found=true;break;
         }
         if(!found)return false;
@@ -114,7 +153,7 @@ static bool AddSourceSlots(Plan& p){
     double u=p.source.unitsPerMm,h=p.gap/2,d=p.source.depth;
     if(p.gap<.01*u)throw std::runtime_error("原管开槽时，切口间隙须至少为 0.01 mm。");
     for(size_t i=0;i<p.bends.size();++i){
-        const auto& b=p.bends[i];SourceSlot slot;slot.incoming=p.segments[i].axis;slot.outgoing=p.segments[i+1].axis;
+        const auto& b=p.bends[i];SourceSlot slot;slot.incoming=b.incoming;slot.outgoing=b.outgoing;
         bool corner=false;for(size_t j=1;j<p.source.spans.size();++j)if(Length(b.vertex-p.source.spans[j].a)<1e-5*u&&Length(p.source.spans[j-1].Tangent(1)-p.source.spans[j].Tangent(0))>1e-7){corner=true;break;}
         if(corner){slot.origin=b.vertex;slot.axis=Unit(slot.incoming+slot.outgoing);slot.cornerCos=std::cos(b.angle/2);}
         else{
@@ -140,6 +179,10 @@ static bool AddSourceSlots(Plan& p){
     return true;
 }
 Plan MakePlan(const Source& source,const Settings& settings){
+    if(!settings.segmentArcs){auto p=BuildMachinePlan(source,settings);
+        if(!AssignHoles(p))throw std::runtime_error("整体弯管模式仅保留直段内的完整孔槽；弯曲区或跨弯孔槽不能保证成型后孔形孔位，请改用圆弧多段伸直。");
+        if(!AddSourceSlots(p))throw std::runtime_error("转角切口与原孔槽冲突，已取消生成。");return p;
+    }
     // Keep the requested count and both end tangents. Shift interior tangent
     // stations together only when this avoids a hole without moving that hole.
     for(double phase:{0.,.1,-.1,.2,-.2,.3,-.3,.4,-.4,.48,-.48}){

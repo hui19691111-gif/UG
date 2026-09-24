@@ -39,10 +39,12 @@ struct Settings {
     int divisions=12;
     double radiusMm=1,kFactor=.4,gapMm=.2;
     double bridgeWidthMm=6;
-    bool hideSource=false,cutSource=false;
+    double tubeKFactor=.5; // neutral radius = inside path radius + K * section depth
+    bool hideSource=false,cutSource=false,segmentArcs=true;
 };
-struct Bend {double angle=0,start=0,allowance=0,setback=0;Vec vertex;};
-struct Segment {Vec origin,axis;double start=0,length=0;};
+struct Bend {double angle=0,start=0,allowance=0,setback=0;Vec vertex,incoming,outgoing;};
+struct Segment {Vec origin,axis;double start=0,length=0;int beforeBend=-1,afterBend=-1;};
+struct MachineArc {Span source;double start=0,length=0,neutralRadius=0;};
 // A transverse gap in the actual curved source, not in its tangent polygon.
 struct SourceSlot {
     Vec origin,axis,center,incoming,outgoing;
@@ -53,6 +55,7 @@ struct Plan {
     std::vector<Vec> polygon;
     std::vector<Bend> bends;
     std::vector<Segment> segments;
+    std::vector<MachineArc> machineArcs;
     std::vector<size_t> holeSegments;
     std::vector<SourceSlot> sourceSlots;
     bool adjustedCuts=false;
