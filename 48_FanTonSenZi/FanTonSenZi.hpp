@@ -20,4 +20,6 @@ private:
     NXOpen::BlockStyler::UIBlock *edges_=nullptr,*numbers_[6]={},*hide_=nullptr,*cutSource_=nullptr,*segmentArcs_=nullptr,*status_=nullptr,*detail_=nullptr;
     NXOpen::Features::CustomFeature* edited_=nullptr;
     bool initialized_=false,shown_=false,updating_=false;
+    bool anchored_=false;
+    tube_straighten::Vec anchor_;
 };

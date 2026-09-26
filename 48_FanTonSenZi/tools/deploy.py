@@ -7,6 +7,7 @@ import json
 import shutil
 import struct
 import re
+import uuid
 import xml.etree.ElementTree as ET
 
 source = Path(__file__).resolve().parents[1]
@@ -130,6 +131,31 @@ for p, data in old_manifests.items():
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
 (backup/'created-files.json').write_text(json.dumps([r for r,d in old_files.items() if d is None],indent=2),encoding='utf-8')
+
+def replace_artifact(target, data):
+    # Stage complete bytes first. NX may keep a callback DLL mapped until exit;
+    # Windows can rename that image while the running process keeps its handle.
+    rel = target.relative_to(root)
+    temporary = target.with_name(target.name+'.deploy-'+uuid.uuid4().hex+'.tmp')
+    temporary.write_bytes(data)
+    try:
+        try:
+            temporary.replace(target)
+        except PermissionError:
+            if not target.exists():
+                raise
+            parked = backup/'loaded-runtime'/uuid.uuid4().hex/rel
+            parked.parent.mkdir(parents=True,exist_ok=True)
+            target.rename(parked)
+            try:
+                temporary.replace(target)
+            except Exception:
+                parked.rename(target)
+                raise
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
 changed = []
 written_manifests = []
 try:
@@ -141,7 +167,7 @@ try:
         assert (target.read_bytes() if target.exists() else None) == old_files[rel], 'Artifact changed concurrently'
         if data != old_files[rel]:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
+            replace_artifact(target,data)
             changed.append(rel)
     for p, value in zip(manifest_paths, [hashes,package]):
         assert p.read_bytes() == old_manifests[p], 'Manifest changed concurrently'
@@ -161,7 +187,7 @@ except Exception:
         if old_files[rel] is None:
             (root/rel).unlink()
         else:
-            (root/rel).write_bytes(old_files[rel])
+            replace_artifact(root/rel,old_files[rel])
     for p in written_manifests:
         p.write_bytes(old_manifests[p])
     raise

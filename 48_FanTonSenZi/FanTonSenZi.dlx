@@ -15,8 +15,8 @@
                   <Option name="Optional" value="1" />
                   <Option name="Satisfied" value="2" />
                 </Property>
-                <Property id="Cue" mask="0" name="Cue" type="utfstring" sname="Cue" value="选择方通侧平面 / 圆管面" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
-                <Property id="Label" mask="0" name="Label" type="utfstring" sname="LabelString" value="选择方通侧平面 / 圆管面" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Cue" mask="0" name="Cue" type="utfstring" sname="Cue" value="选择方通任一平面 / 圆管面" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Label" mask="0" name="Label" type="utfstring" sname="LabelString" value="选择方通任一平面 / 圆管面" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
                 <Property id="Many" mask="256" name="Many" type="enum" sname="SelectMode" source="3" ClassID="UGS::UICOMP_selection" dynamic="0" selected="0" hierarchy="UGS::UICOMP_selection">
                   <Option name="Single" value="0" />
                   <Option name="Multiple" value="1" />
@@ -151,7 +151,7 @@
             <item id="result_status" icon="styler_label.bmp" name="result_status" type="uicomp" class="UICOMP_label" notes="" Expanded="1" hierarchy="" presentation="Label">
               <PropertyList id="id" mode="0">
                 <Property id="API Name" name="API Name" type="string" sname="BlockID" value="result_status" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Title" name="Title" type="utfstring" sname="Label" value="方通选完整侧平面；圆管选管面或圆环端口。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="方通选任一平面，以点击部位固定伸直。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
               </PropertyList>
@@ -181,7 +181,7 @@
             <item id="scope" icon="styler_label.bmp" name="scope" type="uicomp" class="UICOMP_label" notes="" Expanded="1" hierarchy="" presentation="Label">
               <PropertyList id="id" mode="0">
                 <Property id="API Name" name="API Name" type="string" sname="BlockID" value="scope" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
-                <Property id="Title" name="Title" type="utfstring" sname="Label" value="平面、同向、等厚；圆管暂不支持孔槽。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="方通支持左右/上下弯；圆管仍限平面同向。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
                 <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
               </PropertyList>

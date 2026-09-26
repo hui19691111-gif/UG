@@ -11,6 +11,7 @@
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
 #include <uf.h>
+#include <uf_modl.h>
 #include <uf_part.h>
 #include <filesystem>
 #include <iostream>
@@ -39,7 +40,12 @@ void CheckResult(Features::CustomFeature* custom,const std::set<tag_t>& original
     std::cout<<"CHECK divisions="<<stored.divisions<<" segmented="<<stored.segmentArcs<<" cut_source="<<stored.cutSource<<" owned="<<owned.size()<<" source_volume="<<volume<<'\n'<<std::flush;
 }
 int main(int argc,char** argv){try{
-    if(argc==3&&std::string(argv[1])=="--inspect-ui"){
+    if(argc==4&&std::string(argv[1])=="--upgrade"){
+        Require(!std::filesystem::exists(argv[3]),"upgrade output exists");Check(UF_initialize());RequireFeatureClass();tag_t partTag=0;UF_PART_load_status_t load={};Check(UF_PART_open(argv[2],&partTag,&load));UF_PART_free_load_status(&load);
+        auto* session=Session::GetSession();auto* part=session->Parts()->Work();Features::CustomFeature* custom=nullptr;for(auto* f:part->Features()->GetFeatures())if(auto* c=dynamic_cast<Features::CustomFeature*>(f))custom=c;Require(custom,"old custom missing");tag_t face=0;auto s=ReadFeature(custom,face);Require(!s.useAnchor,"not a legacy anchorless fixture");auto source=InspectFace(face);s.useAnchor=true;s.anchorPoint=source.spans.front().Point(.25);auto mark=session->SetUndoMark(Session::MarkVisibilityVisible,"upgrade old custom");CreateFeature(face,s,custom,mark);auto saved=ReadFeature(custom,face);Require(saved.useAnchor&&Length(saved.anchorPoint-s.anchorPoint)<1e-9,"legacy anchor upgrade failed");Check(UF_PART_save_as(argv[3]));Check(UF_PART_close(partTag,0,1));UF_terminate();std::cout<<"PASS legacy custom anchor attributes upgrade and edit"<<std::endl;return 0;
+    }
+    if(argc==3&&(std::string(argv[1])=="--inspect-ui"||std::string(argv[1])=="--inspect-anchor-ui")){
+        const bool anchored=std::string(argv[1])=="--inspect-anchor-ui";
         Check(UF_initialize());RequireFeatureClass();tag_t partTag=0;UF_PART_load_status_t load={};Check(UF_PART_open(argv[2],&partTag,&load));UF_PART_free_load_status(&load);
         auto* part=Session::GetSession()->Parts()->Work();Features::CustomFeature* custom=nullptr;int customs=0,solids=0,loose=0;
         for(auto* f:part->Features()->GetFeatures()){
@@ -48,13 +54,19 @@ int main(int argc,char** argv){try{
             if(auto* c=dynamic_cast<Features::CustomFeature*>(f)){custom=c;++customs;}
         }
         Require(customs==1,"saved UI result needs exactly one custom feature");tag_t face=0;auto s=ReadFeature(custom,face);
-        Require(s.divisions==12&&!s.segmentArcs&&s.cutSource&&!s.hideSource&&std::abs(s.tubeKFactor-.42)<1e-12,"UI edit/cancel parameters not persisted");
+        Require(s.divisions==(anchored?4:12)&&!s.segmentArcs&&s.cutSource&&!s.hideSource&&std::abs(s.tubeKFactor-.42)<1e-12,"UI edit/cancel parameters not persisted");
         std::set<tag_t> owned;for(auto* c:custom->GetConstructionFeatures())owned.insert(c->GetFeature()->Tag());
         for(auto* f:part->Features()->GetFeatures())if(f!=custom&&!f->IsInternal()&&!owned.count(f->Tag()))++loose;
         for(auto* b:*part->Bodies())if(b->IsSolidBody())++solids;
         Require(solids==2&&loose==1&&!owned.empty(),"saved UI result has stale bodies/construction");
         auto source=InspectFace(face);MakePlan(source,s);
-        std::cout<<"PASS saved UI custom=1 groups=0 solids="<<solids<<" owned="<<owned.size()<<" source_features="<<loose<<" divisions="<<s.divisions<<" segmented="<<s.segmentArcs<<" tube_K="<<s.tubeKFactor<<" canceled_K_0.41_not_committed source_volume="<<Volume(source.body)<<std::endl;
+        if(anchored){
+            Require(s.useAnchor,"UI pick point was not persisted");
+            double xyz[]={s.anchorPoint.x,s.anchorPoint.y,s.anchorPoint.z};int status=0;Check(UF_MODL_ask_point_containment(xyz,source.body,&status));Require(status!=2,"persisted pick point is outside the source body");
+            tag_t flat=0;for(auto* b:*part->Bodies())if(b->IsSolidBody()&&b->Tag()!=source.body)flat=b->Tag();Check(UF_MODL_ask_point_containment(xyz,flat,&status));Require(status!=2,"persisted fixed point moved off the flat body");
+            std::cout<<"PASS UI anchor="<<s.anchorPoint.x<<','<<s.anchorPoint.y<<','<<s.anchorPoint.z<<" lies on both saved source and flat bodies"<<std::endl;
+        }
+        std::cout<<"PASS saved UI custom=1 groups=0 solids="<<solids<<" owned="<<owned.size()<<" source_features="<<loose<<" divisions="<<s.divisions<<" segmented="<<s.segmentArcs<<" tube_K="<<s.tubeKFactor<<(anchored?" anchor_persisted source_volume=":" canceled_K_0.41_not_committed source_volume=")<<Volume(source.body)<<std::endl;
         Check(UF_PART_close(partTag,0,1));UF_terminate();return 0;
     }
     Require(argc==3,"input and new output required");Require(!std::filesystem::exists(argv[2]),"output exists");Check(UF_initialize());RequireFeatureClass();

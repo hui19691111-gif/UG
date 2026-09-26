@@ -53,6 +53,23 @@ int main(){try{
     auto segmented=whole;segmented.segmentArcs=true;auto old=MakePlan(machine,segmented);Require(old.bends.size()==13&&old.sourceSlots.size()==13&&old.machineArcs.empty(),"enabled mode no longer uses original cuts");
     Source two;two=machine;two.spans={{{200,0,0},{0,200,0},{0,0,0},{0,0,1},200,pi/2},{{0,200,0},{-100,200,0}},{{-100,200,0},{-220,80,0},{-100,80,0},{0,0,1},120,pi/2}};
     auto multi=MakePlan(two,whole);Require(multi.machineArcs.size()==2&&multi.bends.empty()&&std::abs(multi.length-(100+(185+105)*pi/2))<1e-10,"multiple exact arc radii");
+    Source reverse;reverse.width=30;reverse.depth=20;reverse.thickness=2;reverse.normal=reverse.widthDirection={0,0,1};
+    reverse.spans={{{-100,0,0},{0,0,0}},{{0,0,0},{100,100,0},{0,100,0},{0,0,1},100,pi/2},{{100,100,0},{100,200,0}},{{100,200,0},{260,360,0},{260,200,0},{0,0,-1},160,pi/2},{{260,360,0},{400,360,0}}};
+    Settings rev;rev.gapMm=0;rev.divisions=8;auto rp=MakePlan(reverse,rev);int negative=0;
+    for(size_t i=0;i<rp.bends.size();++i){const auto& b=rp.bends[i];negative+=b.reversed;double slope=tan(b.angle/2);
+        for(double fromOuter:{4.,10.,19.}){double y=b.reversed?20-fromOuter:fromOuter,spread=(fromOuter-3)*slope;
+            auto left=ToFolded(rp,i,{b.start-spread,y,15}),right=ToFolded(rp,i+1,{b.start+b.allowance+spread,y,15});Require(Length(left-right)<1e-8,"reverse notch faces do not meet when refolded");}
+    }
+    Require(negative==8&&rp.bends.size()==16,"reverse arc cut signs incorrect");
+    rev.cutSource=true;rev.gapMm=.2;auto slots=MakePlan(reverse,rev);int reversedSlots=0;for(const auto& slot:slots.sourceSlots){reversedSlots+=slot.reversed;Require(slot.pathRadius==(slot.reversed?180:100),"wrong reverse source-slot radius");}Require(reversedSlots==8,"source-slot retained wall not switched");
+    for(bool segmentedMode:{false,true}){rev.segmentArcs=segmentedMode;rev.useAnchor=true;rev.anchorPoint={90,150,30};auto anchored=MakePlan(reverse,rev);
+        bool found=false;for(size_t i=0;i<anchored.segments.size();++i)if(Length(anchored.segments[i].axis-Vec{0,1,0})<1e-7){auto local=ToFlatLocal(anchored,i,{90,150,12});if(local.x>anchored.segments[i].start&&local.x<anchored.segments[i].start+anchored.segments[i].length){Require(Length(FlatPoint(anchored,local.x,local.y,local.z)-Vec{90,150,12})<1e-8,"selected middle straight section moved");found=true;}}
+        Require(found,"fixed middle straight missing");if(!segmentedMode)Require(std::abs(anchored.length-(340+260*pi/2))<1e-8,"reverse arc centerline length wrong");
+    }
+    rev.segmentArcs=false;rev.tubeKFactor=.42;rev.anchorPoint={90,150,30};auto reverseK=MakePlan(reverse,rev);Require(std::abs(reverseK.length-(340+(260-3.2)*pi/2))<1e-8,"reverse K must use each bend's inner radius");
+    rev.tubeKFactor=.5;const auto& secondArc=reverse.spans[3];Vec arcCenter=secondArc.Point(.4)+Cross(reverse.normal,secondArc.Tangent(.4))*10+Vec{0,0,15};rev.anchorPoint=arcCenter;auto arcAnchor=MakePlan(reverse,rev);double station=arcAnchor.machineArcs[1].start+arcAnchor.machineArcs[1].length*.4;Require(Length(FlatPoint(arcAnchor,station,10,15)-arcCenter)<1e-8&&Length(arcAnchor.flatAxis-secondArc.Tangent(.4))<1e-8,"clicked arc section/tangent moved");
+    Source zigzag=reverse;zigzag.spans={{{0,0,0},{150,0,0}},{{150,0,0},{150,150,0}},{{150,150,0},{300,150,0}}};rev.useAnchor=false;rev.cutSource=true;auto zp=MakePlan(zigzag,rev);Require(zp.bends.size()==2&&!zp.bends[0].reversed&&zp.bends[1].reversed&&zp.sourceSlots[1].reversed,"reverse sharp corner lost");
+    std::cout<<"PASS: opposite arc directions, alternating retained walls, reverse notch refolding, source-slot radii, middle/arc fixed frames, signed K lengths and reverse corners\n";
     std::cout<<"PASS: whole arc, tube K, mixed corner, multiple radii, straight holes and deforming-hole rejection, enabled-mode regression\n";
     std::cout<<"PASS: allowance, setbacks, physical miter closure, arc endpoint/tangent, convergence, invalid inputs\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

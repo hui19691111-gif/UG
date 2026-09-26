@@ -26,6 +26,7 @@
 namespace tube_straighten {
 using namespace NXOpen;
 using namespace NXOpen::Features;
+static std::set<std::string> AttributeNames(CustomFeatureData* data){std::set<std::string> result;if(data){std::vector<NXString> names;std::vector<CustomAttribute::Type> types;data->GetAllCustomAttributeNameAndTypes(names,types);for(const auto& name:names)result.insert(name.GetUTF8Text());}return result;}
 void RequireFeatureClass(){
     CustomFeatureClass* cls=nullptr;
     try{cls=Session::GetSession()->CustomFeatureClassManager()->GetClassFromName(featureClassName);}catch(const NXException&){}
@@ -44,7 +45,8 @@ Settings ReadFeature(CustomFeature* feature,tag_t& face){
     s.tubeKFactor=data->CustomDoubleAttributeByName("TubeKFactor")->Value();
     s.segmentArcs=data->CustomLogicalAttributeByName("SegmentArcs")->Value();
     s.cutSource=data->CustomLogicalAttributeByName("CutSource")->Value();
-    s.hideSource=data->CustomLogicalAttributeByName("HideSource")->Value();return s;
+    s.hideSource=data->CustomLogicalAttributeByName("HideSource")->Value();
+    if(AttributeNames(data).count("UseAnchor")){s.useAnchor=data->CustomLogicalAttributeByName("UseAnchor")->Value();s.anchorPoint={data->CustomDoubleAttributeByName("AnchorX")->Value(),data->CustomDoubleAttributeByName("AnchorY")->Value(),data->CustomDoubleAttributeByName("AnchorZ")->Value()};}return s;
 }
 FeatureResult CreateFeature(tag_t face,const Settings& settings,CustomFeature* edited,Session::UndoMarkId mark){
     RequireFeatureClass();auto* session=Session::GetSession();auto* part=session->Parts()->Work();
@@ -76,13 +78,16 @@ FeatureResult CreateFeature(tag_t face,const Settings& settings,CustomFeature* e
         auto* selected=data?data->CustomTagAttributeByName("SourceFace"):attrs->CreateCustomTagAttribute("SourceFace",{CustomAttribute::PropertyIsOutputAttribute});selected->SetValue(NXObjectManager::Get(face));
         auto* divisions=data?data->CustomIntegerAttributeByName("Divisions"):attrs->CreateCustomIntegerAttribute("Divisions",input);divisions->SetValue(settings.divisions);
         std::vector<CustomAttribute*> attributes{members,selected,divisions};
-        auto number=[&](const char* name,double value){auto* a=data?data->CustomDoubleAttributeByName(name):attrs->CreateCustomDoubleAttribute(name,input);a->SetValue(value);attributes.push_back(a);};
+        const auto names=AttributeNames(data);std::vector<CustomAttribute*> added;
+        auto number=[&](const char* name,double value){bool exists=names.count(name)!=0;auto* a=exists?data->CustomDoubleAttributeByName(name):attrs->CreateCustomDoubleAttribute(name,input);a->SetValue(value);attributes.push_back(a);if(data&&!exists)added.push_back(a);};
         number("RadiusMm",settings.radiusMm);number("KFactor",settings.kFactor);number("GapMm",settings.gapMm);number("BridgeWidthMm",settings.bridgeWidthMm);number("TubeKFactor",settings.tubeKFactor);
-        auto logical=[&](const char* name,bool value){auto* a=data?data->CustomLogicalAttributeByName(name):attrs->CreateCustomLogicalAttribute(name,input);a->SetValue(value);attributes.push_back(a);};
+        auto logical=[&](const char* name,bool value){bool exists=names.count(name)!=0;auto* a=exists?data->CustomLogicalAttributeByName(name):attrs->CreateCustomLogicalAttribute(name,input);a->SetValue(value);attributes.push_back(a);if(data&&!exists)added.push_back(a);};
         logical("SegmentArcs",settings.segmentArcs);logical("CutSource",settings.cutSource);logical("HideSource",settings.hideSource);
+        logical("UseAnchor",settings.useAnchor);number("AnchorX",settings.anchorPoint.x);number("AnchorY",settings.anchorPoint.y);number("AnchorZ",settings.anchorPoint.z);
         std::vector<TaggedObject*> objects;for(auto tag:result.members)objects.push_back(NXObjectManager::Get(tag));members->SetValues(objects);
         auto* cls=session->CustomFeatureClassManager()->GetClassFromName(featureClassName);
         if(!data)data=part->Features()->CustomFeatureDataCollection()->CreateData(cls,attributes);
+        else if(!added.empty())data->AddCustomAttributes(added);
         builder->SetFeatureData(data);
         auto* feature=dynamic_cast<CustomFeature*>(builder->CommitFeature());builder->Destroy();builder=nullptr;
         if(!feature)throw std::runtime_error("创建方通/圆管伸直自定义特征失败。");

@@ -778,6 +778,7 @@ int KonFanLaLiaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
         RefreshDisplay(selected);
         std::ostringstream message;
         message << "检查实体：" << currentAnalysis_.bodyCount
+                << " 个；识别通孔：" << currentAnalysis_.holeCount
                 << " 个；风险孔：" << selected.riskHoleCount << " 个";
         SetStatus(message.str());
     }
@@ -831,6 +832,7 @@ int KonFanLaLiaoDialog::apply_cb()
             RestoreDisplay();
             std::ostringstream message;
             message << "检查实体：" << result.bodyCount
+                    << " 个；识别通孔：" << result.holeCount
                     << " 个；风险孔：" << result.riskHoleCount << " 个";
             SetStatus(message.str());
         }
@@ -1103,6 +1105,7 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
             AppendAnalysisLog(log.str());
         }
         std::set<tag_t> bendFaceTags;
+        std::set<tag_t> verifiedBendFaceTags;
         std::vector<NXOpen::Edge*> bendEdges;
         std::set<tag_t> seenBendEdges;
         std::map<tag_t, NXOpen::Face*> bendEdgeOwners;
@@ -1125,6 +1128,7 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
                     const NXOpen::Features::SheetMetal::SheetmetalBendParameters
                         bendParameters =
                             sheetmetalManager->GetBendParameters(face);
+                    verifiedBendFaceTags.insert(face->Tag());
                     const double innerRadius = bendParameters.InnerRadius;
                     bendInnerRadius = innerRadius;
                     if (config.largeArcRatio > 0.0 && innerRadius >=
@@ -1183,6 +1187,7 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
             std::map<tag_t, InnerFaceRecord> innerFaces;
             std::set<tag_t> carrierFaces;
             std::set<tag_t> loopEdgeTags;
+            std::map<tag_t, std::set<tag_t>> loopEdgesByCarrier;
             std::map<tag_t, NXOpen::Edge*> connectedBendEdges;
             std::map<tag_t, NXOpen::Face*> bendCarrierFaces;
             std::string logicalHoleKey;
@@ -1195,14 +1200,15 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
             NXOpen::Point3d closestLoopBendPoint;
         };
         std::map<std::string, HoleRecord> holes;
+        std::map<tag_t, std::string> holeByWallFace;
 
-        // A qualifying inner loop must be on a planar carrier that is directly
-        // connected to a bend edge. The inner side faces themselves may be
-        // planar, cylindrical, conical or another surface type.
+        // Collect every inner mouth of a hole before selecting its bend side.
+        // The opposite mouth may be on a plane without a bend edge, or on the
+        // bend cylinder itself. Only a planar mouth sharing a bend tangent
+        // edge can later supply the distance and relief-slot geometry.
         for (NXOpen::Face* carrierFace : faces)
         {
-            if (carrierFace == nullptr ||
-                bendFaceTags.count(carrierFace->Tag()) != 0)
+            if (carrierFace == nullptr)
             {
                 continue;
             }
@@ -1210,8 +1216,16 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
             int carrierType = 0;
             if (UF_MODL_ask_face_type(
                     carrierFace->Tag(), &carrierType) != 0 ||
-                carrierType != UF_MODL_PLANAR_FACE)
+                (carrierType != UF_MODL_PLANAR_FACE &&
+                 carrierType != UF_MODL_CYLINDRICAL_FACE))
             {
+                continue;
+            }
+            if (carrierType == UF_MODL_CYLINDRICAL_FACE &&
+                verifiedBendFaceTags.count(carrierFace->Tag()) == 0)
+            {
+                // Periodic hole-wall cylinders can label their perimeter
+                // loops as Hole. They are not a second mouth of the hole.
                 continue;
             }
 
@@ -1226,17 +1240,16 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
                     carrierEdgeTags.insert(edge->Tag());
                 }
             }
-            for (NXOpen::Edge* bendEdge : bendEdges)
+            if (carrierType == UF_MODL_PLANAR_FACE)
             {
-                if (bendEdge != nullptr &&
-                    carrierEdgeTags.count(bendEdge->Tag()) != 0)
+                for (NXOpen::Edge* bendEdge : bendEdges)
                 {
-                    carrierBendEdges.push_back(bendEdge);
+                    if (bendEdge != nullptr &&
+                        carrierEdgeTags.count(bendEdge->Tag()) != 0)
+                    {
+                        carrierBendEdges.push_back(bendEdge);
+                    }
                 }
-            }
-            if (carrierBendEdges.empty())
-            {
-                continue;
             }
 
             uf_loop_p_t loops = nullptr;
@@ -1308,19 +1321,55 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
                         continue;
                     }
 
+                    bool allCircularEdges = true;
                     int linearProfileEdges = 0;
+                    int circularProfileEdges = 0;
+                    int otherProfileEdges = 0;
                     double longestStraightSegment = 0.0;
+                    std::vector<NXOpen::Vector3d> straightDirections;
+                    std::vector<double> straightLengths;
+                    double profileMin[3] = {DBL_MAX, DBL_MAX, DBL_MAX};
+                    double profileMax[3] = {-DBL_MAX, -DBL_MAX, -DBL_MAX};
+                    bool hasProfileBox = false;
                     for (NXOpen::Edge* holeEdge : holeEdges)
                     {
                         int edgeType = 0;
                         if (holeEdge == nullptr ||
                             UF_MODL_ask_edge_type(
-                                holeEdge->Tag(), &edgeType) != 0 ||
-                            edgeType != UF_MODL_LINEAR_EDGE)
+                                holeEdge->Tag(), &edgeType) != 0)
+                        {
+                            allCircularEdges = false;
+                            continue;
+                        }
+                        if (edgeType != UF_MODL_CIRCULAR_EDGE)
+                        {
+                            allCircularEdges = false;
+                        }
+                        if (edgeType == UF_MODL_LINEAR_EDGE)
+                            ++linearProfileEdges;
+                        else if (edgeType == UF_MODL_CIRCULAR_EDGE)
+                            ++circularProfileEdges;
+                        else
+                            ++otherProfileEdges;
+                        double edgeBox[6] = {};
+                        if (UF_MODL_ask_bounding_box(
+                                holeEdge->Tag(), edgeBox) == 0)
+                        {
+                            for (int coordinate = 0; coordinate < 3;
+                                 ++coordinate)
+                            {
+                                profileMin[coordinate] = (std::min)(
+                                    profileMin[coordinate], edgeBox[coordinate]);
+                                profileMax[coordinate] = (std::max)(
+                                    profileMax[coordinate],
+                                    edgeBox[coordinate + 3]);
+                            }
+                            hasProfileBox = true;
+                        }
+                        if (edgeType != UF_MODL_LINEAR_EDGE)
                         {
                             continue;
                         }
-                        ++linearProfileEdges;
                         double first[3] = {};
                         double second[3] = {};
                         int vertexCount = 0;
@@ -1331,36 +1380,126 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
                             const double dx = second[0] - first[0];
                             const double dy = second[1] - first[1];
                             const double dz = second[2] - first[2];
+                            const double segmentLength =
+                                std::sqrt(dx * dx + dy * dy + dz * dz);
                             longestStraightSegment = (std::max)(
-                                longestStraightSegment,
-                                std::sqrt(dx * dx + dy * dy + dz * dz));
+                                longestStraightSegment, segmentLength);
+                            if (segmentLength > 1.0e-9)
+                            {
+                                straightDirections.push_back(Normalize(
+                                    NXOpen::Vector3d(dx, dy, dz)));
+                                straightLengths.push_back(segmentLength);
+                            }
                         }
                     }
 
-                    std::ostringstream key;
-                    if (!wallFaceTags.empty())
+                    double profileSpan = longestStraightSegment;
+                    const bool conventionalSlot =
+                        linearProfileEdges == 2 &&
+                        circularProfileEdges >= 2 &&
+                        otherProfileEdges == 0 &&
+                        straightDirections.size() == 2 &&
+                        std::fabs(Dot(straightDirections[0],
+                                      straightDirections[1])) >= 0.999 &&
+                        std::fabs(straightLengths[0] -
+                                  straightLengths[1]) <=
+                            (std::max)(1.0e-3,
+                                0.05 * longestStraightSegment);
+                    if (hasProfileBox && !conventionalSlot)
                     {
-                        key << "W:";
-                        for (tag_t tag : wallFaceTags) key << tag << ',';
+                        const double dx = profileMax[0] - profileMin[0];
+                        const double dy = profileMax[1] - profileMin[1];
+                        const double dz = profileMax[2] - profileMin[2];
+                        profileSpan = (std::max)(profileSpan,
+                            std::sqrt(dx * dx + dy * dy + dz * dz));
+                    }
+                    std::set<std::string> matchingKeys;
+                    for (tag_t wallTag : wallFaceTags)
+                    {
+                        const auto existing = holeByWallFace.find(wallTag);
+                        if (existing != holeByWallFace.end())
+                        {
+                            matchingKeys.insert(existing->second);
+                        }
+                    }
+                    std::string holeKey;
+                    if (!matchingKeys.empty())
+                    {
+                        holeKey = *matchingKeys.begin();
                     }
                     else
                     {
-                        std::sort(
-                            holeEdgeTags.begin(), holeEdgeTags.end());
-                        key << "E:";
-                        for (tag_t tag : holeEdgeTags) key << tag << ',';
+                        std::ostringstream key;
+                        if (!wallFaceTags.empty())
+                        {
+                            key << "W:";
+                            for (tag_t tag : wallFaceTags) key << tag << ',';
+                        }
+                        else
+                        {
+                            std::sort(
+                                holeEdgeTags.begin(), holeEdgeTags.end());
+                            key << "E:";
+                            for (tag_t tag : holeEdgeTags) key << tag << ',';
+                        }
+                        holeKey = key.str();
                     }
-                    HoleRecord& record = holes[key.str()];
-                    record.logicalHoleKey = key.str();
-                    if (!record.profileInitialized)
+                    HoleRecord& record = holes[holeKey];
+                    record.logicalHoleKey = holeKey;
+                    for (const std::string& otherKey : matchingKeys)
                     {
-                        record.roundProfile = linearProfileEdges == 0;
-                        record.profileLength = longestStraightSegment;
-                        record.profileInitialized = true;
+                        if (otherKey == holeKey) continue;
+                        const auto other = holes.find(otherKey);
+                        if (other == holes.end()) continue;
+                        const HoleRecord& source = other->second;
+                        record.innerFaces.insert(
+                            source.innerFaces.begin(), source.innerFaces.end());
+                        record.carrierFaces.insert(
+                            source.carrierFaces.begin(), source.carrierFaces.end());
+                        record.loopEdgeTags.insert(
+                            source.loopEdgeTags.begin(),
+                            source.loopEdgeTags.end());
+                        for (const auto& mouth : source.loopEdgesByCarrier)
+                        {
+                            record.loopEdgesByCarrier[mouth.first].insert(
+                                mouth.second.begin(), mouth.second.end());
+                        }
+                        record.connectedBendEdges.insert(
+                            source.connectedBendEdges.begin(),
+                            source.connectedBendEdges.end());
+                        record.bendCarrierFaces.insert(
+                            source.bendCarrierFaces.begin(),
+                            source.bendCarrierFaces.end());
+                        if (source.profileInitialized)
+                        {
+                            record.roundProfile = record.profileInitialized
+                                ? record.roundProfile && source.roundProfile
+                                : source.roundProfile;
+                            record.profileLength = (std::max)(
+                                record.profileLength, source.profileLength);
+                            record.profileInitialized = true;
+                        }
+                        for (const auto& wall : source.innerFaces)
+                        {
+                            holeByWallFace[wall.first] = holeKey;
+                        }
+                        holes.erase(other);
                     }
+                    record.roundProfile = record.profileInitialized
+                        ? record.roundProfile && allCircularEdges
+                        : allCircularEdges;
+                    record.profileLength = (std::max)(
+                        record.profileLength, profileSpan);
+                    record.profileInitialized = true;
                     record.carrierFaces.insert(carrierFace->Tag());
                     record.loopEdgeTags.insert(
                         holeEdgeTags.begin(), holeEdgeTags.end());
+                    record.loopEdgesByCarrier[carrierFace->Tag()].insert(
+                        holeEdgeTags.begin(), holeEdgeTags.end());
+                    for (tag_t wallTag : wallFaceTags)
+                    {
+                        holeByWallFace[wallTag] = holeKey;
+                    }
                     for (NXOpen::Edge* bendEdge : carrierBendEdges)
                     {
                         record.connectedBendEdges[bendEdge->Tag()] = bendEdge;
@@ -1390,6 +1529,7 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
                 NXOpen::Vector3d normal;
             };
             std::vector<CarrierPlane> carrierPlanes;
+            bool hasCurvedMouth = false;
             for (tag_t carrierTag : record.carrierFaces)
             {
                 int faceType = 0;
@@ -1401,8 +1541,16 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
                 int normalDirection = 0;
                 if (UF_MODL_ask_face_data(
                         carrierTag, &faceType, pointData, normalData, box,
-                        &radius, &radiusData, &normalDirection) != 0 ||
-                    faceType != UF_MODL_PLANAR_FACE)
+                        &radius, &radiusData, &normalDirection) != 0)
+                {
+                    continue;
+                }
+                if (faceType == UF_MODL_CYLINDRICAL_FACE)
+                {
+                    hasCurvedMouth = true;
+                    continue;
+                }
+                if (faceType != UF_MODL_PLANAR_FACE)
                 {
                     continue;
                 }
@@ -1442,8 +1590,33 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
                     }
                 }
             }
-            return false;
+            // A hole crossing the bend can exit on its cylindrical surface.
+            // That surface has no parallel plane at one sheet thickness.
+            return !carrierPlanes.empty() && hasCurvedMouth;
         };
+
+        // Count all verified through holes, including holes on a locally
+        // formed flange or embossment. Such holes have no planar mouth that
+        // shares a bend tangent edge, so they cannot be relief-slot targets,
+        // but silently dropping them makes a successful scan look like a
+        // missed hole in the dialog.
+        for (const auto& holeItem : holes)
+        {
+            const HoleRecord& record = holeItem.second;
+            const bool throughHole = isThroughHole(record);
+            AppendAnalysisLog(
+                "THROUGH_HOLE_SCAN body=" +
+                std::to_string(body->Tag()) + " hole=" + holeItem.first +
+                " carrier_faces=" +
+                std::to_string(record.carrierFaces.size()) +
+                " bend_edges=" +
+                std::to_string(record.connectedBendEdges.size()) +
+                " decision=" + (throughHole ? "KEEP" : "EXCLUDE"));
+            if (throughHole)
+            {
+                ++result.holeCount;
+            }
+        }
 
         // Analyze every directly connected bend edge independently. The old
         // implementation kept only the globally closest edge for a hole,
@@ -1465,6 +1638,13 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
                 if (carrier != source.bendCarrierFaces.end())
                 {
                     copy.bendCarrierFaces[bendItem.first] = carrier->second;
+                    copy.loopEdgeTags.clear();
+                    const auto mouth = source.loopEdgesByCarrier.find(
+                        carrier->second->Tag());
+                    if (mouth != source.loopEdgesByCarrier.end())
+                    {
+                        copy.loopEdgeTags = mouth->second;
+                    }
                 }
                 copy.closestLoopDistance = DBL_MAX;
                 copy.closestLoopBendEdge = NULL_TAG;
@@ -1474,29 +1654,33 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
             }
         }
         holes.swap(bendSpecificHoles);
-        std::set<std::string> countedThroughHoles;
         std::set<std::string> countedRiskHoles;
 
         for (auto& item : holes)
         {
             HoleRecord& record = item.second;
             const bool throughHole = isThroughHole(record);
+            int cylindricalMouthCount = 0;
+            for (tag_t carrierTag : record.carrierFaces)
+            {
+                if (verifiedBendFaceTags.count(carrierTag) != 0)
+                {
+                    ++cylindricalMouthCount;
+                }
+            }
             AppendAnalysisLog(
                 "THROUGH_HOLE_CHECK body=" +
                 std::to_string(body->Tag()) + " hole=" + item.first +
                 " carrier_faces=" +
                 std::to_string(record.carrierFaces.size()) +
+                " curved_mouths=" +
+                std::to_string(cylindricalMouthCount) +
                 " thickness=" + std::to_string(bodyThickness) +
                 " decision=" + (throughHole ? "KEEP" : "EXCLUDE"));
             if (!throughHole)
             {
                 continue;
             }
-            if (countedThroughHoles.insert(record.logicalHoleKey).second)
-            {
-                ++result.holeCount;
-            }
-
             // Some slot profiles return only the straight wall faces from
             // the planar inner loop. Complete the closed wall chain through
             // face adjacency, while never crossing either carrier face or a
@@ -1523,6 +1707,7 @@ KonFanLaLiaoDialog::AnalysisResult KonFanLaLiaoDialog::Analyze() const
                     {
                         if (adjacent == nullptr ||
                             record.carrierFaces.count(adjacent->Tag()) != 0 ||
+                            bendFaceTags.count(adjacent->Tag()) != 0 ||
                             record.innerFaces.count(adjacent->Tag()) != 0)
                         {
                             continue;
@@ -3563,6 +3748,7 @@ void KonFanLaLiaoDialog::RunAnalysis(bool showErrors)
         RefreshDisplay(result);
         std::ostringstream message;
         message << "检查实体：" << result.bodyCount
+                << " 个；识别通孔：" << result.holeCount
                 << " 个；风险孔：" << result.riskHoleCount << " 个";
         SetStatus(message.str());
     }

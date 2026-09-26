@@ -18,6 +18,7 @@ Vec Unit(Vec);
 struct Span {
     Vec a,b,center,normal;
     double radius=0,angle=0;
+    Vec frameY,frameZ; // transported section frame for spatial centerline spans
     Vec Point(double fraction)const;
     Vec Tangent(double fraction)const;
     void Reverse();
@@ -30,6 +31,7 @@ struct Hole {
 struct Source {
     unsigned int body=0;
     bool round=false;
+    bool spatial=false;
     std::vector<Span> spans;
     Vec normal,widthDirection;
     // Original planar round-tube end normals. Zero means a square end.
@@ -43,14 +45,19 @@ struct Settings {
     double bridgeWidthMm=6;
     double tubeKFactor=.5; // neutral radius = inside path radius + K * section depth
     bool hideSource=false,cutSource=false,segmentArcs=true;
+    bool useAnchor=false;
+    Vec anchorPoint;
 };
-struct Bend {double angle=0,start=0,allowance=0,setback=0;Vec vertex,incoming,outgoing;};
-struct Segment {Vec origin,axis;double start=0,length=0;int beforeBend=-1,afterBend=-1;};
+struct Bend {double angle=0,start=0,allowance=0,setback=0;Vec vertex,incoming,outgoing;bool reversed=false,acrossZ=false;Vec normal,widthDirection;};
+struct Segment {Vec origin,axis;double start=0,length=0;int beforeBend=-1,afterBend=-1;Vec frameY,frameZ;};
 struct MachineArc {Span source;double start=0,length=0,neutralRadius=0;};
 // A transverse gap in the actual curved source, not in its tangent polygon.
 struct SourceSlot {
     Vec origin,axis,center,incoming,outgoing;
     double pathRadius=0,cornerCos=1;
+    bool reversed=false;
+    Vec normal,widthDirection;
+    double depth=0,width=0;
 };
 struct Plan {
     Source source;Settings settings;
@@ -62,6 +69,7 @@ struct Plan {
     std::vector<SourceSlot> sourceSlots;
     bool adjustedCuts=false;
     double length=0,errorMm=0,radius=0,gap=0;
+    Vec flatOrigin,flatAxis,flatInside,flatWidth;
 };
 Plan MakePlan(const Source&,const Settings&);
 // Cut outline in flat longitudinal/depth coordinates. y=0 is the retained outer wall.
@@ -76,6 +84,13 @@ Vec RoundEndNormal(const Plan&,bool end);
 double RoundEndX(const Plan&,bool end,double y,double z);
 double RoundEndExtent(const Plan&,bool end);
 Vec SourceSlotPoint(const Plan&,const SourceSlot&,double x,double y,double z);
+Vec SourceSlotNormal(const Plan&,const SourceSlot&);
+Vec SourceSlotWidth(const Plan&,const SourceSlot&);
+double BendDepth(const Plan&,const Bend&);
+Vec CutPoint(const Plan&,const Bend&,double x,double y,double z);
+Vec Rotate(Vec vector,Vec axis,double angle);
+Vec SectionY(const Source&,const Span&,double fraction);
+Vec SectionZ(const Source&,const Span&,double fraction);
 double SourceSlotTop(const Plan&,const SourceSlot&,double x);
 std::pair<double,double> ProjectRange(const Hole&,Vec direction);
 }

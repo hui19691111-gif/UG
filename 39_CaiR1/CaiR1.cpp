@@ -844,6 +844,12 @@ int CaiR1Dialog::apply_cb()
                 UF_DISP_set_highlight(appliedFaceTag, 0);
             }
         }
+        // Apply leaves the dialog open. Reactivate face selection only after
+        // the committed selection/cache has been cleared. Focus may trigger
+        // an update callback, so keep the selection re-entry guard active.
+        changingSelection_ = true;
+        faceSelect_->Focus();
+        changingSelection_ = false;
         return 0;
     }
     catch (const NXOpen::NXException& ex)

@@ -74,6 +74,7 @@ void FanTonSenZiDialog::Shown(){
     try{if(!initialized_)return;shown_=true;Guard guard(updating_);
         if(edited_){
             tag_t face=0;auto s=tube_straighten::ReadFeature(edited_,face);
+            anchored_=s.useAnchor;anchor_=s.anchorPoint;
             double values[]={static_cast<double>(s.divisions),s.radiusMm,s.kFactor,s.gapMm,s.bridgeWidthMm,s.tubeKFactor};
             for(int i=0;i<6;++i)Props(numbers_[i]->GetProperties())->SetDouble("Value",values[i]);
             Props(segmentArcs_->GetProperties())->SetLogical("Value",s.segmentArcs);Props(cutSource_->GetProperties())->SetLogical("Value",s.cutSource);Props(hide_->GetProperties())->SetLogical("Value",s.hideSource);
@@ -88,12 +89,13 @@ int FanTonSenZiDialog::Filter(NXOpen::BlockStyler::UIBlock*,NXOpen::TaggedObject
 }
 tube_straighten::Settings FanTonSenZiDialog::ReadSettings(){
     tube_straighten::Settings s;
+    s.useAnchor=anchored_;s.anchorPoint=anchor_;
     s.segmentArcs=Props(segmentArcs_->GetProperties())->GetLogical("Value");
     {double n=Props(numbers_[0]->GetProperties())->GetDouble("Value");if(!std::isfinite(n)||n<2||n>180||std::abs(n-std::round(n))>1e-8)throw std::runtime_error("圆弧分段数须为 2–180 的整数。");s.divisions=static_cast<int>(n);}
     s.radiusMm=Props(numbers_[1]->GetProperties())->GetDouble("Value");s.kFactor=Props(numbers_[2]->GetProperties())->GetDouble("Value");s.gapMm=Props(numbers_[3]->GetProperties())->GetDouble("Value");s.bridgeWidthMm=Props(numbers_[4]->GetProperties())->GetDouble("Value");s.tubeKFactor=Props(numbers_[5]->GetProperties())->GetDouble("Value");s.cutSource=Props(cutSource_->GetProperties())->GetLogical("Value");s.hideSource=Props(hide_->GetProperties())->GetLogical("Value");return s;
 }
 tube_straighten::Plan FanTonSenZiDialog::ReadPlan(){
-    auto selected=Select(edges_)->GetSelectedObjects();if(selected.size()!=1)throw std::runtime_error("请选择方通完整侧平面，或圆管上的一个面。");
+    auto selected=Select(edges_)->GetSelectedObjects();if(selected.size()!=1)throw std::runtime_error("请选择方通任一平面，或圆管上的一个面。");
     return tube_straighten::MakePlan(tube_straighten::InspectFace(selected.front()->Tag()),ReadSettings());
 }
 void FanTonSenZiDialog::Status(const std::string& s){auto split=s.find('\n');Props(status_->GetProperties())->SetString("Label",s.substr(0,split).c_str());Props(detail_->GetProperties())->SetString("Label",split==std::string::npos?" ":s.substr(split+1).c_str());}
@@ -105,7 +107,7 @@ void FanTonSenZiDialog::Controls(bool segmented,bool hasCuts,bool round){
 }
 void FanTonSenZiDialog::Preview(){
     bool segmented=Props(segmentArcs_->GetProperties())->GetLogical("Value"),cutSource=Props(cutSource_->GetProperties())->GetLogical("Value");Controls(segmented,true,true);
-    UF_DISP_refresh();if(Select(edges_)->GetSelectedObjects().empty()){Status(!segmented?"圆弧整体伸直供弯管机成型；真实转角仍开槽。\n弯管 K=0.5 按截面中心线计长，圆弧半径从模型读取。":(cutSource?"原管开槽，同时生成伸直下料件。\n请选择未开槽的原管；间隙须至少为 0.01 mm。":"方通选完整侧平面；圆管选管面或圆环端口。\n自动识别管型；圆管选端口可指定伸直起始端。"));return;}auto p=ReadPlan();Controls(segmented,!p.bends.empty(),p.source.round);
+    UF_DISP_refresh();if(Select(edges_)->GetSelectedObjects().empty()){Status(!segmented?"圆弧整体伸直供弯管机成型；真实转角仍开槽。\n弯管 K=0.5 按截面中心线计长，圆弧半径从模型读取。":(cutSource?"原管开槽，同时生成伸直下料件。\n请选择未开槽的原管；间隙须至少为 0.01 mm。":"方通选任一平面，以点击部位固定伸直。\n圆管选管面或圆环端口；选端口可指定起点。"));return;}auto p=ReadPlan();Controls(segmented,!p.bends.empty(),p.source.round);
     UF_OBJ_disp_props_t props={};props.color=186;props.font=1;props.line_width=2;
     for(auto line:tube_straighten::Preview(p)){double a[]={line.first.x,line.first.y,line.first.z},b[]={line.second.x,line.second.y,line.second.z};tube_straighten::Check(UF_DISP_display_temporary_line(NULL_TAG,UF_DISP_USE_ACTIVE_PLUS,a,b,&props));}
     double u=p.source.unitsPerMm;std::ostringstream info;info<<std::fixed<<std::setprecision(3);
@@ -116,18 +118,18 @@ void FanTonSenZiDialog::Preview(){
     if(p.source.round&&(Length(p.source.startCutNormal)>.1||Length(p.source.endCutNormal)>.1))info<<"；保留斜端口，含尖端总长 "<<(p.length+tube_straighten::RoundEndExtent(p,false)+tube_straighten::RoundEndExtent(p,true))/u<<" mm";
     if(!p.source.round)info<<"；保留 "<<p.source.holes.size()<<" 处管壁孔槽"<<(p.adjustedCuts?"（已避孔调整分段）":"");if(p.settings.cutSource)info<<"；原管同步开槽 "<<p.settings.gapMm<<" mm";Status(info.str());
 }
-int FanTonSenZiDialog::Update(NXOpen::BlockStyler::UIBlock*){
+int FanTonSenZiDialog::Update(NXOpen::BlockStyler::UIBlock* block){
     if(!initialized_||!shown_||updating_)return 0;Guard guard(updating_);
-    try{Preview();}catch(const NXOpen::NXException& e){Log(e.Message());try{Status(e.Message());}catch(...){}}catch(const std::exception& e){Log(e.what());try{Status(e.what());}catch(...){}}catch(...){Log("Preview failed");}return 0;
+    try{if(block==edges_){anchored_=!Select(edges_)->GetSelectedObjects().empty();if(anchored_){auto point=Select(edges_)->PickPoint();anchor_={point.X,point.Y,point.Z};}}Preview();}catch(const NXOpen::NXException& e){Log(e.Message());try{Status(e.Message());}catch(...){}}catch(const std::exception& e){Log(e.what());try{Status(e.what());}catch(...){}}catch(...){Log("Preview failed");}return 0;
 }
 int FanTonSenZiDialog::Apply(){
     if(!initialized_||!shown_||updating_)return 1;Guard guard(updating_);auto* session=NXOpen::Session::GetSession();
     try{
-        auto selected=Select(edges_)->GetSelectedObjects();if(selected.size()!=1)throw std::runtime_error("请选择方通完整侧平面，或圆管上的一个面。");
+        auto selected=Select(edges_)->GetSelectedObjects();if(selected.size()!=1)throw std::runtime_error("请选择方通任一平面，或圆管上的一个面。");
         auto settings=ReadSettings();tube_straighten::Plan plan;auto mark=session->SetUndoMark(NXOpen::Session::MarkVisibilityVisible,"方通伸直");
         {QuietDisplay quiet;try{plan=tube_straighten::CreateFeature(selected[0]->Tag(),settings,edited_,mark).plan;}catch(...){try{session->UndoToMark(mark,nullptr);session->DeleteUndoMark(mark,nullptr);}catch(const NXOpen::NXException& e){Log("回滚失败："+std::string(e.Message()));}throw;}}
         for(int i=0;i<6;++i)zhihui_dialog_memory::SaveDouble(memory,keys[i],numbers_[i]);if(!edited_)Select(edges_)->SetSelectedObjects({});UF_DISP_refresh();Controls(plan.settings.segmentArcs,true,true);
-        if(!plan.machineArcs.empty())Status(plan.bends.empty()?"已生成供弯管机成型的连续直管，圆弧区域未开槽。\n原管已保留；起始端与原管重合，直段孔槽保持原尺寸。":(plan.settings.cutSource?"已整体伸直圆弧并切出转角切口，原管仅在转角同步开槽。\n圆弧区域保持连续管壁；整次操作可一次撤销。":"已整体伸直圆弧，真实转角保留原开槽方式。\n圆弧区域保持连续管壁；原模型已保留。"));
+        if(!plan.machineArcs.empty())Status(plan.bends.empty()?"已生成供弯管机成型的连续直管，圆弧区域未开槽。\n原管已保留；方通固定选中部位，直段孔槽保持原尺寸。":(plan.settings.cutSource?"已整体伸直圆弧并切出转角切口，原管仅在转角同步开槽。\n圆弧区域保持连续管壁；整次操作可一次撤销。":"已整体伸直圆弧，真实转角保留原开槽方式。\n圆弧区域保持连续管壁；原模型已保留。"));
         else Status(plan.settings.cutSource?"已在原管切间隙槽，并生成伸直下料件。\n原管保持原形状和连接壁厚；可一次撤销两项结果。":(plan.source.round?"已生成圆管伸直实体，外侧连接带保留完整壁厚。\n起始端与原管重合；连接带宽按外圆弧长计。":"已生成方通伸直实体，保留外侧整面连接壁。\n原模型已保留；孔槽随所在段展开，切口避开孔槽。"));if(edited_)Status("已更新方通/圆管伸直自定义特征。\n参数已保存，原管开槽与下料件已同步更新。");edges_->Focus();return 0;
     }catch(const NXOpen::NXException& e){Error(e.Message());}catch(const std::exception& e){Error(e.what());}catch(...){Error("创建方通伸直失败。");}UF_DISP_refresh();return 1;
 }

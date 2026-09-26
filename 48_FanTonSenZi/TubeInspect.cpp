@@ -11,6 +11,7 @@
 #include <uf_modl.h>
 #include <uf_part.h>
 #include <algorithm>
+#include <map>
 #include <set>
 #include <stdexcept>
 namespace tube_straighten {
@@ -72,6 +73,27 @@ bool LooksLikeCap(Face* face,double tol){
         return t>tol&&std::abs(a.ymax-b.ymax-t)<tol&&std::abs(b.zmin-a.zmin-t)<tol&&std::abs(a.zmax-b.zmax-t)<tol&&std::abs(b.r-std::max(0.,a.r-t))<tol;
     }catch(const std::exception&){return false;}
 }
+// STEP and sweep bodies often keep a separate planar face at each tangent
+// join. Follow only shared-edge, coplanar faces on this body. Their common
+// edges are subdivision seams, not boundaries of the tube's side wall.
+std::vector<tag_t> SideBoundary(Face* selected,double tol){
+    const auto plane=Data(selected);const Vec normal=Unit(plane.normal);
+    struct PatchFace{tag_t tag;std::vector<tag_t> edges;};std::vector<PatchFace> candidates;
+    for(auto* face:selected->GetBody()->GetFaces()){
+        const auto fd=Data(face);
+        if(fd.type!=22||std::abs(Dot(Unit(fd.normal),normal))<1-1e-7||std::abs(Dot(fd.point-plane.point,normal))>tol)continue;
+        PatchFace item{face->Tag(),{}};for(auto* edge:face->GetEdges())item.edges.push_back(edge->Tag());candidates.push_back(std::move(item));
+    }
+    std::set<tag_t> included{selected->Tag()},edges;for(auto* edge:selected->GetEdges())edges.insert(edge->Tag());
+    bool changed=true;while(changed){changed=false;for(const auto& face:candidates)if(!included.count(face.tag)){
+        if(std::any_of(face.edges.begin(),face.edges.end(),[&](tag_t tag){return edges.count(tag)!=0;})){
+            included.insert(face.tag);edges.insert(face.edges.begin(),face.edges.end());changed=true;
+        }
+    }}
+    std::map<tag_t,int> uses;for(const auto& face:candidates)if(included.count(face.tag))for(auto tag:face.edges)++uses[tag];
+    std::vector<tag_t> boundary;for(auto [tag,count]:uses){if(count==1)boundary.push_back(tag);else if(count!=2)throw std::runtime_error("侧面分面边界不完整，无法识别整条方通。");}
+    return boundary;
+}
 struct Cap {double w=0,d=0,t=0,r=0,shift=0;Vec width;};
 Cap InspectCap(Body* body,Vec origin,Vec tangent,Vec normal,double u){
     double tol=1e-4*u;Vec inside=Cross(normal,tangent);std::vector<Cap> candidates;
@@ -86,10 +108,10 @@ Cap InspectCap(Body* body,Vec origin,Vec tangent,Vec normal,double u){
             candidates.push_back({a.zmax-a.zmin,a.ymax-a.ymin,t,a.r,a.ymin,width});
         }catch(const std::exception&){}
     }
-    if(candidates.size()!=1)throw std::runtime_error("未识别到等壁厚方通端口。请选择贯通两端的外侧大平面；支持矩形及等半径圆角矩形截面。");return candidates.front();
+    if(candidates.size()!=1)throw std::runtime_error("未识别到等壁厚方通端口；支持矩形及等半径圆角矩形截面。");return candidates.front();
 }
 void OffsetPath(std::vector<Span>& path,Vec normal,double offset){
-    auto old=path;for(size_t i=0;i<path.size();++i){auto& s=path[i];s.a=old[i].a+Cross(normal,old[i].Tangent(0))*offset;s.b=old[i].b+Cross(normal,old[i].Tangent(1))*offset;if(s.radius)s.radius-=offset;}
+    auto old=path;for(size_t i=0;i<path.size();++i){auto& s=path[i];s.a=old[i].a+Cross(normal,old[i].Tangent(0))*offset;s.b=old[i].b+Cross(normal,old[i].Tangent(1))*offset;if(s.radius)s.radius-=Dot(s.normal,normal)*offset;}
     for(size_t i=1;i<path.size();++i){auto a=old[i-1].Tangent(1),b=old[i].Tangent(0);if(Length(a-b)>1e-7){if(old[i-1].radius||old[i].radius)throw std::runtime_error("圆弧与直段须相切。");Vec q=old[i].a+(Cross(normal,a)+Cross(normal,b))*(offset/(1+Dot(a,b)));path[i-1].b=q;path[i].a=q;}}
 }
 void ReadHoles(Source& s,Body* body){
@@ -118,11 +140,11 @@ Source Inspect(const std::vector<tag_t>& tags){
     s.body=body->Tag();s.spans=Chain(tags,tol,false);Vec normal;
     for(size_t i=0;i<s.spans.size();++i){auto& span=s.spans[i];if(span.radius){normal=span.normal;break;}if(i){auto cross=Cross(s.spans[i-1].Tangent(1),span.Tangent(0));if(Length(cross)>1e-6){normal=Unit(cross);break;}}}
     if(Length(normal)<.9)throw std::runtime_error("方通没有圆弧或转角，无需伸直。");s.normal=normal;Vec origin=s.spans.front().a;
-    for(const auto& span:s.spans)for(double f:{0.,.25,.5,.75,1.})if(std::abs(Dot(span.Point(f)-origin,normal))>tol||(span.radius&&Dot(span.normal,normal)<1-1e-7))throw std::runtime_error("当前支持同一平面、同向弯曲的方通，不支持 S 形或空间弯曲。");
+    for(const auto& span:s.spans)for(double f:{0.,.25,.5,.75,1.})if(std::abs(Dot(span.Point(f)-origin,normal))>tol||(span.radius&&std::abs(Dot(span.normal,normal))<1-1e-7))throw std::runtime_error("当前支持同一平面内的连续弯曲和 S 形方通；空间弯曲暂不支持。");
     auto cap=InspectCap(body,origin,s.spans.front().Tangent(0),normal,s.unitsPerMm),end=InspectCap(body,s.spans.back().b,s.spans.back().Tangent(1),normal,s.unitsPerMm);
     if(std::abs(cap.w-end.w)>tol||std::abs(cap.d-end.d)>tol||std::abs(cap.t-end.t)>tol||std::abs(cap.r-end.r)>tol||std::abs(cap.shift-end.shift)>tol||Dot(cap.width,end.width)<1-1e-7)throw std::runtime_error("方通两端截面不一致或路径换边。");
     s.width=cap.w;s.depth=cap.d;s.thickness=cap.t;s.cornerRadius=cap.r;s.widthDirection=cap.width;OffsetPath(s.spans,normal,cap.shift);
-    double centerLength=0;for(size_t i=0;i<s.spans.size();++i){auto& span=s.spans[i];centerLength+=span.radius?(span.radius-cap.d/2)*span.angle:Length(span.b-span.a);if(i){auto a=s.spans[i-1].Tangent(1),b=span.Tangent(0);double angle=std::atan2(Dot(Cross(a,b),normal),Dot(a,b));if(angle< -1e-7||angle>pi*.75)throw std::runtime_error("路径转向不符合外侧连续要求。");centerLength-=cap.d*std::tan(angle/2);}}
+    double centerLength=0;for(size_t i=0;i<s.spans.size();++i){auto& span=s.spans[i];centerLength+=span.radius?(span.radius-Dot(span.normal,normal)*cap.d/2)*span.angle:Length(span.b-span.a);if(i){auto a=s.spans[i-1].Tangent(1),b=span.Tangent(0);double angle=std::atan2(Dot(Cross(a,b),normal),Dot(a,b));if(std::abs(angle)>pi*.75)throw std::runtime_error("单个转角须不超过 135°。");centerLength-=cap.d*std::tan(angle/2);}}
     ReadHoles(s,body);
     for(auto* face:body->GetFaces()){int type=Data(face).type;if(type!=16&&type!=19&&type!=22)throw std::runtime_error("存在不支持的自由曲面、倒角或孔槽形状。");}
     auto area=[](double w,double d,double r){return w*d-(4-pi)*r*r;};
@@ -132,17 +154,75 @@ Source Inspect(const std::vector<tag_t>& tags){
     if(expected<=0||std::abs(actual-expected)>std::max(expected*1e-6,std::pow(tol,3)))throw std::runtime_error("截面或孔槽核对不一致。当前支持平直管壁上的贯穿圆孔/闭合槽；盲孔、斜孔、曲壁孔或变截面不能直接展开。");
     return s;
 }
-Source InspectFace(tag_t tag){
-    auto* face=dynamic_cast<Face*>(NXObjectManager::Get(tag));auto* part=Session::GetSession()->Parts()->Work();if(!face||face->IsOccurrence()||face->OwningPart()!=part||!face->GetBody()->IsSolidBody())throw std::runtime_error("请选择当前工作零件方通上的一个完整外侧平面。");
+static Source InspectSideFace(tag_t tag){
+    auto* face=dynamic_cast<Face*>(NXObjectManager::Get(tag));auto* part=Session::GetSession()->Parts()->Work();if(!face||face->IsOccurrence()||face->OwningPart()!=part||!face->GetBody()->IsSolidBody())throw std::runtime_error("请选择当前工作零件方通上的一个外侧平面。");
     auto data=Data(face);if(data.type!=22||IsRoundCap(tag))return InspectRoundFace(tag);
-    std::vector<tag_t> ring;for(const auto& l:Loops(tag))if(l.type==1)ring=l.edges;
+    int units=0;Check(UF_PART_ask_units(part->Tag(),&units));const double tol=1e-5*(units==ENGLISH?1/25.4:1);
+    const auto ring=SideBoundary(face,tol);
     std::set<tag_t> ends;
-    for(auto* other:face->GetBody()->GetFaces()){auto fd=Data(other);if(fd.type!=22||std::abs(Dot(data.normal,fd.normal))>1e-6)continue;if(!LooksLikeCap(other,1e-5))continue;
+    for(auto* other:face->GetBody()->GetFaces()){auto fd=Data(other);if(fd.type!=22||std::abs(Dot(data.normal,fd.normal))>1e-6)continue;if(!LooksLikeCap(other,tol))continue;
         for(auto* e:other->GetEdges())if(std::find(ring.begin(),ring.end(),e->Tag())!=ring.end())ends.insert(e->Tag());}
-    if(ends.size()!=2)throw std::runtime_error("所选平面没有贯通方通的两个端口。请选择图中贯穿整条方通的大侧平面。");
+    if(ends.size()!=2)throw std::runtime_error("所选面及相邻共面侧面未连到两个端口。请选择弯曲平面两侧的大侧面，直段或圆弧上的分面均可；不要选端面、内壁或圆角面。");
     std::vector<tag_t> remaining;for(auto e:ring)if(!ends.count(e))remaining.push_back(e);std::string failure="未找到完整方通路径。";
-    while(!remaining.empty()){std::vector<tag_t> chain={remaining.back()};remaining.pop_back();bool changed=true;while(changed){changed=false;for(auto it=remaining.begin();it!=remaining.end();){auto e=ReadSpan(*it);bool match=false;for(auto t:chain){auto c=ReadSpan(t);for(auto a:{e.a,e.b})for(auto b:{c.a,c.b})if(Length(a-b)<1e-5)match=true;}if(match){chain.push_back(*it);it=remaining.erase(it);changed=true;}else ++it;}}
+    while(!remaining.empty()){std::vector<tag_t> chain={remaining.back()};remaining.pop_back();bool changed=true;while(changed){changed=false;for(auto it=remaining.begin();it!=remaining.end();){auto e=ReadSpan(*it,true);bool match=false;for(auto t:chain){auto c=ReadSpan(t,true);for(auto a:{e.a,e.b})for(auto b:{c.a,c.b})if(Length(a-b)<tol)match=true;}if(match){chain.push_back(*it);it=remaining.erase(it);changed=true;}else ++it;}}
         try{auto result=Inspect(chain);if(std::abs(Dot(result.normal,data.normal))<1-1e-7)throw std::runtime_error("所选面不是弯曲路径所在平面的侧面。");return result;}catch(const std::exception& e){failure=e.what();}}
     throw std::runtime_error(failure);
+}
+static Source InspectSpatial(Body* body){
+    int units=0;Check(UF_PART_ask_units(body->OwningPart()->Tag(),&units));double u=units==ENGLISH?1/25.4:1,tol=1e-4*u;
+    for(auto* face:body->GetFaces()){int type=Data(face).type;if(type!=16&&type!=19&&type!=22)throw std::runtime_error("空间方通包含自由曲面、变形截面或不支持的孔槽形状。");}
+    std::vector<Face*> caps;for(auto* f:body->GetFaces())if(Data(f).type==22&&LooksLikeCap(f,tol))caps.push_back(f);
+    if(caps.size()!=2)throw std::runtime_error("空间方通须有两个完整等壁厚矩形端口。");
+    struct Rail{tag_t tag;Span curve;};std::vector<Rail> rails;std::set<tag_t> capEdges;
+    for(auto* f:caps)for(auto* e:f->GetEdges())capEdges.insert(e->Tag());
+    for(auto* e:body->GetEdges())if(!capEdges.count(e->Tag())){try{auto span=ReadSpan(e->Tag());if(Length(span.a-span.b)>tol)rails.push_back({e->Tag(),span});}catch(const std::exception&){}}
+    auto loops=Loops(caps[0]->Tag());Loop outer,inner;for(auto l:loops){if(l.type==1)outer=l;else if(l.type==2)inner=l;}
+    auto finishLoops=Loops(caps[1]->Tag());Loop endOuter,endInner;for(auto l:finishLoops){if(l.type==1)endOuter=l;else if(l.type==2)endInner=l;}
+    std::vector<Vec> starts,finishes;for(auto tag:outer.edges){auto c=ReadSpan(tag);starts.push_back(c.a);starts.push_back(c.b);}for(auto tag:endOuter.edges){auto c=ReadSpan(tag);finishes.push_back(c.a);finishes.push_back(c.b);}
+    std::string failure="没有找到连续相切的空间方通纵向边。";
+    for(Vec start:starts)try{
+        std::vector<Span> path;std::set<tag_t> used;Vec position=start,axis;bool finished=false;
+        for(size_t step=0;step<=rails.size();++step){
+            if(!path.empty()&&std::any_of(finishes.begin(),finishes.end(),[&](Vec p){return Length(p-position)<tol;})){finished=true;break;}
+            std::vector<Rail> next;for(auto rail:rails)if(!used.count(rail.tag)){
+                if(Length(rail.curve.b-position)<tol)rail.curve.Reverse();else if(Length(rail.curve.a-position)>=tol)continue;
+                const auto tangent=rail.curve.Tangent(0);if(path.empty()?std::abs(Dot(tangent,Unit(Data(caps[0]).normal)))>1-1e-7:Dot(axis,tangent)>1-1e-7)next.push_back(rail);
+            }
+            if(next.size()!=1)throw std::runtime_error("空间管段须连续相切，不能包含分支或非相切折角。");
+            used.insert(next[0].tag);path.push_back(next[0].curve);position=path.back().b;axis=path.back().Tangent(1);
+        }
+        if(!finished)throw std::runtime_error("空间方通纵向边未贯通两端。");
+        Source s;s.body=body->Tag();s.spatial=true;s.unitsPerMm=u;Vec y;
+        for(auto tag:outer.edges){auto c=ReadSpan(tag);if(!c.radius){y=c.Tangent(0);break;}}
+        axis=path.front().Tangent(0);Vec z=Unit(Cross(axis,y));auto section=Rectangle(outer,start,y,z,tol),bore=Rectangle(inner,start,y,z,tol);
+        s.depth=section.ymax-section.ymin;s.width=section.zmax-section.zmin;s.thickness=bore.ymin-section.ymin;s.cornerRadius=section.r;
+        if(s.thickness<=tol||std::abs(section.ymax-bore.ymax-s.thickness)>tol||std::abs(bore.zmin-section.zmin-s.thickness)>tol||std::abs(section.zmax-bore.zmax-s.thickness)>tol)throw std::runtime_error("空间方通壁厚不一致。");
+        Vec center=start+y*((section.ymin+section.ymax)/2)+z*((section.zmin+section.zmax)/2),offset=start-center;s.normal=s.widthDirection=z;
+        double totalLength=0;for(const auto& rail:path){Span span=rail;span.frameY=y;span.frameZ=z;span.a=rail.a-offset;
+            if(rail.radius){span.center=rail.center-rail.normal*Dot(offset,rail.normal);span.radius=Length(span.a-span.center);offset=Rotate(offset,rail.normal,rail.angle);y=Rotate(y,rail.normal,rail.angle);z=Rotate(z,rail.normal,rail.angle);if(span.radius<=std::hypot(s.depth,s.width)/2)throw std::runtime_error("空间弯管半径过小。");}
+            span.b=rail.b-offset;if(Length(span.Tangent(0)-rail.Tangent(0))>1e-7)throw std::runtime_error("空间管件截面发生扭转或变形。");totalLength+=span.radius?span.radius*span.angle:Length(span.b-span.a);s.spans.push_back(span);
+        }
+        auto last=s.spans.back();Vec endCenter=last.b;auto end=Rectangle(endOuter,endCenter,y,z,tol),endBore=Rectangle(endInner,endCenter,y,z,tol);
+        if(std::abs(Dot(last.Tangent(1),Unit(Data(caps[1]).normal)))<1-1e-7||std::abs(end.ymin+s.depth/2)>tol||std::abs(end.ymax-s.depth/2)>tol||std::abs(end.zmin+s.width/2)>tol||std::abs(end.zmax-s.width/2)>tol||std::abs(end.r-s.cornerRadius)>tol||std::abs(endBore.ymin-end.ymin-s.thickness)>tol||std::abs(end.ymax-endBore.ymax-s.thickness)>tol||std::abs(endBore.zmin-end.zmin-s.thickness)>tol||std::abs(end.zmax-endBore.zmax-s.thickness)>tol)throw std::runtime_error("空间管两端截面方向或尺寸不一致。");
+        for(auto* face:body->GetFaces()){auto fd=Data(face);if(fd.type!=22)continue;Vec direction;
+            for(const auto& span:s.spans)if(!span.radius){Vec q=fd.point-span.a;for(auto pair:std::vector<std::pair<Vec,double>>{{span.frameY,s.depth},{span.frameZ,s.width}}){double at=Dot(q,pair.first);if(std::abs(Dot(Unit(fd.normal),pair.first))>1-1e-7){if(std::abs(at-pair.second/2)<tol)direction=pair.first*(-1);else if(std::abs(at+pair.second/2)<tol)direction=pair.first;}}}
+            if(Length(direction)<.9)continue;for(const auto& loop:Loops(face->Tag()))if(loop.type==2){Hole h;h.direction=direction;h.length=s.thickness;h.profile=Chain(loop.edges,tol,true);Vec base=h.profile.front().a;double area=0;for(const auto& c:h.profile){area+=Dot(Cross(c.a-base,c.b-base),direction)/2;if(c.radius)area+=Dot(c.normal,direction)*c.radius*c.radius*(c.angle-sin(c.angle))/2;}h.area=std::abs(area);for(const auto& c:h.profile)for(double f:{.125,.375,.625,.875}){auto q=c.Point(f)+direction*s.thickness;double xyz[]={q.x,q.y,q.z};int where=0;Check(UF_MODL_ask_point_containment(xyz,s.body,&where));if(where!=3)throw std::runtime_error("空间方通只支持平壁等截面贯穿孔槽。");}s.holes.push_back(h);}
+        }
+        auto area=[](double d,double w,double r){return d*w-(4-pi)*r*r;};double expected=(area(s.depth,s.width,s.cornerRadius)-area(s.depth-2*s.thickness,s.width-2*s.thickness,std::max(0.,s.cornerRadius-s.thickness)))*totalLength;for(const auto& h:s.holes)expected-=h.area*h.length;
+        double actual=Volume(s.body)*1e9*std::pow(u,3);if(expected<=0||std::abs(expected-actual)>expected*1e-6)throw std::runtime_error("空间路径、截面或孔槽体积核对不一致，已取消生成。");
+        return s;
+    }catch(const std::exception& e){failure=e.what();}
+    throw std::runtime_error(failure);
+}
+Source InspectFace(tag_t tag){
+    auto* face=dynamic_cast<Face*>(NXObjectManager::Get(tag));auto* part=Session::GetSession()->Parts()->Work();
+    if(!face||!part||face->IsOccurrence()||face->OwningPart()!=part||!face->GetBody()->IsSolidBody())throw std::runtime_error("请选择当前工作零件管件上的一个面。");
+    if(Data(face).type!=22||IsRoundCap(tag))return InspectRoundFace(tag);
+    std::string failure;try{return InspectSideFace(tag);}catch(const std::exception& e){failure=e.what();}
+    // The selected planar face is the placement reference; an exterior side
+    // patch elsewhere on this same body supplies the complete bending path.
+    for(auto* other:face->GetBody()->GetFaces())if(other!=face&&Data(other).type==22){try{return InspectSideFace(other->Tag());}catch(const std::exception&){}}
+    try{return InspectSpatial(face->GetBody());}catch(const std::exception& e){failure=e.what();}
+    throw std::runtime_error("未能从所选平面所在实体识别完整等壁厚方通。"+failure);
 }
 }
