@@ -2145,21 +2145,69 @@ NXOpen::Annotations::IntersectionSymbol* CreateIntersectionSymbol(
 	NXOpen::Drawings::DraftingCurve* firstCurve,
 	NXOpen::Drawings::DraftingCurve* secondCurve)
 {
-	if (baseView == NULL || firstCurve == NULL || secondCurve == NULL)
+	if (baseView == NULL || firstCurve == NULL || secondCurve == NULL || firstCurve == secondCurve)
 	{
 		return NULL;
 	}
+
+	double measuredAngleDegrees = 0.0;
+	if (TryMeasureDrawingLineAngleDegrees(baseView, firstCurve, secondCurve, measuredAngleDegrees) &&
+		measuredAngleDegrees < 1.0)
+	{
+		std::ostringstream log;
+		log << "[intersection.skipParallel]"
+			<< " viewTag=" << baseView->Tag()
+			<< " firstCurveTag=" << firstCurve->Tag()
+			<< " secondCurveTag=" << secondCurve->Tag()
+			<< " angle=" << measuredAngleDegrees;
+		DimensionDebugLog(log.str());
+		return NULL;
+	}
+
 	NXOpen::Point3d origin(0, 0, 0);
 	NXOpen::Annotations::IntersectionSymbol* nullSymbol(NULL);
-	NXOpen::Annotations::IntersectionSymbolBuilder* builder =
-		workPart->Annotations()->IntersectionSymbols()->CreateIntersectionSymbolBuilder(nullSymbol);
-	builder->SetExtension(0.20000000000000001);
-	builder->SetColor(workPart->Colors()->Find("Black"));
-	builder->IntersectionObject1()->SetValue(firstCurve, baseView, origin);
-	builder->IntersectionObject2()->SetValue(secondCurve, baseView, origin);
-	NXOpen::NXObject* object = builder->Commit();
-	builder->Destroy();
-	return dynamic_cast<NXOpen::Annotations::IntersectionSymbol*>(object);
+	NXOpen::Annotations::IntersectionSymbolBuilder* builder = NULL;
+	try
+	{
+		builder = workPart->Annotations()->IntersectionSymbols()->CreateIntersectionSymbolBuilder(nullSymbol);
+		builder->SetExtension(0.20000000000000001);
+		builder->SetColor(workPart->Colors()->Find("Black"));
+		builder->IntersectionObject1()->SetValue(firstCurve, baseView, origin);
+		builder->IntersectionObject2()->SetValue(secondCurve, baseView, origin);
+		NXOpen::NXObject* object = builder->Commit();
+		builder->Destroy();
+		return dynamic_cast<NXOpen::Annotations::IntersectionSymbol*>(object);
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		DimensionDebugLog(std::string("[intersection.skipInvalid] ") + ex.Message());
+		if (builder != NULL)
+		{
+			try
+			{
+				builder->Destroy();
+			}
+			catch (...)
+			{
+			}
+		}
+		return NULL;
+	}
+	catch (...)
+	{
+		DimensionDebugLog("[intersection.skipInvalid] unknown exception");
+		if (builder != NULL)
+		{
+			try
+			{
+				builder->Destroy();
+			}
+			catch (...)
+			{
+			}
+		}
+		return NULL;
+	}
 }
 
 bool IsValidIntersectionSymbol(

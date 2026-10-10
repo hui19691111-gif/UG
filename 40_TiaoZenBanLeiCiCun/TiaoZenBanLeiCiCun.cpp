@@ -10,6 +10,7 @@
 #include <NXOpen/BlockStyler_LinearDimension.hxx>
 #include <NXOpen/BlockStyler_TabControl.hxx>
 #include <NXOpen/BlockStyler_UIBlock.hxx>
+#include <NXOpen/BasePart.hxx>
 #include <NXOpen/Body.hxx>
 #include <NXOpen/Callback.hxx>
 #include <NXOpen/Direction.hxx>
@@ -17,11 +18,23 @@
 #include <NXOpen/Edge.hxx>
 #include <NXOpen/Face.hxx>
 #include <NXOpen/FaceDumbRule.hxx>
+#include <NXOpen/Features_CustomAttribute.hxx>
+#include <NXOpen/Features_CustomAttributeCollection.hxx>
+#include <NXOpen/Features_CustomDoubleAttribute.hxx>
+#include <NXOpen/Features_CustomFeature.hxx>
+#include <NXOpen/Features_CustomFeatureBuilder.hxx>
+#include <NXOpen/Features_CustomFeatureClass.hxx>
+#include <NXOpen/Features_CustomFeatureClassManager.hxx>
+#include <NXOpen/Features_CustomFeatureData.hxx>
+#include <NXOpen/Features_CustomFeatureDataCollection.hxx>
+#include <NXOpen/Features_CustomIntegerAttribute.hxx>
+#include <NXOpen/Features_CustomTagAttribute.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
 #include <NXOpen/Features_MoveFaceBuilder.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
+#include <NXOpen/NXString.hxx>
 #include <NXOpen/NXObjectManager.hxx>
 #include <NXOpen/Part.hxx>
 #include <NXOpen/PartCollection.hxx>
@@ -35,6 +48,7 @@
 #include <NXOpen/Update.hxx>
 
 #include <uf_disp.h>
+#include <uf_eval.h>
 #include <uf_modl.h>
 #include <uf_obj.h>
 #include <uf_object_types.h>
@@ -71,6 +85,78 @@ namespace
 {
 constexpr double kTolerance = 1.0e-5;
 constexpr double kParallelTolerance = 0.995;
+
+class FlagGuard
+{
+public:
+    explicit FlagGuard(bool& flag) noexcept
+        : flag_(flag)
+    {
+        flag_ = true;
+    }
+
+    ~FlagGuard()
+    {
+        flag_ = false;
+    }
+
+    FlagGuard(const FlagGuard&) = delete;
+    FlagGuard& operator=(const FlagGuard&) = delete;
+
+private:
+    bool& flag_;
+};
+
+template <typename Visitor>
+void VisitEdgePoints(NXOpen::Edge* edge, Visitor&& visitor)
+{
+    if (edge == nullptr)
+    {
+        return;
+    }
+    NXOpen::Point3d first;
+    NXOpen::Point3d second;
+    try
+    {
+        edge->GetVertices(&first, &second);
+    }
+    catch (...)
+    {
+        return;
+    }
+    visitor(first);
+    visitor(second);
+    if (edge->SolidEdgeType() == NXOpen::Edge::EdgeTypeLinear)
+    {
+        return;
+    }
+
+    UF_EVAL_p_t evaluator = nullptr;
+    if (UF_EVAL_initialize_2(edge->Tag(), &evaluator) != 0 ||
+        evaluator == nullptr)
+    {
+        return;
+    }
+    double limits[2] = {};
+    if (UF_EVAL_ask_limits(evaluator, limits) == 0 &&
+        limits[1] > limits[0] + 1.0e-9)
+    {
+        for (int sample = 1; sample < 32; ++sample)
+        {
+            double point[3] = {};
+            double derivatives[3] = {};
+            const double parameter = limits[0] +
+                (limits[1] - limits[0]) *
+                    static_cast<double>(sample) / 32.0;
+            if (UF_EVAL_evaluate(
+                    evaluator, 0, parameter, point, derivatives) == 0)
+            {
+                visitor(NXOpen::Point3d(point[0], point[1], point[2]));
+            }
+        }
+    }
+    UF_EVAL_free(evaluator);
+}
 
 double Dot(const NXOpen::Vector3d& a, const NXOpen::Vector3d& b)
 {
@@ -158,7 +244,7 @@ void Canonicalize(NXOpen::Vector3d& value)
 std::string Number(double value)
 {
     std::ostringstream stream;
-    stream << std::setprecision(15) << value;
+    stream << std::fixed << std::setprecision(9) << value;
     return stream.str();
 }
 
@@ -313,26 +399,29 @@ std::map<std::string, std::string> ReadSettings()
 
 const std::filesystem::path& LogPath()
 {
-    static const std::filesystem::path path = []()
-    {
-        std::filesystem::path resolved = ResolveLogPath();
-        std::error_code error;
-        if (std::filesystem::exists(resolved, error) &&
-            !error &&
-            std::filesystem::file_size(resolved, error) >
-                5ULL * 1024ULL * 1024ULL)
-        {
-            const std::filesystem::path backup =
-                resolved.parent_path() /
-                L"TiaoZenBanLeiCiCun.previous.log";
-            error.clear();
-            std::filesystem::remove(backup, error);
-            error.clear();
-            std::filesystem::rename(resolved, backup, error);
-        }
-        return resolved;
-    }();
+    static const std::filesystem::path path = ResolveLogPath();
     return path;
+}
+
+void RotateLogIfNeeded()
+{
+    const std::filesystem::path& resolved = LogPath();
+    std::error_code error;
+    if (!std::filesystem::exists(resolved, error) || error)
+    {
+        return;
+    }
+    const auto size = std::filesystem::file_size(resolved, error);
+    if (error || size <= 5ULL * 1024ULL * 1024ULL)
+    {
+        return;
+    }
+    const std::filesystem::path backup =
+        resolved.parent_path() / L"TiaoZenBanLeiCiCun.previous.log";
+    error.clear();
+    std::filesystem::remove(backup, error);
+    error.clear();
+    std::filesystem::rename(resolved, backup, error);
 }
 
 std::mutex& LogMutex()
@@ -458,21 +547,14 @@ bool FaceProjectionRange(
     bool found = false;
     for (NXOpen::Edge* edge : face->GetEdges())
     {
-        if (edge == nullptr)
-        {
-            continue;
-        }
-        NXOpen::Point3d first;
-        NXOpen::Point3d second;
-        edge->GetVertices(&first, &second);
-        for (const NXOpen::Point3d& point : {first, second})
+        VisitEdgePoints(edge, [&](const NXOpen::Point3d& point)
         {
             const double coordinate =
                 Dot(Subtract(point, origin), direction);
             minimum = (std::min)(minimum, coordinate);
             maximum = (std::max)(maximum, coordinate);
             found = true;
-        }
+        });
     }
     return found;
 }
@@ -481,7 +563,45 @@ bool IsAlive(tag_t tag)
 {
     return tag != NULL_TAG && UF_OBJ_ask_status(tag) == UF_OBJ_ALIVE;
 }
+
+std::set<tag_t> FeatureTags(NXOpen::Part* part)
+{
+    std::set<tag_t> tags;
+    if (part == nullptr)
+    {
+        return tags;
+    }
+    for (NXOpen::Features::Feature* feature : part->Features()->GetFeatures())
+    {
+        if (feature != nullptr)
+        {
+            tags.insert(feature->Tag());
+        }
+    }
+    return tags;
 }
+
+tag_t NewestFeature(const std::set<tag_t>& before, NXOpen::Part* part)
+{
+    tag_t created = NULL_TAG;
+    if (part == nullptr)
+    {
+        return created;
+    }
+    for (NXOpen::Features::Feature* feature : part->Features()->GetFeatures())
+    {
+        if (feature != nullptr &&
+            before.find(feature->Tag()) == before.end())
+        {
+            created = feature->Tag();
+        }
+    }
+    return created;
+}
+}
+
+NXOpen::Features::CustomFeatureClass* FindPanelResizeClass(
+    NXOpen::Session* session);
 
 void TiaoZenWriteLog(const std::string& level,
                      const std::string& message) noexcept
@@ -489,6 +609,7 @@ void TiaoZenWriteLog(const std::string& level,
     try
     {
         std::lock_guard<std::mutex> lock(LogMutex());
+        RotateLogIfNeeded();
         SYSTEMTIME time = {};
         GetLocalTime(&time);
         std::ofstream output(
@@ -528,6 +649,50 @@ std::string TiaoZenLogFilePath() noexcept
     }
 }
 
+void TiaoZenShowError(const std::string& message) noexcept
+{
+    try
+    {
+        if (message.empty())
+        {
+            return;
+        }
+        NXOpen::UI* ui = NXOpen::UI::GetUI();
+        if (ui == nullptr || ui->NXMessageBox() == nullptr)
+        {
+            return;
+        }
+        ui->NXMessageBox()->Show(
+            NXOpen::NXString("板件调尺", NXOpen::NXString::UTF8),
+            NXOpen::NXMessageBox::DialogTypeError,
+            NXOpen::NXString(message, NXOpen::NXString::UTF8));
+    }
+    catch (...)
+    {
+    }
+}
+
+void TiaoZenShowNxError(const char* message) noexcept
+{
+    try
+    {
+        NXOpen::UI* ui = NXOpen::UI::GetUI();
+        if (ui == nullptr || ui->NXMessageBox() == nullptr)
+        {
+            return;
+        }
+        ui->NXMessageBox()->Show(
+            NXOpen::NXString("板件调尺", NXOpen::NXString::UTF8),
+            NXOpen::NXMessageBox::DialogTypeError,
+            NXOpen::NXString(
+                message != nullptr ? message : "Unhandled NX exception.",
+                NXOpen::NXString::Locale));
+    }
+    catch (...)
+    {
+    }
+}
+
 bool PanelSizeDialog::SideOffsets::IsZero(double tolerance) const
 {
     return std::abs(left) <= tolerance &&
@@ -537,6 +702,11 @@ bool PanelSizeDialog::SideOffsets::IsZero(double tolerance) const
 }
 
 PanelSizeDialog::PanelSizeDialog()
+    : PanelSizeDialog(true)
+{
+}
+
+PanelSizeDialog::PanelSizeDialog(bool interactiveUi)
     : session_(NXOpen::Session::GetSession()),
       ui_(NXOpen::UI::GetUI()),
       dialog_(nullptr),
@@ -572,8 +742,14 @@ PanelSizeDialog::PanelSizeDialog()
       rebuilding_(false),
       changingUi_(false),
       configuringHandles_(false),
+      ready_(false),
       targetValuesInitialized_(false)
 {
+    if (!interactiveUi)
+    {
+        TiaoZenWriteLog("DEBUG", "创建板件调尺几何计算对象。");
+        return;
+    }
     TiaoZenWriteLog(
         "INFO",
         "创建板件调尺对话框；DLX=" + DialogPath() +
@@ -598,15 +774,32 @@ PanelSizeDialog::PanelSizeDialog()
 
 PanelSizeDialog::~PanelSizeDialog()
 {
+    if (dialog_ == nullptr)
+    {
+        return;
+    }
     TiaoZenWriteLog("INFO", "销毁板件调尺对话框。");
-    UndoPreview();
+    try
+    {
+        UndoPreview();
+    }
+    catch (...)
+    {
+        TiaoZenWriteLog("ERROR", "销毁对话框时撤销预览失败。");
+    }
+    SaveSettings();
     delete dialog_;
     dialog_ = nullptr;
 }
 
 NXOpen::BlockStyler::BlockDialog::DialogResponse PanelSizeDialog::Launch()
 {
-    return dialog_->Launch();
+    editedFeature_ =
+        session_->CustomFeatureClassManager()->GetEditedCustomFeature();
+    const auto mode = editedFeature_ != nullptr
+        ? NXOpen::BlockStyler::BlockDialog::DialogModeEdit
+        : NXOpen::BlockStyler::BlockDialog::DialogModeCreate;
+    return dialog_->LaunchInDialogMode(mode);
 }
 
 void PanelSizeDialog::initialize_cb()
@@ -658,8 +851,10 @@ void PanelSizeDialog::initialize_cb()
         leftHandle_, rightHandle_, bottomHandle_, topHandle_};
     if (std::find(required.begin(), required.end(), nullptr) != required.end())
     {
-        throw std::runtime_error(
-            "TiaoZenBanLeiCiCun.dlx 缺少必要控件，请重新生成对话框文件。");
+        initError_ =
+            "TiaoZenBanLeiCiCun.dlx 缺少必要控件，请重新生成对话框文件。";
+        TiaoZenWriteLog("ERROR", initError_);
+        return;
     }
 
     NXOpen::BlockStyler::PropertyList* properties =
@@ -676,10 +871,15 @@ void PanelSizeDialog::initialize_cb()
 
         LoadSettings();
         RefreshDimensionText();
+        ready_ = true;
         TiaoZenWriteLog("INFO", "initialize_cb 完成，全部 DLX 控件已找到。");
     }
     catch (const NXOpen::NXException& ex)
     {
+        if (initError_.empty())
+        {
+            initError_ = "板件调尺对话框初始化失败。";
+        }
         TiaoZenWriteLog(
             "ERROR",
             std::string("initialize_cb 捕获 NXException：code=") +
@@ -689,12 +889,21 @@ void PanelSizeDialog::initialize_cb()
     }
     catch (const std::exception& ex)
     {
+        if (initError_.empty())
+        {
+            initError_ =
+                std::string("板件调尺对话框初始化失败：") + ex.what();
+        }
         TiaoZenWriteLog(
             "ERROR",
             std::string("initialize_cb 捕获 std::exception：") + ex.what());
     }
     catch (...)
     {
+        if (initError_.empty())
+        {
+            initError_ = "板件调尺对话框初始化失败。";
+        }
         TiaoZenWriteLog("ERROR", "initialize_cb 捕获未知异常。");
     }
 }
@@ -704,6 +913,14 @@ void PanelSizeDialog::dialogShown_cb()
     try
     {
         TiaoZenWriteLog("INFO", "对话框已显示。");
+        if (!ready_)
+        {
+            TiaoZenShowError(initError_.empty()
+                                 ? "板件调尺对话框初始化失败。"
+                                 : initError_);
+            return;
+        }
+        LoadEditedFeature();
         RefreshModeVisibility();
         // The DLX creates the native dimension manipulators with ShowHandle=true,
         // matching feature 38. Hide them only after the dialog is fully realized;
@@ -713,7 +930,20 @@ void PanelSizeDialog::dialogShown_cb()
         TiaoZenWriteLog(
             "DEBUG",
             "拖拽手柄已在对话框构建阶段完成实例化，等待选面后显示。");
-        if (planeSelect_ != nullptr)
+        if (editedFeature_ != nullptr && adjustTabs_ != nullptr)
+        {
+            adjustTabs_->Focus();
+            if (frame_.valid && LivePreviewEnabled())
+            {
+                std::string error;
+                if (!CreatePreview(error) && !error.empty())
+                {
+                    ShowError(error);
+                }
+            }
+            ConfigureDragHandles();
+        }
+        else if (planeSelect_ != nullptr)
         {
             planeSelect_->Focus();
         }
@@ -741,19 +971,26 @@ void PanelSizeDialog::dialogShown_cb()
 
 int PanelSizeDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
-    if (changingUi_ || rebuilding_ || configuringHandles_)
+    if (!ready_ || changingUi_ || rebuilding_ || configuringHandles_)
     {
         return 0;
     }
 
+    FlagGuard rebuildingGuard(rebuilding_);
     try
     {
         TiaoZenWriteLog(
             "DEBUG",
             std::string("update_cb：block=") +
                 (block != nullptr ? block->Name().GetText() : "<null>"));
-        rebuilding_ = true;
-        UndoPreview();
+        const bool basisChanged =
+            block == planeSelect_ || block == swapDirection_;
+        const bool previewTurnedOff =
+            block == livePreview_ && !LivePreviewEnabled();
+        if (basisChanged || previewTurnedOff)
+        {
+            UndoPreview();
+        }
 
         const bool dragChanged = IsDragHandle(block);
         if (dragChanged)
@@ -810,7 +1047,6 @@ int PanelSizeDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
         {
             targetValuesInitialized_ = true;
         }
-        SaveSettings();
 
         if (frame_.valid && LivePreviewEnabled())
         {
@@ -821,24 +1057,35 @@ int PanelSizeDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
             }
         }
         ConfigureDragHandles();
-        rebuilding_ = false;
         TiaoZenWriteLog("DEBUG", "update_cb 完成。");
         return 0;
     }
     catch (const NXOpen::NXException& ex)
     {
-        rebuilding_ = false;
-        ShowError(ex.Message() != nullptr ? ex.Message()
-                                         : "更新板件调尺预览失败。");
+        UndoPreview();
+        TiaoZenWriteLog(
+            "ERROR",
+            std::string("update_cb 捕获 NXException：code=") +
+                std::to_string(ex.ErrorCode()) +
+                "，message=" +
+                (ex.Message() != nullptr ? ex.Message() : "<null>"));
+        if (ex.Message() != nullptr)
+        {
+            TiaoZenShowNxError(ex.Message());
+        }
+        else
+        {
+            ShowError("更新板件调尺预览失败。");
+        }
     }
     catch (const std::exception& ex)
     {
-        rebuilding_ = false;
+        UndoPreview();
         ShowError(ex.what());
     }
     catch (...)
     {
-        rebuilding_ = false;
+        UndoPreview();
         ShowError("更新板件调尺预览时发生未知错误。");
     }
     return 1;
@@ -850,6 +1097,13 @@ int PanelSizeDialog::apply_cb()
     {
         TiaoZenWriteLog("INFO", "apply_cb 开始。");
         SaveSettings();
+        if (!ready_)
+        {
+            ShowError(initError_.empty()
+                          ? "板件调尺对话框初始化失败。"
+                          : initError_);
+            return 1;
+        }
         if (!frame_.valid || CachedFace() == nullptr)
         {
             ShowError("请先选择一个有效的板件平面。");
@@ -869,35 +1123,73 @@ int PanelSizeDialog::apply_cb()
             return 1;
         }
 
-        if (!hasPreview_ && !CreatePreview(error))
+        if (FindPanelResizeClass(session_) == nullptr)
         {
-            ShowError(error.empty() ? "创建尺寸调整失败。" : error);
-            return 1;
+            TiaoZenWriteLog(
+                "WARN",
+                "当前 NX 会话未加载板件调尺自定义特征，本次先提交预览结果。完全退出并重新启动 NX 后，新的板件调尺才能在特征树双击修改。");
+            if (!hasPreview_ && !CreatePreview(error))
+            {
+                ShowError(error.empty() ? "创建尺寸调整失败。" : error);
+                return 1;
+            }
+            CommitPreview();
+            TiaoZenWriteLog("INFO", "尺寸调整已按预览提交。");
         }
-
-        CommitPreview();
-        TiaoZenWriteLog("INFO", "尺寸调整已提交。");
-        ClearSelection();
-        frame_ = PanelFrame();
-        SetLabel(currentSize_, "模型真实尺寸：请先选择板件平面");
-        SetLabel(targetLength_, "长度增量（原 --）");
-        SetLabel(targetWidth_, "宽度增量（原 --）");
-        SetLabel(resultLength_, "调整后尺寸：--");
-        SetLabel(resultWidth_, "尺寸变化：--");
-        planeSelect_->Focus();
+        else
+        {
+            UndoPreview();
+            if (!CommitCustomFeature(offsets, error))
+            {
+                ShowError(error.empty() ? "创建板件调尺特征失败。" : error);
+                return 1;
+            }
+            TiaoZenWriteLog("INFO", "板件调尺自定义特征已提交。");
+        }
+        try
+        {
+            ClearSelection();
+            frame_ = PanelFrame();
+            SetLabel(currentSize_, "模型真实尺寸：请先选择板件平面");
+            SetLabel(targetLength_, "长度增量（原 --）");
+            SetLabel(targetWidth_, "宽度增量（原 --）");
+            SetLabel(resultLength_, "调整后尺寸：--");
+            SetLabel(resultWidth_, "尺寸变化：--");
+            planeSelect_->Focus();
+        }
+        catch (...)
+        {
+            TiaoZenWriteLog(
+                "ERROR", "尺寸已提交，刷新对话框失败。");
+        }
         return 0;
     }
     catch (const NXOpen::NXException& ex)
     {
-        ShowError(ex.Message() != nullptr ? ex.Message()
-                                         : "应用板件调尺失败。");
+        UndoPreview();
+        TiaoZenWriteLog(
+            "ERROR",
+            std::string("apply_cb 捕获 NXException：code=") +
+                std::to_string(ex.ErrorCode()) +
+                "，message=" +
+                (ex.Message() != nullptr ? ex.Message() : "<null>"));
+        if (ex.Message() != nullptr)
+        {
+            TiaoZenShowNxError(ex.Message());
+        }
+        else
+        {
+            ShowError("应用板件调尺失败。");
+        }
     }
     catch (const std::exception& ex)
     {
+        UndoPreview();
         ShowError(ex.what());
     }
     catch (...)
     {
+        UndoPreview();
         ShowError("应用板件调尺时发生未知错误。");
     }
     return 1;
@@ -910,23 +1202,47 @@ int PanelSizeDialog::ok_cb()
 
 int PanelSizeDialog::cancel_cb()
 {
-    TiaoZenWriteLog("INFO", "用户取消对话框，准备撤销预览。");
-    SaveSettings();
-    return UndoPreview() ? 0 : 1;
+    try
+    {
+        TiaoZenWriteLog("INFO", "用户取消对话框，准备撤销预览。");
+        SaveSettings();
+        return UndoPreview() ? 0 : 1;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        TiaoZenWriteLog(
+            "ERROR",
+            std::string("cancel_cb 捕获 NXException：") +
+                (ex.Message() != nullptr ? ex.Message() : "<null>"));
+        return 1;
+    }
+    catch (...)
+    {
+        TiaoZenWriteLog("ERROR", "cancel_cb 捕获未知异常。");
+        return 1;
+    }
 }
 
 int PanelSizeDialog::filter_cb(NXOpen::BlockStyler::UIBlock* block,
                                NXOpen::TaggedObject* selectedObject)
 {
-    if (block != planeSelect_)
+    try
     {
-        return UF_UI_SEL_ACCEPT;
+        if (!ready_ || block != planeSelect_)
+        {
+            return !ready_ ? UF_UI_SEL_REJECT : UF_UI_SEL_ACCEPT;
+        }
+        NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(selectedObject);
+        return face != nullptr &&
+                       face->SolidFaceType() == NXOpen::Face::FaceTypePlanar
+                   ? UF_UI_SEL_ACCEPT
+                   : UF_UI_SEL_REJECT;
     }
-    NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(selectedObject);
-    return face != nullptr &&
-                   face->SolidFaceType() == NXOpen::Face::FaceTypePlanar
-               ? UF_UI_SEL_ACCEPT
-               : UF_UI_SEL_REJECT;
+    catch (...)
+    {
+        TiaoZenWriteLog("ERROR", "filter_cb 捕获异常，已拒绝该选择。");
+        return UF_UI_SEL_REJECT;
+    }
 }
 
 NXOpen::Face* PanelSizeDialog::SelectedFace() const
@@ -1020,7 +1336,7 @@ bool PanelSizeDialog::FindPanelDirections(
         return false;
     }
 
-    if (LogicalValue(swapDirection_))
+    if (DirectionSwapped())
     {
         frame.lengthDirection = perpendicular;
         frame.widthDirection = Scale(candidate, -1.0);
@@ -1034,7 +1350,7 @@ bool PanelSizeDialog::FindPanelDirections(
         "INFO",
         "建立板件方向：最长直边=" + Fixed(longest) +
             "，swap=" +
-            std::string(LogicalValue(swapDirection_) ? "true" : "false") +
+            std::string(DirectionSwapped() ? "true" : "false") +
             "，lengthDirection=" + VectorText(frame.lengthDirection) +
             "，widthDirection=" + VectorText(frame.widthDirection));
     return true;
@@ -1065,11 +1381,7 @@ bool PanelSizeDialog::AnalyzeBodyExtents(
             continue;
         }
         ++edgeCount;
-        NXOpen::Point3d first;
-        NXOpen::Point3d second;
-        edge->GetVertices(&first, &second);
-        const NXOpen::Point3d points[2] = {first, second};
-        for (const NXOpen::Point3d& point : points)
+        VisitEdgePoints(edge, [&](const NXOpen::Point3d& point)
         {
             const NXOpen::Vector3d relative = Subtract(point, frame.origin);
             const double lengthCoordinate =
@@ -1091,7 +1403,7 @@ bool PanelSizeDialog::AnalyzeBodyExtents(
             frame.maxNormal =
                 (std::max)(frame.maxNormal, normalCoordinate);
             found = true;
-        }
+        });
     }
 
     if (!found || frame.Length() <= kTolerance ||
@@ -1129,14 +1441,7 @@ bool PanelSizeDialog::AnalyzeFaceExtents(
     bool found = false;
     for (NXOpen::Edge* edge : face->GetEdges())
     {
-        if (edge == nullptr)
-        {
-            continue;
-        }
-        NXOpen::Point3d first;
-        NXOpen::Point3d second;
-        edge->GetVertices(&first, &second);
-        for (const NXOpen::Point3d& point : {first, second})
+        VisitEdgePoints(edge, [&](const NXOpen::Point3d& point)
         {
             const NXOpen::Vector3d relative =
                 Subtract(point, frame.origin);
@@ -1153,7 +1458,7 @@ bool PanelSizeDialog::AnalyzeFaceExtents(
             frame.faceMaxWidth =
                 (std::max)(frame.faceMaxWidth, widthCoordinate);
             found = true;
-        }
+        });
     }
     if (!found)
     {
@@ -1176,6 +1481,42 @@ double PanelSizeDialog::EstimatePanelThickness(
     {
         return 0.0;
     }
+    NXOpen::Face* face = IsAlive(frame.faceTag)
+        ? dynamic_cast<NXOpen::Face*>(
+              NXOpen::NXObjectManager::Get(frame.faceTag))
+        : nullptr;
+    if (face != nullptr)
+    {
+        const double tolerance = (std::max)(
+            1.0e-3, (std::max)(frame.Length(), frame.Width()) * 1.0e-6);
+        const NXOpen::Vector3d directions[4] = {
+            Scale(frame.lengthDirection, -1.0),
+            frame.lengthDirection,
+            Scale(frame.widthDirection, -1.0),
+            frame.widthDirection};
+        double sectionThickness = std::numeric_limits<double>::max();
+        for (const NXOpen::Vector3d& direction : directions)
+        {
+            const double value = panel_skirt::SectionThickness(
+                face, frame.origin, frame.normal, direction, tolerance);
+            TiaoZenWriteLog(
+                "DEBUG",
+                "外圈截面板厚候选：direction=" + VectorText(direction) +
+                    "，thickness=" + Fixed(value));
+            if (value > 1.0e-3)
+            {
+                sectionThickness = (std::min)(sectionThickness, value);
+            }
+        }
+        if (sectionThickness < std::numeric_limits<double>::max())
+        {
+            TiaoZenWriteLog(
+                "INFO",
+                "按外圈截面识别板厚：thickness=" + Fixed(sectionThickness));
+            return sectionThickness;
+        }
+    }
+
     double thickness = std::numeric_limits<double>::max();
     for (NXOpen::Face* candidate : body->GetFaces())
     {
@@ -1203,7 +1544,7 @@ double PanelSizeDialog::EstimatePanelThickness(
     }
     TiaoZenWriteLog(
         "INFO",
-        "自动识别板厚：thickness=" + Fixed(thickness));
+        "外圈截面未识别板厚，回退到最近平行面：thickness=" + Fixed(thickness));
     return thickness;
 }
 
@@ -1220,21 +1561,14 @@ bool PanelSizeDialog::ValidateSkirtDimensions(
     bool found = false;
     for (NXOpen::Edge* edge : body->GetEdges())
     {
-        if (edge == nullptr)
-        {
-            continue;
-        }
-        NXOpen::Point3d first;
-        NXOpen::Point3d second;
-        edge->GetVertices(&first, &second);
-        for (const NXOpen::Point3d& point : {first, second})
+        VisitEdgePoints(edge, [&](const NXOpen::Point3d& point)
         {
             const double coordinate =
                 Dot(Subtract(point, frame_.origin), frame_.normal);
             minNormal = (std::min)(minNormal, coordinate);
             maxNormal = (std::max)(maxNormal, coordinate);
             found = true;
-        }
+        });
     }
     if (!found)
     {
@@ -1434,7 +1768,9 @@ void PanelSizeDialog::SetLabel(
     NXOpen::BlockStyler::UIBlock* block, const std::string& value)
 {
     NXOpen::BlockStyler::PropertyList* properties = block->GetProperties();
-    properties->SetString("Label", value.c_str());
+    properties->SetString(
+        NXOpen::NXString("Label"),
+        NXOpen::NXString(value, NXOpen::NXString::UTF8));
     delete properties;
 }
 
@@ -1442,10 +1778,11 @@ void PanelSizeDialog::ClearSelection()
 {
     NXOpen::BlockStyler::PropertyList* properties =
         planeSelect_->GetProperties();
-    changingUi_ = true;
-    properties->SetTaggedObjectVector(
-        "SelectedObjects", std::vector<NXOpen::TaggedObject*>());
-    changingUi_ = false;
+    {
+        FlagGuard uiGuard(changingUi_);
+        properties->SetTaggedObjectVector(
+            "SelectedObjects", std::vector<NXOpen::TaggedObject*>());
+    }
     delete properties;
     if (IsAlive(frame_.faceTag))
     {
@@ -1501,7 +1838,8 @@ void PanelSizeDialog::LoadSettings()
             return fallback;
         }
     };
-    changingUi_ = true;
+    {
+    FlagGuard uiGuard(changingUi_);
     adjustTabs_->SetActivePage(
         (std::max)(0, (std::min)(2, readInt("mode", 0))));
     SetLogicalValue(
@@ -1527,8 +1865,8 @@ void PanelSizeDialog::LoadSettings()
         (std::max)(0, (std::min)(8, readInt("anchor", 4))));
     SetLogicalValue(
         livePreview_, readInt("livePreview", 1) != 0);
+    }
 
-    changingUi_ = false;
     TiaoZenWriteLog(
         "INFO",
         "已恢复全部用户输入（包含数字）：mode=" +
@@ -1546,7 +1884,7 @@ void PanelSizeDialog::LoadSettings()
 
 void PanelSizeDialog::SaveSettings() const
 {
-    if (adjustTabs_ == nullptr || leftOffset_ == nullptr)
+    if (!ready_ || adjustTabs_ == nullptr || leftOffset_ == nullptr)
     {
         return;
     }
@@ -1782,7 +2120,7 @@ void PanelSizeDialog::HideDragHandles()
 {
     const std::array<NXOpen::BlockStyler::LinearDimension*, 4> handles{
         leftHandle_, rightHandle_, bottomHandle_, topHandle_};
-    configuringHandles_ = true;
+    FlagGuard guard(configuringHandles_);
     for (NXOpen::BlockStyler::LinearDimension* handle : handles)
     {
         if (handle != nullptr)
@@ -1791,7 +2129,6 @@ void PanelSizeDialog::HideDragHandles()
             handle->SetShowFocusHandle(false);
         }
     }
-    configuringHandles_ = false;
 }
 
 void PanelSizeDialog::ReadDragHandleValues()
@@ -1801,12 +2138,11 @@ void PanelSizeDialog::ReadDragHandleValues()
     {
         return;
     }
-    changingUi_ = true;
+    FlagGuard uiGuard(changingUi_);
     SetDoubleValue(leftOffset_, leftHandle_->Value());
     SetDoubleValue(rightOffset_, rightHandle_->Value());
     SetDoubleValue(bottomOffset_, bottomHandle_->Value());
     SetDoubleValue(topOffset_, topHandle_->Value());
-    changingUi_ = false;
     TiaoZenWriteLog(
         "DEBUG",
         "读取拖拽手柄：left=" + SignedFixed(DoubleValue(leftOffset_)) +
@@ -1875,9 +2211,11 @@ void PanelSizeDialog::ConfigureDragHandles()
             -frame_.minWidth, frame_.maxWidth};
         for (std::size_t index = 0; index < origins.size(); ++index)
         {
+            std::string skirtError;
             const std::vector<NXOpen::Face*> movingFaces =
                 FindBoundaryFaces(
-                    body, directions[index], boundaryCoordinates[index]);
+                    body, directions[index], boundaryCoordinates[index],
+                    skirtError);
             if (!movingFaces.empty())
             {
                 // FindBoundaryFaces returns PLANE1 first.  Keep the drag
@@ -2038,26 +2376,21 @@ void PanelSizeDialog::ConfigureDragHandles()
     const std::array<NXOpen::BlockStyler::LinearDimension*, 4> handles{
         leftHandle_, rightHandle_, bottomHandle_, topHandle_};
 
-    configuringHandles_ = true;
-    try
+    FlagGuard guard(configuringHandles_);
+    SetDragHandleValues(offsets);
+    for (std::size_t index = 0; index < handles.size(); ++index)
     {
-        SetDragHandleValues(offsets);
-        for (std::size_t index = 0; index < handles.size(); ++index)
+        NXOpen::BlockStyler::LinearDimension* handle = handles[index];
+        if (handle == nullptr)
         {
-            NXOpen::BlockStyler::LinearDimension* handle = handles[index];
-            handle->SetAutoReverseDuringDrag(true);
-            handle->SetShowFocusHandle(false);
-            handle->SetHandleOrigin(origins[index]);
-            handle->SetHandleOrientation(directions[index]);
-            handle->SetShowHandle(true);
+            continue;
         }
+        handle->SetAutoReverseDuringDrag(true);
+        handle->SetShowFocusHandle(false);
+        handle->SetHandleOrigin(origins[index]);
+        handle->SetHandleOrientation(directions[index]);
+        handle->SetShowHandle(true);
     }
-    catch (...)
-    {
-        configuringHandles_ = false;
-        throw;
-    }
-    configuringHandles_ = false;
     UF_DISP_refresh();
 }
 
@@ -2103,390 +2436,13 @@ void PanelSizeDialog::RefreshDimensionText()
                  SignedFixed(newWidth - frame_.Width()) + " mm");
 }
 
-void PanelSizeDialog::RefreshPreview()
-{
-    if (!frame_.valid || !LivePreviewEnabled())
-    {
-        return;
-    }
-    std::string error;
-    if (!CreatePreview(error) && !error.empty())
-    {
-        ShowError(error);
-    }
-}
-
-#if 0
-std::vector<NXOpen::Face*> FindBoundaryFacesLegacy(
-    NXOpen::Body* body,
-    const NXOpen::Vector3d& outwardDirection,
-    double boundaryCoordinate,
-    const PanelSizeDialog::PanelFrame& frame_)
-{
-    std::vector<NXOpen::Face*> result;
-    std::vector<std::pair<NXOpen::Face*, double>> candidates;
-    const double dimension =
-        (std::max)(frame_.Length(), frame_.Width());
-    const double coordinateTolerance =
-        (std::max)(1.0e-3, dimension * 1.0e-6);
-    double skirtInset = 0.0;
-    const double lengthAlignment =
-        Dot(outwardDirection, frame_.lengthDirection);
-    const double widthAlignment =
-        Dot(outwardDirection, frame_.widthDirection);
-    if (lengthAlignment < -kParallelTolerance)
-    {
-        skirtInset = frame_.LeftSkirt();
-    }
-    else if (lengthAlignment > kParallelTolerance)
-    {
-        skirtInset = frame_.RightSkirt();
-    }
-    else if (widthAlignment < -kParallelTolerance)
-    {
-        skirtInset = frame_.BottomSkirt();
-    }
-    else if (widthAlignment > kParallelTolerance)
-    {
-        skirtInset = frame_.TopSkirt();
-    }
-    skirtInset = (std::max)(0.0, skirtInset);
-    const double selectionBand =
-        skirtInset +
-        (frame_.thickness > coordinateTolerance
-             ? frame_.thickness * 2.25
-             : 0.0) +
-        coordinateTolerance;
-    double sideCenterCoordinate = 0.0;
-    if (lengthAlignment < -kParallelTolerance)
-    {
-        sideCenterCoordinate =
-            -(frame_.minLength + frame_.maxLength) * 0.5;
-    }
-    else if (lengthAlignment > kParallelTolerance)
-    {
-        sideCenterCoordinate =
-            (frame_.minLength + frame_.maxLength) * 0.5;
-    }
-    else if (widthAlignment < -kParallelTolerance)
-    {
-        sideCenterCoordinate =
-            -(frame_.minWidth + frame_.maxWidth) * 0.5;
-    }
-    else if (widthAlignment > kParallelTolerance)
-    {
-        sideCenterCoordinate =
-            (frame_.minWidth + frame_.maxWidth) * 0.5;
-    }
-    const bool skirtTowardMaximum =
-        std::abs(frame_.maxNormal) >=
-        std::abs(frame_.minNormal);
-    const double skirtExtreme =
-        skirtTowardMaximum
-            ? frame_.maxNormal
-            : frame_.minNormal;
-    const double skirtHeightTolerance =
-        (std::max)(1.0e-3, frame_.NormalDepth() * 1.0e-5);
-    const auto belongsToSkirt =
-        [this, sideCenterCoordinate, coordinateTolerance,
-         skirtTowardMaximum, skirtExtreme,
-         skirtHeightTolerance](
-            NXOpen::Face* face, double sideCoordinate)
-    {
-        if (sideCoordinate <
-            sideCenterCoordinate - coordinateTolerance)
-        {
-            return false;
-        }
-        double minimum = 0.0;
-        double maximum = 0.0;
-        if (!FaceProjectionRange(
-                face, frame_.origin, frame_.normal,
-                minimum, maximum))
-        {
-            return false;
-        }
-        return skirtTowardMaximum
-                   ? std::abs(maximum - skirtExtreme) <=
-                         skirtHeightTolerance
-                   : std::abs(minimum - skirtExtreme) <=
-                         skirtHeightTolerance;
-    };
-    const auto expandConnectedSideFaces =
-        [this, outwardDirection, sideCenterCoordinate,
-         coordinateTolerance](
-            std::vector<NXOpen::Face*>& selectedFaces)
-    {
-        std::set<tag_t> visitedTags;
-        std::set<tag_t> selectedTags;
-        std::vector<NXOpen::Face*> frontier;
-        for (NXOpen::Face* face : selectedFaces)
-        {
-            if (face != nullptr &&
-                visitedTags.insert(face->Tag()).second)
-            {
-                frontier.push_back(face);
-                selectedTags.insert(face->Tag());
-            }
-        }
-
-        int addedParallelFaces = 0;
-        for (std::size_t cursor = 0;
-             cursor < frontier.size(); ++cursor)
-        {
-            NXOpen::Face* current = frontier[cursor];
-            for (NXOpen::Edge* edge : current->GetEdges())
-            {
-                if (edge == nullptr)
-                {
-                    continue;
-                }
-                for (NXOpen::Face* adjacent : edge->GetFaces())
-                {
-                    if (adjacent == nullptr ||
-                        visitedTags.find(adjacent->Tag()) !=
-                            visitedTags.end())
-                    {
-                        continue;
-                    }
-
-                    double minimumSide = 0.0;
-                    double maximumSide = 0.0;
-                    if (!FaceProjectionRange(
-                            adjacent, frame_.origin,
-                            outwardDirection,
-                            minimumSide, maximumSide))
-                    {
-                        continue;
-                    }
-
-                    NXOpen::Point3d planePoint;
-                    NXOpen::Vector3d planeNormal;
-                    const bool planar = FacePlaneData(
-                        adjacent, planePoint, planeNormal);
-                    const bool targetParallel =
-                        planar &&
-                        std::abs(Dot(
-                            planeNormal, outwardDirection)) >=
-                            kParallelTolerance;
-                    const bool entirelyOnThisSide =
-                        minimumSide >=
-                        sideCenterCoordinate -
-                            coordinateTolerance;
-
-                    bool remoteSkirtConnector = false;
-                    if (!targetParallel)
-                    {
-                        double minimumNormal = 0.0;
-                        double maximumNormal = 0.0;
-                        if (FaceProjectionRange(
-                                adjacent, frame_.origin,
-                                frame_.normal,
-                                minimumNormal, maximumNormal))
-                        {
-                            const bool crossesMainPlane =
-                                minimumNormal <= coordinateTolerance &&
-                                maximumNormal >=
-                                    -coordinateTolerance;
-                            const double nearestNormalDistance =
-                                crossesMainPlane
-                                    ? 0.0
-                                    : (std::min)(
-                                          std::abs(minimumNormal),
-                                          std::abs(maximumNormal));
-                            remoteSkirtConnector =
-                                nearestNormalDistance >
-                                (std::max)(
-                                    coordinateTolerance,
-                                    frame_.thickness * 2.25);
-                        }
-                    }
-
-                    if (!entirelyOnThisSide &&
-                        !remoteSkirtConnector)
-                    {
-                        // Reject the selected middle panel, but allow a
-                        // remote annular skirt face to bridge across the
-                        // center. Parallel faces on the opposite side never
-                        // qualify for this exception.
-                        continue;
-                    }
-
-                    visitedTags.insert(adjacent->Tag());
-                    frontier.push_back(adjacent);
-
-                    if (targetParallel &&
-                        selectedTags.insert(
-                            adjacent->Tag()).second)
-                    {
-                        selectedFaces.push_back(adjacent);
-                        ++addedParallelFaces;
-                    }
-                }
-            }
-        }
-        return addedParallelFaces;
-    };
-    TiaoZenWriteLog(
-        "DEBUG",
-        "开始搜索边界面：bodyTag=" + std::to_string(body->Tag()) +
-            "，direction=" + VectorText(outwardDirection) +
-            "，boundaryCoordinate=" + Fixed(boundaryCoordinate) +
-            "，coordinateTolerance=" +
-            Number(coordinateTolerance));
-
-    for (NXOpen::Face* face : body->GetFaces())
-    {
-        NXOpen::Point3d point;
-        NXOpen::Vector3d normal;
-        if (!FacePlaneData(face, point, normal) ||
-            std::abs(Dot(normal, outwardDirection)) <
-                kParallelTolerance)
-        {
-            continue;
-        }
-        const NXOpen::Vector3d relative = Subtract(point, frame_.origin);
-        const double coordinate = Dot(relative, outwardDirection);
-        candidates.emplace_back(face, coordinate);
-        TiaoZenWriteLog(
-            "TRACE",
-            "平行平面候选：faceTag=" + std::to_string(face->Tag()) +
-                "，point=" + PointText(point) +
-                "，normal=" + VectorText(normal) +
-                "，coordinate=" + Fixed(coordinate) +
-                "，boundaryDelta=" +
-                SignedFixed(coordinate - boundaryCoordinate));
-        if (std::abs(coordinate - boundaryCoordinate) <=
-            coordinateTolerance)
-        {
-            result.push_back(face);
-        }
-    }
-
-    if (!result.empty())
-    {
-        result.clear();
-        int skirtFaceCount = 0;
-        for (const auto& candidate : candidates)
-        {
-            const double inwardDistance =
-                boundaryCoordinate - candidate.second;
-            if (inwardDistance >= -coordinateTolerance &&
-                (inwardDistance <= selectionBand ||
-                 belongsToSkirt(
-                     candidate.first, candidate.second)))
-            {
-                result.push_back(candidate.first);
-                if (inwardDistance > selectionBand)
-                {
-                    ++skirtFaceCount;
-                }
-            }
-        }
-        const int connectedSkirtFaces =
-            expandConnectedSideFaces(result);
-        TiaoZenWriteLog(
-            "INFO",
-            "边界外侧面和内侧面匹配完成：parallelCandidates=" +
-                std::to_string(candidates.size()) +
-                "，thickness=" + Fixed(frame_.thickness) +
-                "，skirtInset=" + Fixed(skirtInset) +
-                "，selectionBand=" + Fixed(selectionBand) +
-                "，skirtTopologyFaces=" +
-                std::to_string(skirtFaceCount) +
-                "，connectedSkirtFaces=" +
-                std::to_string(connectedSkirtFaces) +
-                "，selectedCount=" + std::to_string(result.size()));
-        return result;
-    }
-    if (candidates.empty())
-    {
-        TiaoZenWriteLog(
-            "WARN", "没有找到与边界方向平行的平面。");
-        return result;
-    }
-
-    // A folded sheet-metal boundary is often formed by a cylindrical bend
-    // whose extreme point lies slightly outside the nearest planar flange
-    // end face. In that case the body extent and the movable planar face do
-    // not share exactly the same coordinate. Fall back to the outermost
-    // parallel planar face, but only when it remains close enough to the
-    // measured body boundary to avoid selecting a remote hole wall.
-    double outermostCandidate = -std::numeric_limits<double>::max();
-    for (const auto& candidate : candidates)
-    {
-        outermostCandidate =
-            (std::max)(outermostCandidate, candidate.second);
-    }
-    const double maximumFallbackInset =
-        (std::max)(10.0, dimension * 5.0e-3);
-    const double inset = boundaryCoordinate - outermostCandidate;
-    TiaoZenWriteLog(
-        "WARN",
-        "精确匹配为空，评估回退：outermostCandidate=" +
-            Fixed(outermostCandidate) +
-            "，inset=" + Fixed(inset) +
-            "，maximumFallbackInset=" +
-            Fixed(maximumFallbackInset));
-    if (inset < -coordinateTolerance ||
-        inset > maximumFallbackInset)
-    {
-        TiaoZenWriteLog(
-            "ERROR",
-            "回退候选超出安全范围，拒绝选择边界面。");
-        return result;
-    }
-
-    int skirtFaceCount = 0;
-    for (const auto& candidate : candidates)
-    {
-        const double inwardDistance =
-            outermostCandidate - candidate.second;
-        if (inwardDistance >= -coordinateTolerance &&
-            (inwardDistance <= selectionBand ||
-             belongsToSkirt(
-                 candidate.first, candidate.second)))
-        {
-            result.push_back(candidate.first);
-            if (inwardDistance > selectionBand)
-            {
-                ++skirtFaceCount;
-            }
-        }
-    }
-    const int connectedSkirtFaces =
-        expandConnectedSideFaces(result);
-    std::ostringstream selected;
-    for (NXOpen::Face* face : result)
-    {
-        if (selected.tellp() > 0)
-        {
-            selected << ",";
-        }
-        selected << face->Tag();
-    }
-    TiaoZenWriteLog(
-        "INFO",
-        "采用最外侧平面回退并包含板厚内侧面：selectedCount=" +
-            std::to_string(result.size()) +
-            "，thickness=" + Fixed(frame_.thickness) +
-            "，skirtInset=" + Fixed(skirtInset) +
-            "，selectionBand=" + Fixed(selectionBand) +
-            "，skirtTopologyFaces=" +
-            std::to_string(skirtFaceCount) +
-            "，connectedSkirtFaces=" +
-            std::to_string(connectedSkirtFaces) +
-            "，faceTags=[" + selected.str() + "]");
-    return result;
-}
-
-#endif
-
 std::vector<NXOpen::Face*> PanelSizeDialog::FindBoundaryFaces(
     NXOpen::Body* body,
     const NXOpen::Vector3d& outwardDirection,
-    double boundaryCoordinate) const
+    double boundaryCoordinate,
+    std::string& failure) const
 {
+    failure.clear();
     if (body == nullptr)
         return {};
     const double tolerance = (std::max)(1.0e-3,
@@ -2494,6 +2450,7 @@ std::vector<NXOpen::Face*> PanelSizeDialog::FindBoundaryFaces(
     const panel_skirt::Selection selection = panel_skirt::Collect(
         CachedFace(), frame_.origin, frame_.normal, outwardDirection,
         frame_.thickness, tolerance);
+    failure = selection.error;
     TiaoZenWriteLog(selection.error.empty() ? "INFO" : "ERROR",
         "完整裙边截面选面：bodyTag=" + std::to_string(body->Tag()) +
         "，boundary=" + Fixed(boundaryCoordinate) +
@@ -2503,14 +2460,84 @@ std::vector<NXOpen::Face*> PanelSizeDialog::FindBoundaryFaces(
     return selection.faces;
 }
 
+void PanelSizeDialog::RememberPreviewFeatures()
+{
+    previewFeatures_.clear();
+    for (const SidePreview& slot : sidePreviews_)
+    {
+        if (slot.featureTag != NULL_TAG)
+        {
+            previewFeatures_.push_back(slot.featureTag);
+        }
+    }
+}
+
+bool PanelSizeDialog::DeleteSideFeature(
+    SidePreview& slot, std::string& error)
+{
+    const tag_t featureTag = slot.featureTag;
+    if (featureTag == NULL_TAG || !IsAlive(featureTag))
+    {
+        slot = SidePreview();
+        return true;
+    }
+    NXOpen::Features::Feature* feature =
+        dynamic_cast<NXOpen::Features::Feature*>(
+            NXOpen::NXObjectManager::Get(featureTag));
+    if (feature == nullptr)
+    {
+        slot = SidePreview();
+        return true;
+    }
+
+    try
+    {
+        const NXOpen::Session::UndoMarkId cleanupMark =
+            session_->SetUndoMark(
+                NXOpen::Session::MarkVisibilityInvisible,
+                "板件调尺删除侧向预览");
+        NXOpen::Update* update = session_->UpdateManager();
+        update->ClearDeleteList();
+        update->ClearErrorList();
+        update->AddObjectsToDeleteList(
+            std::vector<NXOpen::TaggedObject*>{feature});
+        const int updateErrors = update->DoUpdate(cleanupMark);
+        if (session_->DoesUndoMarkExist(
+                cleanupMark, "板件调尺删除侧向预览"))
+        {
+            session_->DeleteUndoMark(
+                cleanupMark, "板件调尺删除侧向预览");
+        }
+        if (updateErrors != 0 || IsAlive(featureTag))
+        {
+            error = "该侧偏移已为零，但无法删除已有预览特征。";
+            TiaoZenWriteLog("ERROR", error);
+            return false;
+        }
+        slot = SidePreview();
+        TiaoZenWriteLog(
+            "INFO",
+            "已删除偏移为零的预览特征，featureTag=" +
+                std::to_string(featureTag));
+        return true;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        error = ex.Message() != nullptr ? ex.Message()
+                                       : "删除预览特征失败。";
+        TiaoZenWriteLog("ERROR", "删除侧向预览特征失败：" + error);
+        return false;
+    }
+}
+
 bool PanelSizeDialog::PullBoundaryFaces(
     NXOpen::Body* body,
     const char* sideName,
     const NXOpen::Vector3d& outwardDirection,
     double boundaryCoordinate,
     double distance,
-    std::vector<tag_t>& createdFeatures,
-    std::string& error) const
+    SidePreview& slot,
+    std::string& error)
 {
     const std::string side =
         sideName != nullptr ? sideName : "<unknown>";
@@ -2519,23 +2546,99 @@ bool PanelSizeDialog::PullBoundaryFaces(
         "准备调整" + side +
             "侧：distance=" + SignedFixed(distance) +
             "，direction=" + VectorText(outwardDirection) +
-            "，boundaryCoordinate=" + Fixed(boundaryCoordinate));
+            "，boundaryCoordinate=" + Fixed(boundaryCoordinate) +
+            "，existingFeature=" + std::to_string(slot.featureTag));
     if (std::abs(distance) <= kTolerance)
     {
+        if (slot.featureTag == NULL_TAG && slot.baseline.empty())
+        {
+            TiaoZenWriteLog(
+                "DEBUG", side + "侧距离为零，跳过。");
+            return true;
+        }
+        return DeleteSideFeature(slot, error);
+    }
+
+    const bool canEdit =
+        IsAlive(slot.featureTag) && !slot.baseline.empty();
+    if (canEdit && std::abs(slot.distance - distance) <= kTolerance)
+    {
         TiaoZenWriteLog(
-            "DEBUG", side + "侧距离为零，跳过。");
+            "DEBUG", side + "侧距离未变，保持原移动面特征。");
         return true;
     }
 
+    NXOpen::Part* workPart = session_->Parts()->Work();
+    if (workPart == nullptr)
+    {
+        error = "没有工作部件，无法调整板件。";
+        return false;
+    }
+    const double tolerance = (std::max)(1.0e-3,
+        (std::max)(frame_.Length(), frame_.Width()) * 1.0e-6);
+    if (canEdit)
+    {
+        auto* feature = dynamic_cast<NXOpen::Features::Feature*>(
+            NXOpen::NXObjectManager::Get(slot.featureTag));
+        if (feature == nullptr)
+        {
+            error = side + "侧预览特征已失效，请重新选择板件。";
+            return false;
+        }
+        const std::set<tag_t> before = FeatureTags(workPart);
+        const panel_skirt::MoveResult result =
+            panel_skirt::EditMoveDistance(
+                workPart, feature, distance, slot.baseline,
+                frame_.origin, frame_.normal, outwardDirection, tolerance);
+        if (!result.error.empty())
+        {
+            error = side + "侧" + result.error + "，已取消调整。";
+            TiaoZenWriteLog("ERROR", error);
+            return false;
+        }
+        const tag_t spawned = NewestFeature(before, workPart);
+        if (spawned != NULL_TAG && spawned != slot.featureTag &&
+            IsAlive(slot.featureTag))
+        {
+            error = side + "侧修改距离时又创建了移动面特征，已取消调整。";
+            TiaoZenWriteLog("ERROR", error);
+            return false;
+        }
+        if (result.featureTag != NULL_TAG)
+        {
+            slot.featureTag = result.featureTag;
+        }
+        else if (spawned != NULL_TAG)
+        {
+            slot.featureTag = spawned;
+        }
+        slot.distance = distance;
+        TiaoZenWriteLog(
+            "INFO",
+            side + "侧已编辑原移动面特征：featureTag=" +
+                std::to_string(slot.featureTag) +
+                "，distance=" + SignedFixed(distance));
+        return true;
+    }
+    if (slot.featureTag == NULL_TAG && !slot.baseline.empty())
+    {
+        error = side + "侧预览没有可编辑的特征，已取消调整。";
+        TiaoZenWriteLog("ERROR", error);
+        return false;
+    }
+
+    std::string skirtError;
     const std::vector<NXOpen::Face*> faces =
-        FindBoundaryFaces(body, outwardDirection, boundaryCoordinate);
+        FindBoundaryFaces(
+            body, outwardDirection, boundaryCoordinate, skirtError);
     if (faces.empty())
     {
-        error =
-            "未能完整识别该侧折回裙边，已取消调整以保持原宽度。"
-            "请选择能代表板件整体长宽的主平面。";
+        error = skirtError.empty()
+            ? "未能完整识别该侧折回裙边，已取消调整以保持原宽度。"
+              "请选择能代表板件整体长宽的主平面。"
+            : side + "侧" + skirtError;
         TiaoZenWriteLog(
-            "ERROR", side + "侧未找到可移动边界面。");
+            "ERROR", side + "侧未找到可移动边界面：" + error);
         return false;
     }
     std::ostringstream faceTags;
@@ -2566,7 +2669,6 @@ bool PanelSizeDialog::PullBoundaryFaces(
         originalSurfaces.push_back(position);
     }
 
-    NXOpen::Part* workPart = session_->Parts()->Work();
     NXOpen::Features::MoveFaceBuilder* builder = nullptr;
     try
     {
@@ -2592,13 +2694,10 @@ bool PanelSizeDialog::PullBoundaryFaces(
 
         const double tolerance = (std::max)(1.0e-3,
             (std::max)(frame_.Length(), frame_.Width()) * 1.0e-6);
+        const std::set<tag_t> before = FeatureTags(workPart);
         const panel_skirt::MoveResult result = panel_skirt::CommitAndVerifyMove(
             builder, originalSurfaces, frame_.origin, frame_.normal,
             outwardDirection, distance, tolerance);
-        // A direct edit has no feature to delete; the preview undo mark owns
-        // its rollback. Retain actual feature tags only as additional cleanup.
-        if (result.featureTag != NULL_TAG)
-            createdFeatures.push_back(result.featureTag);
         builder->Destroy();
         builder = nullptr;
         if (!result.error.empty())
@@ -2607,10 +2706,15 @@ bool PanelSizeDialog::PullBoundaryFaces(
             TiaoZenWriteLog("ERROR", error);
             return false;
         }
+        slot.baseline = originalSurfaces;
+        slot.distance = distance;
+        slot.featureTag = result.featureTag != NULL_TAG
+            ? result.featureTag
+            : NewestFeature(before, workPart);
         TiaoZenWriteLog(
             "INFO",
             side + "侧 MoveFace 提交成功：featureTag=" +
-                std::to_string(result.featureTag) +
+                std::to_string(slot.featureTag) +
                 "，geometryVerified=true，distance=" + SignedFixed(distance));
         return true;
     }
@@ -2631,8 +2735,7 @@ bool PanelSizeDialog::PullBoundaryFaces(
 
 bool PanelSizeDialog::ApplyOffsets(
     const SideOffsets& offsets,
-    std::vector<tag_t>& createdFeatures,
-    std::string& error) const
+    std::string& error)
 {
     TiaoZenWriteLog(
         "INFO",
@@ -2653,34 +2756,385 @@ bool PanelSizeDialog::ApplyOffsets(
         error = "无法获取板件实体。";
         return false;
     }
+    NXOpen::Part* workPart = session_->Parts()->Work();
+    NXOpen::BasePart* owner = body->OwningPart();
+    if (workPart == nullptr || owner == nullptr ||
+        owner->Tag() != workPart->Tag())
+    {
+        error = "板件不在当前工作部件中，请先将它所在的部件设为工作部件。";
+        return false;
+    }
 
     if (!PullBoundaryFaces(
             body, "左", Scale(frame_.lengthDirection, -1.0),
             -frame_.minLength, offsets.left,
-            createdFeatures, error))
+            sidePreviews_[0], error))
     {
         return false;
     }
     if (!PullBoundaryFaces(
             body, "右", frame_.lengthDirection,
             frame_.maxLength, offsets.right,
-            createdFeatures, error))
+            sidePreviews_[1], error))
     {
         return false;
     }
     if (!PullBoundaryFaces(
             body, "下", Scale(frame_.widthDirection, -1.0),
             -frame_.minWidth, offsets.bottom,
-            createdFeatures, error))
+            sidePreviews_[2], error))
     {
         return false;
     }
     if (!PullBoundaryFaces(
             body, "上", frame_.widthDirection,
             frame_.maxWidth, offsets.top,
-            createdFeatures, error))
+            sidePreviews_[3], error))
     {
         return false;
+    }
+    return true;
+}
+
+bool PanelSizeDialog::DirectionSwapped() const
+{
+    if (swapDirection_ != nullptr)
+    {
+        return LogicalValue(swapDirection_);
+    }
+    return directionSwapped_;
+}
+
+namespace
+{
+template <typename Attribute>
+Attribute* AttributeOrNull(
+    NXOpen::Features::CustomFeatureData* data, const char* name,
+    NXOpen::Features::CustomAttribute::Type type)
+{
+    if (data == nullptr || !data->HasCustomAttribute(name, type))
+    {
+        return nullptr;
+    }
+    return dynamic_cast<Attribute*>(
+        type == NXOpen::Features::CustomAttribute::TypeTag
+            ? static_cast<NXOpen::Features::CustomAttribute*>(
+                  data->CustomTagAttributeByName(name))
+            : type == NXOpen::Features::CustomAttribute::TypeInteger
+                  ? static_cast<NXOpen::Features::CustomAttribute*>(
+                        data->CustomIntegerAttributeByName(name))
+                  : static_cast<NXOpen::Features::CustomAttribute*>(
+                        data->CustomDoubleAttributeByName(name)));
+}
+}
+
+bool ReadPanelResizeParameters(
+    NXOpen::Features::CustomFeature* feature,
+    PanelResizeParameters& parameters,
+    std::string& error)
+{
+    parameters = PanelResizeParameters();
+    if (feature == nullptr || feature->FeatureData() == nullptr)
+    {
+        error = "板件调尺特征没有参数。";
+        return false;
+    }
+    NXOpen::Features::CustomFeatureData* data = feature->FeatureData();
+    auto* faceAttribute = AttributeOrNull<NXOpen::Features::CustomTagAttribute>(
+        data, "face", NXOpen::Features::CustomAttribute::TypeTag);
+    auto* face = faceAttribute != nullptr
+        ? dynamic_cast<NXOpen::Face*>(faceAttribute->Value())
+        : nullptr;
+    if (face == nullptr)
+    {
+        error = "板件调尺特征里的板件平面已经失效。";
+        return false;
+    }
+    auto* swap = AttributeOrNull<NXOpen::Features::CustomIntegerAttribute>(
+        data, "swap", NXOpen::Features::CustomAttribute::TypeInteger);
+    auto readDouble = [&](const char* name)
+    {
+        auto* attribute = AttributeOrNull<NXOpen::Features::CustomDoubleAttribute>(
+            data, name, NXOpen::Features::CustomAttribute::TypeDouble);
+        return attribute != nullptr ? attribute->Value() : 0.0;
+    };
+    parameters.faceTag = face->Tag();
+    parameters.swapped = swap != nullptr && swap->Value() != 0;
+    parameters.left = readDouble("left");
+    parameters.right = readDouble("right");
+    parameters.bottom = readDouble("bottom");
+    parameters.top = readDouble("top");
+    return true;
+}
+
+void PanelSizeDialog::LoadEditedFeature()
+{
+    if (editedFeature_ == nullptr || !ready_)
+    {
+        return;
+    }
+    NXOpen::Features::CustomFeatureData* data = editedFeature_->FeatureData();
+    if (data == nullptr)
+    {
+        return;
+    }
+    FlagGuard uiGuard(changingUi_);
+    auto integerOr = [&](const char* name, int fallback)
+    {
+        auto* attribute = AttributeOrNull<NXOpen::Features::CustomIntegerAttribute>(
+            data, name, NXOpen::Features::CustomAttribute::TypeInteger);
+        return attribute != nullptr ? attribute->Value() : fallback;
+    };
+    auto doubleOr = [&](const char* name, double fallback)
+    {
+        auto* attribute = AttributeOrNull<NXOpen::Features::CustomDoubleAttribute>(
+            data, name, NXOpen::Features::CustomAttribute::TypeDouble);
+        return attribute != nullptr ? attribute->Value() : fallback;
+    };
+    adjustTabs_->SetActivePage(
+        (std::max)(0, (std::min)(2, integerOr("mode", static_cast<int>(CurrentMode())))));
+    SetLogicalValue(swapDirection_, integerOr("swap", 0) != 0);
+    SetEnumValue(anchor_, integerOr("anchor", CurrentAnchor()));
+    SetEnumValue(
+        roundPolicy_,
+        integerOr("roundPolicy", static_cast<int>(CurrentRoundPolicy())));
+    SetLogicalValue(roundLength_, integerOr("roundLength", LogicalValue(roundLength_) ? 1 : 0) != 0);
+    SetLogicalValue(roundWidth_, integerOr("roundWidth", LogicalValue(roundWidth_) ? 1 : 0) != 0);
+    SetDoubleValue(leftOffset_, doubleOr("left", DoubleValue(leftOffset_)));
+    SetDoubleValue(rightOffset_, doubleOr("right", DoubleValue(rightOffset_)));
+    SetDoubleValue(bottomOffset_, doubleOr("bottom", DoubleValue(bottomOffset_)));
+    SetDoubleValue(topOffset_, doubleOr("top", DoubleValue(topOffset_)));
+    SetDoubleValue(targetLength_, doubleOr("targetLength", DoubleValue(targetLength_)));
+    SetDoubleValue(targetWidth_, doubleOr("targetWidth", DoubleValue(targetWidth_)));
+    SetDoubleValue(lengthStep_, doubleOr("lengthStep", DoubleValue(lengthStep_)));
+    SetDoubleValue(widthStep_, doubleOr("widthStep", DoubleValue(widthStep_)));
+    targetValuesInitialized_ = true;
+
+    auto* faceAttribute = AttributeOrNull<NXOpen::Features::CustomTagAttribute>(
+        data, "face", NXOpen::Features::CustomAttribute::TypeTag);
+    auto* face = faceAttribute != nullptr
+        ? dynamic_cast<NXOpen::Face*>(faceAttribute->Value())
+        : nullptr;
+    if (face == nullptr)
+    {
+        TiaoZenWriteLog("ERROR", "编辑板件调尺时找不到原来的板件平面。");
+        return;
+    }
+    NXOpen::BlockStyler::PropertyList* properties = planeSelect_->GetProperties();
+    properties->SetTaggedObjectVector(
+        "SelectedObjects", std::vector<NXOpen::TaggedObject*>{face});
+    delete properties;
+    std::string error;
+    if (!AnalyzeSelectedFace(face, error))
+    {
+        TiaoZenWriteLog("ERROR", "编辑板件调尺时无法恢复板件：" + error);
+    }
+}
+
+NXOpen::Features::CustomFeatureClass* FindPanelResizeClass(
+    NXOpen::Session* session)
+{
+    if (session == nullptr)
+    {
+        return nullptr;
+    }
+    try
+    {
+        return session->CustomFeatureClassManager()->GetClassFromName(
+            "NXOpen::CustomFeature::TiaoZenBanLeiCiCun");
+    }
+    catch (const NXOpen::NXException& exception)
+    {
+        TiaoZenWriteLog(
+            "WARN",
+            std::string("自定义特征类未加载：code=") +
+                std::to_string(exception.ErrorCode()) +
+                "，message=" +
+                (exception.Message() != nullptr ? exception.Message() : ""));
+        return nullptr;
+    }
+    catch (...)
+    {
+        TiaoZenWriteLog("WARN", "自定义特征类未加载。");
+        return nullptr;
+    }
+}
+
+bool PanelSizeDialog::CommitCustomFeature(
+    const SideOffsets& offsets, std::string& error)
+{
+    auto* manager = session_->CustomFeatureClassManager();
+    auto* featureClass = FindPanelResizeClass(session_);
+    if (featureClass == nullptr)
+    {
+        error = "板件调尺自定义特征尚未加载。请完全退出并重新启动 NX 后再执行。";
+        return false;
+    }
+    NXOpen::Part* workPart = session_->Parts()->Work();
+    if (workPart == nullptr || CachedFace() == nullptr)
+    {
+        error = "没有工作部件或板件平面，无法创建板件调尺特征。";
+        return false;
+    }
+    NXOpen::Features::CustomFeature* edited = editedFeature_ != nullptr
+        ? editedFeature_
+        : manager->GetEditedCustomFeature();
+    NXOpen::Features::CustomFeatureBuilder* builder = nullptr;
+    try
+    {
+        builder = workPart->Features()->CreateCustomFeatureBuilder(edited);
+        auto* attributeCollection = workPart->Features()->CustomAttributeCollection();
+        std::vector<NXOpen::Features::CustomAttribute::Property> properties;
+        NXOpen::Features::CustomFeatureData* data =
+            edited != nullptr ? edited->FeatureData() : nullptr;
+        std::vector<NXOpen::Features::CustomAttribute*> created;
+        auto writeDouble = [&](const char* name, double value)
+        {
+            if (data != nullptr &&
+                data->HasCustomAttribute(
+                    name, NXOpen::Features::CustomAttribute::TypeDouble))
+            {
+                data->CustomDoubleAttributeByName(name)->SetValue(value);
+                return;
+            }
+            auto* attribute = dynamic_cast<NXOpen::Features::CustomDoubleAttribute*>(
+                attributeCollection->CreateCustomDoubleAttribute(name, properties));
+            attribute->SetValue(value);
+            created.push_back(attribute);
+        };
+        auto writeInteger = [&](const char* name, int value)
+        {
+            if (data != nullptr &&
+                data->HasCustomAttribute(
+                    name, NXOpen::Features::CustomAttribute::TypeInteger))
+            {
+                data->CustomIntegerAttributeByName(name)->SetValue(value);
+                return;
+            }
+            auto* attribute = dynamic_cast<NXOpen::Features::CustomIntegerAttribute*>(
+                attributeCollection->CreateCustomIntegerAttribute(name, properties));
+            attribute->SetValue(value);
+            created.push_back(attribute);
+        };
+        if (data != nullptr &&
+            data->HasCustomAttribute(
+                "face", NXOpen::Features::CustomAttribute::TypeTag))
+        {
+            data->CustomTagAttributeByName("face")->SetValue(CachedFace());
+        }
+        else
+        {
+            std::vector<NXOpen::Features::CustomAttribute::Property> faceProperties{
+                NXOpen::Features::CustomAttribute::PropertyMandatoryInput};
+            auto* faceAttribute = dynamic_cast<NXOpen::Features::CustomTagAttribute*>(
+                attributeCollection->CreateCustomTagAttribute("face", faceProperties));
+            faceAttribute->SetValue(CachedFace());
+            created.push_back(faceAttribute);
+        }
+        writeDouble("left", offsets.left);
+        writeDouble("right", offsets.right);
+        writeDouble("bottom", offsets.bottom);
+        writeDouble("top", offsets.top);
+        writeDouble("targetLength", DoubleValue(targetLength_));
+        writeDouble("targetWidth", DoubleValue(targetWidth_));
+        writeDouble("lengthStep", DoubleValue(lengthStep_));
+        writeDouble("widthStep", DoubleValue(widthStep_));
+        writeInteger("swap", DirectionSwapped() ? 1 : 0);
+        writeInteger("mode", static_cast<int>(CurrentMode()));
+        writeInteger("anchor", CurrentAnchor());
+        writeInteger("roundPolicy", static_cast<int>(CurrentRoundPolicy()));
+        writeInteger("roundLength", LogicalValue(roundLength_) ? 1 : 0);
+        writeInteger("roundWidth", LogicalValue(roundWidth_) ? 1 : 0);
+        if (edited == nullptr)
+        {
+            data = workPart->Features()->CustomFeatureDataCollection()->CreateData(
+                featureClass, created);
+            builder->SetFeatureData(data);
+        }
+        NXOpen::Features::Feature* committed = builder->CommitFeature();
+        builder->Destroy();
+        builder = nullptr;
+        if (committed == nullptr)
+        {
+            error = "板件调尺特征提交后没有返回特征对象。";
+            return false;
+        }
+        TiaoZenWriteLog(
+            "INFO",
+            "板件调尺特征已写入特征树，featureTag=" +
+                std::to_string(committed->Tag()));
+        return true;
+    }
+    catch (const NXOpen::NXException& exception)
+    {
+        if (builder != nullptr)
+        {
+            builder->Destroy();
+        }
+        error = exception.Message() != nullptr
+            ? exception.Message()
+            : "提交板件调尺特征失败。";
+        TiaoZenWriteLog("ERROR", error);
+        return false;
+    }
+}
+
+bool PanelSizeDialog::EnsureSideMoves(
+    NXOpen::Face* face, bool swapped, double left, double right,
+    double bottom, double top, std::array<tag_t, 4>& featureTags,
+    std::string& error)
+{
+    directionSwapped_ = swapped;
+    if (!AnalyzeSelectedFace(face, error))
+    {
+        return false;
+    }
+    NXOpen::Body* body = IsAlive(frame_.bodyTag)
+        ? dynamic_cast<NXOpen::Body*>(
+              NXOpen::NXObjectManager::Get(frame_.bodyTag))
+        : nullptr;
+    if (body == nullptr)
+    {
+        error = "无法获取板件实体。";
+        return false;
+    }
+    const double distances[4] = {left, right, bottom, top};
+    const char* labels[4] = {"左", "右", "下", "上"};
+    const char* featureNames[4] = {"TZBL-L", "TZBL-R", "TZBL-B", "TZBL-T"};
+    const NXOpen::Vector3d directions[4] = {
+        Scale(frame_.lengthDirection, -1.0),
+        frame_.lengthDirection,
+        Scale(frame_.widthDirection, -1.0),
+        frame_.widthDirection};
+    const double boundaries[4] = {
+        -frame_.minLength, frame_.maxLength,
+        -frame_.minWidth, frame_.maxWidth};
+    for (int index = 0; index < 4; ++index)
+    {
+        if (std::abs(distances[index]) <= kTolerance)
+        {
+            featureTags[index] = NULL_TAG;
+            continue;
+        }
+        if (IsAlive(featureTags[index]))
+        {
+            continue;
+        }
+        SidePreview slot;
+        if (!PullBoundaryFaces(
+                body, labels[index], directions[index], boundaries[index],
+                distances[index], slot, error))
+        {
+            return false;
+        }
+        if (slot.featureTag == NULL_TAG)
+        {
+            error = std::string(labels[index]) +
+                "侧没有生成可编辑的移动面特征。";
+            return false;
+        }
+        featureTags[index] = slot.featureTag;
+        UF_OBJ_set_name(slot.featureTag, featureNames[index]);
     }
     return true;
 }
@@ -2695,55 +3149,109 @@ bool PanelSizeDialog::CreatePreview(std::string& error)
     const SideOffsets offsets = CalculateOffsets(error);
     if (!error.empty())
     {
+        UndoPreview();
         return false;
     }
     if (offsets.IsZero(kTolerance))
     {
+        UndoPreview();
         return true;
     }
 
-    previewMark_ = session_->SetUndoMark(
-        NXOpen::Session::MarkVisibilityInvisible,
-        "板件调尺预览");
-    previewFeatures_.clear();
-    TiaoZenWriteLog(
-        "DEBUG",
-        "已创建不可见预览撤销标记，markId=" +
-            std::to_string(static_cast<int>(previewMark_)));
-    if (!ApplyOffsets(offsets, previewFeatures_, error))
+    const auto untracked = [this]()
+    {
+        for (const SidePreview& slot : sidePreviews_)
+        {
+            if (!IsAlive(slot.featureTag) && !slot.baseline.empty() &&
+                std::abs(slot.distance) > kTolerance)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (hasPreview_ && previewFaceTag_ != frame_.faceTag)
     {
         UndoPreview();
-        return false;
     }
-    NXOpen::Body* adjustedBody =
-        IsAlive(frame_.bodyTag)
-            ? dynamic_cast<NXOpen::Body*>(
-                  NXOpen::NXObjectManager::Get(frame_.bodyTag))
-            : nullptr;
-    if (!ValidateSkirtDimensions(adjustedBody, error))
+    if (hasPreview_ && untracked())
     {
         TiaoZenWriteLog(
-            "ERROR", "裙边尺寸保护触发：" + error);
+            "WARN",
+            "已有预览没有可编辑特征，撤销后按当前数值重建一次。");
         UndoPreview();
-        return false;
     }
-    hasPreview_ = true;
-    TiaoZenWriteLog(
-        "INFO",
-        "实时预览创建成功：featureCount=" +
-            std::to_string(previewFeatures_.size()));
-    return true;
+    if (!hasPreview_)
+    {
+        sidePreviews_ = {};
+        previewFeatures_.clear();
+        previewFaceTag_ = frame_.faceTag;
+        previewMark_ = session_->SetUndoMark(
+            NXOpen::Session::MarkVisibilityInvisible,
+            "PanelResizePreview");
+        TiaoZenWriteLog(
+            "DEBUG",
+            "已创建不可见预览撤销标记，markId=" +
+                std::to_string(static_cast<int>(previewMark_)));
+    }
+    try
+    {
+        if (!ApplyOffsets(offsets, error))
+        {
+            UndoPreview();
+            return false;
+        }
+        NXOpen::Body* adjustedBody =
+            IsAlive(frame_.bodyTag)
+                ? dynamic_cast<NXOpen::Body*>(
+                      NXOpen::NXObjectManager::Get(frame_.bodyTag))
+                : nullptr;
+        if (!ValidateSkirtDimensions(adjustedBody, error))
+        {
+            TiaoZenWriteLog(
+                "ERROR", "裙边尺寸保护触发：" + error);
+            UndoPreview();
+            return false;
+        }
+        hasPreview_ = true;
+        RememberPreviewFeatures();
+        TiaoZenWriteLog(
+            "INFO",
+            "实时预览已同步：featureCount=" +
+                std::to_string(previewFeatures_.size()));
+        return true;
+    }
+    catch (...)
+    {
+        UndoPreview();
+        throw;
+    }
 }
 
 bool PanelSizeDialog::UndoPreview()
 {
+    bool anySide = false;
+    for (const SidePreview& slot : sidePreviews_)
+    {
+        if (slot.featureTag != NULL_TAG || !slot.baseline.empty())
+        {
+            anySide = true;
+        }
+    }
     if (!hasPreview_ &&
         previewMark_ == static_cast<NXOpen::Session::UndoMarkId>(0) &&
-        previewFeatures_.empty())
+        previewFeatures_.empty() && !anySide)
     {
         return true;
     }
-    const std::vector<tag_t> featureTags = previewFeatures_;
+    std::vector<tag_t> featureTags = previewFeatures_;
+    for (const SidePreview& slot : sidePreviews_)
+    {
+        if (slot.featureTag != NULL_TAG)
+        {
+            featureTags.push_back(slot.featureTag);
+        }
+    }
     bool markUndoSucceeded = false;
     try
     {
@@ -2759,7 +3267,7 @@ bool PanelSizeDialog::UndoPreview()
             static_cast<NXOpen::Session::UndoMarkId>(0))
         {
             const bool markExists = session_->DoesUndoMarkExist(
-                previewMark_, "板件调尺预览");
+                previewMark_, "PanelResizePreview");
             TiaoZenWriteLog(
                 markExists ? "DEBUG" : "WARN",
                 "预览撤销标记检查：markId=" +
@@ -2768,12 +3276,12 @@ bool PanelSizeDialog::UndoPreview()
                     std::string(markExists ? "true" : "false"));
             if (markExists)
             {
-                session_->UndoToMark(previewMark_, "板件调尺预览");
+                session_->UndoToMark(previewMark_, "PanelResizePreview");
                 if (session_->DoesUndoMarkExist(
-                        previewMark_, "板件调尺预览"))
+                        previewMark_, "PanelResizePreview"))
                 {
                     session_->DeleteUndoMark(
-                        previewMark_, "板件调尺预览");
+                        previewMark_, "PanelResizePreview");
                 }
                 markUndoSucceeded = true;
                 TiaoZenWriteLog(
@@ -2827,17 +3335,17 @@ bool PanelSizeDialog::UndoPreview()
             const NXOpen::Session::UndoMarkId cleanupMark =
                 session_->SetUndoMark(
                     NXOpen::Session::MarkVisibilityInvisible,
-                    "板件调尺预览残留清理");
+                    "PanelResizeCleanup");
             NXOpen::Update* update = session_->UpdateManager();
             update->ClearDeleteList();
             update->ClearErrorList();
             update->AddObjectsToDeleteList(survivors);
             const int updateErrors = update->DoUpdate(cleanupMark);
             if (session_->DoesUndoMarkExist(
-                    cleanupMark, "板件调尺预览残留清理"))
+                    cleanupMark, "PanelResizeCleanup"))
             {
                 session_->DeleteUndoMark(
-                    cleanupMark, "板件调尺预览残留清理");
+                    cleanupMark, "PanelResizeCleanup");
             }
             TiaoZenWriteLog(
                 updateErrors == 0 ? "INFO" : "WARN",
@@ -2872,6 +3380,8 @@ bool PanelSizeDialog::UndoPreview()
     }
     previewMark_ = static_cast<NXOpen::Session::UndoMarkId>(0);
     hasPreview_ = false;
+    previewFaceTag_ = NULL_TAG;
+    sidePreviews_ = {};
     previewFeatures_.clear();
     TiaoZenWriteLog(
         remainingFeatureCount == 0 ? "INFO" : "ERROR",
@@ -2891,7 +3401,7 @@ void PanelSizeDialog::CommitPreview()
             "DEBUG", "CommitPreview：没有可提交的预览。");
         return;
     }
-    if (session_->DoesUndoMarkExist(previewMark_, "板件调尺预览"))
+    if (session_->DoesUndoMarkExist(previewMark_, "PanelResizePreview"))
     {
         session_->SetUndoMarkName(previewMark_, "板件调尺");
         session_->SetUndoMarkVisibility(
@@ -2900,6 +3410,8 @@ void PanelSizeDialog::CommitPreview()
     }
     previewMark_ = static_cast<NXOpen::Session::UndoMarkId>(0);
     hasPreview_ = false;
+    previewFaceTag_ = NULL_TAG;
+    sidePreviews_ = {};
     previewFeatures_.clear();
     TiaoZenWriteLog("INFO", "预览撤销标记已转为正式“板件调尺”特征。");
 }
@@ -2907,8 +3419,5 @@ void PanelSizeDialog::CommitPreview()
 void PanelSizeDialog::ShowError(const std::string& message) const
 {
     TiaoZenWriteLog("ERROR", "界面错误提示：" + message);
-    ui_->NXMessageBox()->Show(
-        "板件调尺",
-        NXOpen::NXMessageBox::DialogTypeError,
-        message.c_str());
+    TiaoZenShowError(message);
 }

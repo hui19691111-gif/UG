@@ -13,7 +13,9 @@
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/Session.hxx>
 
+#include <cstdio>
 #include <stdexcept>
+#include <string>
 
 #ifndef DllExport
 #define DllExport __declspec(dllexport)
@@ -65,7 +67,27 @@ int PreUpdateCallback(
             construction.push_back(item);
         }
         event->SetConstructionFeatures(construction);
-        return construction.empty() ? 1 : 0;
+        // An empty child list used to fail this feature. That failure makes
+        // NX undo the whole edit and report "Update undo happened." Keeping
+        // the already built notches is more important than adopting them.
+        {
+            FILE* log = nullptr;
+            if (_wfopen_s(&log,
+                    L"D:\\UG智辉钣金插件\\logs\\BendMarkNotch_debug.log",
+                    L"ab") == 0 && log != nullptr)
+            {
+                const std::string line =
+                    "BendMarkNotchCore: PreUpdate feature=" +
+                    std::to_string(customFeature->Tag()) +
+                    " objects=" + std::to_string(objects.size()) +
+                    " existing=" + std::to_string(existing.size()) +
+                    " construction=" + std::to_string(construction.size()) +
+                    "\r\n";
+                fputs(line.c_str(), log);
+                fclose(log);
+            }
+        }
+        return 0;
     }
     catch (...)
     {

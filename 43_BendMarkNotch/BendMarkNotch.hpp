@@ -22,12 +22,17 @@ class Feature;
 }
 }
 
+bool BendMarkNotchShouldStayLoaded();
+
 class BendMarkNotchDialog
 {
 public:
     BendMarkNotchDialog();
     ~BendMarkNotchDialog();
     NXOpen::BlockStyler::BlockDialog::DialogResponse Launch();
+    // True when a timer owns this object and the caller must not delete it.
+    bool DeferredRebuildPending() const;
+    void RunDeferredRebuild();
 
 private:
     struct BendRecord
@@ -83,6 +88,18 @@ private:
         int segments = 1;
     };
 
+    // Everything the dialog shows. Stored on the feature so editing refills
+    // the controls with the values that built the notches.
+    struct DialogSettings
+    {
+        bool automatic = true;
+        bool separate = false;
+        LargeBendSettings large;
+        NotchSettings common;
+        NotchSettings up;
+        NotchSettings down;
+    };
+
     struct NotchProfile
     {
         NXOpen::Point3d center;
@@ -109,6 +126,10 @@ private:
     NotchSettings ReadNotchSettings(const NotchControls& controls) const;
     void ValidateNotchSettings(const NotchSettings& settings,
                               const std::string& label) const;
+    DialogSettings ReadDialogSettings() const;
+    std::string EncodeDialogSettings(const DialogSettings& settings) const;
+    bool DecodeDialogSettings(const std::string& text, DialogSettings& settings) const;
+    void ApplyDialogSettings(const DialogSettings& settings) const;
     LargeBendSettings ReadLargeBendSettings() const;
     double DoubleValue(NXOpen::BlockStyler::UIBlock* block) const;
     bool ToggleValue(NXOpen::BlockStyler::UIBlock* block) const;
@@ -116,11 +137,18 @@ private:
     void ShowError(const std::string& text) const noexcept;
 
     int Execute();
+    int ExecuteEdit();
+    void RebuildEditedFeature();
+    bool ScheduleDeferredRebuild();
     bool CreateCustomFeatureNode();
+    bool RetargetCustomFeature(
+        NXOpen::Features::Feature* feature,
+        tag_t& committedTag);
     NXOpen::Features::Feature* FindFlatPatternFeature(
         NXOpen::Body* body) const;
     NXOpen::Features::Feature* FindFeatureBefore(
         NXOpen::Features::Feature* feature) const;
+    bool IsBendMarkNotchFeature(NXOpen::Features::Feature* feature) const;
     NXOpen::Features::Feature* FindBodyInsertionFeature(
         const std::vector<NXOpen::Body*>& bodies) const;
     NXOpen::Face* FlatPatternUpwardFace(NXOpen::Features::Feature* feature) const;
@@ -141,7 +169,13 @@ private:
     bool CreateInternalSketchExtrudeTool(
         const NXOpen::Vector3d& normal,
         const std::vector<NotchProfile>& profiles,
-        double thickness, ToolRecord& tool, double cutDepth = 0.0) const;
+        double thickness, ToolRecord& tool, double cutDepth = 0.0,
+        NXOpen::Features::Feature* reuseExtrude = nullptr) const;
+    NXOpen::Features::Feature* ActivateReusedFeature(tag_t tag) const;
+    bool IsMarkingLineTool(NXOpen::Features::Feature* extrude) const;
+    bool RetargetSubtractTools(
+        tag_t booleanTag,
+        const std::vector<NXOpen::Features::Feature*>& extrudes) const;
     bool SubtractToolsOnce(NXOpen::Body* body,
                            const std::vector<ToolRecord>& tools,
                            NXOpen::Features::Feature*& booleanFeature,
@@ -166,5 +200,15 @@ private:
     bool initialized_;
     bool shown_;
     bool updating_;
+    tag_t editedFeatureTag_;
+    tag_t createdNodeTag_ = NULL_TAG;
+    bool editRebuildPending_ = false;
+    bool useCachedSettings_ = false;
+    const std::vector<tag_t>* reuseChain_ = nullptr;
+    bool cachedSeparate_ = false;
+    LargeBendSettings cachedLarge_;
+    NotchSettings cachedUp_;
+    NotchSettings cachedDown_;
+    DialogSettings cachedDialog_;
     std::vector<tag_t> pendingInternalFeatureTags_;
 };

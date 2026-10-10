@@ -42,6 +42,7 @@
 #include <NXOpen/SmartObject.hxx>
 #include <NXOpen/TaggedObject.hxx>
 #include <NXOpen/UI.hxx>
+#include <NXOpen/Update.hxx>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -68,6 +69,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <exception>
 #include <fstream>
 #include <functional>
@@ -97,6 +99,8 @@ const char* kBodySelectionBlockId = "bodySelection";
 const char* kOutputFolderBlockId = "nativeFolderBrowser0";
 const char* kColorMatchedBodiesToggleBlockId = "colorMatchedBodiesToggle";
 const char* kRetainBodiesToggleBlockId = "retainBodiesToggle";
+const char* kInheritBodyAttributesToggleBlockId = "inheritBodyAttributesToggle";
+const char* kInheritPartAttributesToggleBlockId = "inheritPartAttributesToggle";
 const char* kFindSameBodiesButtonBlockId = "findSameBodiesButton";
 const char* kNameModeBlockId = "nameMode";
 const char* kNameCustomTextBlockId = "nameCustomText";
@@ -139,6 +143,8 @@ const wchar_t* kDialogStateSection = L"DialogState";
 const wchar_t* kAssemblyModeStateKey = L"AssemblyMode";
 const wchar_t* kRetainBodiesStateKey = L"RetainBodies";
 const wchar_t* kColorMatchedBodiesStateKey = L"ColorMatchedBodies";
+const wchar_t* kInheritBodyAttributesStateKey = L"InheritBodyAttributes";
+const wchar_t* kInheritPartAttributesStateKey = L"InheritPartAttributes";
 const char* kSerialToken = "\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D";
 const char* kCustomToken = "\x7B\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x7D";
 const char* kWorkPartToken = "\x7B\xE5\xB7\xA5\xE4\xBD\x9C\xE9\x83\xA8\xE4\xBB\xB6\xE5\x90\x8D\x7D";
@@ -165,6 +171,8 @@ enum AssemblyOutputMode
 
 std::string gSelectedOutputDirectory;
 bool gColorMatchedBodies = true;
+bool gInheritBodyAttributes = true;
+bool gInheritPartAttributes = true;
 
 std::string GetCurrentModuleDirectory()
 {
@@ -227,11 +235,18 @@ std::string GetPreviewDebugLogPath()
     return moduleDirectory + "DuoSiTiZuanZuanPei_preview.log";
 }
 
-std::string GetNameConfigPath()
+std::string WideToUtf8(const std::wstring& text);
+
+std::wstring GetNameConfigPathW()
 {
     CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
     CreateDirectoryW(L"D:\\UG智辉钣金插件\\config", NULL);
-    return std::string("D:\\UG智辉钣金插件\\config\\") + kNameConfigFileName;
+    return std::wstring(L"D:\\UG智辉钣金插件\\config\\DuoSiTiZuanZuanPei_name_config.ini");
+}
+
+std::string GetNameConfigPath()
+{
+    return WideToUtf8(GetNameConfigPathW());
 }
 
 std::wstring GetDialogStateConfigPath()
@@ -1611,17 +1626,57 @@ std::string TrimText(const std::string& text)
     return result;
 }
 
-std::string ReadWholeFile(const std::string& path)
+std::string ReadWholeFileW(const std::wstring& path)
 {
-    std::ifstream input(path.c_str(), std::ios::in | std::ios::binary);
-    if (!input.is_open())
+    if (path.empty())
     {
         return std::string();
     }
 
-    std::ostringstream content;
-    content << input.rdbuf();
-    return content.str();
+    FILE* file = _wfopen(path.c_str(), L"rb");
+    if (file == NULL)
+    {
+        return std::string();
+    }
+
+    std::string content;
+    char buffer[4096];
+    size_t readCount = 0;
+    while ((readCount = fread(buffer, 1, sizeof(buffer), file)) > 0)
+    {
+        content.append(buffer, readCount);
+    }
+    fclose(file);
+    return content;
+}
+
+bool WriteUtf8TextFile(const std::wstring& path, const std::string& content)
+{
+    if (path.empty())
+    {
+        WritePreviewDebugLog("Name config write failed: empty path");
+        return false;
+    }
+
+    FILE* file = _wfopen(path.c_str(), L"wb");
+    if (file == NULL)
+    {
+        WritePreviewDebugLog("Name config write failed: cannot open file");
+        return false;
+    }
+
+    const size_t expected = content.size();
+    const size_t written = expected == 0
+        ? 0
+        : fwrite(content.data(), 1, expected, file);
+    const int closeResult = fclose(file);
+    if (written != expected || closeResult != 0)
+    {
+        WritePreviewDebugLog("Name config write failed: short write");
+        return false;
+    }
+
+    return true;
 }
 
 std::string ReadSimpleIniValue(
@@ -1629,7 +1684,7 @@ std::string ReadSimpleIniValue(
     const std::string& keyName,
     const std::string& defaultValue)
 {
-    const std::string content = ReadWholeFile(GetNameConfigPath());
+    const std::string content = ReadWholeFileW(GetNameConfigPathW());
     if (content.empty())
     {
         return defaultValue;
@@ -1704,7 +1759,6 @@ std::string ReplaceAllText(
 
 void EnsureNameConfigFileExists()
 {
-    const std::string configPath = GetNameConfigPath();
     std::string nameFormat = ReadSimpleIniValue(
         Utf8Text("\xE5\x91\xBD\xE5\x90\x8D\xE8\xA7\x84\xE5\x88\x99"),
         Utf8Text("\xE5\x90\x8D\xE7\xA7\xB0\xE6\xA0\xBC\xE5\xBC\x8F"),
@@ -1761,12 +1815,7 @@ void EnsureNameConfigFileExists()
             kDefaultBodyNameAttribute);
     }
 
-    std::ofstream config(configPath.c_str(), std::ios::out | std::ios::trunc);
-    if (!config.is_open())
-    {
-        return;
-    }
-
+    std::ostringstream config;
     config << Utf8Text("\x23\x20\xE5\x8F\xAF\xE7\x94\xA8\xE5\x8D\xA0\xE4\xBD\x8D\xE7\xAC\xA6\xEF\xBC\x9A\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D\xE3\x80\x81\x7B\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x7D\xE3\x80\x81\x7B\xE5\xB7\xA5\xE4\xBD\x9C\xE9\x83\xA8\xE4\xBB\xB6\xE5\x90\x8D\x7D\xE3\x80\x81\x7B\xE4\xBD\x93\xE5\x90\x8D\x7D\xE3\x80\x81\x7B\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7\x7D") << std::endl;
     config << Utf8Text("\x23\x20\xE6\x83\xB3\xE5\x8A\xA0\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\xE5\xB0\xB1\xE5\x9C\xA8\xE5\x90\x8D\xE7\xA7\xB0\xE6\xA0\xBC\xE5\xBC\x8F\xE9\x87\x8C\xE5\x86\x99\x20\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D\xEF\xBC\x8C\xE4\xB8\x8D\xE5\x86\x99\xE5\xB0\xB1\xE4\xB8\x8D\xE5\x8A\xA0") << std::endl;
     config << Utf8Text("\x23\x20\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A\x7B\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x7D\x5F\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D") << std::endl;
@@ -1779,6 +1828,7 @@ void EnsureNameConfigFileExists()
     config << Utf8Text("\xE4\xBD\x93\xE5\xB1\x9E\xE6\x80\xA7\xE5\x90\x8D\x3D") << attributeName << std::endl;
     config << Utf8Text("\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\xE8\xB5\xB7\xE5\xA7\x8B\xE5\x8F\xB7\x3D")
            << (serialStart.empty() ? kDefaultSerialStart : serialStart) << std::endl;
+    WriteUtf8TextFile(GetNameConfigPathW(), config.str());
 }
 
 void WriteNameConfigValues(
@@ -1787,12 +1837,7 @@ void WriteNameConfigValues(
     const std::string& attributeName,
     const std::string& serialStart)
 {
-    std::ofstream config(GetNameConfigPath().c_str(), std::ios::out | std::ios::trunc);
-    if (!config.is_open())
-    {
-        return;
-    }
-
+    std::ostringstream config;
     config << Utf8Text(
         "\x23\x20\xE5\x8F\xAF\xE7\x94\xA8\xE5\x8D\xA0\xE4\xBD\x8D\xE7\xAC\xA6\xEF\xBC\x9A"
         "\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D\xE3\x80\x81"
@@ -1810,6 +1855,12 @@ void WriteNameConfigValues(
            << (attributeName.empty() ? kDefaultBodyNameAttribute : attributeName) << std::endl;
     config << Utf8Text("\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\xE8\xB5\xB7\xE5\xA7\x8B\xE5\x8F\xB7\x3D")
            << (serialStart.empty() ? kDefaultSerialStart : serialStart) << std::endl;
+    if (WriteUtf8TextFile(GetNameConfigPathW(), config.str()))
+    {
+        std::ostringstream line;
+        line << "Name config saved customBytes=" << customName.size();
+        WritePreviewDebugLog(line.str());
+    }
 }
 
 std::string ReadNameConfigValue(
@@ -1890,7 +1941,7 @@ std::string ReadConfiguredSerialStart()
 bool OpenNameConfigFileAndWait()
 {
     EnsureNameConfigFileExists();
-    const std::wstring configPath = LocaleToWide(GetNameConfigPath());
+    const std::wstring configPath = GetNameConfigPathW();
     if (configPath.empty())
     {
         return false;
@@ -2424,6 +2475,172 @@ void SaveComponentPart(NXOpen::Part* componentPart)
     }
 }
 
+bool AttributeTitleHasPrefix(
+    const NXOpen::NXString& title,
+    const char* prefix)
+{
+    const char* utf8 = title.GetUTF8Text();
+    if (utf8 == NULL || prefix == NULL)
+    {
+        return false;
+    }
+
+    for (int index = 0; prefix[index] != '\0'; ++index)
+    {
+        if (utf8[index] != prefix[index])
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool IsTransferableUserAttribute(
+    const NXOpen::NXObject::AttributeInformation& info)
+{
+    if (info.Unset || info.OwnedBySystem || info.NotSaved || info.PdmBased)
+    {
+        return false;
+    }
+
+    const char* title = info.Title.GetUTF8Text();
+    if (title == NULL || title[0] == '\0')
+    {
+        return false;
+    }
+
+    return !AttributeTitleHasPrefix(info.Title, "DB_") &&
+        !AttributeTitleHasPrefix(info.Title, "UG_");
+}
+
+void CopyTransferableUserAttributes(
+    NXOpen::NXObject* source,
+    NXOpen::NXObject* target)
+{
+    if (source == NULL || target == NULL || source == target)
+    {
+        return;
+    }
+
+    std::vector<NXOpen::NXObject::AttributeInformation> attributes;
+    try
+    {
+        attributes = source->GetUserAttributes();
+    }
+    catch (const NXOpen::NXException&)
+    {
+        WritePreviewDebugLog("GetUserAttributes failed");
+        return;
+    }
+    catch (...)
+    {
+        WritePreviewDebugLog("GetUserAttributes failed");
+        return;
+    }
+
+    int copied = 0;
+    int failed = 0;
+    for (std::size_t index = 0; index < attributes.size(); ++index)
+    {
+        if (!IsTransferableUserAttribute(attributes[index]))
+        {
+            continue;
+        }
+
+        NXOpen::NXObject::AttributeInformation info = attributes[index];
+        info.Inherited = false;
+        info.IsOverride = false;
+        info.Locked = false;
+        info.OwnedBySystem = false;
+        info.Required = false;
+        info.Unset = false;
+        info.Expression = NULL;
+        info.ExpressionNotLoaded = false;
+        if (info.Type == NXOpen::NXObject::AttributeTypeReference)
+        {
+            info.Type = NXOpen::NXObject::AttributeTypeString;
+        }
+        info.ReferenceValue = NXOpen::NXString();
+
+        try
+        {
+            target->SetUserAttribute(info, NXOpen::Update::OptionNow);
+            ++copied;
+        }
+        catch (const NXOpen::NXException&)
+        {
+            ++failed;
+        }
+        catch (...)
+        {
+            ++failed;
+        }
+    }
+
+    std::ostringstream line;
+    line << "Copied user attributes copied=" << copied << ", failed=" << failed;
+    WritePreviewDebugLog(line.str());
+}
+
+NXOpen::Part* FindLoadedPartByPath(const std::string& partPath)
+{
+    if (partPath.empty())
+    {
+        return NULL;
+    }
+
+    const tag_t partTag = UF_PART_ask_part_tag(partPath.c_str());
+    if (partTag == NULL_TAG)
+    {
+        return NULL;
+    }
+
+    return dynamic_cast<NXOpen::Part*>(NXOpen::NXObjectManager::Get(partTag));
+}
+
+void InheritAttributesOntoNewComponent(
+    NXOpen::Part* sourcePart,
+    const std::string& componentPartPath,
+    const std::vector<NXOpen::Body*>& bodies)
+{
+    if (!gInheritBodyAttributes && !gInheritPartAttributes)
+    {
+        return;
+    }
+
+    NXOpen::Part* componentPart = FindLoadedPartByPath(componentPartPath);
+    if (componentPart == NULL || componentPart == sourcePart)
+    {
+        WritePreviewDebugLog("Inherit attributes skipped: component part is not loaded");
+        return;
+    }
+
+    try
+    {
+        if (gInheritPartAttributes && sourcePart != NULL)
+        {
+            CopyTransferableUserAttributes(sourcePart, componentPart);
+        }
+
+        if (gInheritBodyAttributes && bodies.size() == 1 && bodies[0] != NULL)
+        {
+            CopyTransferableUserAttributes(bodies[0], componentPart);
+        }
+
+        SaveComponentPart(componentPart);
+        WritePreviewDebugLog("Inherited attributes saved on component part");
+    }
+    catch (const NXOpen::NXException&)
+    {
+        WritePreviewDebugLog("Inherit attributes failed");
+    }
+    catch (...)
+    {
+        WritePreviewDebugLog("Inherit attributes failed");
+    }
+}
+
 void CreateComponentWithRecordedBuilder(
     NXOpen::Session* session,
     NXOpen::Part* workPart,
@@ -2492,9 +2709,11 @@ void CreateComponentWithRecordedBuilder(
         builder->Commit();
         WritePreviewDebugLog("CreateNewComponentBuilder commit end");
         builder->Destroy();
+        builder = NULL;
         WritePreviewDebugLog("CreateNewComponentBuilder destroy end");
         session->SetUndoMarkName(undoMark, NXOpen::NXString("Create Same Body Component"));
         session->CleanUpFacetedFacesAndEdges();
+        InheritAttributesOntoNewComponent(workPart, componentPartPath, bodies);
         ++result.createdComponents;
     }
     catch (...)
@@ -2502,7 +2721,10 @@ void CreateComponentWithRecordedBuilder(
         WritePreviewDebugLog("CreateNewComponentBuilder exception cleanup begin");
         try
         {
-            builder->Destroy();
+            if (builder != NULL)
+            {
+                builder->Destroy();
+            }
         }
         catch (...)
         {
@@ -2879,6 +3101,7 @@ std::vector<MatchedBodyGroup> CopyGroupsAsNonParametricBodies(
     const tag_t workPartTag = workPart->Tag();
     std::vector<MatchedBodyGroup> copiedGroups = sourceGroups;
     copiedBodyTags.clear();
+    std::vector<tag_t> attributeSourceTags;
 
     try
     {
@@ -2933,6 +3156,7 @@ std::vector<MatchedBodyGroup> CopyGroupsAsNonParametricBodies(
 
                     const tag_t copiedTag = resultBodies[0]->Tag();
                     copiedBodyTags.push_back(copiedTag);
+                    attributeSourceTags.push_back(sourceTag);
                     copiedGroups[groupIndex].instances[instanceIndex].bodyTag = copiedTag;
                     builder->Destroy();
                 }
@@ -2951,6 +3175,19 @@ std::vector<MatchedBodyGroup> CopyGroupsAsNonParametricBodies(
         }
 
         DeleteBodyParameters(copiedBodyTags);
+        if (gInheritBodyAttributes)
+        {
+            for (std::size_t index = 0;
+                 index < copiedBodyTags.size() && index < attributeSourceTags.size();
+                 ++index)
+            {
+                CopyTransferableUserAttributes(
+                    dynamic_cast<NXOpen::NXObject*>(
+                        NXOpen::NXObjectManager::Get(attributeSourceTags[index])),
+                    dynamic_cast<NXOpen::NXObject*>(
+                        NXOpen::NXObjectManager::Get(copiedBodyTags[index])));
+            }
+        }
         WritePreviewDebugLog(
             "Copied bodies converted to NX unparameterized features");
     }
@@ -5033,6 +5270,8 @@ public:
           outputFolder(NULL),
           colorMatchedBodiesToggle(NULL),
           retainBodiesToggle(NULL),
+          inheritBodyAttributesToggle(NULL),
+          inheritPartAttributesToggle(NULL),
           findSameBodiesButton(NULL),
           nameMode(NULL),
           nameCustomText(NULL),
@@ -5064,6 +5303,7 @@ public:
         dialog->AddUpdateHandler(NXOpen::make_callback(this, &DuoSiTiZuanZuanPeiDialog::Update));
         dialog->AddApplyHandler(NXOpen::make_callback(this, &DuoSiTiZuanZuanPeiDialog::Apply));
         dialog->AddOkHandler(NXOpen::make_callback(this, &DuoSiTiZuanZuanPeiDialog::Ok));
+        dialog->AddCancelHandler(NXOpen::make_callback(this, &DuoSiTiZuanZuanPeiDialog::Cancel));
         WritePreviewDebugLog("constructor end");
     }
 
@@ -5091,6 +5331,8 @@ private:
     NXOpen::BlockStyler::UIBlock* outputFolder;
     NXOpen::BlockStyler::UIBlock* colorMatchedBodiesToggle;
     NXOpen::BlockStyler::UIBlock* retainBodiesToggle;
+    NXOpen::BlockStyler::UIBlock* inheritBodyAttributesToggle;
+    NXOpen::BlockStyler::UIBlock* inheritPartAttributesToggle;
     NXOpen::BlockStyler::Button* findSameBodiesButton;
     NXOpen::BlockStyler::Enumeration* nameMode;
     NXOpen::BlockStyler::StringBlock* nameCustomText;
@@ -5122,6 +5364,8 @@ private:
         outputFolder = NULL;
         colorMatchedBodiesToggle = NULL;
         retainBodiesToggle = NULL;
+        inheritBodyAttributesToggle = NULL;
+        inheritPartAttributesToggle = NULL;
         findSameBodiesButton = NULL;
         nameMode = NULL;
         nameCustomText = NULL;
@@ -5154,6 +5398,7 @@ private:
             InitializeOutputFolder();
             UpdateColorMatchedBodiesOption();
             UpdateRetainBodiesOption();
+            UpdateInheritAttributeOptions();
             WritePreviewDebugLog("Initialize end");
         }
         catch (const NXOpen::NXException& ex)
@@ -5282,6 +5527,32 @@ private:
                 }
                 WritePreviewDebugLog("Update routed to retainBodiesToggle");
             }
+            else if (block == inheritBodyAttributesToggle ||
+                     blockName == kInheritBodyAttributesToggleBlockId)
+            {
+                inheritBodyAttributesToggle = block;
+                UpdateInheritAttributeOptions();
+                if (!rememberedOptionsInitializing)
+                {
+                    WriteDialogStateInt(
+                        kInheritBodyAttributesStateKey,
+                        gInheritBodyAttributes ? 1 : 0);
+                }
+                WritePreviewDebugLog("Update routed to inheritBodyAttributesToggle");
+            }
+            else if (block == inheritPartAttributesToggle ||
+                     blockName == kInheritPartAttributesToggleBlockId)
+            {
+                inheritPartAttributesToggle = block;
+                UpdateInheritAttributeOptions();
+                if (!rememberedOptionsInitializing)
+                {
+                    WriteDialogStateInt(
+                        kInheritPartAttributesStateKey,
+                        gInheritPartAttributes ? 1 : 0);
+                }
+                WritePreviewDebugLog("Update routed to inheritPartAttributesToggle");
+            }
             else if (block == bodySelection || blockName == kBodySelectionBlockId)
             {
                 bodySelection = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(block);
@@ -5388,6 +5659,18 @@ private:
                 topBlock,
                 kRetainBodiesToggleBlockId);
         }
+        if (inheritBodyAttributesToggle == NULL)
+        {
+            inheritBodyAttributesToggle = FindBlockRecursive(
+                topBlock,
+                kInheritBodyAttributesToggleBlockId);
+        }
+        if (inheritPartAttributesToggle == NULL)
+        {
+            inheritPartAttributesToggle = FindBlockRecursive(
+                topBlock,
+                kInheritPartAttributesToggleBlockId);
+        }
         if (findSameBodiesButton == NULL)
         {
             findSameBodiesButton = dynamic_cast<NXOpen::BlockStyler::Button*>(
@@ -5440,6 +5723,8 @@ private:
              << ", outputFolder=" << PointerText(outputFolder)
              << ", colorToggle=" << PointerText(colorMatchedBodiesToggle)
              << ", retainToggle=" << PointerText(retainBodiesToggle)
+             << ", inheritBodyToggle=" << PointerText(inheritBodyAttributesToggle)
+             << ", inheritPartToggle=" << PointerText(inheritPartAttributesToggle)
              << ", button=" << PointerText(findSameBodiesButton)
              << ", nameMode=" << PointerText(nameMode)
              << ", nameCustomText=" << PointerText(nameCustomText)
@@ -5599,6 +5884,12 @@ private:
             SetLogicalBlockValue(
                 colorMatchedBodiesToggle,
                 ReadDialogStateInt(kColorMatchedBodiesStateKey, 1) != 0);
+            SetLogicalBlockValue(
+                inheritBodyAttributesToggle,
+                ReadDialogStateInt(kInheritBodyAttributesStateKey, 1) != 0);
+            SetLogicalBlockValue(
+                inheritPartAttributesToggle,
+                ReadDialogStateInt(kInheritPartAttributesStateKey, 1) != 0);
         }
         catch (...)
         {
@@ -6038,6 +6329,39 @@ private:
         WritePreviewDebugLog(
             std::string("Retain bodies option=") +
             (retainOriginalBodies ? "true" : "false"));
+    }
+
+    void UpdateInheritAttributeOptions()
+    {
+        if (inheritBodyAttributesToggle == NULL)
+        {
+            gInheritBodyAttributes = false;
+        }
+        else
+        {
+            NXOpen::BlockStyler::PropertyList* properties =
+                inheritBodyAttributesToggle->GetProperties();
+            gInheritBodyAttributes = properties->GetLogical("Value");
+            delete properties;
+        }
+
+        if (inheritPartAttributesToggle == NULL)
+        {
+            gInheritPartAttributes = false;
+        }
+        else
+        {
+            NXOpen::BlockStyler::PropertyList* properties =
+                inheritPartAttributesToggle->GetProperties();
+            gInheritPartAttributes = properties->GetLogical("Value");
+            delete properties;
+        }
+
+        WritePreviewDebugLog(
+            std::string("Inherit attributes body=") +
+            (gInheritBodyAttributes ? "true" : "false") +
+            ", part=" +
+            (gInheritPartAttributes ? "true" : "false"));
     }
 
     void InitializeAssemblyList()
@@ -6689,15 +7013,61 @@ private:
             retainOriginalBodies);
     }
 
+    int Cancel()
+    {
+        WritePreviewDebugLog("Cancel begin");
+        try
+        {
+            SaveNamingControls();
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogCallbackError("Cancel NXException", ex.Message());
+        }
+        catch (const std::exception& ex)
+        {
+            LogCallbackError("Cancel exception", ex.what());
+        }
+        catch (...)
+        {
+            LogCallbackError("Cancel unknown exception", "Cannot save naming controls.");
+        }
+        return 0;
+    }
+
     int Ok()
     {
         WritePreviewDebugLog("Ok begin");
+        try
+        {
+            SaveNamingControls();
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogCallbackError("Ok save naming NXException", ex.Message());
+        }
+        catch (...)
+        {
+            LogCallbackError("Ok save naming exception", "Cannot save naming controls.");
+        }
         return ConvertSelectedBodies();
     }
 
     int Apply()
     {
         WritePreviewDebugLog("Apply begin");
+        try
+        {
+            SaveNamingControls();
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogCallbackError("Apply save naming NXException", ex.Message());
+        }
+        catch (...)
+        {
+            LogCallbackError("Apply save naming exception", "Cannot save naming controls.");
+        }
         try
         {
             const bool advanceSinglePartSerial =
@@ -6862,6 +7232,7 @@ private:
             }
 
             UpdateRetainBodiesOption();
+            UpdateInheritAttributeOptions();
             if (!retainOriginalBodies &&
                 !ConfirmAndDeleteFeatureParameters(selectedBodies))
             {
@@ -6916,6 +7287,18 @@ private:
         }
     }
 
+    bool IsSolidBody(tag_t bodyTag)
+    {
+        int bodyType = 0;
+        if (bodyTag == NULL_TAG ||
+            UF_MODL_ask_body_type(bodyTag, &bodyType) != 0)
+        {
+            return false;
+        }
+
+        return bodyType == UF_MODL_SOLID_BODY;
+    }
+
     void ConfigureBodySelectionFilter()
     {
         if (bodySelection == NULL)
@@ -6924,10 +7307,11 @@ private:
         }
 
         std::vector<NXOpen::Selection::MaskTriple> masks;
+        // Third mask value is the solid subtype. SOLID_BODY is non-sheet only.
         masks.push_back(NXOpen::Selection::MaskTriple(
             UF_solid_type,
             UF_solid_body_subtype,
-            UF_UI_SEL_FEATURE_BODY));
+            UF_UI_SEL_FEATURE_SOLID_BODY));
 
         NXOpen::BlockStyler::PropertyList* properties = bodySelection->GetProperties();
         // Block Styler scope values (not UF_UI_SEL_SCOPE_*): 10 = Work Part Only.
@@ -6977,6 +7361,14 @@ private:
             if (body == NULL)
             {
                 throw std::runtime_error("无法读取当前工作部件的实体，请重新选择。");
+            }
+            if (!IsSolidBody(body->Tag()))
+            {
+                std::ostringstream skipLine;
+                skipLine << "Skipped non-solid body: selected=" << selectedTag
+                         << ", prototype=" << body->Tag();
+                WritePreviewDebugLog(skipLine.str());
+                continue;
             }
             std::ostringstream bodyLine;
             bodyLine << "Selected work-part body: selected=" << selectedTag

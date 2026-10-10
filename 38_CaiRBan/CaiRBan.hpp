@@ -29,6 +29,8 @@ class CustomFeaturePreUpdateEvent;
 }
 }
 
+bool CaiRBanShouldStayLoaded();
+
 class CaiRBanDialog
 {
 public:
@@ -36,6 +38,8 @@ public:
     ~CaiRBanDialog();
 
     NXOpen::BlockStyler::BlockDialog::DialogResponse Launch();
+    bool DeferredRebuildPending() const;
+    void RunDeferredRebuild();
     int BuildCustomFeatureConstruction(
         NXOpen::Features::CustomFeaturePreUpdateEvent* event);
 
@@ -65,6 +69,14 @@ private:
     void LoadDialogState() const;
     void SaveDialogState() const;
     void LoadEditedCustomFeatureData();
+    void BeginEditPreview();
+    void ReleaseFaceSelection();
+    void RestoreEditRollback();
+    std::vector<tag_t> CollectEditedInputFaces(
+        NXOpen::Features::CustomFeature* node) const;
+    void CaptureEditParameters();
+    void RebuildEditedFeature();
+    bool ScheduleDeferredRebuild();
     bool CommitEditableCustomFeature(std::string& error);
     bool EstimateCylinderThickness(NXOpen::Body* body,
                                    NXOpen::Face* face,
@@ -131,14 +143,27 @@ private:
     bool configuringDimensionHandles_;
     bool dimensionValuesInitialized_;
     bool buildingCustomFeature_;
+    bool rebuildingEditedFeature_;
+    bool editRebuildPending_;
+    bool useCachedParameters_;
+    bool cachedRecolor_;
     bool previewSubtractCreated_;
     int previewColor_;
     tag_t previewTargetBodyTag_;
     tag_t previewSelectedFaceTag_;
     tag_t dimensionFaceTag_;
+    tag_t editedFeatureTag_;
+    int cachedColorMode_;
+    int cachedFixedColor_;
+    int cachedAppliedColor_;
+    int cachedWrapMode_;
+    double cachedExtension_;
     std::array<double, 2> cutDistances_;
     std::array<double, 2> offsetDistances_;
     double currentThickness_;
     std::vector<tag_t> previewCreatedFeatureTags_;
     std::vector<std::pair<tag_t, int>> previewBodyTranslucencies_;
+    NXOpen::Session::UndoMarkId editPreviewMark_;
+    bool editRolledBack_;
+    tag_t currentFeatureBeforeEdit_;
 };

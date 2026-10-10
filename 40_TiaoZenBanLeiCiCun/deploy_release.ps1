@@ -26,9 +26,48 @@ $displayName = "板件调尺"
 $featureCode = "ZHIHUI.TIAOZENBANLEICICUN"
 $artifactNames = @(
     "$launcherName.dll",
+    "${launcherName}Core.dll",
     "$launcherName.dlx",
     "$launcherName.bmp",
-    "${launcherName}Guide.bmp")
+    "${launcherName}Guide.bmp",
+    "CustomFeatureConfiguration.xml")
+
+function Merge-CustomFeatureConfiguration(
+    [string]$TargetPath, [string]$SourcePath)
+{
+    $sourceDoc = New-Object System.Xml.XmlDocument
+    $sourceDoc.Load($SourcePath)
+    $sourceNodes = @($sourceDoc.SelectNodes("/CustomFeatureLib/CustomFeature"))
+    if ($sourceNodes.Count -ne 1)
+    {
+        throw "CustomFeatureConfiguration.xml must describe exactly one feature to merge."
+    }
+    $sourceNode = $sourceNodes[0]
+    $className = $sourceNode.GetAttribute("FeatureClass")
+    if ([string]::IsNullOrWhiteSpace($className))
+    {
+        throw "Custom feature entry is missing FeatureClass."
+    }
+    $targetText = [System.IO.File]::ReadAllText($TargetPath, $utf8NoBom)
+    $entry = "    " + $sourceNode.OuterXml
+    $pattern = '<CustomFeature\b[^>]*FeatureClass="' +
+        [regex]::Escape($className) + '"[^>]*/>'
+    if ([regex]::IsMatch($targetText, $pattern))
+    {
+        $targetText = [regex]::Replace($targetText, $pattern, $entry.Trim(), 1)
+    }
+    else
+    {
+        $close = "</CustomFeatureLib>"
+        $index = $targetText.LastIndexOf($close)
+        if ($index -lt 0)
+        {
+            throw "Installed CustomFeatureConfiguration.xml has no CustomFeatureLib."
+        }
+        $targetText = $targetText.Insert($index, ($entry + "`r`n"))
+    }
+    [System.IO.File]::WriteAllText($TargetPath, $targetText, $utf8NoBom)
+}
 
 function Get-PeChecksum([string]$Path)
 {
@@ -56,6 +95,8 @@ New-Item -ItemType Directory -Path $config -Force | Out-Null
 foreach ($required in @(
     $gatePath,
     (Join-Path $release "$launcherName.dll"),
+    (Join-Path $release "${launcherName}Core.dll"),
+    (Join-Path $release "CustomFeatureConfiguration.xml"),
     (Join-Path $release "$launcherName.dlx"),
     (Join-Path $release "$launcherName.bmp"),
     (Join-Path $release "${launcherName}Guide.bmp"),
@@ -73,7 +114,9 @@ foreach ($required in @(
 
 $sourceDll = Join-Path $release "$launcherName.dll"
 $sourceChecksum = Get-PeChecksum $sourceDll
-if ($sourceChecksum -eq 0)
+$sourceCoreDll = Join-Path $release "${launcherName}Core.dll"
+$sourceCoreChecksum = Get-PeChecksum $sourceCoreDll
+if ($sourceChecksum -eq 0 -or $sourceCoreChecksum -eq 0)
 {
     throw "Refusing to deploy an unprotected DLL with a zero PE checksum."
 }
@@ -117,10 +160,35 @@ foreach ($name in $artifactNames)
     }
 }
 
+$xmlName = "CustomFeatureConfiguration.xml"
+$xmlPath = Join-Path $application $xmlName
+$featureCountBefore = 0
+if (Test-Path -LiteralPath $xmlPath -PathType Leaf)
+{
+    $beforeDoc = New-Object System.Xml.XmlDocument
+    $beforeDoc.Load($xmlPath)
+    $featureCountBefore = @($beforeDoc.SelectNodes(
+        "/CustomFeatureLib/CustomFeature")).Count
+}
 foreach ($name in $artifactNames)
 {
+    if ($name -eq $xmlName) { continue }
     Copy-Item -LiteralPath (Join-Path $release $name) `
         -Destination (Join-Path $application $name) -Force
+}
+Merge-CustomFeatureConfiguration $xmlPath (Join-Path $release $xmlName)
+$afterDoc = New-Object System.Xml.XmlDocument
+$afterDoc.Load($xmlPath)
+$featureCountAfter = @($afterDoc.SelectNodes(
+    "/CustomFeatureLib/CustomFeature")).Count
+if ($featureCountAfter -lt $featureCountBefore)
+{
+    throw "Custom feature merge dropped existing registrations."
+}
+if ($null -eq $afterDoc.SelectSingleNode(
+    "/CustomFeatureLib/CustomFeature[@FeatureClass='NXOpen::CustomFeature::TiaoZenBanLeiCiCun']"))
+{
+    throw "Custom feature merge did not register TiaoZenBanLeiCiCun."
 }
 
 $menuText = [System.IO.File]::ReadAllText(
@@ -241,8 +309,10 @@ if ($hashEntries.Count -eq 1 -and $hashEntries[0] -is [System.Array])
 $managedRelativePaths = @(
     "application/$launcherName.bmp",
     "application/$launcherName.dll",
+    "application/${launcherName}Core.dll",
     "application/$launcherName.dlx",
     "application/${launcherName}Guide.bmp",
+    "application/CustomFeatureConfiguration.xml",
     "startup/UGZH_design.men",
     "startup/UGZH_design.tbr",
     "startup/UGZH_design.rtb")
@@ -267,6 +337,7 @@ $allEntries = @($remaining + $newEntries | Sort-Object path)
 
 foreach ($name in $artifactNames)
 {
+    if ($name -eq "CustomFeatureConfiguration.xml") { continue }
     $targetHash = (Get-FileHash -LiteralPath `
         (Join-Path $application $name) -Algorithm SHA256).Hash
     if ($targetHash -ne $sourceHashes[$name])
@@ -279,6 +350,12 @@ if ($targetChecksum -ne $sourceChecksum -or $targetChecksum -eq 0)
 {
     throw "Post-deployment PE checksum validation failed."
 }
+$coreDll = Join-Path $application "${launcherName}Core.dll"
+$coreChecksum = Get-PeChecksum $coreDll
+if ($coreChecksum -eq 0 -or $coreChecksum -ne $sourceCoreChecksum)
+{
+    throw "Post-deployment core PE checksum validation failed."
+}
 
 [System.IO.File]::AppendAllText(
     $runtimeLogPath,
@@ -290,6 +367,7 @@ if ($targetChecksum -ne $sourceChecksum -or $targetChecksum -eq 0)
 Write-Output "Backup=$backup"
 Write-Output "DllSha256=$targetDllHash"
 Write-Output ("PeChecksum=0x{0:X8}" -f $targetChecksum)
+Write-Output ("CorePeChecksum=0x{0:X8}" -f $coreChecksum)
 Write-Output "Protection=ZhaoFuGate+native-multi-entry+pe-checksum+sha256"
 Write-Output "RuntimeLog=$runtimeLogPath"
 Write-Output "Deployed=$launcherName.dll,$launcherName.dlx,$launcherName.bmp,${launcherName}Guide.bmp,UGZH_design.men,UGZH_design.tbr,UGZH_design.rtb,zhihui-package.json,file-hashes.json"

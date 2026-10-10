@@ -1,15 +1,20 @@
 #pragma once
 
+#include "PanelSkirtGeometry.hpp"
+
 #include <NXOpen/BlockStyler_BlockDialog.hxx>
 #include <NXOpen/NXObject.hxx>
 #include <NXOpen/Session.hxx>
 
+#include <array>
 #include <string>
 #include <vector>
 
 void TiaoZenWriteLog(const std::string& level,
                      const std::string& message) noexcept;
 std::string TiaoZenLogFilePath() noexcept;
+void TiaoZenShowError(const std::string& message) noexcept;
+void TiaoZenShowNxError(const char* message) noexcept;
 
 namespace NXOpen
 {
@@ -22,15 +27,40 @@ class LinearDimension;
 class TabControl;
 class UIBlock;
 }
+namespace Features
+{
+class CustomFeature;
 }
+}
+
+struct PanelResizeParameters
+{
+    tag_t faceTag = NULL_TAG;
+    bool swapped = false;
+    double left = 0.0;
+    double right = 0.0;
+    double bottom = 0.0;
+    double top = 0.0;
+};
+
+bool ReadPanelResizeParameters(
+    NXOpen::Features::CustomFeature* feature,
+    PanelResizeParameters& parameters,
+    std::string& error);
 
 class PanelSizeDialog
 {
 public:
     PanelSizeDialog();
+    explicit PanelSizeDialog(bool interactiveUi);
     ~PanelSizeDialog();
 
     NXOpen::BlockStyler::BlockDialog::DialogResponse Launch();
+    bool EnsureSideMoves(NXOpen::Face* face, bool swapped,
+                         double left, double right,
+                         double bottom, double top,
+                         std::array<tag_t, 4>& featureTags,
+                         std::string& error);
 
 private:
     enum class AdjustMode
@@ -162,30 +192,40 @@ private:
                          std::string& error) const;
     void RefreshModeVisibility();
     void RefreshDimensionText();
-    void RefreshPreview();
     void ConfigureDragHandles();
     void HideDragHandles();
     bool IsDragHandle(NXOpen::BlockStyler::UIBlock* block) const;
     void ReadDragHandleValues();
     void SetDragHandleValues(const SideOffsets& offsets);
 
+    struct SidePreview
+    {
+        tag_t featureTag = NULL_TAG;
+        double distance = 0.0;
+        std::vector<panel_skirt::SurfacePosition> baseline;
+    };
+
+    bool DirectionSwapped() const;
+    void LoadEditedFeature();
+    bool CommitCustomFeature(const SideOffsets& offsets, std::string& error);
     bool CreatePreview(std::string& error);
     bool UndoPreview();
     void CommitPreview();
-    bool ApplyOffsets(const SideOffsets& offsets,
-                      std::vector<tag_t>& createdFeatures,
-                      std::string& error) const;
+    void RememberPreviewFeatures();
+    bool DeleteSideFeature(SidePreview& slot, std::string& error);
+    bool ApplyOffsets(const SideOffsets& offsets, std::string& error);
     bool PullBoundaryFaces(NXOpen::Body* body,
                            const char* sideName,
                            const NXOpen::Vector3d& outwardDirection,
                            double boundaryCoordinate,
                            double distance,
-                           std::vector<tag_t>& createdFeatures,
-                           std::string& error) const;
+                           SidePreview& slot,
+                           std::string& error);
     std::vector<NXOpen::Face*> FindBoundaryFaces(
         NXOpen::Body* body,
         const NXOpen::Vector3d& outwardDirection,
-        double boundaryCoordinate) const;
+        double boundaryCoordinate,
+        std::string& failure) const;
 
     void ShowError(const std::string& message) const;
 
@@ -223,11 +263,17 @@ private:
     NXOpen::BlockStyler::LinearDimension* topHandle_;
 
     PanelFrame frame_;
+    NXOpen::Features::CustomFeature* editedFeature_ = nullptr;
+    bool directionSwapped_ = false;
+    std::array<SidePreview, 4> sidePreviews_;
+    tag_t previewFaceTag_ = NULL_TAG;
     NXOpen::Session::UndoMarkId previewMark_;
     bool hasPreview_;
     bool rebuilding_;
     bool changingUi_;
     bool configuringHandles_;
+    bool ready_;
     bool targetValuesInitialized_;
+    std::string initError_;
     std::vector<tag_t> previewFeatures_;
 };

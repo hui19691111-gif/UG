@@ -79,4 +79,18 @@
         FeatureLibrary="QiuMianZanKaiCore"
         FeatureUILibrary="QiuMianZanKai"
         IsWithoutBody="true"/>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::FanTonSenZi"
+        FeatureName="&#x65B9;&#x901A;/&#x5706;&#x7BA1;&#x4F38;&#x76F4;"
+        FeatureIcon="FanTonSenZi"
+        FeatureLibrary="FanTonSenZiCore"
+        FeatureUILibrary="FanTonSenZi"
+        IsWithoutBody="true"/>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::TiaoZenBanLeiCiCun"
+        FeatureName="&#x677F;&#x4EF6;&#x8C03;&#x5C3A;"
+        FeatureIcon="TiaoZenBanLeiCiCun"
+        FeatureLibrary="TiaoZenBanLeiCiCunCore"
+        FeatureUILibrary="TiaoZenBanLeiCiCun"
+        IsWithoutBody="false"/>
 </CustomFeatureLib>

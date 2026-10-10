@@ -75,10 +75,15 @@ extern "C" DllExport void ufusr(char*, int* returnCode, int)
         if (returnCode != nullptr) *returnCode = status;
         return;
     }
+    CaiRBanDialog* dialog = nullptr;
     try
     {
-        CaiRBanDialog dialog;
-        dialog.Launch();
+        dialog = new CaiRBanDialog();
+        dialog->Launch();
+        if (dialog->DeferredRebuildPending())
+        {
+            dialog = nullptr;
+        }
     }
     catch (const NXOpen::NXException& ex)
     {
@@ -92,10 +97,17 @@ extern "C" DllExport void ufusr(char*, int* returnCode, int)
             "拆圆弧板", NXOpen::NXMessageBox::DialogTypeError, "拆圆弧板发生未处理异常。");
         if (returnCode != nullptr) *returnCode = -1;
     }
+    if (dialog != nullptr && dialog->DeferredRebuildPending())
+    {
+        dialog = nullptr;
+    }
+    delete dialog;
     UF_terminate();
 }
 
 extern "C" DllExport int ufusr_ask_unload(void)
 {
-    return UF_UNLOAD_IMMEDIATELY;
+    return CaiRBanShouldStayLoaded()
+               ? UF_UNLOAD_UG_TERMINATE
+               : UF_UNLOAD_IMMEDIATELY;
 }

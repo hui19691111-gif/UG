@@ -88,10 +88,12 @@ extern "C" DllExport void ufusr(char*, int* returnCode, int)
         if (returnCode != nullptr) *returnCode = status;
         return;
     }
+    BendMarkNotchDialog* dialog = nullptr;
     try
     {
-        BendMarkNotchDialog dialog;
-        dialog.Launch();
+        dialog = new BendMarkNotchDialog();
+        dialog->Launch();
+        if (dialog->DeferredRebuildPending()) dialog = nullptr;
     }
     catch (const NXOpen::NXException& ex)
     {
@@ -107,12 +109,15 @@ extern "C" DllExport void ufusr(char*, int* returnCode, int)
             "折弯标记缺口发生未处理异常。");
         if (returnCode != nullptr) *returnCode = -1;
     }
+    if (dialog != nullptr && dialog->DeferredRebuildPending()) dialog = nullptr;
+    delete dialog;
     UF_terminate();
 }
 
 extern "C" DllExport int ufusr_ask_unload()
 {
-    return UF_UNLOAD_IMMEDIATELY;
+    return BendMarkNotchShouldStayLoaded()
+        ? UF_UNLOAD_UG_TERMINATE : UF_UNLOAD_IMMEDIATELY;
 }
 
 extern "C" DllExport void ufusr_cleanup()

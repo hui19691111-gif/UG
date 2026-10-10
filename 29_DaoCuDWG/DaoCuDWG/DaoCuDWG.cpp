@@ -1,5 +1,8 @@
 #include <stdexcept>
 #include <string>
+#include <set>
+#include <locale>
+#include <sstream>
 //==============================================================================
 //  WARNING!!  This file is overwritten by the Block UI Styler while generating
 //  the automation code. Any modifications to this file will be lost after
@@ -39,8 +42,12 @@
 #include "DaoCuDWG.hpp"
 #include "../../../common/ZhihuiEmbeddedDialog.hpp"
 #include "../embedded_dialog_resources.h"
+#include <NXOpen/PartLoadStatus.hxx>
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
+
+// 用 __ImageBase 定位本 DLL 所在目录（不能用 GetModuleFileName(NULL)，那是 ugraf.exe）
+extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 //------------------------------------------------------------------------------
 // Initialize static variables
@@ -109,6 +116,454 @@ std::string Utf8LiteralToLocale(const char* text)
     std::vector<char> localeText(localeLength);
     WideCharToMultiByte(CP_ACP, 0, &wideText[0], -1, &localeText[0], localeLength, NULL, NULL);
     return std::string(&localeText[0]);
+}
+
+std::wstring WideFromUtf8(const char* text)
+{
+    if (text == NULL || text[0] == '\0')
+    {
+        return std::wstring();
+    }
+
+    const int wideLength = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
+    if (wideLength <= 0)
+    {
+        return std::wstring();
+    }
+
+    std::vector<wchar_t> wideText(wideLength);
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, &wideText[0], wideLength);
+    return std::wstring(&wideText[0]);
+}
+
+std::string Utf8FromWide(const std::wstring& text)
+{
+    if (text.empty())
+    {
+        return std::string();
+    }
+
+    const int utf8Length = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, NULL, 0, NULL, NULL);
+    if (utf8Length <= 0)
+    {
+        return std::string();
+    }
+
+    std::vector<char> utf8Text(utf8Length);
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &utf8Text[0], utf8Length, NULL, NULL);
+    return std::string(&utf8Text[0]);
+}
+
+// 列表窗口在中文 NX 下按本机代码页解释，写列表窗口必须换回 locale 编码
+std::string LocaleFromWide(const std::wstring& text)
+{
+    if (text.empty())
+    {
+        return std::string();
+    }
+
+    const int localeLength = WideCharToMultiByte(CP_ACP, 0, text.c_str(), -1, NULL, 0, NULL, NULL);
+    if (localeLength <= 0)
+    {
+        return std::string();
+    }
+
+    std::vector<char> localeText(localeLength);
+    WideCharToMultiByte(CP_ACP, 0, text.c_str(), -1, &localeText[0], localeLength, NULL, NULL);
+    return std::string(&localeText[0]);
+}
+
+std::wstring GetModuleDirectory()
+{
+    wchar_t buffer[MAX_PATH] = {0};
+    const DWORD length = GetModuleFileNameW(reinterpret_cast<HMODULE>(&__ImageBase), buffer, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+    {
+        return std::wstring();
+    }
+
+    std::wstring path(buffer, length);
+    const size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+}
+
+std::wstring ParentDirectoryOf(const std::wstring& path)
+{
+    const size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+}
+
+// 图纸名/部件名直接拼进文件名时，先清掉 Windows 非法字符，
+// 否则 SetOutputFile 会拿到非法路径，这一页会被静默丢掉
+std::wstring SanitizeFileStem(std::wstring text)
+{
+    const std::wstring invalid = L"\\/:*?\"<>|";
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        if (invalid.find(text[i]) != std::wstring::npos || text[i] < 0x20)
+        {
+            text[i] = L'_';
+        }
+    }
+
+    while (!text.empty() && (text[text.size() - 1] == L'.' || text[text.size() - 1] == L' '))
+    {
+        text.erase(text.size() - 1);
+    }
+
+    if (text.empty())
+    {
+        text = L"sheet";
+    }
+
+    return text;
+}
+
+// 图纸对象名默认都来自模板（实测同一部件内可能都叫 “Sheet 1”），重名会互相覆盖
+std::string BuildUniqueOutputStem(const std::string& partNameUtf8,
+                                  const std::string& sheetNameUtf8,
+                                  std::set<std::string>& usedStems)
+{
+    std::wstring stem = SanitizeFileStem(WideFromUtf8(partNameUtf8.c_str()));
+    stem += L"_";
+    stem += SanitizeFileStem(WideFromUtf8(sheetNameUtf8.c_str()));
+
+    std::string stemUtf8 = Utf8FromWide(stem);
+    if (usedStems.insert(stemUtf8).second)
+    {
+        return stemUtf8;
+    }
+
+    for (int suffix = 2; ; ++suffix)
+    {
+        const std::string candidate = stemUtf8 + "-" + std::to_string(suffix);
+        if (usedStems.insert(candidate).second)
+        {
+            return candidate;
+        }
+    }
+}
+
+std::string EscapeJobValue(const std::string& value)
+{
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (size_t i = 0; i < value.size(); ++i)
+    {
+        switch (value[i])
+        {
+        case '\\':
+            escaped += "\\\\";
+            break;
+        case '\n':
+            escaped += "\\n";
+            break;
+        case '\r':
+            escaped += "\\r";
+            break;
+        default:
+            escaped += value[i];
+            break;
+        }
+    }
+    return escaped;
+}
+
+// 与区域设置无关的写法，避免中文系统下把比例写成 "1,5"
+std::string FormatInvariantDouble(double value)
+{
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream << value;
+    return stream.str();
+}
+
+bool WriteUtf8File(const std::wstring& path, const std::string& text)
+{
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+
+    DWORD written = 0;
+    const BOOL ok = WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, NULL);
+    CloseHandle(file);
+    return ok == TRUE && written == text.size();
+}
+
+bool RunWorkerProcess(const std::wstring& workerExe, const std::wstring& jobPath)
+{
+    std::wstring commandLine = L"\"" + workerExe + L"\" --job \"" + jobPath + L"\"";
+    std::vector<wchar_t> commandBuffer(commandLine.begin(), commandLine.end());
+    commandBuffer.push_back(L'\0');
+
+    STARTUPINFOW startupInfo;
+    ZeroMemory(&startupInfo, sizeof(startupInfo));
+    startupInfo.cb = sizeof(startupInfo);
+    PROCESS_INFORMATION processInfo;
+    ZeroMemory(&processInfo, sizeof(processInfo));
+
+    const BOOL created = CreateProcessW(workerExe.c_str(),
+                                        &commandBuffer[0],
+                                        NULL,
+                                        NULL,
+                                        FALSE,
+                                        CREATE_DEFAULT_ERROR_MODE,
+                                        NULL,
+                                        NULL,
+                                        &startupInfo,
+                                        &processInfo);
+    if (created != TRUE)
+    {
+        return false;
+    }
+
+    CloseHandle(processInfo.hThread);
+    CloseHandle(processInfo.hProcess);
+    return true;
+}
+
+// 导图 worker 运行期间持有该命名互斥体；已有一个在跑时就不要再提交，
+// 否则两个进程会同时写同一批 dwg（互相删产物、互相判失败）。
+// 名字带 _Drawing：STP/IGES/批量导入等无关后台任务不会挡掉导出DWG。
+bool IsBackgroundExportRunning()
+{
+    HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\ZhsmExportWorkerRunning_Drawing");
+    if (mutex == NULL)
+    {
+        return false;
+    }
+
+    CloseHandle(mutex);
+    return true;
+}
+
+// 只做枚举：走装配收集部件 -> 每件取图纸页 -> 生成输出路径/比例，并统计未保存部件
+bool CollectDwgExportItems(const std::vector<NXOpen::Part*>& parts,
+                           const NXString& folderPath,
+                           std::vector<std::string>& sourcePaths,
+                           std::vector<std::string>& sheetNames,
+                           std::vector<std::string>& outputPaths,
+                           std::vector<double>& scaleValues,
+                           int& unsavedPartCount,
+                           int& unsavedPathPartCount,
+                           std::string& errorText)
+{
+    errorText.clear();
+    unsavedPartCount = 0;
+    unsavedPathPartCount = 0;
+
+    const char* folderUtf8 = folderPath.GetUTF8Text();
+    const std::wstring folderWide = WideFromUtf8(folderUtf8);
+    if (folderWide.empty())
+    {
+        errorText = "输出目录为空。";
+        return false;
+    }
+
+    std::set<std::string> usedStems;
+    for (size_t i = 0; i < parts.size(); ++i)
+    {
+        NXOpen::Part* part = parts[i];
+        if (part == NULL)
+        {
+            continue;
+        }
+
+        std::vector<NXOpen::Drawings::DrawingSheet*> sheets;
+        try
+        {
+            NXOpen::Drawings::DrawingSheetCollection* collection = part->DrawingSheets();
+            if (collection == NULL)
+            {
+                continue;
+            }
+            for (NXOpen::Drawings::DrawingSheetCollection::iterator it = collection->begin(); it != collection->end(); ++it)
+            {
+                if ((*it) != NULL)
+                {
+                    sheets.push_back(*it);
+                }
+            }
+        }
+        catch (exception&)
+        {
+            continue;   // 这一件枚举失败只跳过它，不再中断整批
+        }
+
+        if (sheets.empty())
+        {
+            continue;
+        }
+
+        try
+        {
+            if (part->IsModified())
+            {
+                unsavedPartCount++;
+            }
+        }
+        catch (exception&)
+        {
+        }
+
+        NXString partNameNX;
+        NXString partPathNX;
+        try
+        {
+            partNameNX = part->Name();
+            partPathNX = part->FullPath();
+        }
+        catch (exception&)
+        {
+            continue;   // 取名字/路径失败只跳过这一件，不终止整批提交
+        }
+
+        const char* partNameUtf8 = partNameNX.GetUTF8Text();
+        const char* partPathUtf8 = partPathNX.GetUTF8Text();
+        if (partPathUtf8 == NULL || partPathUtf8[0] == '\0')
+        {
+            // 从未保存过的新件没有磁盘路径，后台 worker 打不开它；这里单独计数并提示，不静默跳过
+            unsavedPathPartCount++;
+            continue;
+        }
+
+        for (size_t s = 0; s < sheets.size(); ++s)
+        {
+            NXString sheetNameNX;
+            try
+            {
+                sheetNameNX = sheets[s]->Name();
+            }
+            catch (exception&)
+            {
+                continue;   // 单页取不到图纸名就跳过这一页
+            }
+
+            const char* sheetNameUtf8 = sheetNameNX.GetUTF8Text();
+            const std::string sheetNameText = sheetNameUtf8 != NULL ? sheetNameUtf8 : "";
+
+            const std::string stem = BuildUniqueOutputStem(partNameUtf8 != NULL ? partNameUtf8 : "", sheetNameText, usedStems);
+            const std::wstring outputWide = folderWide + L"\\" + WideFromUtf8(stem.c_str()) + L".dwg";
+
+            double scaleValue = 0.0;
+            try
+            {
+                double numerator = 0.0;
+                double denominator = 0.0;
+                sheets[s]->GetScale(&numerator, &denominator);
+                if (numerator != 0.0)
+                {
+                    scaleValue = denominator / numerator;
+                }
+            }
+            catch (exception&)
+            {
+                scaleValue = 0.0;
+            }
+
+            sourcePaths.push_back(partPathUtf8);
+            sheetNames.push_back(sheetNameText);
+            outputPaths.push_back(Utf8FromWide(outputWide));
+            scaleValues.push_back(scaleValue);
+        }
+    }
+
+    return true;
+}
+
+// 写后台任务文件并拉起 worker；NX 侧到这一步就结束，不参与翻译
+bool SubmitBackgroundDwgJob(const std::vector<std::string>& sourcePaths,
+                            const std::vector<std::string>& sheetNames,
+                            const std::vector<std::string>& outputPaths,
+                            const std::vector<double>& scaleValues,
+                            std::string& errorText)
+{
+    errorText.clear();
+    if (sourcePaths.empty() || sourcePaths.size() != outputPaths.size() || sourcePaths.size() != sheetNames.size())
+    {
+        errorText = "后台导出清单不完整。";
+        return false;
+    }
+
+    const std::wstring moduleDir = GetModuleDirectory();
+    if (moduleDir.empty())
+    {
+        errorText = "无法定位插件所在目录。";
+        return false;
+    }
+
+    const std::wstring workerExe = moduleDir + L"\\ZhsmExportWorker.exe";
+    if (GetFileAttributesW(workerExe.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        errorText = "找不到后台导出程序：" + Utf8FromWide(workerExe) + "（需要与 DaoCuDWG.dll 同目录）";
+        return false;
+    }
+
+    if (IsBackgroundExportRunning())
+    {
+        errorText = "已有一个后台导出任务在运行，请等它结束后再提交。\n"
+                    "如果确认没有任务在跑，请在任务管理器里结束 ZhsmExportWorker.exe 后重试。";
+        return false;
+    }
+
+    const std::wstring pluginRoot = ParentDirectoryOf(moduleDir);
+    const std::wstring tempDir = pluginRoot + L"\\temp";
+    const std::wstring jobsDir = tempDir + L"\\jobs";
+    const std::wstring workerLogsDir = tempDir + L"\\worker_logs";
+    CreateDirectoryW(tempDir.c_str(), NULL);
+    CreateDirectoryW(jobsDir.c_str(), NULL);
+    CreateDirectoryW(workerLogsDir.c_str(), NULL);
+
+    const std::string jobId = "dwg_" + std::to_string(GetTickCount64());
+    const std::wstring jobIdWide = WideFromUtf8(jobId.c_str());
+    const std::wstring jobPath = jobsDir + L"\\" + jobIdWide + L".job";
+    const std::wstring workerLogPath = workerLogsDir + L"\\" + jobIdWide + L".log";
+
+    std::string text;
+    text += "job_id=" + jobId + "\n";
+    text += "job_group_id=" + jobId + "\n";
+    text += "kind=dwg\n";
+    text += "source_part_path=" + EscapeJobValue(sourcePaths[0]) + "\n";
+    text += "settings_file_path=\n";
+    text += "worker_log_path=" + EscapeJobValue(Utf8FromWide(workerLogPath)) + "\n";
+    text += "popup_title=" + EscapeJobValue("导出DWG") + "\n";
+    text += "success_popup_auto_close=true\n";
+    text += "show_progress_toast=true\n";
+    text += "open_output_folder_after_finish=false\n";
+    // 保持“导出DWG”原有的模型空间效果，不用工具箱的 Drafting 默认值
+    text += "dwg_output_to_drafting=false\n";
+    // 对齐改造前的 translator 参数：R2004 + ViewEditMode + 曲线/注释/结构全开
+    text += "dwg_legacy_exporter_options=true\n";
+    text += "import_filter_group=all\n";
+    text += "item_count=" + std::to_string(outputPaths.size()) + "\n";
+    for (size_t i = 0; i < outputPaths.size(); ++i)
+    {
+        const std::string indexText = std::to_string(i);
+        text += "item_" + indexText + "_source_file_path=" + EscapeJobValue(sourcePaths[i]) + "\n";
+        text += "item_" + indexText + "_sheet_name=" + EscapeJobValue(sheetNames[i]) + "\n";
+        text += "item_" + indexText + "_output_file_path=" + EscapeJobValue(outputPaths[i]) + "\n";
+        text += "item_" + indexText + "_import_format=step\n";
+        if (i < scaleValues.size() && scaleValues[i] > 0.0)
+        {
+            text += "item_" + indexText + "_export_scale_value=" + FormatInvariantDouble(scaleValues[i]) + "\n";
+        }
+    }
+
+    if (!WriteUtf8File(jobPath, text))
+    {
+        errorText = "后台任务文件写入失败：" + Utf8FromWide(jobPath);
+        return false;
+    }
+
+    if (!RunWorkerProcess(workerExe, jobPath))
+    {
+        errorText = "后台导出程序启动失败（Win32 error " + std::to_string(GetLastError()) + "）：" + Utf8FromWide(workerExe);
+        return false;
+    }
+
+    return true;
 }
 }
 //------------------------------------------------------------------------------
@@ -306,17 +761,67 @@ void DaoCuDWG::getchildren(Assemblies::Component* root)
         return;
     }
 
-    std::vector<Assemblies::Component*> children = root->GetChildren();//获取第一层Component
-    for (int i = 0; i < children.size(); i++)
+    std::vector<Assemblies::Component*> children;
+    try
+    {
+        children = root->GetChildren();//获取第一层Component
+    }
+    catch (exception&)
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < children.size(); i++)
 
     {   
 
         Assemblies::Component* component = children[i];//获取第一层第i个Component
-        NXOpen::Part* part1(dynamic_cast<NXOpen::Part*>(theSession->Parts()->FindObject(component->DisplayName())));
+        if (component == NULL)
+        {
+            continue;
+        }
+
+        // 必须优先用 Prototype()：FindObject(DisplayName()) 在部件未加载时会抛异常，
+        // 不同目录同名叶名还会返回先加载的那一件，两种情况都会让导出清单少件
+        NXOpen::Part* part1 = NULL;
+        try
+        {
+            part1 = dynamic_cast<NXOpen::Part*>(component->Prototype());
+        }
+        catch (exception&)
+        {
+            part1 = NULL;
+        }
+        if (part1 == NULL)
+        {
+            try
+            {
+                part1 = dynamic_cast<NXOpen::Part*>(theSession->Parts()->FindObject(component->DisplayName()));
+            }
+            catch (exception&)
+            {
+                part1 = NULL;
+            }
+        }
+
         if (part1 != NULL)
         {
             VecPart.push_back(part1);
         }
+        else
+        {
+            try
+            {
+                char skipped[512];
+                sprintf(skipped, "SKIP unresolved component: %s\n", component->DisplayName().GetLocaleText());
+                UF_UI_open_listing_window();
+                UF_UI_write_listing_window(skipped);
+            }
+            catch (exception&)
+            {
+            }
+        }
+
         getchildren(component);
         if (part1 != NULL)
         {
@@ -408,7 +913,27 @@ int DaoCuDWG::apply_cb()
 		}
 		else//
 		{
-			NXOpen::Part* part1(dynamic_cast<NXOpen::Part*>(theSession->Parts()->FindObject(rootcomponent->DisplayName())));
+			// 根部件同样优先用 Prototype()，避免 FindObject 抛异常或同名件取错
+			NXOpen::Part* part1 = NULL;
+			try
+			{
+				part1 = dynamic_cast<NXOpen::Part*>(rootcomponent->Prototype());
+			}
+			catch (exception&)
+			{
+				part1 = NULL;
+			}
+			if (part1 == NULL)
+			{
+				try
+				{
+					part1 = dynamic_cast<NXOpen::Part*>(theSession->Parts()->FindObject(rootcomponent->DisplayName()));
+				}
+				catch (exception&)
+				{
+					part1 = NULL;
+				}
+			}
             if (part1 != NULL)
             {
 			    VecPart.push_back(part1);
@@ -502,8 +1027,98 @@ int DaoCuDWG::apply_cb()
 		}
 
 
+		// 部分加载的部件可能枚举不全图纸页，提交前统一补齐加载
+		{
+			std::vector<NXOpen::BasePart*> baseParts;
+			baseParts.reserve(VecPart.size());
+			for (size_t baseIndex = 0; baseIndex < VecPart.size(); ++baseIndex)
+			{
+				baseParts.push_back(VecPart[baseIndex]);
+			}
+			try
+			{
+				NXOpen::PartLoadStatus* loadStatus = theSession->Parts()->EnsurePartsLoadedFully(baseParts, false);
+				if (loadStatus != NULL)
+				{
+					delete loadStatus;
+					loadStatus = NULL;
+				}
+			}
+			catch (exception&)
+			{
+			}
+		}
+
+		//===== DWG：只枚举清单并提交后台 worker，NX 不再参与翻译 =====
+		int submittedPageCount = 0;
+		if (Thetoggle0 == true)
+		{
+			std::vector<std::string> itemSourcePaths;
+			std::vector<std::string> itemSheetNames;
+			std::vector<std::string> itemOutputPaths;
+			std::vector<double> itemScaleValues;
+			int unsavedPartCount = 0;
+			int unsavedPathPartCount = 0;
+			std::string collectError;
+
+			if (!CollectDwgExportItems(VecPart, ThenativeFolderBrowser0, itemSourcePaths, itemSheetNames,
+                                       itemOutputPaths, itemScaleValues, unsavedPartCount, unsavedPathPartCount, collectError))
+			{
+				theUI->NXMessageBox()->Show(NXString("导出DWG", NXString::UTF8),
+                                            NXOpen::NXMessageBox::DialogTypeError,
+                                            NXString(collectError.c_str(), NXString::UTF8));
+			}
+			else if (itemOutputPaths.empty())
+			{
+				UF_UI_open_listing_window();
+				UF_UI_write_listing_window(Utf8LiteralToLocale("没有找到任何图纸页，未提交后台导出。\n").c_str());
+			}
+			else
+			{
+				std::string submitError;
+				if (SubmitBackgroundDwgJob(itemSourcePaths, itemSheetNames, itemOutputPaths, itemScaleValues, submitError))
+				{
+					submittedPageCount = static_cast<int>(itemOutputPaths.size());
+					const std::string submitted = Utf8LiteralToLocale("已提交后台导出：共") + std::to_string(submittedPageCount) +
+                        Utf8LiteralToLocale("页，NX 可以继续操作，完成后会有提示。\n");
+					UF_UI_open_listing_window();
+					UF_UI_write_listing_window(submitted.c_str());
+
+					std::string warning;
+					if (unsavedPartCount > 0)
+					{
+						warning = Utf8LiteralToLocale("有") + std::to_string(unsavedPartCount) +
+                            Utf8LiteralToLocale("个部件未保存，后台导出的是磁盘上已保存的版本。");
+					}
+					if (unsavedPathPartCount > 0)
+					{
+						if (!warning.empty())
+						{
+							warning += "\n";
+						}
+						warning += Utf8LiteralToLocale("有") + std::to_string(unsavedPathPartCount) +
+                            Utf8LiteralToLocale("个部件从未保存、没有磁盘路径，其图纸页没有提交。");
+					}
+					if (!warning.empty())
+					{
+						theUI->NXMessageBox()->Show(NXString("导出DWG", NXString::UTF8),
+                                                    NXOpen::NXMessageBox::DialogTypeWarning,
+                                                    NXString(warning.c_str(), NXString::UTF8));
+					}
+				}
+				else
+				{
+					theUI->NXMessageBox()->Show(NXString("导出DWG", NXString::UTF8),
+                                                NXOpen::NXMessageBox::DialogTypeError,
+                                                NXString(submitError.c_str(), NXString::UTF8));
+				}
+			}
+		}
+
 		int c = 1, d = 0;
 
+		// PDF 仍在本进程内出图（后台 worker 只处理 DXF/DWG/STP/IGES）
+		if (Thetoggle01 == true)
 		for (size_t i = 0; i < VecPart.size(); i++)
 		{
 
@@ -525,65 +1140,33 @@ int DaoCuDWG::apply_cb()
 					theDrawingsSheets = (*Ite); //获得图纸页
                     theDrawingsSheets->Open();
 					AllSheetsVector.push_back(theDrawingsSheets);
-					if (Thetoggle0 == true)
-					{
-                        NXOpen::DxfdwgCreator* dxfdwgCreator1;
-                        dxfdwgCreator1 = theSession->DexManager()->CreateDxfdwgCreator();
-                        dxfdwgCreator1->SetExportData(NXOpen::DxfdwgCreator::ExportDataOptionDrawing);
-                        dxfdwgCreator1->SetAutoCADRevision(NXOpen::DxfdwgCreator::AutoCADRevisionOptionsR2004);
-                        dxfdwgCreator1->SetOutputFileType(NXOpen::DxfdwgCreator::OutputFileTypeOptionDwg);
-                        dxfdwgCreator1->SetProcessHoldFlag(false);
-                        dxfdwgCreator1->SetFileSaveFlag(false);
-                        dxfdwgCreator1->SetViewEditMode(true);
-                        dxfdwgCreator1->ObjectTypes()->SetCurves(true);
-                        dxfdwgCreator1->ObjectTypes()->SetAnnotations(true);
-                        dxfdwgCreator1->ObjectTypes()->SetStructures(true);
-                        dxfdwgCreator1->SetExportScaleOption(NXOpen::DxfdwgCreator::ExportScaleOptionsBaseView);
-                        dxfdwgCreator1->SetFlattenAssembly(false);
-                        dxfdwgCreator1->SetWidthFactorMode(NXOpen::DxfdwgCreator::WidthfactorMethodOptionsAutomaticCalculation);
-                        dxfdwgCreator1->SetLayerMask("1-256");
-
-						dxfdwgCreator1->SetInputFile(VecPart[i]->FullPath());
-						double a, b;
-						theDrawingsSheets->GetScale(&a, &b);
-						dxfdwgCreator1->SetExportScaleValue(b / a);
-
-                        NXString folderPath = ThenativeFolderBrowser0 + "\\" + VecPart[i]->Name() + "_" + theDrawingsSheets->Name() + ".dwg";
-						dxfdwgCreator1->SetOutputFile(folderPath);
-						dxfdwgCreator1->SetDrawingList(theDrawingsSheets->Name());
-
-						NXOpen::NXObject* nXObject1;
-						nXObject1 = dxfdwgCreator1->Commit();
-
-                        dxfdwgCreator1->Destroy();
-                        theSession->CleanUpFacetedFacesAndEdges();
-						char ShuLiang[256];
-						sprintf(ShuLiang, "%d %s\n", c++, folderPath.GetLocaleText());
-						UF_UI_open_listing_window();
-						UF_UI_write_listing_window(ShuLiang);
-					}
-					else
-					{
-						c++;
-					}
+					c++;
 
 
 				}
-				if (Thetoggle01 == true)
-				{
-					printPDFBuilder1->SourceBuilder()->SetSheets(AllSheetsVector);
-					NXOpen::NXObject* nXObject2;
-					nXObject2 = printPDFBuilder1->Commit();
-				}
+				printPDFBuilder1->SourceBuilder()->SetSheets(AllSheetsVector);
+				NXOpen::NXObject* nXObject2;
+				nXObject2 = printPDFBuilder1->Commit();
 
 			}
 
 		}
 
-		std::string ShuLiang = Utf8LiteralToLocale("图纸共") + std::to_string(c - 1) +
-            Utf8LiteralToLocale("页  零件共") + std::to_string(d) + Utf8LiteralToLocale("个");
-		UF_UI_open_listing_window();
-		UF_UI_write_listing_window(ShuLiang.c_str());
+		//=== 汇总：只报真实发生的事，避免“图纸页共0页”这类自相矛盾 ===
+		{
+			std::string ShuLiang = Utf8LiteralToLocale("遍历零件共") + std::to_string(VecPart.size()) + Utf8LiteralToLocale("个");
+			if (Thetoggle0 == true)
+			{
+				ShuLiang += Utf8LiteralToLocale("，已提交后台导出 ") + std::to_string(submittedPageCount) + Utf8LiteralToLocale(" 页");
+			}
+			if (Thetoggle01 == true)
+			{
+				ShuLiang += Utf8LiteralToLocale("，本进程出PDF ") + std::to_string(c - 1) + Utf8LiteralToLocale(" 页");
+			}
+			UF_UI_open_listing_window();
+			UF_UI_write_listing_window(ShuLiang.c_str());
+			UF_UI_write_listing_window("\n");
+		}
 
 		printPDFBuilder1->Destroy();
 		UF_PART_set_display_part(AssTag);

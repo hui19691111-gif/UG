@@ -2138,6 +2138,242 @@ bool TryMeasureArcSpanDegrees(tag_t objectTag, double& degrees)
 	return degrees > 1.0e-3 && degrees <= 360.0;
 }
 
+double BendAngleFromArcSpan(double arcSpanDegrees)
+{
+	return fabs(180.0 - arcSpanDegrees);
+}
+
+bool TryReadCylindricalFaceAxis(
+	NXOpen::Face* bendFace,
+	double axisPoint[3],
+	double axisDirection[3],
+	double& radius)
+{
+	if (bendFace == NULL || axisPoint == NULL || axisDirection == NULL)
+	{
+		return false;
+	}
+
+	double box[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+	double radData = 0.0;
+	int type = 0;
+	int normDir = 0;
+	radius = 0.0;
+	if (UF_MODL_ask_face_data(
+			bendFace->Tag(),
+			&type,
+			axisPoint,
+			axisDirection,
+			box,
+			&radius,
+			&radData,
+			&normDir) != 0 ||
+		type != UF_MODL_CYLINDRICAL_FACE ||
+		radius <= 1.0e-6)
+	{
+		return false;
+	}
+
+	const double length = sqrt(
+		axisDirection[0] * axisDirection[0] +
+		axisDirection[1] * axisDirection[1] +
+		axisDirection[2] * axisDirection[2]);
+	if (length <= 1.0e-9)
+	{
+		return false;
+	}
+	axisDirection[0] /= length;
+	axisDirection[1] /= length;
+	axisDirection[2] /= length;
+	return true;
+}
+
+bool TryMeasureCylindricalUvArcSpan(NXOpen::Face* bendFace, double& arcSpanDegrees)
+{
+	arcSpanDegrees = 0.0;
+	if (bendFace == NULL)
+	{
+		return false;
+	}
+
+	double uvMinMax[4] = { 0.0, 0.0, 0.0, 0.0 };
+	if (UF_MODL_ask_face_uv_minmax(bendFace->Tag(), uvMinMax) != 0)
+	{
+		return false;
+	}
+
+	const double pi = 3.14159265358979323846;
+	double span = fabs(uvMinMax[1] - uvMinMax[0]);
+	while (span > (2.0 * pi))
+	{
+		span -= 2.0 * pi;
+	}
+	arcSpanDegrees = span * 180.0 / pi;
+	return arcSpanDegrees > 1.0e-3 && arcSpanDegrees < 359.0;
+}
+
+bool ArcEdgeMatchesCylinder(
+	const UF_EVAL_arc_t& arc,
+	const double axisPoint[3],
+	const double axisDirection[3],
+	double radius)
+{
+	const double radiusTolerance = std::max(0.05, fabs(radius) * 0.02);
+	if (fabs(arc.radius - radius) > radiusTolerance)
+	{
+		return false;
+	}
+
+	const double offsetX = arc.center[0] - axisPoint[0];
+	const double offsetY = arc.center[1] - axisPoint[1];
+	const double offsetZ = arc.center[2] - axisPoint[2];
+	const double crossX = axisDirection[1] * offsetZ - axisDirection[2] * offsetY;
+	const double crossY = axisDirection[2] * offsetX - axisDirection[0] * offsetZ;
+	const double crossZ = axisDirection[0] * offsetY - axisDirection[1] * offsetX;
+	const double axisDistance = sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
+	return axisDistance <= radiusTolerance;
+}
+
+bool TryMeasureGeneratorArcSpan(
+	NXOpen::Face* bendFace,
+	const double axisPoint[3],
+	const double axisDirection[3],
+	double radius,
+	double& arcSpanDegrees)
+{
+	arcSpanDegrees = 0.0;
+	if (bendFace == NULL || axisPoint == NULL || axisDirection == NULL || radius <= 1.0e-6)
+	{
+		return false;
+	}
+
+	double reference[3] = { 1.0, 0.0, 0.0 };
+	if (fabs(axisDirection[0]) > 0.9)
+	{
+		reference[0] = 0.0;
+		reference[1] = 1.0;
+	}
+	double uAxis[3] = {
+		axisDirection[1] * reference[2] - axisDirection[2] * reference[1],
+		axisDirection[2] * reference[0] - axisDirection[0] * reference[2],
+		axisDirection[0] * reference[1] - axisDirection[1] * reference[0]
+	};
+	const double uLength = sqrt(uAxis[0] * uAxis[0] + uAxis[1] * uAxis[1] + uAxis[2] * uAxis[2]);
+	if (uLength <= 1.0e-9)
+	{
+		return false;
+	}
+	uAxis[0] /= uLength;
+	uAxis[1] /= uLength;
+	uAxis[2] /= uLength;
+	const double vAxis[3] = {
+		axisDirection[1] * uAxis[2] - axisDirection[2] * uAxis[1],
+		axisDirection[2] * uAxis[0] - axisDirection[0] * uAxis[2],
+		axisDirection[0] * uAxis[1] - axisDirection[1] * uAxis[0]
+	};
+
+	const double radiusTolerance = std::max(0.05, fabs(radius) * 0.02);
+	const double pi = 3.14159265358979323846;
+	std::vector<double> angles;
+	const std::vector<NXOpen::Edge*> edges = bendFace->GetEdges();
+	for (size_t i = 0; i < edges.size(); i++)
+	{
+		if (edges[i] == NULL)
+		{
+			continue;
+		}
+
+		UF_EVAL_p_t evaluator = NULL;
+		if (UF_EVAL_initialize(edges[i]->Tag(), &evaluator) != 0 || evaluator == NULL)
+		{
+			continue;
+		}
+		logical isLine = false;
+		if (UF_EVAL_is_line(evaluator, &isLine) != 0 || !isLine)
+		{
+			UF_EVAL_free(evaluator);
+			continue;
+		}
+
+		UF_EVAL_line_t lineData;
+		if (UF_EVAL_ask_line(evaluator, &lineData) != 0)
+		{
+			UF_EVAL_free(evaluator);
+			continue;
+		}
+		UF_EVAL_free(evaluator);
+
+		const double parallel = fabs(
+			lineData.unit[0] * axisDirection[0] +
+			lineData.unit[1] * axisDirection[1] +
+			lineData.unit[2] * axisDirection[2]);
+		if (parallel < 0.999)
+		{
+			continue;
+		}
+
+		const double midX = (lineData.start[0] + lineData.end[0]) * 0.5;
+		const double midY = (lineData.start[1] + lineData.end[1]) * 0.5;
+		const double midZ = (lineData.start[2] + lineData.end[2]) * 0.5;
+		const double offsetX = midX - axisPoint[0];
+		const double offsetY = midY - axisPoint[1];
+		const double offsetZ = midZ - axisPoint[2];
+		const double axial =
+			offsetX * axisDirection[0] +
+			offsetY * axisDirection[1] +
+			offsetZ * axisDirection[2];
+		const double radialX = offsetX - axisDirection[0] * axial;
+		const double radialY = offsetY - axisDirection[1] * axial;
+		const double radialZ = offsetZ - axisDirection[2] * axial;
+		const double radialLength = sqrt(radialX * radialX + radialY * radialY + radialZ * radialZ);
+		if (fabs(radialLength - radius) > radiusTolerance)
+		{
+			continue;
+		}
+
+		double angle = atan2(
+			radialX * vAxis[0] + radialY * vAxis[1] + radialZ * vAxis[2],
+			radialX * uAxis[0] + radialY * uAxis[1] + radialZ * uAxis[2]) * 180.0 / pi;
+		if (angle < 0.0)
+		{
+			angle += 360.0;
+		}
+		angles.push_back(angle);
+	}
+
+	if (angles.size() < 2)
+	{
+		return false;
+	}
+	std::sort(angles.begin(), angles.end());
+	std::vector<double> clusters;
+	clusters.push_back(angles.front());
+	for (size_t i = 1; i < angles.size(); i++)
+	{
+		if (angles[i] - clusters.back() > 1.0)
+		{
+			clusters.push_back(angles[i]);
+		}
+	}
+	if (clusters.size() >= 2 && (clusters.front() + 360.0 - clusters.back()) <= 1.0)
+	{
+		clusters.pop_back();
+	}
+	if (clusters.size() < 2)
+	{
+		return false;
+	}
+
+	double maxGap = 0.0;
+	for (size_t i = 0; i < clusters.size(); i++)
+	{
+		const double next = (i + 1 == clusters.size()) ? clusters.front() + 360.0 : clusters[i + 1];
+		maxGap = std::max(maxGap, next - clusters[i]);
+	}
+	arcSpanDegrees = 360.0 - maxGap;
+	return arcSpanDegrees > 1.0e-3 && arcSpanDegrees < 359.0;
+}
+
 bool TryMeasureBendAngleDegrees(NXOpen::Face* bendFace, double& degrees)
 {
 	degrees = 0.0;
@@ -2146,8 +2382,14 @@ bool TryMeasureBendAngleDegrees(NXOpen::Face* bendFace, double& degrees)
 		return false;
 	}
 
+	double axisPoint[3] = { 0.0, 0.0, 0.0 };
+	double axisDirection[3] = { 0.0, 0.0, 1.0 };
+	double radius = 0.0;
+	const bool hasCylinder = TryReadCylindricalFaceAxis(bendFace, axisPoint, axisDirection, radius);
+
 	const std::vector<NXOpen::Edge*> edges = bendFace->GetEdges();
 	double bestArcDegrees = 0.0;
+	bool longestEdgeMatchesCylinder = false;
 	for (size_t i = 0; i < edges.size(); i++)
 	{
 		if (edges[i] == NULL)
@@ -2156,14 +2398,32 @@ bool TryMeasureBendAngleDegrees(NXOpen::Face* bendFace, double& degrees)
 		}
 
 		double edgeDegrees = 0.0;
-		if (!TryMeasureArcSpanDegrees(edges[i]->Tag(), edgeDegrees))
+		if (!TryMeasureArcSpanDegrees(edges[i]->Tag(), edgeDegrees) ||
+			edgeDegrees <= bestArcDegrees ||
+			edgeDegrees >= 359.0)
 		{
 			continue;
 		}
-		if (edgeDegrees > bestArcDegrees && edgeDegrees < 359.0)
+
+		bestArcDegrees = edgeDegrees;
+		longestEdgeMatchesCylinder = false;
+		if (!hasCylinder)
 		{
-			bestArcDegrees = edgeDegrees;
+			continue;
 		}
+
+		UF_EVAL_p_t evaluator = NULL;
+		if (UF_EVAL_initialize(edges[i]->Tag(), &evaluator) != 0 || evaluator == NULL)
+		{
+			continue;
+		}
+		logical isArc = false;
+		UF_EVAL_arc_t arcData;
+		if (UF_EVAL_is_arc(evaluator, &isArc) == 0 && isArc && UF_EVAL_ask_arc(evaluator, &arcData) == 0)
+		{
+			longestEdgeMatchesCylinder = ArcEdgeMatchesCylinder(arcData, axisPoint, axisDirection, radius);
+		}
+		UF_EVAL_free(evaluator);
 	}
 
 	if (bestArcDegrees <= 1.0e-3)
@@ -2171,7 +2431,40 @@ bool TryMeasureBendAngleDegrees(NXOpen::Face* bendFace, double& degrees)
 		return false;
 	}
 
-	degrees = fabs(180.0 - bestArcDegrees);
+	const double edgeBend = BendAngleFromArcSpan(bestArcDegrees);
+	double uvSpan = 0.0;
+	double generatorSpan = 0.0;
+	const bool hasUv = TryMeasureCylindricalUvArcSpan(bendFace, uvSpan);
+	const bool hasGenerator = hasCylinder &&
+		TryMeasureGeneratorArcSpan(bendFace, axisPoint, axisDirection, radius, generatorSpan);
+	const double uvBend = hasUv ? BendAngleFromArcSpan(uvSpan) : 0.0;
+	const double generatorBend = hasGenerator ? BendAngleFromArcSpan(generatorSpan) : 0.0;
+	const bool suspiciousEdge = !longestEdgeMatchesCylinder || bestArcDegrees > 181.0;
+	double chosenBend = edgeBend;
+	const char* source = "edge";
+	if (hasGenerator &&
+		fabs(generatorBend - edgeBend) > 5.0 &&
+		(suspiciousEdge || (hasUv && fabs(uvBend - generatorBend) <= 5.0)))
+	{
+		chosenBend = generatorBend;
+		source = "generators";
+	}
+
+	std::ostringstream sideLog;
+	sideLog << "[side.radius.angleSource]"
+		<< " faceTag=" << bendFace->Tag()
+		<< " source=" << source
+		<< " edgeSpan=" << bestArcDegrees
+		<< " edgeBend=" << edgeBend
+		<< " edgeMatchesCylinder=" << (longestEdgeMatchesCylinder ? 1 : 0)
+		<< " uvSpan=" << (hasUv ? uvSpan : -1.0)
+		<< " uvBend=" << (hasUv ? uvBend : -1.0)
+		<< " genSpan=" << (hasGenerator ? generatorSpan : -1.0)
+		<< " genBend=" << (hasGenerator ? generatorBend : -1.0)
+		<< " chosenBend=" << chosenBend;
+	SideDimensionDebugLog(sideLog.str());
+
+	degrees = chosenBend;
 	return true;
 }
 
@@ -2483,10 +2776,7 @@ std::vector<NXOpen::Annotations::IntersectionSymbol*> CreateNot90IntersectionSym
 
 		NXOpen::Annotations::IntersectionSymbol* intersectionSymbol =
 			CreateIntersectionSymbol(baseView, intersectionCurves[0], intersectionCurves[1]);
-		if (intersectionSymbol != NULL)
-		{
-			symbols.push_back(intersectionSymbol);
-		}
+		symbols.push_back(intersectionSymbol);
 	}
 
 	return symbols;

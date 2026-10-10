@@ -30,10 +30,12 @@
 #include <NXOpen/Features_CustomFeatureDataCollection.hxx>
 #include <NXOpen/Features_CustomFeaturePreUpdateEvent.hxx>
 #include <NXOpen/Features_CustomTagAttribute.hxx>
+#include <NXOpen/Features_EditWithRollbackManager.hxx>
 #include <NXOpen/Features_ExtrudeBuilder.hxx>
 #include <NXOpen/Features_Feature.hxx>
 #include <NXOpen/Features_FeatureCollection.hxx>
 #include <NXOpen/Features_OffsetFaceBuilder.hxx>
+#include <NXOpen/Features_Thicken.hxx>
 #include <NXOpen/Features_ThickenBuilder.hxx>
 #include <NXOpen/Features_TrimBody2Builder.hxx>
 #include <NXOpen/Features_ReplaceFaceBuilder.hxx>
@@ -92,6 +94,178 @@ constexpr double kTolerance = 1.0e-5;
 constexpr double kParallelTolerance = 0.999;
 constexpr double kCoverageThreshold = 0.60;
 CaiRBanDialog* gActiveCaiRBanDialog = nullptr;
+CaiRBanDialog* gDeferredDialog = nullptr;
+int gDeferredTries = 0;
+bool gKeepLoaded = false;
+
+// Edit-session diagnostics. The custom-feature edit path can terminate ugraf
+// before any error box appears, so record every stage to a file first; the
+// write is non-throwing and shares the existing deploy log directory so the
+// sequence survives a hard crash.
+void AppendDebugLog(const std::string& message) noexcept
+{
+    try
+    {
+        SYSTEMTIME now = {};
+        GetLocalTime(&now);
+        char prefix[160] = {};
+        sprintf_s(prefix, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] [T%lu] CaiRBan: ",
+                  now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+                  now.wSecond, now.wMilliseconds, GetCurrentThreadId());
+        const std::string line = std::string(prefix) + message + "\r\n";
+
+        CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", nullptr);
+        HANDLE file = CreateFileW(
+            L"D:\\UG智辉钣金插件\\logs\\CaiRBan_debug.log", FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            DWORD written = 0;
+            WriteFile(file, line.data(), static_cast<DWORD>(line.size()),
+                      &written, nullptr);
+            CloseHandle(file);
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+// Defined later in this anonymous namespace; declared here for the
+// diagnostic snapshot below.
+bool FeatureAlive(tag_t tag);
+
+// Diagnostic snapshot of the feature tree. Used to prove whether the
+// deferred delete-and-recreate leaves NX consistent: a dangling construction
+// reference or a stale current feature is what we need to rule in or out.
+std::string FeatureTreeSnapshot(const char* label)
+{
+    std::string text = std::string(label) + ": ";
+    try
+    {
+        NXOpen::Part* part = NXOpen::Session::GetSession()->Parts()->Work();
+        if (part == nullptr)
+        {
+            return text + "no work part";
+        }
+        int total = 0;
+        int custom = 0;
+        int named = 0;
+        for (NXOpen::Features::Feature* feature : part->Features()->GetFeatures())
+        {
+            if (feature == nullptr || !FeatureAlive(feature->Tag()))
+            {
+                continue;
+            }
+            ++total;
+            if (dynamic_cast<NXOpen::Features::CustomFeature*>(feature) != nullptr)
+            {
+                ++custom;
+            }
+            char* featureName = nullptr;
+            if (UF_MODL_ask_feat_name(feature->Tag(), &featureName) == 0 &&
+                featureName != nullptr &&
+                std::string(featureName).find("拆圆弧板") != std::string::npos)
+            {
+                ++named;
+            }
+        }
+        NXOpen::Features::Feature* current = part->CurrentFeature();
+        text += "aliveFeatures=" + std::to_string(total) +
+                " customFeatures=" + std::to_string(custom) +
+                " namedCaiRBan=" + std::to_string(named) +
+                " currentFeature=" +
+                std::to_string(current == nullptr ? NULL_TAG : current->Tag());
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        text += std::string("snapshot NXException code=") +
+                std::to_string(ex.ErrorCode()) + " message=" +
+                (ex.Message() != nullptr ? ex.Message() : "(null)");
+    }
+    catch (...)
+    {
+        text += "snapshot failed";
+    }
+    return text;
+}
+
+void SehRunDeferredRebuild(CaiRBanDialog* dialog)
+{
+    __try
+    {
+        dialog->RunDeferredRebuild();
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+}
+
+void SehDeleteDialog(CaiRBanDialog* dialog)
+{
+    __try
+    {
+        delete dialog;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+}
+
+void CALLBACK DeferredCaiRBanRebuildTimer(HWND, UINT, UINT_PTR id, DWORD)
+{
+    KillTimer(nullptr, id);
+    CaiRBanDialog* dialog = gDeferredDialog;
+    if (dialog == nullptr)
+    {
+        return;
+    }
+    if (UF_initialize() != 0)
+    {
+        gDeferredDialog = nullptr;
+        gKeepLoaded = false;
+        SehDeleteDialog(dialog);
+        return;
+    }
+    bool finished = true;
+    try
+    {
+        NXOpen::Features::CustomFeature* still = nullptr;
+        try
+        {
+            still = NXOpen::Session::GetSession()
+                        ->CustomFeatureClassManager()
+                        ->GetEditedCustomFeature();
+        }
+        catch (const NXOpen::NXException&)
+        {
+        }
+        if (still != nullptr && gDeferredTries < 40 &&
+            SetTimer(nullptr, 0, 250, DeferredCaiRBanRebuildTimer) != 0)
+        {
+            ++gDeferredTries;
+            finished = false;
+        }
+        else
+        {
+            gDeferredDialog = nullptr;
+            gDeferredTries = 0;
+            gKeepLoaded = false;
+            SehRunDeferredRebuild(dialog);
+        }
+    }
+    catch (...)
+    {
+        gDeferredDialog = nullptr;
+        gKeepLoaded = false;
+    }
+    if (finished)
+    {
+        SehDeleteDialog(dialog);
+    }
+    UF_terminate();
+}
 
 struct OppositeFaceCandidate
 {
@@ -191,6 +365,241 @@ NXOpen::Point3d FaceBoxCenter(NXOpen::Face* face)
                                (box[2] + box[5]) * 0.5);
     }
     return NXOpen::Point3d(0.0, 0.0, 0.0);
+}
+
+bool TryReadPlanarFace(NXOpen::Face* face,
+                       NXOpen::Point3d& point,
+                       NXOpen::Vector3d& outwardNormal)
+{
+    if (face == nullptr)
+    {
+        return false;
+    }
+
+    int type = 0;
+    double origin[3] = {};
+    double direction[3] = {};
+    double box[6] = {};
+    double radius = 0.0;
+    double radiusData = 0.0;
+    int normalDirection = 1;
+    if (UF_MODL_ask_face_data(face->Tag(), &type, origin, direction, box,
+                              &radius, &radiusData, &normalDirection) != 0)
+    {
+        return false;
+    }
+
+    bool planar = type == UF_MODL_PLANAR_FACE;
+    if (!planar)
+    {
+        try
+        {
+            planar = face->SolidFaceType() == NXOpen::Face::FaceTypePlanar;
+        }
+        catch (...)
+        {
+            planar = false;
+        }
+    }
+    if (!planar)
+    {
+        return false;
+    }
+
+    point = NXOpen::Point3d(origin[0], origin[1], origin[2]);
+    outwardNormal = NXOpen::Vector3d(direction[0] * normalDirection,
+                                     direction[1] * normalDirection,
+                                     direction[2] * normalDirection);
+    return Normalize(outwardNormal);
+}
+
+bool FaceEdgeAxisRange(NXOpen::Face* face,
+                       const NXOpen::Point3d& origin,
+                       const NXOpen::Vector3d& axis,
+                       double& rangeMin,
+                       double& rangeMax)
+{
+    rangeMin = (std::numeric_limits<double>::max)();
+    rangeMax = std::numeric_limits<double>::lowest();
+    if (face == nullptr)
+    {
+        return false;
+    }
+
+    std::vector<NXOpen::Edge*> edges;
+    try
+    {
+        edges = face->GetEdges();
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    bool any = false;
+    for (NXOpen::Edge* edge : edges)
+    {
+        if (edge == nullptr)
+        {
+            continue;
+        }
+        NXOpen::Point3d first;
+        NXOpen::Point3d second;
+        try
+        {
+            edge->GetVertices(&first, &second);
+        }
+        catch (...)
+        {
+            continue;
+        }
+        for (const NXOpen::Point3d& point : {first, second})
+        {
+            const double projection = Dot(Subtract(point, origin), axis);
+            rangeMin = (std::min)(rangeMin, projection);
+            rangeMax = (std::max)(rangeMax, projection);
+            any = true;
+        }
+    }
+    return any;
+}
+
+// End caps of a thickened cylinder sit at the two axial extremes and do not
+// run along the axis. Side walls and the cylinders themselves do. Edge type
+// is intentionally not required: thicken often classifies one cap's boundary
+// as a spline or intersection edge, which used to leave only one usable face.
+bool LocateThickenedEndCaps(
+    NXOpen::Body* body,
+    const NXOpen::Point3d& origin,
+    const NXOpen::Vector3d& axis,
+    std::array<std::vector<NXOpen::Face*>, 2>& endFaces,
+    std::array<NXOpen::Point3d, 2>& endCenters,
+    std::array<NXOpen::Vector3d, 2>& endNormals,
+    double& bodyMin,
+    double& bodyMax)
+{
+    endFaces = {};
+    endCenters = {};
+    endNormals = {};
+    bodyMin = (std::numeric_limits<double>::max)();
+    bodyMax = std::numeric_limits<double>::lowest();
+    if (body == nullptr)
+    {
+        return false;
+    }
+
+    struct Sample
+    {
+        NXOpen::Face* face = nullptr;
+        double rangeMin = 0.0;
+        double rangeMax = 0.0;
+        double center = 0.0;
+        double alignment = 0.0;
+        bool planar = false;
+        NXOpen::Point3d point{};
+        NXOpen::Vector3d normal{};
+    };
+
+    std::vector<NXOpen::Face*> faces;
+    try
+    {
+        faces = body->GetFaces();
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    std::vector<Sample> samples;
+    for (NXOpen::Face* face : faces)
+    {
+        Sample sample;
+        sample.face = face;
+        if (!FaceEdgeAxisRange(face, origin, axis, sample.rangeMin,
+                               sample.rangeMax))
+        {
+            continue;
+        }
+        sample.center = (sample.rangeMin + sample.rangeMax) * 0.5;
+        bodyMin = (std::min)(bodyMin, sample.rangeMin);
+        bodyMax = (std::max)(bodyMax, sample.rangeMax);
+        sample.planar = TryReadPlanarFace(face, sample.point, sample.normal);
+        sample.alignment =
+            sample.planar ? std::fabs(Dot(sample.normal, axis)) : 0.0;
+        samples.push_back(sample);
+    }
+
+    const double bodySpan = bodyMax - bodyMin;
+    if (samples.empty() || bodySpan <= kTolerance)
+    {
+        return false;
+    }
+
+    const double spanLimit = (std::max)(1.0, bodySpan * 0.85);
+    const double mid = (bodyMin + bodyMax) * 0.5;
+    std::array<std::vector<Sample>, 2> sides;
+    for (const Sample& sample : samples)
+    {
+        if ((sample.rangeMax - sample.rangeMin) > spanLimit)
+        {
+            continue;
+        }
+        const std::size_t side = sample.center <= mid ? 0 : 1;
+        sides[side].push_back(sample);
+    }
+
+    for (std::size_t side = 0; side < 2; ++side)
+    {
+        int bestIndex = -1;
+        for (std::size_t index = 0; index < sides[side].size(); ++index)
+        {
+            const Sample& sample = sides[side][index];
+            if (!sample.planar || sample.alignment < 0.5 ||
+                sample.face == nullptr)
+            {
+                continue;
+            }
+            if (bestIndex < 0)
+            {
+                bestIndex = static_cast<int>(index);
+                continue;
+            }
+            const Sample& best = sides[side][static_cast<std::size_t>(bestIndex)];
+            const bool betterAlignment =
+                sample.alignment > best.alignment + 1.0e-4;
+            const bool sameAlignment =
+                std::fabs(sample.alignment - best.alignment) <= 1.0e-4;
+            const bool closerToEnd =
+                (side == 0 && sample.center < best.center) ||
+                (side == 1 && sample.center > best.center);
+            if (betterAlignment || (sameAlignment && closerToEnd))
+            {
+                bestIndex = static_cast<int>(index);
+            }
+        }
+        if (bestIndex < 0)
+        {
+            continue;
+        }
+
+        const Sample& best =
+            sides[side][static_cast<std::size_t>(bestIndex)];
+        endCenters[side] = FaceBoxCenter(best.face);
+        endNormals[side] = best.normal;
+        const double centerTolerance = (std::max)(1.0, bodySpan * 0.02);
+        for (const Sample& sample : sides[side])
+        {
+            if (!sample.planar || sample.face == nullptr ||
+                sample.alignment < 0.5 ||
+                std::fabs(sample.center - best.center) > centerTolerance ||
+                Dot(sample.normal, best.normal) < 0.5)
+            {
+                continue;
+            }
+            endFaces[side].push_back(sample.face);
+        }
+    }
+    return true;
 }
 
 bool PointOnFace(NXOpen::Face* face, const NXOpen::Point3d& point)
@@ -502,6 +911,56 @@ std::string Number(double value)
     stream << value;
     return stream.str();
 }
+
+bool FeatureAlive(tag_t tag)
+{
+    return tag != NULL_TAG && UF_OBJ_ask_status(tag) == UF_OBJ_ALIVE;
+}
+
+void RememberTag(std::vector<tag_t>& tags, tag_t tag)
+{
+    if (tag == NULL_TAG)
+    {
+        return;
+    }
+    if (std::find(tags.begin(), tags.end(), tag) == tags.end())
+    {
+        tags.push_back(tag);
+    }
+}
+
+NXOpen::Face* AliveCylindricalFace(const std::vector<tag_t>& tags)
+{
+    for (tag_t faceTag : tags)
+    {
+        if (!FeatureAlive(faceTag))
+        {
+            continue;
+        }
+        auto* face = dynamic_cast<NXOpen::Face*>(
+            NXOpen::NXObjectManager::Get(faceTag));
+        if (face == nullptr)
+        {
+            continue;
+        }
+        int type = 0;
+        double origin[3] = {};
+        double direction[3] = {};
+        double box[6] = {};
+        double radius = 0.0;
+        double radiusData = 0.0;
+        int normalDirection = 1;
+        if (UF_MODL_ask_face_data(
+                faceTag, &type, origin, direction, box, &radius, &radiusData,
+                &normalDirection) != 0 ||
+            type != UF_MODL_CYLINDRICAL_FACE || radius <= kTolerance)
+        {
+            continue;
+        }
+        return face;
+    }
+    return nullptr;
+}
 }
 
 CaiRBanDialog::CaiRBanDialog()
@@ -528,19 +987,36 @@ CaiRBanDialog::CaiRBanDialog()
       configuringDimensionHandles_(false),
       dimensionValuesInitialized_(false),
       buildingCustomFeature_(false),
+      rebuildingEditedFeature_(false),
+      editRebuildPending_(false),
+      useCachedParameters_(false),
+      cachedRecolor_(false),
       previewSubtractCreated_(false),
       previewColor_(0),
       previewTargetBodyTag_(NULL_TAG),
       previewSelectedFaceTag_(NULL_TAG),
       dimensionFaceTag_(NULL_TAG),
+      editedFeatureTag_(NULL_TAG),
+      cachedColorMode_(0),
+      cachedFixedColor_(36),
+      cachedAppliedColor_(0),
+      cachedWrapMode_(0),
+      cachedExtension_(0.0),
       cutDistances_{0.0, 0.0},
       offsetDistances_{0.0, 0.0},
       currentThickness_(0.0),
       previewCreatedFeatureTags_(),
-      previewBodyTranslucencies_()
+      previewBodyTranslucencies_(),
+      editPreviewMark_(static_cast<NXOpen::Session::UndoMarkId>(0)),
+      editRolledBack_(false),
+      currentFeatureBeforeEdit_(NULL_TAG)
 {
     customFeatureManager_ = session_->CustomFeatureClassManager();
     editedFeature_ = customFeatureManager_->GetEditedCustomFeature();
+    if (editedFeature_ != nullptr)
+    {
+        editedFeatureTag_ = editedFeature_->Tag();
+    }
     try
     {
         featureClass_ = customFeatureManager_->GetClassFromName(
@@ -551,6 +1027,10 @@ CaiRBanDialog::CaiRBanDialog()
         featureClass_ = nullptr;
     }
     gActiveCaiRBanDialog = this;
+    // Keep one line per edit so a crash can be pinned to "which feature, was
+    // the class registered". Everything else on the happy path stays quiet.
+    AppendDebugLog("edit start edited=" + std::to_string(editedFeatureTag_) +
+                   (featureClass_ == nullptr ? " FEATURECLASS-MISSING" : ""));
     dialog_->AddInitializeHandler(NXOpen::make_callback(this, &CaiRBanDialog::initialize_cb));
     dialog_->AddDialogShownHandler(NXOpen::make_callback(this, &CaiRBanDialog::dialogShown_cb));
     dialog_->AddUpdateHandler(NXOpen::make_callback(this, &CaiRBanDialog::update_cb));
@@ -561,6 +1041,18 @@ CaiRBanDialog::CaiRBanDialog()
 
 CaiRBanDialog::~CaiRBanDialog()
 {
+    try
+    {
+        if (hasPreview_ ||
+            previewUndoMark_ != static_cast<NXOpen::Session::UndoMarkId>(0))
+        {
+            UndoPreview();
+        }
+        RestoreEditRollback();
+    }
+    catch (...)
+    {
+    }
     RestorePreviewTranslucency();
     if (gActiveCaiRBanDialog == this)
     {
@@ -569,12 +1061,121 @@ CaiRBanDialog::~CaiRBanDialog()
     delete dialog_;
 }
 
+bool CaiRBanShouldStayLoaded()
+{
+    return gKeepLoaded;
+}
+
+bool CaiRBanDialog::DeferredRebuildPending() const
+{
+    return gDeferredDialog == this;
+}
+
+bool CaiRBanDialog::ScheduleDeferredRebuild()
+{
+    if (gDeferredDialog != nullptr)
+    {
+        return false;
+    }
+    gDeferredDialog = this;
+    gDeferredTries = 0;
+    gKeepLoaded = true;
+    if (SetTimer(nullptr, 0, 400, DeferredCaiRBanRebuildTimer) == 0)
+    {
+        gDeferredDialog = nullptr;
+        gKeepLoaded = false;
+        return false;
+    }
+    return true;
+}
+
+void CaiRBanDialog::RunDeferredRebuild()
+{
+    NXOpen::Features::CustomFeature* still = nullptr;
+    try
+    {
+        still = session_->CustomFeatureClassManager()->GetEditedCustomFeature();
+    }
+    catch (const NXOpen::NXException&)
+    {
+    }
+    if (still != nullptr)
+    {
+        AppendDebugLog("rebuild abandoned: NX still editing tag=" +
+                       std::to_string(still->Tag()));
+        ShowError("NX 仍处于编辑状态，拆圆弧板未更新。");
+        return;
+    }
+    try
+    {
+        RebuildEditedFeature();
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("rebuild failed NXException code=" +
+                       std::to_string(ex.ErrorCode()) + " message=" +
+                       (ex.Message() != nullptr ? ex.Message() : "(null)"));
+        ShowError(ex.Message() != nullptr ? ex.Message() : "编辑拆圆弧板失败。");
+    }
+    catch (const std::exception& ex)
+    {
+        AppendDebugLog(std::string("rebuild failed: ") + ex.what());
+        ShowError(ex.what());
+    }
+    catch (...)
+    {
+        AppendDebugLog("RunDeferredRebuild unknown exception");
+        ShowError("编辑拆圆弧板失败。");
+    }
+}
+
 NXOpen::BlockStyler::BlockDialog::DialogResponse CaiRBanDialog::Launch()
 {
-    return dialog_->LaunchInDialogMode(
-        editedFeature_ != nullptr
-            ? NXOpen::BlockStyler::BlockDialog::DialogModeEdit
-            : NXOpen::BlockStyler::BlockDialog::DialogModeCreate);
+    const NXOpen::BlockStyler::BlockDialog::DialogResponse response =
+        dialog_->LaunchInDialogMode(
+            editedFeatureTag_ != NULL_TAG
+                ? NXOpen::BlockStyler::BlockDialog::DialogModeEdit
+                : NXOpen::BlockStyler::BlockDialog::DialogModeCreate);
+    if (!editRebuildPending_)
+    {
+        return response;
+    }
+    editRebuildPending_ = false;
+    NXOpen::Features::CustomFeature* stillEdited = nullptr;
+    try
+    {
+        stillEdited = customFeatureManager_->GetEditedCustomFeature();
+    }
+    catch (const NXOpen::NXException&)
+    {
+    }
+    if (stillEdited != nullptr)
+    {
+        if (!ScheduleDeferredRebuild())
+        {
+            AppendDebugLog("deferred rebuild scheduling failed for tag=" +
+                           std::to_string(editedFeatureTag_));
+            ShowError("拆圆弧板未能在编辑结束后重新创建。");
+        }
+        return response;
+    }
+    try
+    {
+        RebuildEditedFeature();
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("rebuild (direct) NXException code=" +
+                       std::to_string(ex.ErrorCode()) + " message=" +
+                       (ex.Message() != nullptr ? ex.Message() : "(null)"));
+        ShowError(ex.Message() != nullptr ? ex.Message() : "编辑拆圆弧板失败。");
+    }
+    catch (const std::exception& ex)
+    {
+        AppendDebugLog(std::string("Launch std::exception: ") + ex.what());
+        ShowError(ex.what());
+    }
+    return response;
 }
 
 void CaiRBanDialog::initialize_cb()
@@ -636,10 +1237,32 @@ void CaiRBanDialog::dialogShown_cb()
         if (currentEdited != nullptr && currentEdited != editedFeature_)
         {
             editedFeature_ = currentEdited;
+            editedFeatureTag_ = currentEdited->Tag();
             LoadEditedCustomFeatureData();
         }
     }
     UpdateColorControlVisibility();
+    if (editedFeature_ != nullptr || FeatureAlive(editedFeatureTag_))
+    {
+        try
+        {
+            BeginEditPreview();
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog("edit preview restore NXException code=" +
+                           std::to_string(ex.ErrorCode()) + " message=" +
+                           (ex.Message() != nullptr ? ex.Message() : "(null)"));
+            ShowError(ex.Message() != nullptr ? ex.Message()
+                                             : "无法恢复拆圆弧板预览。");
+        }
+        catch (const std::exception& ex)
+        {
+            AppendDebugLog(std::string("dialogShown_cb std::exception: ") +
+                           ex.what());
+            ShowError(ex.what());
+        }
+    }
 }
 
 int CaiRBanDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
@@ -691,7 +1314,7 @@ int CaiRBanDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
         dimensionValuesInitialized_ = false;
         dimensionFaceTag_ = NULL_TAG;
     }
-    if (parameterChanged)
+        if (parameterChanged)
     {
         UpdateColorControlVisibility();
         SaveDialogState();
@@ -871,6 +1494,237 @@ void CaiRBanDialog::SaveDialogState() const
         fileName, L"fixedColor", FixedColor());
 }
 
+void CaiRBanDialog::ReleaseFaceSelection()
+{
+    if (faceSelect_ == nullptr)
+    {
+        return;
+    }
+    loadingEditedFeature_ = true;
+    try
+    {
+        NXOpen::BlockStyler::PropertyList* properties =
+            faceSelect_->GetProperties();
+        properties->SetTaggedObjectVector(
+            "SelectedObjects", std::vector<NXOpen::TaggedObject*>());
+        delete properties;
+    }
+    catch (...)
+    {
+    }
+    loadingEditedFeature_ = false;
+}
+
+void CaiRBanDialog::RestoreEditRollback()
+{
+    if (!editRolledBack_ &&
+        editPreviewMark_ == static_cast<NXOpen::Session::UndoMarkId>(0))
+    {
+        return;
+    }
+    try
+    {
+        if (editPreviewMark_ != static_cast<NXOpen::Session::UndoMarkId>(0) &&
+            session_->DoesUndoMarkExist(editPreviewMark_, "拆圆弧板编辑预览"))
+        {
+            session_->UndoToMark(editPreviewMark_, "拆圆弧板编辑预览");
+            if (session_->DoesUndoMarkExist(editPreviewMark_, "拆圆弧板编辑预览"))
+            {
+                session_->DeleteUndoMark(editPreviewMark_, "拆圆弧板编辑预览");
+            }
+        }
+        else if (FeatureAlive(currentFeatureBeforeEdit_))
+        {
+            UF_MODL_set_current_feature(currentFeatureBeforeEdit_);
+        }
+    }
+    catch (...)
+    {
+    }
+    editPreviewMark_ = static_cast<NXOpen::Session::UndoMarkId>(0);
+    editRolledBack_ = false;
+    currentFeatureBeforeEdit_ = NULL_TAG;
+}
+
+std::vector<tag_t> CaiRBanDialog::CollectEditedInputFaces(
+    NXOpen::Features::CustomFeature* node) const
+{
+    std::vector<tag_t> tags;
+    if (node == nullptr)
+    {
+        return tags;
+    }
+    RememberTag(tags, previewSelectedFaceTag_);
+    RememberTag(tags, dimensionFaceTag_);
+    try
+    {
+        NXOpen::TaggedObject* stored =
+            node->FeatureData()
+                ->CustomTagAttributeByName(zhihui_cairban::kAttrSelectedFace)
+                ->Value();
+        if (stored != nullptr)
+        {
+            RememberTag(tags, stored->Tag());
+        }
+    }
+    catch (...)
+    {
+    }
+
+    NXOpen::Part* part = session_ == nullptr ? nullptr : session_->Parts()->Work();
+    if (part == nullptr)
+    {
+        return tags;
+    }
+    try
+    {
+        for (NXOpen::Features::ConstructionFeatureData* item :
+             node->GetConstructionFeatures())
+        {
+            NXOpen::Features::Feature* feature =
+                item == nullptr ? nullptr : item->GetFeature();
+            if (feature == nullptr)
+            {
+                continue;
+            }
+            NXOpen::Features::ThickenBuilder* builder = nullptr;
+            try
+            {
+                builder = part->Features()->CreateThickenBuilder(feature);
+            }
+            catch (const NXOpen::NXException&)
+            {
+                builder = nullptr;
+            }
+            if (builder == nullptr)
+            {
+                continue;
+            }
+            for (NXOpen::TaggedObject* object :
+                 builder->FaceCollector()->GetObjects())
+            {
+                if (object != nullptr)
+                {
+                    RememberTag(tags, object->Tag());
+                }
+            }
+            builder->Destroy();
+            break;
+        }
+    }
+    catch (...)
+    {
+    }
+    return tags;
+}
+
+void CaiRBanDialog::BeginEditPreview()
+{
+    if (hasPreview_ || editRolledBack_)
+    {
+        return;
+    }
+    NXOpen::Part* part = session_->Parts()->Work();
+    auto* node = dynamic_cast<NXOpen::Features::CustomFeature*>(
+        FeatureAlive(editedFeatureTag_)
+            ? NXOpen::NXObjectManager::Get(editedFeatureTag_)
+            : nullptr);
+    if (part == nullptr || node == nullptr)
+    {
+        return;
+    }
+
+    const std::vector<tag_t> recordedFaces = CollectEditedInputFaces(node);
+
+    int boundary = node->Timestamp();
+    try
+    {
+        for (NXOpen::Features::ConstructionFeatureData* item :
+             node->GetConstructionFeatures())
+        {
+            NXOpen::Features::Feature* feature =
+                item == nullptr ? nullptr : item->GetFeature();
+            if (feature != nullptr)
+            {
+                boundary = (std::min)(boundary, feature->Timestamp());
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+
+    NXOpen::Features::Feature* insertion = nullptr;
+    for (NXOpen::Features::Feature* feature : part->Features()->GetFeatures())
+    {
+        if (feature == nullptr || feature->IsInternal() ||
+            feature->Tag() == editedFeatureTag_ ||
+            feature->Timestamp() >= boundary)
+        {
+            continue;
+        }
+        if (insertion == nullptr ||
+            feature->Timestamp() > insertion->Timestamp())
+        {
+            insertion = feature;
+        }
+    }
+
+    NXOpen::Features::Feature* originalCurrent = part->CurrentFeature();
+    currentFeatureBeforeEdit_ =
+        originalCurrent == nullptr ? NULL_TAG : originalCurrent->Tag();
+    editPreviewMark_ = session_->SetUndoMark(
+        NXOpen::Session::MarkVisibilityInvisible, "拆圆弧板编辑预览");
+    if (insertion != nullptr &&
+        insertion->Tag() != currentFeatureBeforeEdit_)
+    {
+        rebuildingEditedFeature_ = true;
+        const int rolled = UF_MODL_set_current_feature(insertion->Tag());
+        rebuildingEditedFeature_ = false;
+        editRolledBack_ = rolled == 0;
+        if (rolled != 0)
+        {
+            AppendDebugLog("edit preview roll failed status=" +
+                           std::to_string(rolled) + " insertion=" +
+                           std::to_string(insertion->Tag()));
+        }
+    }
+
+    NXOpen::Face* face = AliveCylindricalFace(recordedFaces);
+    if (face == nullptr || faceSelect_ == nullptr)
+    {
+        RestoreEditRollback();
+        ShowError("无法读取已保存的圆弧面，不能恢复编辑预览。");
+        return;
+    }
+
+    loadingEditedFeature_ = true;
+    try
+    {
+        NXOpen::BlockStyler::PropertyList* properties =
+            faceSelect_->GetProperties();
+        properties->SetTaggedObjectVector(
+            "SelectedObjects",
+            std::vector<NXOpen::TaggedObject*>{face});
+        delete properties;
+    }
+    catch (...)
+    {
+        loadingEditedFeature_ = false;
+        throw;
+    }
+    loadingEditedFeature_ = false;
+
+    previewSelectedFaceTag_ = face->Tag();
+    dimensionFaceTag_ = face->Tag();
+    if (face->GetBody() != nullptr)
+    {
+        previewTargetBodyTag_ = face->GetBody()->Tag();
+    }
+    dimensionValuesInitialized_ = true;
+    CreatePreview();
+}
+
 void CaiRBanDialog::LoadEditedCustomFeatureData()
 {
     if (editedFeature_ == nullptr || faceSelect_ == nullptr)
@@ -890,12 +1744,19 @@ void CaiRBanDialog::LoadEditedCustomFeatureData()
             if (storedFace != nullptr)
             {
                 dimensionFaceTag_ = storedFace->Tag();
-                NXOpen::BlockStyler::PropertyList* faceProperties =
-                    faceSelect_->GetProperties();
-                faceProperties->SetTaggedObjectVector(
-                    "SelectedObjects",
-                    std::vector<NXOpen::TaggedObject*>{storedFace});
-                delete faceProperties;
+                previewSelectedFaceTag_ = storedFace->Tag();
+                if (storedFace->GetBody() != nullptr)
+                {
+                    previewTargetBodyTag_ = storedFace->GetBody()->Tag();
+                }
+            }
+            NXOpen::TaggedObject* storedTarget =
+                data->CustomTagAttributeByName(
+                        zhihui_cairban::kAttrTargetBody)
+                    ->Value();
+            if (storedTarget != nullptr)
+            {
+                previewTargetBodyTag_ = storedTarget->Tag();
             }
         }
         catch (...)
@@ -953,11 +1814,22 @@ void CaiRBanDialog::LoadEditedCustomFeatureData()
             // extension value; offset defaults are resolved from thickness.
         }
         dimensionValuesInitialized_ = loadedDimensionValues;
+        if (cutDimension0_ != nullptr && cutDimension1_ != nullptr &&
+            offsetDimension0_ != nullptr && offsetDimension1_ != nullptr)
+        {
+            cutDimension0_->SetFormula(Number(cutDistances_[0]).c_str());
+            cutDimension0_->SetValue(cutDistances_[0]);
+            cutDimension1_->SetFormula(Number(cutDistances_[1]).c_str());
+            cutDimension1_->SetValue(cutDistances_[1]);
+            offsetDimension0_->SetFormula(Number(offsetDistances_[0]).c_str());
+            offsetDimension0_->SetValue(offsetDistances_[0]);
+            offsetDimension1_->SetFormula(Number(offsetDistances_[1]).c_str());
+            offsetDimension1_->SetValue(offsetDistances_[1]);
+        }
         zhihui_dialog_memory::TrySetEnum(
             wrapMode_,
             static_cast<int>(data->CustomDoubleAttributeByName(
                 zhihui_cairban::kAttrWrapMode)->Value()));
-        faceSelect_->SetEnable(false);
         UpdateColorControlVisibility();
     }
     catch (...)
@@ -1052,24 +1924,30 @@ bool CaiRBanDialog::CommitEditableCustomFeature(std::string& error)
         // A new feature has already been coloured by the live preview.  Reuse
         // that exact colour when it is committed; otherwise random mode would
         // draw a second colour here and visibly change on Apply.
-        const int appliedColor =
-            RecolorEnabled()
-                ? (!editing && hasPreview_ && previewColor_ >= 1
-                       ? previewColor_
-                       : RequestedColor())
-                : 0;
+        const bool recolor =
+            useCachedParameters_ ? cachedRecolor_ : RecolorEnabled();
+        const int appliedColor = useCachedParameters_
+            ? cachedAppliedColor_
+            : (recolor
+                   ? (!editing && hasPreview_ && previewColor_ >= 1
+                          ? previewColor_
+                          : RequestedColor())
+                   : 0);
         data->CustomDoubleAttributeByName(
                 zhihui_cairban::kAttrRecolorEnabled)
-            ->SetValue(RecolorEnabled() ? 1.0 : 0.0);
+            ->SetValue(recolor ? 1.0 : 0.0);
         data->CustomDoubleAttributeByName(zhihui_cairban::kAttrColorMode)
-            ->SetValue(static_cast<double>(ColorMode()));
+            ->SetValue(static_cast<double>(
+                useCachedParameters_ ? cachedColorMode_ : ColorMode()));
         data->CustomDoubleAttributeByName(zhihui_cairban::kAttrFixedColor)
-            ->SetValue(static_cast<double>(FixedColor()));
+            ->SetValue(static_cast<double>(
+                useCachedParameters_ ? cachedFixedColor_ : FixedColor()));
         data->CustomDoubleAttributeByName(zhihui_cairban::kAttrAppliedColor)
             ->SetValue(static_cast<double>(appliedColor));
         data->CustomDoubleAttributeByName(
                 zhihui_cairban::kAttrExtensionLength)
-            ->SetValue(ExtensionLength());
+            ->SetValue(useCachedParameters_ ? cachedExtension_
+                                            : ExtensionLength());
         data->CustomDoubleAttributeByName(zhihui_cairban::kAttrCutDistance0)
             ->SetValue(cutDistances_[0]);
         data->CustomDoubleAttributeByName(zhihui_cairban::kAttrCutDistance1)
@@ -1079,9 +1957,12 @@ bool CaiRBanDialog::CommitEditableCustomFeature(std::string& error)
         data->CustomDoubleAttributeByName(zhihui_cairban::kAttrOffsetDistance1)
             ->SetValue(offsetDistances_[1]);
         data->CustomDoubleAttributeByName(zhihui_cairban::kAttrWrapMode)
-            ->SetValue(static_cast<double>(WrapMode()));
+            ->SetValue(static_cast<double>(
+                useCachedParameters_ ? cachedWrapMode_ : WrapMode()));
 
-        buildingCustomFeature_ = !editing;
+        // Edit must adopt the new preview chain. Leaving this false keeps the
+        // original construction features, so parameter changes never appear.
+        buildingCustomFeature_ = true;
         builder->SetFeatureData(data);
         NXOpen::Features::Feature* committed = builder->CommitFeature();
         builder->Destroy();
@@ -1097,7 +1978,11 @@ bool CaiRBanDialog::CommitEditableCustomFeature(std::string& error)
         customFeature->SetName(zhihui_cairban::kFeatureDisplayName);
         if (editing)
         {
+            // The commit replaced the feature, so the tag must follow the new
+            // node. Leaving editedFeatureTag_ on the deleted feature made every
+            // later lookup by tag return null (NX returns a fresh tag here).
             editedFeature_ = customFeature;
+            editedFeatureTag_ = customFeature->Tag();
         }
         return true;
     }
@@ -1126,13 +2011,21 @@ int CaiRBanDialog::BuildCustomFeatureConstruction(
 
     std::vector<NXOpen::Features::ConstructionFeatureData*> construction =
         event->GetConstructionFeatures();
-    if (construction.empty())
+    // While the edit dialog has closed and the replacement has not started,
+    // keep the existing construction. Replacing it here crashes NX.
+    if (rebuildingEditedFeature_ || gDeferredDialog != nullptr)
     {
-        if (!buildingCustomFeature_ || !hasPreview_ ||
-            previewCreatedFeatureTags_.empty())
+        if (!construction.empty())
         {
-            return 1;
+            event->SetConstructionFeatures(construction);
         }
+        return 0;
+    }
+    if (buildingCustomFeature_ && hasPreview_ &&
+        !previewCreatedFeatureTags_.empty())
+    {
+        // Editing replaces the previous internal chain. Creating starts empty.
+        construction.clear();
         std::set<tag_t> seen;
         for (tag_t featureTag : previewCreatedFeatureTags_)
         {
@@ -1153,10 +2046,10 @@ int CaiRBanDialog::BuildCustomFeatureConstruction(
             item->SetShowInGraphicView(true);
             construction.push_back(item);
         }
-        if (construction.empty())
-        {
-            return 1;
-        }
+    }
+    if (construction.empty())
+    {
+        return 1;
     }
 
     NXOpen::Features::CustomFeatureData* data =
@@ -1203,16 +2096,579 @@ int CaiRBanDialog::BuildCustomFeatureConstruction(
     return 0;
 }
 
+void CaiRBanDialog::CaptureEditParameters()
+{
+    if (NXOpen::Face* face = SelectedFace())
+    {
+        previewSelectedFaceTag_ = face->Tag();
+        dimensionFaceTag_ = face->Tag();
+        if (face->GetBody() != nullptr)
+        {
+            previewTargetBodyTag_ = face->GetBody()->Tag();
+        }
+    }
+    if (cutDimension0_ != nullptr && cutDimension1_ != nullptr &&
+        offsetDimension0_ != nullptr && offsetDimension1_ != nullptr)
+    {
+        cutDistances_[0] = (std::max)(0.0, cutDimension0_->Value());
+        cutDistances_[1] = (std::max)(0.0, cutDimension1_->Value());
+        offsetDistances_[0] = offsetDimension0_->Value();
+        offsetDistances_[1] = offsetDimension1_->Value();
+    }
+    cachedRecolor_ = RecolorEnabled();
+    cachedColorMode_ = ColorMode();
+    cachedFixedColor_ = FixedColor();
+    cachedAppliedColor_ = cachedRecolor_ ? RequestedColor() : 0;
+    cachedExtension_ = ExtensionLength();
+    cachedWrapMode_ = WrapMode();
+}
+
+void CaiRBanDialog::RebuildEditedFeature()
+{
+    if (!FeatureAlive(editedFeatureTag_))
+    {
+        throw std::runtime_error("找不到要编辑的拆圆弧板特征。");
+    }
+    auto* node = dynamic_cast<NXOpen::Features::CustomFeature*>(
+        NXOpen::NXObjectManager::Get(editedFeatureTag_));
+    if (node == nullptr)
+    {
+        throw std::runtime_error("找不到要编辑的拆圆弧板特征。");
+    }
+
+    // The original face stays alive while the dialog closes. Put the committed
+    // feature back only after Block Styler has released that selection.
+    rebuildingEditedFeature_ = true;
+    RestoreEditRollback();
+    rebuildingEditedFeature_ = false;
+    if (!FeatureAlive(editedFeatureTag_))
+    {
+        throw std::runtime_error("找不到要编辑的拆圆弧板特征。");
+    }
+    node = dynamic_cast<NXOpen::Features::CustomFeature*>(
+        NXOpen::NXObjectManager::Get(editedFeatureTag_));
+    if (node == nullptr)
+    {
+        throw std::runtime_error("找不到要编辑的拆圆弧板特征。");
+    }
+
+    const std::vector<tag_t> recordedFaces = CollectEditedInputFaces(node);
+
+    AppendDebugLog(FeatureTreeSnapshot("RebuildEditedFeature BEFORE delete"));
+    std::vector<tag_t> oldChain;
+    try
+    {
+        for (NXOpen::Features::ConstructionFeatureData* item :
+             node->GetConstructionFeatures())
+        {
+            NXOpen::Features::Feature* feature =
+                item == nullptr ? nullptr : item->GetFeature();
+            if (feature != nullptr && FeatureAlive(feature->Tag()))
+            {
+                oldChain.push_back(feature->Tag());
+            }
+        }
+    }
+    catch (...)
+    {
+    }
+    {
+        std::string chain;
+        for (tag_t tag : oldChain)
+        {
+            if (!chain.empty())
+            {
+                chain += ",";
+            }
+            chain += std::to_string(tag);
+        }
+        AppendDebugLog("RebuildEditedFeature old construction chain size=" +
+                       std::to_string(oldChain.size()) + " tags=[" + chain + "]");
+    }
+
+    // Undo marks are NOT stable here. This code runs from a timer after the
+    // edit dialog closed, and NX recycles marks exactly in that window
+    // ("UNDO_UG: Recyclable status of mark N set to True" appears immediately
+    // before the 0xe0434352 termination). A mark held across the whole
+    // delete + rebuild + commit sequence can therefore be dead by the time it
+    // is handed to DoUpdate, which surfaces as NXException 3615009
+    // ("错误的标记"). Take a fresh mark immediately before each use, verify it,
+    // and never let one escape into a long-lived variable.
+    // Roll the model back to the position the edited feature occupied BEFORE
+    // deleting it. A feature created while the model sits at that point takes
+    // the old feature's place in the history instead of being appended to the
+    // end, so the tree keeps its order and the timestamps stay right.
+    // EditWithRollbackManager is NX's own mechanism for exactly this:
+    // "will roll the model to a suitable point before feature edit can begin"
+    // and Stop() "rolls forward the model to the original current feature".
+    NXOpen::Features::EditWithRollbackManager* rollback = nullptr;
+    NXOpen::Features::Feature* rollbackInsertion = nullptr;
+    try
+    {
+        int boundary = node->Timestamp();
+        try
+        {
+            for (NXOpen::Features::ConstructionFeatureData* item :
+                 node->GetConstructionFeatures())
+            {
+                NXOpen::Features::Feature* feature =
+                    item == nullptr ? nullptr : item->GetFeature();
+                if (feature != nullptr)
+                {
+                    boundary = (std::min)(boundary, feature->Timestamp());
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+        for (NXOpen::Features::Feature* feature :
+             session_->Parts()->Work()->Features()->GetFeatures())
+        {
+            if (feature == nullptr || feature->IsInternal() ||
+                feature->Tag() == editedFeatureTag_ ||
+                feature->Timestamp() >= boundary)
+            {
+                continue;
+            }
+            if (rollbackInsertion == nullptr ||
+                feature->Timestamp() > rollbackInsertion->Timestamp())
+            {
+                rollbackInsertion = feature;
+            }
+        }
+    }
+    catch (...)
+    {
+        rollbackInsertion = nullptr;
+    }
+
+    NXOpen::Session::UndoMarkId rollbackMark =
+        static_cast<NXOpen::Session::UndoMarkId>(0);
+    try
+    {
+        rollbackMark = session_->SetUndoMark(
+            NXOpen::Session::MarkVisibilityVisible, "编辑拆圆弧板-回滚");
+        rollback = session_->Parts()->Work()->Features()
+                       ->StartEditWithRollbackManager(node, rollbackMark);
+        // One compact line: where the model was rolled back to. Enough to tell
+        // whether a later failure happened before or after the rollback.
+        AppendDebugLog("rebuild rolled back to insertion=" +
+                       std::to_string(rollbackInsertion == nullptr
+                                           ? NULL_TAG
+                                           : rollbackInsertion->Tag()) +
+                       " currentNow=" +
+                       std::to_string(session_->Parts()->Work()->CurrentFeature() ==
+                                              nullptr
+                                          ? NULL_TAG
+                                          : session_->Parts()
+                                                ->Work()
+                                                ->CurrentFeature()
+                                                ->Tag()));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("RebuildEditedFeature StartEditWithRollbackManager threw code=" +
+                       std::to_string(ex.ErrorCode()) + " message=" +
+                       (ex.Message() != nullptr ? ex.Message() : "(null)"));
+        rollback = nullptr;
+    }
+
+    NXOpen::Session::UndoMarkId deleteMark =
+        static_cast<NXOpen::Session::UndoMarkId>(0);
+    NXOpen::Session::UndoMarkId commitMark =
+        static_cast<NXOpen::Session::UndoMarkId>(0);
+    const bool rollbackActive = rollback != nullptr;
+    rebuildingEditedFeature_ = true;
+    try
+    {
+        deleteMark = session_->SetUndoMark(
+            NXOpen::Session::MarkVisibilityVisible, "编辑拆圆弧板-删除");
+        AppendDebugLog("RebuildEditedFeature deleteMark=" +
+                       std::to_string(deleteMark) + " exists=" +
+                       std::to_string(session_->DoesUndoMarkExist(
+                                          deleteMark, "编辑拆圆弧板-删除")
+                                          ? 1
+                                          : 0));
+        std::vector<NXOpen::TaggedObject*> doomed;
+        for (auto item = oldChain.rbegin(); item != oldChain.rend(); ++item)
+        {
+            NXOpen::TaggedObject* object =
+                NXOpen::NXObjectManager::Get(*item);
+            if (object != nullptr)
+            {
+                doomed.push_back(object);
+            }
+        }
+        doomed.push_back(node);
+        NXOpen::Update* update = session_->UpdateManager();
+        update->ClearDeleteList();
+        update->ClearErrorList();
+        update->AddObjectsToDeleteList(doomed);
+        int deleteErrors = 0;
+        try
+        {
+            deleteErrors = update->DoUpdate(deleteMark);
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog(
+                "RebuildEditedFeature delete DoUpdate threw code=" +
+                std::to_string(ex.ErrorCode()) + " message=" +
+                (ex.Message() != nullptr ? ex.Message() : "(null)") +
+                " markExists=" +
+                std::to_string(session_->DoesUndoMarkExist(
+                                   deleteMark, "编辑拆圆弧板-删除")
+                                   ? 1
+                                   : 0));
+            throw;
+        }
+        rebuildingEditedFeature_ = false;
+        AppendDebugLog("RebuildEditedFeature DoUpdate deleteErrors=" +
+                       std::to_string(deleteErrors));
+        {
+            int stillAlive = 0;
+            std::string alive;
+            for (tag_t tag : oldChain)
+            {
+                if (FeatureAlive(tag))
+                {
+                    ++stillAlive;
+                    alive += " " + std::to_string(tag);
+                }
+            }
+            AppendDebugLog("RebuildEditedFeature old construction still alive=" +
+                           std::to_string(stillAlive) + "/" +
+                           std::to_string(oldChain.size()) + alive);
+        }
+        if (deleteErrors != 0 || FeatureAlive(editedFeatureTag_))
+        {
+            throw std::runtime_error("删除旧的拆圆弧板特征失败。");
+        }
+
+        NXOpen::Face* face = AliveCylindricalFace(recordedFaces);
+        if (face == nullptr || face->GetBody() == nullptr)
+        {
+            throw std::runtime_error(
+                "无法读取已保存的圆弧面，不能编辑该特征。");
+        }
+
+        double diameter = 0.0;
+        double thickness = 0.0;
+        bool reverseThicken = false;
+        std::string error;
+        if (!EstimateCylinderThickness(face->GetBody(), face, diameter,
+                                       thickness, reverseThicken,
+                                       cachedWrapMode_, error))
+        {
+            throw std::runtime_error(error);
+        }
+        previewCreatedFeatureTags_.clear();
+        previewSubtractCreated_ = false;
+        previewTargetBodyTag_ = face->GetBody()->Tag();
+        previewSelectedFaceTag_ = face->Tag();
+        hasPreview_ = false;
+        if (!CreateArcPanel(face, thickness, reverseThicken, cutDistances_,
+                            offsetDistances_, cachedWrapMode_, error,
+                            cachedRecolor_, cachedAppliedColor_,
+                            &previewCreatedFeatureTags_, nullptr, nullptr))
+        {
+            throw std::runtime_error(error);
+        }
+        hasPreview_ = true;
+        if (!CommitPreviewSubtract(error))
+        {
+            throw std::runtime_error(error);
+        }
+        editedFeature_ = nullptr;
+        useCachedParameters_ = true;
+        buildingCustomFeature_ = true;
+        // Fresh mark for the rebuild, taken immediately before the commit that
+        // consumes it - see the note on deleteMark above.
+        commitMark = session_->SetUndoMark(
+            NXOpen::Session::MarkVisibilityVisible, "编辑拆圆弧板-重建");
+        AppendDebugLog("RebuildEditedFeature commitMark=" +
+                       std::to_string(commitMark) + " exists=" +
+                       std::to_string(session_->DoesUndoMarkExist(
+                                          commitMark, "编辑拆圆弧板-重建")
+                                          ? 1
+                                          : 0));
+        const bool committed = CommitEditableCustomFeature(error);
+        useCachedParameters_ = false;
+        buildingCustomFeature_ = false;
+        if (!committed)
+        {
+            throw std::runtime_error(
+                error.empty() ? "编辑拆圆弧板失败。" : error);
+        }
+        if (commitMark != static_cast<NXOpen::Session::UndoMarkId>(0))
+        {
+            AppendDebugLog("RebuildEditedFeature commitMark before update exists=" +
+                           std::to_string(session_->DoesUndoMarkExist(
+                                              commitMark, "编辑拆圆弧板-重建")
+                                              ? 1
+                                              : 0));
+            if (session_->DoesUndoMarkExist(commitMark, "编辑拆圆弧板-重建"))
+            {
+                try
+                {
+                    NXOpen::Update* commitUpdate = session_->UpdateManager();
+                    if (commitUpdate != nullptr)
+                    {
+                        commitUpdate->ClearDeleteList();
+                        commitUpdate->ClearErrorList();
+                        const int commitErrors =
+                            commitUpdate->DoUpdate(commitMark);
+                        AppendDebugLog("RebuildEditedFeature commit DoUpdate errors=" +
+                                       std::to_string(commitErrors));
+                    }
+                }
+                catch (const NXOpen::NXException& commitEx)
+                {
+                    AppendDebugLog("RebuildEditedFeature commit DoUpdate threw code=" +
+                                   std::to_string(commitEx.ErrorCode()) +
+                                   " message=" +
+                                   (commitEx.Message() != nullptr
+                                        ? commitEx.Message()
+                                        : "(null)"));
+                }
+            }
+            else
+            {
+                AppendDebugLog("RebuildEditedFeature commit update skipped: mark gone");
+            }
+        }
+        hasPreview_ = false;
+        previewCreatedFeatureTags_.clear();
+        previewUndoMark_ = static_cast<NXOpen::Session::UndoMarkId>(0);
+        previewSubtractCreated_ = false;
+        AppendDebugLog(FeatureTreeSnapshot("RebuildEditedFeature AFTER commit"));
+        // Release the rollback: Stop() rolls the model forward to the original
+        // current feature, Destroy() frees the transient object.
+        if (rollback != nullptr)
+        {
+            bool stopOk = false;
+            try
+            {
+                rollback->UpdateFeature(false);
+                rollback->Stop();
+                stopOk = true;
+                AppendDebugLog("RebuildEditedFeature rollback->Stop ok, currentNow=" +
+                               std::to_string(
+                                   session_->Parts()->Work()->CurrentFeature() == nullptr
+                                       ? NULL_TAG
+                                       : session_->Parts()->Work()->CurrentFeature()->Tag()));
+            }
+            catch (const NXOpen::NXException& rbEx)
+            {
+                // Stop() can fail to restore the pre-edit current feature after
+                // the replacement, which NX reports as "设为当前特征时出错 /
+                // Unable to replace current feature". That must not leave the
+                // model rolled back, so fall through to the explicit
+                // roll-forward below.
+                AppendDebugLog("RebuildEditedFeature rollback->Stop threw code=" +
+                               std::to_string(rbEx.ErrorCode()) + " message=" +
+                               (rbEx.Message() != nullptr ? rbEx.Message() : "(null)"));
+            }
+            try
+            {
+                rollback->Destroy();
+            }
+            catch (...)
+            {
+            }
+            rollback = nullptr;
+
+            // Explicit roll-forward: put the model back at the end of the
+            // feature tree (the newest feature), which is the state a finished
+            // edit must leave behind.
+            NXOpen::Part* workPart = session_->Parts()->Work();
+            NXOpen::Features::Feature* newest = nullptr;
+            try
+            {
+                for (NXOpen::Features::Feature* feature :
+                     workPart->Features()->GetFeatures())
+                {
+                    if (feature == nullptr || !FeatureAlive(feature->Tag()))
+                    {
+                        continue;
+                    }
+                    if (newest == nullptr ||
+                        feature->Timestamp() > newest->Timestamp())
+                    {
+                        newest = feature;
+                    }
+                }
+            }
+            catch (...)
+            {
+                newest = nullptr;
+            }
+            NXOpen::Features::Feature* currentBeforeRollback = nullptr;
+            if (FeatureAlive(currentFeatureBeforeEdit_))
+            {
+                currentBeforeRollback = dynamic_cast<NXOpen::Features::Feature*>(
+                    NXOpen::NXObjectManager::Get(currentFeatureBeforeEdit_));
+            }
+            const tag_t target = newest != nullptr
+                ? newest->Tag()
+                : (currentBeforeRollback != nullptr
+                       ? currentBeforeRollback->Tag()
+                       : NULL_TAG);
+            if (!stopOk && target != NULL_TAG)
+            {
+                try
+                {
+                    const int rollForward = UF_MODL_set_current_feature(target);
+                    AppendDebugLog("RebuildEditedFeature explicit roll-forward target=" +
+                                   std::to_string(target) + " status=" +
+                                   std::to_string(rollForward) + " currentNow=" +
+                                   std::to_string(
+                                       workPart->CurrentFeature() == nullptr
+                                           ? NULL_TAG
+                                           : workPart->CurrentFeature()->Tag()));
+                }
+                catch (const NXOpen::NXException& fwdEx)
+                {
+                    AppendDebugLog("RebuildEditedFeature explicit roll-forward threw code=" +
+                                   std::to_string(fwdEx.ErrorCode()));
+                }
+            }
+        }
+        AppendDebugLog(FeatureTreeSnapshot("RebuildEditedFeature AFTER reorder"));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        rebuildingEditedFeature_ = false;
+        useCachedParameters_ = false;
+        buildingCustomFeature_ = false;
+        hasPreview_ = false;
+        previewCreatedFeatureTags_.clear();
+        previewUndoMark_ = static_cast<NXOpen::Session::UndoMarkId>(0);
+        if (rollback != nullptr)
+        {
+            try
+            {
+                rollback->UpdateFeature(true);
+                rollback->Stop();
+                rollback->Destroy();
+            }
+            catch (...)
+            {
+            }
+            rollback = nullptr;
+        }
+        AppendDebugLog("RebuildEditedFeature failed NXException code=" +
+                       std::to_string(ex.ErrorCode()) + " message=" +
+                       (ex.Message() != nullptr ? ex.Message() : "(null)") +
+                       " deleteMarkExists=" +
+                       std::to_string(
+                           deleteMark !=
+                                       static_cast<
+                                           NXOpen::Session::UndoMarkId>(0) &&
+                                   session_->DoesUndoMarkExist(
+                                       deleteMark, "编辑拆圆弧板-删除")
+                               ? 1
+                               : 0));
+        // Only roll back when the mark is still valid; a recycled mark makes
+        // UndoToMark throw the very "错误的标记" error we are fixing here.
+        if (deleteMark != static_cast<NXOpen::Session::UndoMarkId>(0) &&
+            session_->DoesUndoMarkExist(deleteMark, "编辑拆圆弧板-删除"))
+        {
+            try
+            {
+                session_->UndoToMark(deleteMark, "编辑拆圆弧板失败");
+            }
+            catch (const NXOpen::NXException& undoEx)
+            {
+                AppendDebugLog("RebuildEditedFeature rollback failed code=" +
+                               std::to_string(undoEx.ErrorCode()));
+            }
+        }
+        else
+        {
+            AppendDebugLog("RebuildEditedFeature rollback skipped: mark gone");
+        }
+        throw;
+    }
+    catch (...)
+    {
+        rebuildingEditedFeature_ = false;
+        useCachedParameters_ = false;
+        buildingCustomFeature_ = false;
+        hasPreview_ = false;
+        previewCreatedFeatureTags_.clear();
+        previewUndoMark_ = static_cast<NXOpen::Session::UndoMarkId>(0);
+        if (rollback != nullptr)
+        {
+            try
+            {
+                rollback->UpdateFeature(true);
+                rollback->Stop();
+                rollback->Destroy();
+            }
+            catch (...)
+            {
+            }
+            rollback = nullptr;
+        }
+        AppendDebugLog("RebuildEditedFeature failed non-NX exception");
+        if (deleteMark != static_cast<NXOpen::Session::UndoMarkId>(0) &&
+            session_->DoesUndoMarkExist(deleteMark, "编辑拆圆弧板-删除"))
+        {
+            try
+            {
+                session_->UndoToMark(deleteMark, "编辑拆圆弧板失败");
+            }
+            catch (...)
+            {
+            }
+        }
+        throw;
+    }
+}
+
 int CaiRBanDialog::apply_cb()
 {
     SaveDialogState();
-    const bool editing = editedFeature_ != nullptr;
-    if (editedFeature_ == nullptr && !hasPreview_ && SelectedFace() == nullptr)
+    if (editedFeature_ != nullptr || FeatureAlive(editedFeatureTag_))
+    {
+        try
+        {
+            CaptureEditParameters();
+            const tag_t keptFace = previewSelectedFaceTag_;
+            const tag_t keptBody = previewTargetBodyTag_;
+            ReleaseFaceSelection();
+            // Put the model's current feature back before NX closes its own
+            // edit session. Leaving the dialog-open rollback in place makes NX
+            // fail "Unable to replace current feature" (Error code 1,
+            // ModlFeature_CustomFeatureData.cxx) and crash right after OK.
+            RestoreEditRollback();
+            UndoPreview();
+            previewSelectedFaceTag_ = keptFace;
+            dimensionFaceTag_ = keptFace;
+            previewTargetBodyTag_ = keptBody;
+            editRebuildPending_ = true;
+            return 0;
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            ShowError(ex.Message() != nullptr ? ex.Message()
+                                             : "编辑拆圆弧板失败。");
+            return 1;
+        }
+        catch (const std::exception& ex)
+        {
+            ShowError(ex.what());
+            return 1;
+        }
+    }
+    if (SelectedFace() == nullptr)
     {
         ShowError("请选择一个圆柱面。");
         return 1;
     }
-    if (editedFeature_ == nullptr && !hasPreview_)
+    if (!hasPreview_)
     {
         const int previewResult = CreatePreview();
         if (previewResult != 0)
@@ -1221,7 +2677,7 @@ int CaiRBanDialog::apply_cb()
         }
     }
     std::string error;
-    if (!editing && !CommitPreviewSubtract(error))
+    if (!CommitPreviewSubtract(error))
     {
         ShowError(error);
         return 1;
@@ -1231,22 +2687,19 @@ int CaiRBanDialog::apply_cb()
         ShowError(error);
         return 1;
     }
-    if (!editing)
-    {
-        NXOpen::BlockStyler::PropertyList* properties =
-            faceSelect_->GetProperties();
-        loadingEditedFeature_ = true;
-        properties->SetTaggedObjectVector(
-            "SelectedObjects", std::vector<NXOpen::TaggedObject*>());
-        loadingEditedFeature_ = false;
-        delete properties;
-        previewTargetBodyTag_ = NULL_TAG;
-        previewSelectedFaceTag_ = NULL_TAG;
-        previewColor_ = 0;
-        previewSubtractCreated_ = false;
-        dimensionValuesInitialized_ = false;
-        dimensionFaceTag_ = NULL_TAG;
-    }
+    NXOpen::BlockStyler::PropertyList* properties =
+        faceSelect_->GetProperties();
+    loadingEditedFeature_ = true;
+    properties->SetTaggedObjectVector(
+        "SelectedObjects", std::vector<NXOpen::TaggedObject*>());
+    loadingEditedFeature_ = false;
+    delete properties;
+    previewTargetBodyTag_ = NULL_TAG;
+    previewSelectedFaceTag_ = NULL_TAG;
+    previewColor_ = 0;
+    previewSubtractCreated_ = false;
+    dimensionValuesInitialized_ = false;
+    dimensionFaceTag_ = NULL_TAG;
     return 0;
 }
 
@@ -1257,6 +2710,7 @@ int CaiRBanDialog::ok_cb()
 
 int CaiRBanDialog::cancel_cb()
 {
+    ReleaseFaceSelection();
     UndoPreview();
     return 0;
 }
@@ -1272,7 +2726,11 @@ int CaiRBanDialog::CreatePreview()
     previewUndoMark_ = session_->SetUndoMark(
         NXOpen::Session::MarkVisibilityInvisible,
         "拆圆弧板预览");
-    previewTargetBodyTag_ = face->GetBody()->Tag();
+    if (previewTargetBodyTag_ == NULL_TAG ||
+        UF_OBJ_ask_status(previewTargetBodyTag_) != UF_OBJ_ALIVE)
+    {
+        previewTargetBodyTag_ = face->GetBody()->Tag();
+    }
     previewSelectedFaceTag_ = face->Tag();
     std::string error;
     double diameter = 0.0;
@@ -1393,7 +2851,26 @@ bool CaiRBanDialog::UndoPreview()
             update->ClearDeleteList();
             update->ClearErrorList();
             update->AddObjectsToDeleteList(survivingFeatures);
-            update->DoUpdate(cleanupMark);
+            try
+            {
+                update->DoUpdate(cleanupMark);
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                // Previously swallowed by catch(...); log it so a recycled
+                // cleanup mark is visible instead of silent.
+                AppendDebugLog(
+                    "UndoPreview cleanup DoUpdate threw code=" +
+                    std::to_string(ex.ErrorCode()) + " message=" +
+                    (ex.Message() != nullptr ? ex.Message() : "(null)") +
+                    " markExists=" +
+                    std::to_string(session_->DoesUndoMarkExist(
+                                       cleanupMark, "拆圆弧板预览清理")
+                                       ? 1
+                                       : 0) +
+                    " survivors=" + std::to_string(survivingFeatures.size()));
+                throw;
+            }
             if (session_->DoesUndoMarkExist(cleanupMark,
                                             "拆圆弧板预览清理"))
             {
@@ -1464,7 +2941,26 @@ NXOpen::Face* CaiRBanDialog::SelectedFace() const
     const std::vector<NXOpen::TaggedObject*> objects =
         properties->GetTaggedObjectVector("SelectedObjects");
     delete properties;
-    return objects.size() == 1 ? dynamic_cast<NXOpen::Face*>(objects.front()) : nullptr;
+    if (objects.size() == 1)
+    {
+        if (NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(objects.front()))
+        {
+            return face;
+        }
+    }
+    for (tag_t faceTag : {previewSelectedFaceTag_, dimensionFaceTag_})
+    {
+        if (faceTag == NULL_TAG || UF_OBJ_ask_status(faceTag) != UF_OBJ_ALIVE)
+        {
+            continue;
+        }
+        if (NXOpen::Face* face = dynamic_cast<NXOpen::Face*>(
+                NXOpen::NXObjectManager::Get(faceTag)))
+        {
+            return face;
+        }
+    }
+    return nullptr;
 }
 
 void CaiRBanDialog::ApplyPreviewTranslucency(NXOpen::Body* previewBody)
@@ -2382,112 +3878,21 @@ bool CaiRBanDialog::CreateArcPanel(
 
         // 两端偏置手柄均为自由有符号距离。外包默认 0，内包默认
         // 负板厚；拖动后按两端各自的实际数值创建偏置特征。
+        // 端面按轴线两端的位置识别。某一端没有可偏置平面时，只有该端
+        // 偏置距离不为 0 才失败；外包默认 0，仍可生成圆弧板。
         {
             stage = "定位端面偏置手柄";
-            std::vector<NXOpen::Face*> inwardOffsetFaces;
+            std::array<std::vector<NXOpen::Face*>, 2> endOffsetFaces;
+            std::array<NXOpen::Point3d, 2> endCenters{};
+            std::array<NXOpen::Vector3d, 2> endNormals{};
+            double axialMin = 0.0;
+            double axialMax = 0.0;
             const NXOpen::Point3d cylinderOrigin(
                 cylinderOriginData[0], cylinderOriginData[1],
                 cylinderOriginData[2]);
-            for (NXOpen::Face* candidateFace : panelBody->GetFaces())
-            {
-                NXOpen::Point3d planePoint;
-                NXOpen::Vector3d planeNormal;
-                if (candidateFace == nullptr ||
-                    !FacePlaneData(candidateFace, planePoint, planeNormal) ||
-                    std::fabs(Dot(planeNormal, cylinderAxis)) <
-                        kParallelTolerance)
-                {
-                    continue;
-                }
-
-                bool connectedToCoaxialArc = false;
-                for (NXOpen::Edge* candidateEdge : candidateFace->GetEdges())
-                {
-                    if (candidateEdge == nullptr ||
-                        candidateEdge->SolidEdgeType() !=
-                            NXOpen::Edge::EdgeTypeCircular)
-                    {
-                        continue;
-                    }
-                    for (NXOpen::Face* adjacentFace :
-                         candidateEdge->GetUnsortedFaces())
-                    {
-                        if (adjacentFace == nullptr ||
-                            adjacentFace == candidateFace ||
-                            adjacentFace->SolidFaceType() !=
-                                NXOpen::Face::FaceTypeCylindrical)
-                        {
-                            continue;
-                        }
-                        int adjacentType = 0;
-                        double adjacentOriginData[3] = {};
-                        double adjacentAxisData[3] = {};
-                        double adjacentBox[6] = {};
-                        double adjacentRadius = 0.0;
-                        double adjacentRadiusData = 0.0;
-                        int adjacentNormalDirection = 1;
-                        if (UF_MODL_ask_face_data(
-                                adjacentFace->Tag(), &adjacentType,
-                                adjacentOriginData, adjacentAxisData,
-                                adjacentBox, &adjacentRadius,
-                                &adjacentRadiusData,
-                                &adjacentNormalDirection) != 0 ||
-                            adjacentType != UF_MODL_CYLINDRICAL_FACE)
-                        {
-                            continue;
-                        }
-                        NXOpen::Vector3d adjacentAxis(
-                            adjacentAxisData[0], adjacentAxisData[1],
-                            adjacentAxisData[2]);
-                        const NXOpen::Point3d adjacentOrigin(
-                            adjacentOriginData[0], adjacentOriginData[1],
-                            adjacentOriginData[2]);
-                        if (Normalize(adjacentAxis) &&
-                            std::fabs(Dot(adjacentAxis, cylinderAxis)) >=
-                                kParallelTolerance &&
-                            Length(Cross(Subtract(adjacentOrigin,
-                                                  cylinderOrigin),
-                                         cylinderAxis)) <=
-                                (std::max)(1.0e-3,
-                                           cylinderRadius * 1.0e-5))
-                        {
-                            connectedToCoaxialArc = true;
-                            break;
-                        }
-                    }
-                    if (connectedToCoaxialArc)
-                    {
-                        break;
-                    }
-                }
-                if (connectedToCoaxialArc)
-                {
-                    inwardOffsetFaces.push_back(candidateFace);
-                }
-            }
-
-            if (inwardOffsetFaces.empty())
-            {
-                throw std::runtime_error(
-                    "未找到与加厚体圆弧边连接的端部平面。");
-            }
-
-            std::sort(
-                inwardOffsetFaces.begin(), inwardOffsetFaces.end(),
-                [&cylinderOrigin, &cylinderAxis](NXOpen::Face* left,
-                                                 NXOpen::Face* right)
-                {
-                    return Dot(Subtract(FaceBoxCenter(left), cylinderOrigin),
-                               cylinderAxis) <
-                           Dot(Subtract(FaceBoxCenter(right), cylinderOrigin),
-                               cylinderAxis);
-                });
-            if (inwardOffsetFaces.size() > 2)
-            {
-                inwardOffsetFaces = std::vector<NXOpen::Face*>{
-                    inwardOffsetFaces.front(), inwardOffsetFaces.back()};
-            }
-            if (inwardOffsetFaces.size() != 2)
+            if (!LocateThickenedEndCaps(
+                    panelBody, cylinderOrigin, cylinderAxis, endOffsetFaces,
+                    endCenters, endNormals, axialMin, axialMax))
             {
                 throw std::runtime_error(
                     "未能准确找到加厚体两端的偏置平面。");
@@ -2495,24 +3900,46 @@ bool CaiRBanDialog::CreateArcPanel(
 
             for (std::size_t index = 0; index < 2; ++index)
             {
-                NXOpen::Point3d planePoint;
-                NXOpen::Vector3d outwardNormal;
-                if (!FacePlaneData(inwardOffsetFaces[index], planePoint,
-                                   outwardNormal))
+                if (!endOffsetFaces[index].empty())
                 {
-                    throw std::runtime_error("无法读取偏置端面的法向。");
+                    continue;
                 }
-                if (handleOrigins != nullptr && handleDirections != nullptr)
+                if (std::fabs(offsetDistances[index]) > kTolerance)
                 {
-                    (*handleOrigins)[index + 2] =
-                        FaceBoxCenter(inwardOffsetFaces[index]);
-                    (*handleDirections)[index + 2] = outwardNormal;
+                    throw std::runtime_error(
+                        "未能准确找到加厚体两端的偏置平面。");
+                }
+                const double position = index == 0 ? axialMin : axialMax;
+                endCenters[index] =
+                    Move(cylinderOrigin, cylinderAxis, position);
+                const double sense = index == 0 ? -1.0 : 1.0;
+                endNormals[index] = NXOpen::Vector3d(
+                    cylinderAxis.X * sense, cylinderAxis.Y * sense,
+                    cylinderAxis.Z * sense);
+                const std::size_t other = index == 0 ? 1 : 0;
+                const double otherSense = other == 0 ? -1.0 : 1.0;
+                if (!endOffsetFaces[other].empty() &&
+                    Dot(endNormals[other], cylinderAxis) * otherSense < 0.0)
+                {
+                    endNormals[index].X = -endNormals[index].X;
+                    endNormals[index].Y = -endNormals[index].Y;
+                    endNormals[index].Z = -endNormals[index].Z;
+                }
+            }
+
+            if (handleOrigins != nullptr && handleDirections != nullptr)
+            {
+                for (std::size_t index = 0; index < 2; ++index)
+                {
+                    (*handleOrigins)[index + 2] = endCenters[index];
+                    (*handleDirections)[index + 2] = endNormals[index];
                 }
             }
 
             for (std::size_t index = 0; index < 2; ++index)
             {
-                if (std::fabs(offsetDistances[index]) <= kTolerance)
+                if (std::fabs(offsetDistances[index]) <= kTolerance ||
+                    endOffsetFaces[index].empty())
                 {
                     continue;
                 }
@@ -2528,8 +3955,7 @@ bool CaiRBanDialog::CreateArcPanel(
                 offsetOptions->SetSelectedFromInactive(false);
                 NXOpen::FaceDumbRule* offsetRule =
                     workPart->ScRuleFactory()->CreateRuleFaceDumb(
-                        std::vector<NXOpen::Face*>{inwardOffsetFaces[index]},
-                        offsetOptions);
+                        endOffsetFaces[index], offsetOptions);
                 delete offsetOptions;
                 innerOffset->FaceCollector()->ReplaceRules(
                     std::vector<NXOpen::SelectionIntentRule*>{offsetRule},

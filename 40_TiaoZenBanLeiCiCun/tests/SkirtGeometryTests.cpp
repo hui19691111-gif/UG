@@ -13,6 +13,8 @@
 #include <NXOpen/ScRuleFactory.hxx>
 #include <NXOpen/Session.hxx>
 #include <uf.h>
+#include <uf_modl.h>
+#include <uf_obj.h>
 #include <uf_part.h>
 #include <array>
 #include <iostream>
@@ -224,11 +226,166 @@ void MoveSide(Face* skin, const Vector3d& outward, double distance,
     }
 }
 
+void CheckBossDoesNotChangeThickness()
+{
+    tag_t part;
+    Uf(UF_PART_new("skirt_boss.prt", 1, &part));
+    tag_t body = Block(0, 0, 0, 200, 150, 2);
+    Uf(UF_MODL_unite_bodies(body, Block(80, 60, 2, 30, 30, 0.4)));
+    Body* solid = dynamic_cast<Body*>(NXObjectManager::Get(body));
+    Face* skin = MainSkin(solid, false);
+    double thickness = 1.0e100;
+    const Vector3d directions[] = {
+        Vector3d(-1, 0, 0), Vector3d(1, 0, 0),
+        Vector3d(0, -1, 0), Vector3d(0, 1, 0)};
+    for (const auto& direction : directions)
+    {
+        const double value = panel_skirt::SectionThickness(
+            skin, Point3d(0, 0, 2), Vector3d(0, 0, 1), direction, 0.001);
+        std::cout << "boss side thickness=" << value << std::endl;
+        if (value > 0)
+            thickness = (std::min)(thickness, value);
+    }
+    Check(std::abs(thickness - 2.0) < 0.05,
+          "Interior boss changed sheet thickness to " + std::to_string(thickness));
+    auto selection = panel_skirt::Collect(
+        skin, Point3d(0, 0, 2), Vector3d(0, 0, 1), Vector3d(1, 0, 0),
+        thickness, 0.001);
+    Check(selection.error.empty(), selection.error);
+}
+
+int CountFeatures(Part* part)
+{
+    int count = 0;
+    for (Features::Feature* feature : part->Features()->GetFeatures())
+    {
+        if (feature != nullptr)
+            ++count;
+    }
+    return count;
+}
+
+tag_t AddedFeature(const std::vector<tag_t>& before, Part* part)
+{
+    tag_t created = NULL_TAG;
+    int added = 0;
+    for (Features::Feature* feature : part->Features()->GetFeatures())
+    {
+        if (feature == nullptr)
+            continue;
+        bool known = false;
+        for (tag_t tag : before)
+        {
+            if (tag == feature->Tag())
+                known = true;
+        }
+        if (!known)
+        {
+            created = feature->Tag();
+            ++added;
+        }
+    }
+    Check(added <= 1, "One side created more than one feature");
+    return created;
+}
+
+void CheckDisplacement(const std::vector<panel_skirt::SurfacePosition>& baseline,
+                       const Point3d& origin, const Vector3d& normal,
+                       const Vector3d& outward, double distance)
+{
+    for (const auto& original : baseline)
+    {
+        auto* face = dynamic_cast<Face*>(NXObjectManager::Get(original.tag));
+        panel_skirt::SurfacePosition after;
+        Check(panel_skirt::Measure(face, origin, normal, outward, after),
+              "Remeasure after edit failed");
+        Check(std::abs(after.outward - original.outward -
+                       distance * original.motionProjection) < 0.001,
+              "Edited distance stacked on the previous move");
+    }
+}
+
+void CheckEditKeepsOneFeature()
+{
+    tag_t partTag = NULL_TAG;
+    Uf(UF_PART_new("skirt_edit.prt", 1, &partTag));
+    Body* body = Fixture(0);
+    Face* skin = MainSkin(body, false);
+    const auto originalBounds = Bounds(body);
+    Part* part = Session::GetSession()->Parts()->Work();
+    std::vector<tag_t> before;
+    for (Features::Feature* feature : part->Features()->GetFeatures())
+    {
+        if (feature != nullptr)
+            before.push_back(feature->Tag());
+    }
+    const int countBefore = static_cast<int>(before.size());
+
+    const Point3d origin(0, 0, 2);
+    const Vector3d normal(0, 0, 1);
+    const Vector3d outward(1, 0, 0);
+    auto selection = panel_skirt::Collect(skin, origin, normal, outward, 2, 0.001);
+    Check(selection.error.empty(), selection.error);
+    std::vector<panel_skirt::SurfacePosition> baseline;
+    for (Face* face : selection.faces)
+    {
+        panel_skirt::SurfacePosition value;
+        Check(panel_skirt::Measure(face, origin, normal, outward, value),
+              "Measure before edit failed");
+        baseline.push_back(value);
+    }
+
+    auto* builder = part->Features()->CreateMoveFaceBuilder(nullptr);
+    auto* direction = part->Directions()->CreateDirection(
+        origin, outward, SmartObject::UpdateOptionWithinModeling);
+    builder->SetType(Features::MoveFaceBuilder::TypesTranslateDirectionAndDistance);
+    builder->SetDirection(direction);
+    builder->Distance()->SetFormula("5");
+    auto* rule = part->ScRuleFactory()->CreateRuleFaceDumb(selection.faces);
+    builder->MoveFaceCollector()->ReplaceRules({rule}, false);
+    const auto created = panel_skirt::CommitAndVerifyMove(
+        builder, baseline, origin, normal, outward, 5, 0.001);
+    builder->Destroy();
+    Check(created.error.empty(), created.error);
+
+    tag_t featureTag = created.featureTag != NULL_TAG
+        ? created.featureTag
+        : AddedFeature(before, part);
+    std::cout << "edit featureTag=" << featureTag
+              << " countBefore=" << countBefore
+              << " countAfterCreate=" << CountFeatures(part) << std::endl;
+    Check(featureTag != NULL_TAG, "Move Face did not create an editable feature");
+    const int countAfterCreate = CountFeatures(part);
+
+    auto* feature = dynamic_cast<Features::Feature*>(NXObjectManager::Get(featureTag));
+    const auto edited = panel_skirt::EditMoveDistance(
+        part, feature, 12, baseline, origin, normal, outward, 0.001);
+    Check(edited.error.empty(), edited.error);
+    Check(CountFeatures(part) == countAfterCreate,
+          "Editing distance from 5 to 12 created another feature");
+    CheckDisplacement(baseline, origin, normal, outward, 12);
+
+    const tag_t editedTag = edited.featureTag != NULL_TAG ? edited.featureTag : featureTag;
+    feature = dynamic_cast<Features::Feature*>(NXObjectManager::Get(editedTag));
+    const auto editedAgain = panel_skirt::EditMoveDistance(
+        part, feature, 3, baseline, origin, normal, outward, 0.001);
+    Check(editedAgain.error.empty(), editedAgain.error);
+    Check(CountFeatures(part) == countAfterCreate,
+          "Editing distance from 12 to 3 created another feature");
+    CheckDisplacement(baseline, origin, normal, outward, 3);
+    const auto actual = Bounds(body);
+    Check(std::abs(actual[3] - (originalBounds[3] + 3.0)) < 0.001,
+          "Edited body did not move by the latest distance");
+    std::cout << "PASS edit keeps one Move Face and uses the latest distance" << std::endl;
+}
+
 int main()
 {
     try
     {
         Uf(UF_initialize());
+        CheckBossDoesNotChangeThickness();
+        std::cout << "PASS interior boss does not change sheet thickness" << std::endl;
         const std::array<Vector3d, 4> directions{
             Vector3d(-1, 0, 0), Vector3d(1, 0, 0),
             Vector3d(0, -1, 0), Vector3d(0, 1, 0)};
@@ -243,6 +400,18 @@ int main()
                 std::cout << "CREATE fixture=" << type << " underside=" << underside << std::endl;
                 Body* body = Fixture(type);
                 Face* skin = MainSkin(body, underside);
+                double sectionThickness = 1.0e100;
+                for (const auto& direction : directions)
+                {
+                    const double value = panel_skirt::SectionThickness(
+                        skin, Point3d(0, 0, underside ? 0 : 2),
+                        Vector3d(0, 0, underside ? -1 : 1), direction, 0.001);
+                    if (value > 0)
+                        sectionThickness = (std::min)(sectionThickness, value);
+                }
+                std::cout << "sectionThickness=" << sectionThickness << std::endl;
+                Check(std::abs(sectionThickness - 2.0) < 0.05,
+                      "Section thickness drifted to " + std::to_string(sectionThickness));
                 CheckWidths(skin, type, underside);
                 const auto originalBounds = Bounds(body);
                 // Null commit results must still fail if geometry is wrong.
@@ -283,6 +452,7 @@ int main()
             }
         std::cout << "PASS " << checks << " NX commits and geometry moves; in-place="
                   << inPlaceMoves << std::endl;
+        CheckEditKeepsOneFeature();
         UF_terminate();
         return 0;
     }

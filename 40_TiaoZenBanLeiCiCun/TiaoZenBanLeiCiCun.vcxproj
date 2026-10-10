@@ -53,7 +53,7 @@
       <AdditionalDependencies>libugopenint.lib;libufun.lib;libnxopencpp.lib;libnxopencpp_gateway.lib;libnxopencpp_features.lib;libnxopencpp_geometricutilities.lib;libnxopenuicpp.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)TiaoZenBanLeiCiCun.dlx" "$(OutDir)TiaoZenBanLeiCiCun.dlx" &amp;&amp; copy /Y "$(ProjectDir)TiaoZenBanLeiCiCun.bmp" "$(OutDir)TiaoZenBanLeiCiCun.bmp" &amp;&amp; copy /Y "$(ProjectDir)TiaoZenBanLeiCiCunGuide.bmp" "$(OutDir)TiaoZenBanLeiCiCunGuide.bmp"</Command>
+      <Command>copy /Y "$(ProjectDir)TiaoZenBanLeiCiCun.dlx" "$(OutDir)TiaoZenBanLeiCiCun.dlx" &amp;&amp; copy /Y "$(ProjectDir)TiaoZenBanLeiCiCun.bmp" "$(OutDir)TiaoZenBanLeiCiCun.bmp" &amp;&amp; copy /Y "$(ProjectDir)TiaoZenBanLeiCiCunGuide.bmp" "$(OutDir)TiaoZenBanLeiCiCunGuide.bmp" &amp;&amp; copy /Y "$(ProjectDir)CustomFeatureConfiguration.xml" "$(OutDir)CustomFeatureConfiguration.xml"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>

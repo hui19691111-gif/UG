@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CustomFeatureLib>
+    <CustomFeature
+        FeatureClass="NXOpen::CustomFeature::TiaoZenBanLeiCiCun"
+        FeatureName="板件调尺"
+        FeatureIcon="TiaoZenBanLeiCiCun"
+        FeatureLibrary="TiaoZenBanLeiCiCunCore"
+        FeatureUILibrary="TiaoZenBanLeiCiCun"
+        IsWithoutBody="false"/>
+</CustomFeatureLib>

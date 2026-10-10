@@ -11,6 +11,9 @@
 #include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/BodyDumbRule.hxx>
+#include <NXOpen/BodyFeatureRule.hxx>
+#include <NXOpen/Expression.hxx>
+#include <NXOpen/NXMatrix.hxx>
 #include <NXOpen/Arc.hxx>
 #include <NXOpen/Curve.hxx>
 #include <NXOpen/CurveCollection.hxx>
@@ -22,13 +25,17 @@
 #include <NXOpen/Face.hxx>
 #include <NXOpen/FaceDumbRule.hxx>
 #include <NXOpen/Features_BooleanBuilder.hxx>
+#include <NXOpen/Features_BooleanFeature.hxx>
 #include <NXOpen/Features_CustomAttribute.hxx>
 #include <NXOpen/Features_CustomAttributeCollection.hxx>
+#include <NXOpen/Features_ConstructionFeatureData.hxx>
+#include <NXOpen/Features_CustomFeature.hxx>
 #include <NXOpen/Features_CustomFeatureBuilder.hxx>
 #include <NXOpen/Features_CustomFeatureClass.hxx>
 #include <NXOpen/Features_CustomFeatureClassManager.hxx>
 #include <NXOpen/Features_CustomFeatureData.hxx>
 #include <NXOpen/Features_CustomFeatureDataCollection.hxx>
+#include <NXOpen/Features_CustomStringAttribute.hxx>
 #include <NXOpen/Features_CustomTagArrayAttribute.hxx>
 #include <NXOpen/Features_ExtrudeBuilder.hxx>
 #include <NXOpen/Features_Feature.hxx>
@@ -46,6 +53,8 @@
 #include <NXOpen/GeometricUtilities_Limits.hxx>
 #include <NXOpen/GeometricUtilities_SmartVolumeProfileBuilder.hxx>
 #include <NXOpen/Line.hxx>
+#include <NXOpen/ErrorInfo.hxx>
+#include <NXOpen/ErrorList.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObjectManager.hxx>
@@ -74,9 +83,15 @@
 #include <uf.h>
 #include <uf_disp.h>
 #include <uf_modl.h>
+#include <uf_modl_utilities.h>
 #include <uf_obj.h>
 #include <uf_smd.h>
 #include <uf_ui_types.h>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -90,6 +105,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 
 namespace
 {
@@ -194,6 +210,51 @@ bool IsAlive(tag_t tag)
     return tag != NULL_TAG && UF_OBJ_ask_status(tag) == UF_OBJ_ALIVE;
 }
 
+void LogUpdateUndoFeature()
+{
+    tag_t feature = NULL_TAG;
+    int failure = 0;
+    if (UF_MODL_ask_update_undo_feat(&feature, &failure) != 0) return;
+    if (feature == NULL_TAG && failure == 0) return;
+    char name[UF_OBJ_NAME_LEN + 1] = {};
+    if (feature != NULL_TAG) UF_OBJ_ask_name(feature, name);
+    AppendDebugLog("update undo feature=" + std::to_string(feature) +
+        " code=" + std::to_string(failure) +
+        " name=" + (name[0] == '\0' ? "(none)" : name));
+}
+
+void LogUpdateErrors()
+{
+    NXOpen::ErrorList* errors =
+        NXOpen::Session::GetSession()->UpdateManager()->ErrorList();
+    if (errors == nullptr || errors->Length() <= 0) return;
+    AppendDebugLog("update error count=" + std::to_string(errors->Length()));
+    for (int index = 0; index < errors->Length(); ++index)
+    {
+        NXOpen::ErrorInfo* info = errors->GetErrorInfo(index);
+        if (info == nullptr) continue;
+        NXOpen::NXObject* object = info->ErrorObject();
+        AppendDebugLog("update error code=" + std::to_string(info->ErrorCode()) +
+            " object=" + std::to_string(object == nullptr ? 0 : object->Tag()));
+    }
+}
+
+int ChangeFeatureSuppression(const std::vector<tag_t>& tags, bool suppress)
+{
+    std::set<tag_t> unique;
+    for (tag_t tag : tags)
+        if (IsAlive(tag)) unique.insert(tag);
+    if (unique.empty()) return 0;
+    uf_list_p_t list = nullptr;
+    if (UF_MODL_create_list(&list) != 0 || list == nullptr) return -1;
+    for (tag_t tag : unique)
+        UF_MODL_put_list_item(list, tag);
+    const int error = suppress ? UF_MODL_suppress_feature(list)
+                               : UF_MODL_unsuppress_feature(list);
+    UF_MODL_delete_list(&list);
+    return error;
+}
+
 double Dot(const NXOpen::Vector3d& a, const NXOpen::Vector3d& b)
 {
     return a.X * b.X + a.Y * b.Y + a.Z * b.Z;
@@ -272,6 +333,58 @@ std::vector<char> NumberBuffer(double value)
     return buffer;
 }
 
+BendMarkNotchDialog* g_deferredDialog = nullptr;
+int g_deferredTries = 0;
+bool g_keepLoaded = false;
+
+void CALLBACK DeferredRebuildTimer(HWND, UINT, UINT_PTR id, DWORD)
+{
+    KillTimer(nullptr, id);
+    BendMarkNotchDialog* dialog = g_deferredDialog;
+    if (dialog == nullptr) return;
+    if (UF_initialize() != 0)
+    {
+        g_deferredDialog = nullptr;
+        g_keepLoaded = false;
+        delete dialog;
+        return;
+    }
+    bool finished = true;
+    try
+    {
+        NXOpen::Features::CustomFeature* still = nullptr;
+        try
+        {
+            still = NXOpen::Session::GetSession()->CustomFeatureClassManager()
+                        ->GetEditedCustomFeature();
+        }
+        catch (const NXOpen::NXException&) {}
+        if (still != nullptr && g_deferredTries < 40 &&
+            SetTimer(nullptr, 0, 250, DeferredRebuildTimer) != 0)
+        {
+            ++g_deferredTries;
+            finished = false;
+            AppendDebugLog("rebuild wait edited=" + std::to_string(still->Tag()) +
+                " try=" + std::to_string(g_deferredTries));
+        }
+        else
+        {
+            g_deferredDialog = nullptr;
+            g_deferredTries = 0;
+            g_keepLoaded = false;
+            dialog->RunDeferredRebuild();
+        }
+    }
+    catch (...)
+    {
+        g_deferredDialog = nullptr;
+        g_keepLoaded = false;
+        AppendDebugLog("rebuild timer failed");
+    }
+    if (finished) delete dialog;
+    UF_terminate();
+}
+
 NXOpen::Point3d PlanarFacePoint(NXOpen::Face* face)
 {
     int type = 0, normalDirection = 0;
@@ -292,8 +405,22 @@ BendMarkNotchDialog::BendMarkNotchDialog()
       bodySelect_(nullptr), distinguishBends_(nullptr), directionHelp_(nullptr),
       largeBendRatio_(nullptr), divideLargeBend_(nullptr),
       largeBendSegments_(nullptr), largeBendHelp_(nullptr),
-      status_(nullptr), initialized_(false), shown_(false), updating_(false)
+      status_(nullptr), initialized_(false), shown_(false), updating_(false),
+      editedFeatureTag_(NULL_TAG)
 {
+    try
+    {
+        NXOpen::Features::CustomFeature* edited =
+            session_->CustomFeatureClassManager()->GetEditedCustomFeature();
+        if (edited != nullptr && IsBendMarkNotchFeature(edited))
+            editedFeatureTag_ = edited->Tag();
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("query edited custom feature failed code=" +
+            std::to_string(ex.ErrorCode()));
+    }
+    AppendDebugLog("dialog open edited=" + std::to_string(editedFeatureTag_));
     dialog_->AddInitializeHandler(
         NXOpen::make_callback(this, &BendMarkNotchDialog::initialize_cb));
     dialog_->AddDialogShownHandler(
@@ -336,12 +463,110 @@ BendMarkNotchDialog::~BendMarkNotchDialog()
     session_ = nullptr;
 }
 
+bool BendMarkNotchShouldStayLoaded()
+{
+    return g_keepLoaded;
+}
+
+bool BendMarkNotchDialog::DeferredRebuildPending() const
+{
+    return g_deferredDialog == this;
+}
+
+bool BendMarkNotchDialog::ScheduleDeferredRebuild()
+{
+    if (g_deferredDialog != nullptr) return false;
+    g_deferredDialog = this;
+    g_deferredTries = 0;
+    g_keepLoaded = true;
+    if (SetTimer(nullptr, 0, 400, DeferredRebuildTimer) == 0)
+    {
+        g_deferredDialog = nullptr;
+        g_keepLoaded = false;
+        return false;
+    }
+    AppendDebugLog("rebuild scheduled feature=" +
+        std::to_string(editedFeatureTag_));
+    return true;
+}
+
+void BendMarkNotchDialog::RunDeferredRebuild()
+{
+    // The Block Styler dialog is already closed. Leave its blocks alone.
+    status_ = nullptr;
+    NXOpen::Features::CustomFeature* still = nullptr;
+    try
+    {
+        still = session_->CustomFeatureClassManager()->GetEditedCustomFeature();
+    }
+    catch (const NXOpen::NXException&) {}
+    if (still != nullptr)
+    {
+        AppendDebugLog("rebuild abandoned edited=" + std::to_string(still->Tag()));
+        ShowError("NX 仍处于编辑状态，折弯标记缺口未更新。");
+        return;
+    }
+    try
+    {
+        RebuildEditedFeature();
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("rebuild failed code=" + std::to_string(ex.ErrorCode()) +
+            " message=" + ex.Message());
+        ShowError(ex.Message());
+    }
+    catch (const std::exception& ex)
+    {
+        AppendDebugLog(std::string("rebuild failed: ") + ex.what());
+        ShowError(ex.what());
+    }
+}
+
 NXOpen::BlockStyler::BlockDialog::DialogResponse
 BendMarkNotchDialog::Launch()
 {
-    return dialog_->Launch();
+    const NXOpen::BlockStyler::BlockDialog::DialogResponse response =
+        dialog_->LaunchInDialogMode(
+            editedFeatureTag_ != NULL_TAG
+                ? NXOpen::BlockStyler::BlockDialog::DialogModeEdit
+                : NXOpen::BlockStyler::BlockDialog::DialogModeCreate);
+    NXOpen::Features::CustomFeature* stillEdited = nullptr;
+    try
+    {
+        stillEdited = session_->CustomFeatureClassManager()->GetEditedCustomFeature();
+    }
+    catch (const NXOpen::NXException&) {}
+    AppendDebugLog("dialog closed response=" + std::to_string(response) +
+        " rebuild=" + std::to_string(editRebuildPending_ ? 1 : 0) +
+        " stillEdited=" + std::to_string(stillEdited == nullptr ? 0 : stillEdited->Tag()));
+    if (!editRebuildPending_) return response;
+    editRebuildPending_ = false;
+    if (stillEdited != nullptr)
+    {
+        // NX keeps the edit session until this command returns, and deleting
+        // the node before then crashes. Rebuild on a timer after it ends.
+        if (!ScheduleDeferredRebuild())
+            ShowError("折弯标记缺口未能在编辑结束后重新创建。");
+        return response;
+    }
+    try
+    {
+        RebuildEditedFeature();
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("rebuild failed code=" + std::to_string(ex.ErrorCode()) +
+            " message=" + ex.Message());
+        ShowError(ex.Message());
+    }
+    catch (const std::exception& ex)
+    {
+        AppendDebugLog(std::string("rebuild failed: ") + ex.what());
+        ShowError(ex.what());
+    }
+    return response;
 }
-
 std::string BendMarkNotchDialog::DialogPath() const
 {
     return ModuleDirectory() + "BendMarkNotch.dlx";
@@ -401,6 +626,41 @@ void BendMarkNotchDialog::dialogShown_cb()
     {
         if (!initialized_) return;
         shown_ = true;
+        if (editedFeatureTag_ != NULL_TAG && IsAlive(editedFeatureTag_))
+        {
+            const char* stored = nullptr;
+            try
+            {
+                auto* edited = dynamic_cast<NXOpen::Features::CustomFeature*>(
+                    NXOpen::NXObjectManager::Get(editedFeatureTag_));
+                NXOpen::Features::CustomFeatureData* data =
+                    edited == nullptr ? nullptr : edited->FeatureData();
+                NXOpen::Features::CustomStringAttribute* attribute =
+                    data == nullptr ? nullptr :
+                    data->CustomStringAttributeByName(
+                        zhihui_bend_mark_notch::kAttrSettings);
+                if (attribute != nullptr)
+                    stored = attribute->Value().GetUTF8Text();
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                AppendDebugLog("dialog settings read failed code=" +
+                    std::to_string(ex.ErrorCode()));
+                stored = nullptr;
+            }
+            DialogSettings settings;
+            if (stored != nullptr && DecodeDialogSettings(stored, settings))
+            {
+                ApplyDialogSettings(settings);
+                AppendDebugLog("dialog restored settings feature=" +
+                    std::to_string(editedFeatureTag_));
+            }
+            else
+            {
+                AppendDebugLog("dialog has no stored settings feature=" +
+                    std::to_string(editedFeatureTag_));
+            }
+        }
         UpdateControlState();
         if (!ToggleValue(autoSelect_) && bodySelect_ != nullptr)
             bodySelect_->Focus();
@@ -606,6 +866,120 @@ BendMarkNotchDialog::NotchSettings BendMarkNotchDialog::ReadNotchSettings(
     return settings;
 }
 
+BendMarkNotchDialog::DialogSettings BendMarkNotchDialog::ReadDialogSettings() const
+{
+    DialogSettings settings;
+    settings.automatic = ToggleValue(autoSelect_);
+    settings.separate = ToggleValue(distinguishBends_);
+    settings.large = ReadLargeBendSettings();
+    settings.common = ReadNotchSettings(commonNotch_);
+    settings.up = ReadNotchSettings(upNotch_);
+    settings.down = ReadNotchSettings(downNotch_);
+    return settings;
+}
+
+std::string BendMarkNotchDialog::EncodeDialogSettings(
+    const DialogSettings& settings) const
+{
+    std::ostringstream text;
+    text.precision(16);
+    const auto writeNotch = [&](const NotchSettings& notch)
+    {
+        text << (notch.lineMark ? 1 : 0) << ' ' << notch.edgeOffset << ' '
+             << notch.type << ' ' << notch.diameter << ' ' << notch.angle << ' '
+             << notch.depth << ' ' << notch.width << ' ';
+    };
+    text << "v1 " << (settings.automatic ? 1 : 0) << ' '
+         << (settings.separate ? 1 : 0) << ' '
+         << settings.large.radiusThicknessRatio << ' '
+         << settings.large.segments << ' ';
+    writeNotch(settings.common);
+    writeNotch(settings.up);
+    writeNotch(settings.down);
+    return text.str();
+}
+
+bool BendMarkNotchDialog::DecodeDialogSettings(
+    const std::string& text, DialogSettings& settings) const
+{
+    std::istringstream input(text);
+    std::string version;
+    int automatic = 0;
+    int separate = 0;
+    const auto readNotch = [&](NotchSettings& notch)
+    {
+        int lineMark = 0;
+        input >> lineMark >> notch.edgeOffset >> notch.type >> notch.diameter >>
+            notch.angle >> notch.depth >> notch.width;
+        notch.lineMark = lineMark != 0;
+    };
+    input >> version >> automatic >> separate >>
+        settings.large.radiusThicknessRatio >> settings.large.segments;
+    readNotch(settings.common);
+    readNotch(settings.up);
+    readNotch(settings.down);
+    if (version != "v1" || input.fail()) return false;
+    settings.automatic = automatic != 0;
+    settings.separate = separate != 0;
+    return true;
+}
+
+void BendMarkNotchDialog::ApplyDialogSettings(const DialogSettings& settings) const
+{
+    const auto setLogical = [](NXOpen::BlockStyler::UIBlock* block, bool value)
+    {
+        std::unique_ptr<NXOpen::BlockStyler::PropertyList> properties(
+            block->GetProperties());
+        properties->SetLogical("Value", value);
+    };
+    const auto setDouble = [](NXOpen::BlockStyler::UIBlock* block, double value)
+    {
+        std::unique_ptr<NXOpen::BlockStyler::PropertyList> properties(
+            block->GetProperties());
+        properties->SetDouble("Value", value);
+    };
+    const auto setEnum = [](NXOpen::BlockStyler::UIBlock* block, int value)
+    {
+        std::unique_ptr<NXOpen::BlockStyler::PropertyList> properties(
+            block->GetProperties());
+        properties->SetEnum("Value", value);
+    };
+    const auto setInteger = [](NXOpen::BlockStyler::UIBlock* block, int value)
+    {
+        std::unique_ptr<NXOpen::BlockStyler::PropertyList> properties(
+            block->GetProperties());
+        properties->SetInteger("Value", value);
+    };
+    const auto applyNotch = [&](const NotchControls& controls,
+                                 const NotchSettings& notch)
+    {
+        setEnum(controls.method, notch.lineMark ? 1 : 0);
+        setEnum(controls.type, notch.type);
+        setDouble(controls.diameter, notch.diameter);
+        setDouble(controls.angle, notch.angle);
+        if (notch.lineMark)
+        {
+            setDouble(controls.lineLength, notch.depth);
+            setDouble(controls.lineOffset, notch.edgeOffset);
+        }
+        else
+        {
+            setDouble(controls.depth, notch.depth);
+            setDouble(controls.rectangleWidth, notch.width);
+            setDouble(controls.rectangleDepth, notch.depth);
+        }
+    };
+    setLogical(autoSelect_, settings.automatic);
+    setLogical(distinguishBends_, settings.separate);
+    setDouble(largeBendRatio_, settings.large.radiusThicknessRatio);
+    setLogical(divideLargeBend_, settings.large.segments > 1);
+    setInteger(largeBendSegments_,
+        settings.large.segments > 1 ? settings.large.segments : 2);
+    applyNotch(commonNotch_, settings.common);
+    applyNotch(upNotch_, settings.up);
+    applyNotch(downNotch_, settings.down);
+}
+
 void BendMarkNotchDialog::ValidateNotchSettings(
     const NotchSettings& settings, const std::string& label) const
 {
@@ -735,6 +1109,8 @@ int BendMarkNotchDialog::Execute()
     }
     else
         ValidateNotchSettings(ReadNotchSettings(commonNotch_), "");
+    if (editedFeatureTag_ != NULL_TAG && IsAlive(editedFeatureTag_))
+        return ExecuteEdit();
 
     std::vector<NXOpen::Body*> bodies;
     const NXOpen::Session::UndoMarkId validationMark = session_->SetUndoMark(
@@ -765,6 +1141,10 @@ int BendMarkNotchDialog::Execute()
     {
         int bodyCount = 0;
         int notchCount = 0;
+        bool rebuilt = false;
+        bool showMarkSet = false;
+        NXOpen::Session::UndoMarkId showMark =
+            static_cast<NXOpen::Session::UndoMarkId>(0);
         for (NXOpen::Body* body : bodies)
         {
             NXOpen::Features::Feature* flatPattern =
@@ -775,6 +1155,65 @@ int BendMarkNotchDialog::Execute()
                 throw std::runtime_error(
                     "未找到该钣金体的展平图样或其前一特征，"
                     "无法在展平图样前插入缺口特征。");
+            // Editing or running again lands on the existing custom feature.
+            // Keep that node: deleting it while NX is editing it raises a
+            // memory access violation after the command returns. Roll back
+            // before its old construction features so the new tools cut the
+            // clean sheet, then retarget the same node.
+            std::vector<NXOpen::Features::Feature*> existingNodes;
+            std::set<tag_t> oldConstructionTags;
+            tag_t reusedNotchTag = NULL_TAG;
+            tag_t lastBuiltFeature = NULL_TAG;
+            while (IsBendMarkNotchFeature(insertionFeature))
+            {
+                NXOpen::Features::Feature* previous =
+                    FindFeatureBefore(insertionFeature);
+                if (previous == nullptr)
+                    throw std::runtime_error(
+                        "无法替换已有的折弯标记缺口特征。");
+                const int nodeTimestamp = insertionFeature->Timestamp();
+                const int previousTimestamp = previous->Timestamp();
+                for (NXOpen::Features::Feature* feature :
+                     workPart->Features()->GetFeatures())
+                {
+                    if (feature == nullptr || !IsAlive(feature->Tag())) continue;
+                    const int timestamp = feature->Timestamp();
+                    if (timestamp > previousTimestamp && timestamp < nodeTimestamp)
+                        oldConstructionTags.insert(feature->Tag());
+                }
+                try
+                {
+                    auto* custom = dynamic_cast<NXOpen::Features::CustomFeature*>(
+                        insertionFeature);
+                    if (custom != nullptr)
+                    {
+                        for (NXOpen::Features::ConstructionFeatureData* data :
+                             custom->GetConstructionFeatures())
+                        {
+                            NXOpen::Features::Feature* owned =
+                                data == nullptr ? nullptr : data->GetFeature();
+                            if (owned != nullptr && IsAlive(owned->Tag()))
+                                oldConstructionTags.insert(owned->Tag());
+                        }
+                    }
+                }
+                catch (const NXOpen::NXException& ex)
+                {
+                    AppendDebugLog(
+                        "existing construction query failed code=" +
+                        std::to_string(ex.ErrorCode()));
+                }
+                AppendDebugLog(
+                    "reuse existing bend mark feature=" +
+                    std::to_string(insertionFeature->Tag()) +
+                    " previous=" + std::to_string(previous->Tag()) +
+                    " oldConstruction=" +
+                    std::to_string(oldConstructionTags.size()));
+                if (reusedNotchTag == NULL_TAG)
+                    reusedNotchTag = insertionFeature->Tag();
+                existingNodes.push_back(insertionFeature);
+                insertionFeature = previous;
+            }
             // Read the committed upward face before rolling model history back.
             // A largest-web heuristic must not choose the meaning of up/down.
             NXOpen::Face* upwardFace = (separate || MarkingMethod(commonNotch_) == 1)
@@ -792,6 +1231,57 @@ int BendMarkNotchDialog::Execute()
                             ? 0 : originalCurrentFeature->Tag());
                 AppendDebugLog(log.str());
             }
+            // The old node stays later in the tree. Committing a new unbend
+            // updates it, its previous construction features fail, and NX
+            // undoes the whole update ("Update undo happened"). Park it
+            // first. Roll forward when an edit has already rolled the model
+            // back, so the park runs against the feature that currently works.
+            if (!existingNodes.empty())
+            {
+                NXOpen::Features::Feature* current = workPart->CurrentFeature();
+                const bool rolledBack = current == nullptr ||
+                    current->Timestamp() <= insertionFeature->Timestamp();
+                if (rolledBack && flatPattern != nullptr &&
+                    IsAlive(flatPattern->Tag()))
+                {
+                    try
+                    {
+                        AppendDebugLog(
+                            "roll forward before replacing existing notch");
+                        flatPattern->MakeCurrentFeature();
+                    }
+                    catch (const NXOpen::NXException& ex)
+                    {
+                        AppendDebugLog(
+                            "roll forward failed code=" +
+                            std::to_string(ex.ErrorCode()) + " message=" +
+                            ex.Message());
+                        LogUpdateUndoFeature();
+                    }
+                }
+                std::vector<tag_t> nodeTags;
+                for (NXOpen::Features::Feature* node : existingNodes)
+                    if (node != nullptr) nodeTags.push_back(node->Tag());
+                AppendDebugLog("suppress existing notch nodes=" +
+                    std::to_string(nodeTags.size()));
+                const int nodeError = ChangeFeatureSuppression(nodeTags, true);
+                if (nodeError != 0)
+                {
+                    LogUpdateUndoFeature();
+                    AppendDebugLog(
+                        "suppress existing notch nodes failed code=" +
+                        std::to_string(nodeError));
+                    throw std::runtime_error(
+                        "暂时停用已有的折弯标记缺口失败。");
+                }
+                const int constructionError = ChangeFeatureSuppression(
+                    std::vector<tag_t>(oldConstructionTags.begin(),
+                                       oldConstructionTags.end()),
+                    true);
+                if (constructionError != 0)
+                    AppendDebugLog("suppress old construction code=" +
+                        std::to_string(constructionError));
+            }
             if (workPart->CurrentFeature() == nullptr ||
                 workPart->CurrentFeature()->Tag() != insertionFeature->Tag())
                 insertionFeature->MakeCurrentFeature();
@@ -802,32 +1292,327 @@ int BendMarkNotchDialog::Execute()
             const int created = ProcessBody(body, upwardFace);
             if (created > 0)
             {
-                if (!CreateCustomFeatureNode())
+                const bool retargeted = !existingNodes.empty();
+                if (retargeted)
+                {
+                    tag_t committedTag = NULL_TAG;
+                    if (!RetargetCustomFeature(existingNodes.front(), committedTag))
+                        throw std::runtime_error(
+                            "更新已有的折弯标记缺口特征失败。");
+                    if (committedTag != NULL_TAG)
+                        reusedNotchTag = committedTag;
+                }
+                else if (!CreateCustomFeatureNode())
                     throw std::runtime_error(
                         "创建单个钣金体的“折弯标记缺口”自定义特征失败，"
                         "请重启 NX 后重试。");
-                AppendDebugLog("custom feature node created for body=" +
+                AppendDebugLog(
+                    std::string(retargeted
+                        ? "custom feature node retargeted for body="
+                        : "custom feature node created for body=") +
                     std::to_string(body == nullptr ? 0 : body->Tag()) +
                     " internalFeatures=" +
                     std::to_string(pendingInternalFeatureTags_.size()));
+                if (retargeted)
+                {
+                    std::set<tag_t> kept(
+                        pendingInternalFeatureTags_.begin(),
+                        pendingInternalFeatureTags_.end());
+                    std::vector<NXOpen::TaggedObject*> superseded;
+                    for (tag_t tag : oldConstructionTags)
+                    {
+                        if (!IsAlive(tag) || kept.count(tag) != 0) continue;
+                        NXOpen::TaggedObject* object =
+                            NXOpen::NXObjectManager::Get(tag);
+                        if (object != nullptr) superseded.push_back(object);
+                    }
+                    for (std::size_t index = 1; index < existingNodes.size(); ++index)
+                    {
+                        NXOpen::Features::Feature* extra = existingNodes[index];
+                        if (extra != nullptr && IsAlive(extra->Tag()))
+                            superseded.push_back(extra);
+                    }
+                    // The new notches already exist. A failed unsuppress must
+                    // not roll back to the mark that owns them. The old sketch
+                    // is what fails; suppress that failure and keep the edit.
+                    session_->SetUndoMark(
+                        NXOpen::Session::MarkVisibilityVisible,
+                        "折弯标记缺口已生成");
+                    UF_MODL_update_option_t previousOption =
+                        UF_MODL_UPDATE_UNDO;
+                    const bool optionSet =
+                        UF_MODL_ask_update_fail_option(&previousOption) == 0 &&
+                        UF_MODL_set_update_fail_option(
+                            UF_MODL_UPDATE_SUPPRESS) == 0;
+                    const int unsuppressError = ChangeFeatureSuppression(
+                        std::vector<tag_t>(1, reusedNotchTag),
+                        false);
+                    if (optionSet)
+                        UF_MODL_set_update_fail_option(previousOption);
+                    AppendDebugLog("unsuppress retargeted notch code=" +
+                        std::to_string(unsuppressError) +
+                        " saved=" + std::to_string(reusedNotchTag) +
+                        " status=" +
+                        std::to_string(UF_OBJ_ask_status(reusedNotchTag)));
+                    if (unsuppressError != 0)
+                    {
+                        LogUpdateUndoFeature();
+                        LogUpdateErrors();
+                        bool newNotchesAlive = false;
+                        for (tag_t tag : pendingInternalFeatureTags_)
+                        {
+                            if (IsAlive(tag))
+                            {
+                                newNotchesAlive = true;
+                                break;
+                            }
+                        }
+                        AppendDebugLog(
+                            "unsuppress failed newNotchesAlive=" +
+                            std::to_string(newNotchesAlive ? 1 : 0));
+                        if (!newNotchesAlive)
+                            throw std::runtime_error(
+                                "恢复折弯标记缺口特征失败。");
+                    }
+                    if (!superseded.empty())
+                    {
+                        // These features are already suppressed. Deleting them
+                        // also deletes the custom-feature node, which hides
+                        // the new notches. Leave the old tools suppressed.
+                        AppendDebugLog(
+                            "keep suppressed old construction=" +
+                            std::to_string(superseded.size()));
+                    }
+                    NXOpen::Features::Feature* afterUnsuppress =
+                        workPart->CurrentFeature();
+                    AppendDebugLog("after unsuppress current=" +
+                        std::to_string(afterUnsuppress == nullptr
+                            ? 0 : afterUnsuppress->Tag()));
+                }
+                rebuilt = true;
                 ++bodyCount;
                 notchCount += created;
+                if (!pendingInternalFeatureTags_.empty())
+                    lastBuiltFeature = pendingInternalFeatureTags_.back();
                 pendingInternalFeatureTags_.clear();
             }
 
-            // Return to exactly the current-feature position that was active
-            // before the command.  The newly inserted node remains before the
-            // target body's Flat Pattern in model history.
-            if (originalCurrentFeature != nullptr &&
-                IsAlive(originalCurrentFeature->Tag()))
-                originalCurrentFeature->MakeCurrentFeature();
+            // A menu run returns to the feature that was current. An edit
+            // rolls NX back before the node being edited; restoring that
+            // position hides the new notches. The flat pattern is later than
+            // an unrelated feature that fails update and undoes the roll, so
+            // stop on the reused node. Its cuts are then the current model.
+            // CommitFeature and the later delete update drop the wrapper
+            // that was current while editing, so its Tag() becomes 0.
+            // Resolve the saved tag again before choosing what to display.
+            NXOpen::Features::Feature* notchNode = nullptr;
+            if (reusedNotchTag != NULL_TAG && IsAlive(reusedNotchTag))
+            {
+                notchNode = dynamic_cast<NXOpen::Features::Feature*>(
+                    NXOpen::NXObjectManager::Get(reusedNotchTag));
+                if (notchNode == nullptr || notchNode->Tag() != reusedNotchTag)
+                {
+                    notchNode = nullptr;
+                    for (NXOpen::Features::Feature* feature :
+                         workPart->Features()->GetFeatures())
+                    {
+                        if (feature != nullptr && feature->Tag() == reusedNotchTag)
+                        {
+                            notchNode = feature;
+                            break;
+                        }
+                    }
+                }
+            }
+            AppendDebugLog("restore notch tag=" +
+                std::to_string(reusedNotchTag) + " resolved=" +
+                std::to_string(notchNode == nullptr ? 0 : notchNode->Tag()) +
+                " timestamp=" +
+                std::to_string(notchNode == nullptr ? 0 : notchNode->Timestamp()));
+            int nodeSuppressed = 0;
+            if (reusedNotchTag != NULL_TAG && IsAlive(reusedNotchTag))
+                UF_MODL_ask_suppress_feature(reusedNotchTag, &nodeSuppressed);
+            NXOpen::Features::Feature* builtFeature = nullptr;
+            if (lastBuiltFeature != NULL_TAG && IsAlive(lastBuiltFeature))
+            {
+                builtFeature = dynamic_cast<NXOpen::Features::Feature*>(
+                    NXOpen::NXObjectManager::Get(lastBuiltFeature));
+                if (builtFeature != nullptr &&
+                    builtFeature->Tag() != lastBuiltFeature)
+                    builtFeature = nullptr;
+            }
+            NXOpen::Features::Feature* restoreTarget = originalCurrentFeature;
+            if (nodeSuppressed && builtFeature != nullptr)
+            {
+                AppendDebugLog(
+                    "restore built feature because node stays suppressed=" +
+                    std::to_string(builtFeature->Tag()));
+                restoreTarget = builtFeature;
+            }
+            else if (notchNode != nullptr)
+                restoreTarget = notchNode;
+            else if (reusedNotchTag != NULL_TAG)
+                restoreTarget = nullptr;
+            else if (flatPattern != nullptr &&
+                (restoreTarget == nullptr || !IsAlive(restoreTarget->Tag()) ||
+                 (insertionFeature != nullptr &&
+                  restoreTarget->Timestamp() <= insertionFeature->Timestamp())))
+                restoreTarget = flatPattern;
+            if (!showMarkSet)
+            {
+                // Latest visible mark. A failed refresh rolls back here,
+                // after the notches exist, instead of cancelling the edit.
+                showMark = session_->SetUndoMark(
+                    NXOpen::Session::MarkVisibilityVisible,
+                    "折弯标记缺口结果显示");
+                showMarkSet = true;
+            }
+            if (restoreTarget != nullptr && IsAlive(restoreTarget->Tag()))
+            {
+                try
+                {
+                    AppendDebugLog("restore current feature target=" +
+                        std::to_string(restoreTarget->Tag()));
+                    restoreTarget->MakeCurrentFeature();
+                }
+                catch (const NXOpen::NXException& ex)
+                {
+                    AppendDebugLog("restore current feature failed code=" +
+                        std::to_string(ex.ErrorCode()) + " message=" +
+                        ex.Message());
+                    LogUpdateUndoFeature();
+                    LogUpdateErrors();
+                    if (!rebuilt) throw;
+                    // The failed roll undoes itself and can leave the node
+                    // looking inactive. Accept that one failure and stop on
+                    // the reused node so the new notches stay current.
+                    NXOpen::Features::Feature* kept = nullptr;
+                    if (reusedNotchTag != NULL_TAG && IsAlive(reusedNotchTag))
+                    {
+                        kept = dynamic_cast<NXOpen::Features::Feature*>(
+                            NXOpen::NXObjectManager::Get(reusedNotchTag));
+                        if (kept != nullptr && kept->Tag() != reusedNotchTag)
+                            kept = nullptr;
+                        if (kept == nullptr)
+                        {
+                            for (NXOpen::Features::Feature* feature :
+                                 workPart->Features()->GetFeatures())
+                            {
+                                if (feature != nullptr &&
+                                    feature->Tag() == reusedNotchTag)
+                                {
+                                    kept = feature;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    AppendDebugLog("restore kept notch feature=" +
+                        std::to_string(kept == nullptr ? 0 : kept->Tag()) +
+                        " alive=" +
+                        std::to_string(kept != nullptr && IsAlive(kept->Tag()) ? 1 : 0));
+                    if (kept != nullptr && IsAlive(kept->Tag()))
+                    {
+                        UF_MODL_update_option_t previousOption =
+                            UF_MODL_UPDATE_UNDO;
+                        const bool optionSet =
+                            UF_MODL_ask_update_fail_option(&previousOption) == 0 &&
+                            UF_MODL_set_update_fail_option(
+                                UF_MODL_UPDATE_ACCEPT_ALL) == 0;
+                        try
+                        {
+                            kept->MakeCurrentFeature();
+                            AppendDebugLog("restore kept notch current=" +
+                                std::to_string(kept->Tag()));
+                        }
+                        catch (const NXOpen::NXException& keptEx)
+                        {
+                            AppendDebugLog(
+                                "restore kept notch failed code=" +
+                                std::to_string(keptEx.ErrorCode()) +
+                                " message=" + keptEx.Message());
+                            LogUpdateUndoFeature();
+                            LogUpdateErrors();
+                        }
+                        if (optionSet)
+                            UF_MODL_set_update_fail_option(previousOption);
+                    }
+                }
+            }
+            if (reusedNotchTag != NULL_TAG)
+            {
+                AppendDebugLog("uf notch status=" +
+                    std::to_string(UF_OBJ_ask_status(reusedNotchTag)) +
+                    " alive=" +
+                    std::to_string(IsAlive(reusedNotchTag) ? 1 : 0));
+            }
+            if (nodeSuppressed && builtFeature != nullptr &&
+                IsAlive(builtFeature->Tag()))
+            {
+                AppendDebugLog("skip set current on suppressed notch node");
+            }
+            else if (reusedNotchTag != NULL_TAG && IsAlive(reusedNotchTag))
+            {
+                tag_t currentTag = NULL_TAG;
+                UF_MODL_ask_current_feature(workPart->Tag(), &currentTag);
+                if (currentTag != reusedNotchTag)
+                {
+                    int suppressed = 0;
+                    int objectType = 0;
+                    int objectSubtype = 0;
+                    UF_MODL_ask_suppress_feature(reusedNotchTag, &suppressed);
+                    UF_OBJ_ask_type_and_subtype(
+                        reusedNotchTag, &objectType, &objectSubtype);
+                    AppendDebugLog(
+                        "uf notch before set current suppressed=" +
+                        std::to_string(suppressed) +
+                        " type=" + std::to_string(objectType) +
+                        " subtype=" + std::to_string(objectSubtype) +
+                        " current=" + std::to_string(currentTag));
+                    UF_MODL_update_option_t previousOption =
+                        UF_MODL_UPDATE_UNDO;
+                    const bool optionSet =
+                        UF_MODL_ask_update_fail_option(&previousOption) == 0 &&
+                        UF_MODL_set_update_fail_option(
+                            UF_MODL_UPDATE_ACCEPT_ALL) == 0;
+                    const int setCode =
+                        UF_MODL_set_current_feature(reusedNotchTag);
+                    tag_t afterTag = NULL_TAG;
+                    UF_MODL_ask_current_feature(workPart->Tag(), &afterTag);
+                    AppendDebugLog("uf set current notch code=" +
+                        std::to_string(setCode) +
+                        " after=" + std::to_string(afterTag));
+                    LogUpdateUndoFeature();
+                    if (optionSet)
+                        UF_MODL_set_update_fail_option(previousOption);
+                }
+            }
         }
         if (notchCount == 0)
             throw std::runtime_error("未找到可伸直并标记的折弯。");
-        const int updateErrors =
-            session_->UpdateManager()->DoUpdate(operationMark);
-        if (updateErrors != 0)
-            throw std::runtime_error("折弯标记缺口自定义特征更新失败。");
+        if (!showMarkSet)
+        {
+            showMark = session_->SetUndoMark(
+                NXOpen::Session::MarkVisibilityVisible,
+                "折弯标记缺口结果显示");
+            showMarkSet = true;
+        }
+        int updateErrors = 0;
+        try
+        {
+            AppendDebugLog("final update begin rebuilt=" +
+                std::string(rebuilt ? "1" : "0"));
+            updateErrors = session_->UpdateManager()->DoUpdate(showMark);
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            AppendDebugLog("final update failed code=" +
+                std::to_string(ex.ErrorCode()) + " message=" + ex.Message());
+            LogUpdateUndoFeature();
+            LogUpdateErrors();
+            if (!rebuilt) throw;
+            updateErrors = ex.ErrorCode();
+        }
         {
             NXOpen::Features::Feature* afterRestore =
                 workPart->CurrentFeature();
@@ -853,6 +1638,279 @@ int BendMarkNotchDialog::Execute()
         pendingInternalFeatureTags_.clear();
         session_->UndoToMark(operationMark, "折弯标记缺口失败回退");
         throw;
+    }
+}
+
+int BendMarkNotchDialog::ExecuteEdit()
+{
+    // Editing never modifies the existing node. NX replays a node's old
+    // construction features when its edit session ends, which is what breaks
+    // the second edit. The dialog only collects the values; the old node is
+    // deleted and a fresh one is created once NX has finished editing.
+    cachedDialog_ = ReadDialogSettings();
+    cachedLarge_ = cachedDialog_.large;
+    cachedSeparate_ = cachedDialog_.separate;
+    cachedUp_ = cachedDialog_.separate ? cachedDialog_.up : cachedDialog_.common;
+    cachedDown_ = cachedDialog_.separate ? cachedDialog_.down : cachedUp_;
+    editRebuildPending_ = true;
+    AppendDebugLog("edit accepted feature=" + std::to_string(editedFeatureTag_));
+    return 0;
+}
+
+void BendMarkNotchDialog::RebuildEditedFeature()
+{
+    NXOpen::Part* part = session_->Parts()->Work();
+    auto* node = dynamic_cast<NXOpen::Features::CustomFeature*>(
+        IsAlive(editedFeatureTag_)
+            ? NXOpen::NXObjectManager::Get(editedFeatureTag_) : nullptr);
+    if (part == nullptr || node == nullptr)
+        throw std::runtime_error("未找到正在编辑的折弯标记缺口特征。");
+
+    std::vector<tag_t> oldChain;
+    std::set<tag_t> oldSet;
+    const auto addOld = [&](NXOpen::TaggedObject* object)
+    {
+        auto* feature = dynamic_cast<NXOpen::Features::Feature*>(object);
+        if (feature == nullptr || !IsAlive(feature->Tag()) ||
+            feature->Tag() == editedFeatureTag_ ||
+            !oldSet.insert(feature->Tag()).second)
+            return;
+        oldChain.push_back(feature->Tag());
+    };
+    for (NXOpen::Features::ConstructionFeatureData* data :
+         node->GetConstructionFeatures())
+        if (data != nullptr) addOld(data->GetFeature());
+    try
+    {
+        NXOpen::Features::CustomFeatureData* data = node->FeatureData();
+        NXOpen::Features::CustomTagArrayAttribute* attribute =
+            data == nullptr ? nullptr :
+            data->CustomTagArrayAttributeByName(
+                zhihui_bend_mark_notch::kAttrInternalFeatures);
+        if (attribute != nullptr)
+            for (NXOpen::TaggedObject* object : attribute->GetValues())
+                addOld(object);
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("rebuild attribute query failed code=" +
+            std::to_string(ex.ErrorCode()));
+    }
+
+    int boundary = node->Timestamp();
+    for (tag_t tag : oldChain)
+    {
+        auto* feature = dynamic_cast<NXOpen::Features::Feature*>(
+            NXOpen::NXObjectManager::Get(tag));
+        if (feature != nullptr)
+            boundary = (std::min)(boundary, feature->Timestamp());
+    }
+    NXOpen::Features::Feature* insertion = nullptr;
+    for (NXOpen::Features::Feature* feature : part->Features()->GetFeatures())
+    {
+        if (feature == nullptr || !IsAlive(feature->Tag()) ||
+            feature->IsInternal() || oldSet.count(feature->Tag()) != 0 ||
+            feature->Tag() == editedFeatureTag_ ||
+            feature->Timestamp() >= boundary)
+            continue;
+        if (insertion == nullptr || feature->Timestamp() > insertion->Timestamp())
+            insertion = feature;
+    }
+    NXOpen::Body* body = nullptr;
+    if (insertion != nullptr)
+        for (NXOpen::Body* candidate : insertion->GetBodies())
+            if (candidate != nullptr && IsAlive(candidate->Tag()) &&
+                candidate->IsSolidBody())
+            {
+                body = candidate;
+                break;
+            }
+    NXOpen::Features::Feature* originalCurrent = part->CurrentFeature();
+    tag_t restoreTag = originalCurrent == nullptr ? NULL_TAG : originalCurrent->Tag();
+    if (restoreTag == editedFeatureTag_ || oldSet.count(restoreTag) != 0)
+        restoreTag = NULL_TAG;
+    {
+        std::ostringstream log;
+        log << "rebuild begin feature=" << editedFeatureTag_
+            << " timestamp=" << node->Timestamp()
+            << " current=" << (originalCurrent == nullptr ? 0 : originalCurrent->Tag())
+            << " restore=" << restoreTag
+            << " insertion=" << (insertion == nullptr ? 0 : insertion->Tag())
+            << " body=" << (body == nullptr ? 0 : body->Tag())
+            << " old=";
+        for (tag_t tag : oldChain) log << tag << ",";
+        AppendDebugLog(log.str());
+    }
+    if (insertion == nullptr || body == nullptr)
+        throw std::runtime_error("未找到折弯标记缺口所在的钣金体。");
+    const tag_t insertionTag = insertion->Tag();
+
+    const tag_t bodyTag = body->Tag();
+    const NXOpen::Session::UndoMarkId operationMark = session_->SetUndoMark(
+        NXOpen::Session::MarkVisibilityVisible, "折弯标记缺口");
+    DisplaySuppressionGuard displayGuard;
+    pendingInternalFeatureTags_.clear();
+    createdNodeTag_ = NULL_TAG;
+    useCachedSettings_ = true;
+    try
+    {
+        std::vector<NXOpen::TaggedObject*> doomed;
+        for (auto item = oldChain.rbegin(); item != oldChain.rend(); ++item)
+        {
+            NXOpen::TaggedObject* object = NXOpen::NXObjectManager::Get(*item);
+            if (object != nullptr) doomed.push_back(object);
+        }
+        doomed.push_back(node);
+        NXOpen::Update* update = session_->UpdateManager();
+        update->ClearDeleteList();
+        update->ClearErrorList();
+        update->AddObjectsToDeleteList(doomed);
+        const int deleteErrors = update->DoUpdate(operationMark);
+        std::size_t survivors = 0;
+        for (tag_t tag : oldChain)
+            if (IsAlive(tag)) ++survivors;
+        AppendDebugLog("rebuild delete old node count=" +
+            std::to_string(doomed.size()) +
+            " errors=" + std::to_string(deleteErrors) +
+            " nodeAlive=" + std::to_string(IsAlive(editedFeatureTag_) ? 1 : 0) +
+            " survivors=" + std::to_string(survivors));
+        if (deleteErrors != 0) LogUpdateErrors();
+        if (IsAlive(editedFeatureTag_) || survivors != 0)
+            throw std::runtime_error("删除旧的折弯标记缺口失败。");
+
+        body = IsAlive(bodyTag)
+            ? dynamic_cast<NXOpen::Body*>(NXOpen::NXObjectManager::Get(bodyTag))
+            : nullptr;
+        insertion = IsAlive(insertionTag)
+            ? dynamic_cast<NXOpen::Features::Feature*>(
+                  NXOpen::NXObjectManager::Get(insertionTag))
+            : nullptr;
+        if (body == nullptr || insertion == nullptr)
+            throw std::runtime_error("未找到折弯标记缺口所在的钣金体。");
+        NXOpen::Features::Feature* flatPattern = FindFlatPatternFeature(body);
+        NXOpen::Face* upwardFace =
+            flatPattern != nullptr && (cachedSeparate_ || cachedUp_.lineMark)
+                ? FlatPatternUpwardFace(flatPattern) : nullptr;
+        if (part->CurrentFeature() == nullptr ||
+            part->CurrentFeature()->Tag() != insertionTag)
+            insertion->MakeCurrentFeature();
+
+        const int created = ProcessBody(body, upwardFace);
+        if (created <= 0) throw std::runtime_error("未找到可伸直并标记的折弯。");
+        if (!CreateCustomFeatureNode())
+            throw std::runtime_error("创建折弯标记缺口特征失败。");
+
+        if (restoreTag != NULL_TAG && IsAlive(restoreTag))
+        {
+            auto* restore = dynamic_cast<NXOpen::Features::Feature*>(
+                NXOpen::NXObjectManager::Get(restoreTag));
+            if (restore != nullptr) restore->MakeCurrentFeature();
+        }
+        auto* rebuilt = dynamic_cast<NXOpen::Features::CustomFeature*>(
+            IsAlive(createdNodeTag_)
+                ? NXOpen::NXObjectManager::Get(createdNodeTag_) : nullptr);
+        std::set<tag_t> adopted;
+        if (rebuilt != nullptr)
+            for (NXOpen::Features::ConstructionFeatureData* data :
+                 rebuilt->GetConstructionFeatures())
+            {
+                NXOpen::Features::Feature* feature =
+                    data == nullptr ? nullptr : data->GetFeature();
+                if (feature != nullptr) adopted.insert(feature->Tag());
+            }
+        std::size_t adoptedNew = 0;
+        for (tag_t tag : pendingInternalFeatureTags_)
+            if (adopted.count(tag) != 0) ++adoptedNew;
+        int nodeSuppressed = 0;
+        if (rebuilt != nullptr)
+            UF_MODL_ask_suppress_feature(createdNodeTag_, &nodeSuppressed);
+        NXOpen::Features::Feature* current = part->CurrentFeature();
+        AppendDebugLog("rebuild done node=" + std::to_string(createdNodeTag_) +
+            " suppressed=" + std::to_string(nodeSuppressed) +
+            " adoptedNew=" + std::to_string(adoptedNew) + "/" +
+            std::to_string(pendingInternalFeatureTags_.size()) +
+            " current=" + std::to_string(current == nullptr ? 0 : current->Tag()));
+        if (rebuilt == nullptr || nodeSuppressed != 0 ||
+            adoptedNew != pendingInternalFeatureTags_.size())
+            throw std::runtime_error("折弯标记缺口特征未能正确封装内部特征。");
+
+        try
+        {
+            SetStatus("完成：创建 " + std::to_string(created) + " 个折弯端部缺口。");
+        }
+        catch (...) {}
+        useCachedSettings_ = false;
+        pendingInternalFeatureTags_.clear();
+        editedFeatureTag_ = createdNodeTag_;
+    }
+    catch (...)
+    {
+        useCachedSettings_ = false;
+        pendingInternalFeatureTags_.clear();
+        session_->UndoToMark(operationMark, "折弯标记缺口失败回退");
+        throw;
+    }
+}
+bool BendMarkNotchDialog::RetargetCustomFeature(
+    NXOpen::Features::Feature* feature,
+    tag_t& committedTag)
+{
+    auto* custom = dynamic_cast<NXOpen::Features::CustomFeature*>(feature);
+    NXOpen::Part* part = session_->Parts()->Work();
+    if (custom == nullptr || part == nullptr ||
+        pendingInternalFeatureTags_.empty() || !IsAlive(custom->Tag()))
+        return false;
+    std::vector<NXOpen::TaggedObject*> internalObjects;
+    std::set<tag_t> uniqueTags;
+    for (tag_t tag : pendingInternalFeatureTags_)
+    {
+        if (!IsAlive(tag) || !uniqueTags.insert(tag).second) continue;
+        NXOpen::TaggedObject* object = NXOpen::NXObjectManager::Get(tag);
+        if (dynamic_cast<NXOpen::Features::Feature*>(object) != nullptr)
+            internalObjects.push_back(object);
+    }
+    if (internalObjects.empty()) return false;
+    NXOpen::Features::CustomFeatureBuilder* builder = nullptr;
+    try
+    {
+        builder = part->Features()->CreateCustomFeatureBuilder(custom);
+        AppendDebugLog("retarget suppressed=" +
+            std::string(custom->Suppressed() ? "1" : "0") +
+            " feature=" + std::to_string(custom->Tag()));
+        NXOpen::Features::CustomFeatureData* data = builder->FeatureData();
+        NXOpen::Features::CustomTagArrayAttribute* attribute =
+            data == nullptr ? nullptr :
+            data->CustomTagArrayAttributeByName(
+                zhihui_bend_mark_notch::kAttrInternalFeatures);
+        if (attribute == nullptr)
+        {
+            builder->Destroy();
+            return false;
+        }
+        attribute->SetValues(internalObjects);
+        NXOpen::Features::Feature* committed = builder->CommitFeature();
+        builder->Destroy();
+        builder = nullptr;
+        committedTag = committed == nullptr ? NULL_TAG : committed->Tag();
+        AppendDebugLog(
+            "retarget committed=" + std::to_string(committedTag) +
+            " committedAlive=" +
+            std::to_string(committedTag != NULL_TAG && IsAlive(committedTag) ? 1 : 0) +
+            " custom=" + std::to_string(custom->Tag()) +
+            " customStatus=" + std::to_string(UF_OBJ_ask_status(custom->Tag())));
+        return committedTag != NULL_TAG && IsAlive(committedTag);
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("retarget custom feature failed code=" +
+            std::to_string(ex.ErrorCode()) + " message=" + ex.Message());
+        if (builder != nullptr) builder->Destroy();
+        return false;
+    }
+    catch (...)
+    {
+        if (builder != nullptr) builder->Destroy();
+        return false;
     }
 }
 
@@ -898,12 +1956,20 @@ bool BendMarkNotchDialog::CreateCustomFeatureNode()
         NXOpen::Features::CustomTagArrayAttribute* internalAttribute =
             attributes->CreateCustomTagArrayAttribute(
                 zhihui_bend_mark_notch::kAttrInternalFeatures, properties);
+        NXOpen::Features::CustomStringAttribute* settingsAttribute =
+            attributes->CreateCustomStringAttribute(
+                zhihui_bend_mark_notch::kAttrSettings,
+                std::vector<NXOpen::Features::CustomAttribute::Property>());
         NXOpen::Features::CustomFeatureData* data =
             part->Features()->CustomFeatureDataCollection()->CreateData(
                 featureClass,
-                std::vector<NXOpen::Features::CustomAttribute*>(
-                    1, internalAttribute));
+                std::vector<NXOpen::Features::CustomAttribute*>{
+                    internalAttribute, settingsAttribute});
         internalAttribute->SetValues(internalObjects);
+        settingsAttribute->SetValue(NXOpen::NXString(
+            EncodeDialogSettings(useCachedSettings_
+                ? cachedDialog_ : ReadDialogSettings()),
+            NXOpen::NXString::UTF8));
         builder = part->Features()->CreateCustomFeatureBuilder(nullptr);
         builder->SetFeatureData(data);
         NXOpen::Features::Feature* feature = builder->CommitFeature();
@@ -911,6 +1977,7 @@ bool BendMarkNotchDialog::CreateCustomFeatureNode()
         builder = nullptr;
         if (feature == nullptr) return false;
         feature->SetName(zhihui_bend_mark_notch::kFeatureDisplayName);
+        createdNodeTag_ = feature->Tag();
         return true;
     }
     catch (...)
@@ -998,6 +2065,28 @@ NXOpen::Features::Feature* BendMarkNotchDialog::FindFeatureBefore(
             previous = feature;
     }
     return previous;
+}
+
+bool BendMarkNotchDialog::IsBendMarkNotchFeature(
+    NXOpen::Features::Feature* feature) const
+{
+    auto* custom = dynamic_cast<NXOpen::Features::CustomFeature*>(feature);
+    if (custom == nullptr || !IsAlive(custom->Tag())) return false;
+    try
+    {
+        NXOpen::Features::CustomFeatureData* data = custom->FeatureData();
+        if (data == nullptr) return false;
+        const NXOpen::NXString className = data->ClassName();
+        const char* text = className.GetUTF8Text();
+        if (text == nullptr) return false;
+        const std::string name(text);
+        return name == zhihui_bend_mark_notch::kFeatureClassName ||
+            name == "BendMarkNotch";
+    }
+    catch (const NXOpen::NXException&)
+    {
+        return false;
+    }
 }
 
 NXOpen::Features::Feature* BendMarkNotchDialog::FindBodyInsertionFeature(
@@ -1402,12 +2491,14 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
     AppendDebugLog("ProcessBody begin body=" +
         std::to_string(body == nullptr ? 0 : body->Tag()));
     const double thickness = manager->GetBodyThickness(body);
-    const LargeBendSettings largeBendSettings = ReadLargeBendSettings();
-    const bool separate = ToggleValue(distinguishBends_);
-    const NotchSettings upSettings = ReadNotchSettings(
-        separate ? upNotch_ : commonNotch_);
-    const NotchSettings downSettings = separate
-        ? ReadNotchSettings(downNotch_) : upSettings;
+    const LargeBendSettings largeBendSettings =
+        useCachedSettings_ ? cachedLarge_ : ReadLargeBendSettings();
+    const bool separate =
+        useCachedSettings_ ? cachedSeparate_ : ToggleValue(distinguishBends_);
+    const NotchSettings upSettings = useCachedSettings_ ? cachedUp_ :
+        ReadNotchSettings(separate ? upNotch_ : commonNotch_);
+    const NotchSettings downSettings = useCachedSettings_ ? cachedDown_ :
+        (separate ? ReadNotchSettings(downNotch_) : upSettings);
     NXOpen::Face* referenceFace = FindReferenceFace(body);
     const std::vector<BendRecord> bends = CollectBends(body, thickness);
     {
@@ -1450,20 +2541,29 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
             bendFaces.push_back(bend.innerFace);
             bendFaces.push_back(bend.outerFace);
         }
-        NXOpen::FaceDumbRule* rule =
-            part->ScRuleFactory()->CreateRuleFaceDumb(bendFaces);
-        NXOpen::ScCollector* collector = part->ScCollectors()->CreateCollector();
-        collector->ReplaceRules(
-            std::vector<NXOpen::SelectionIntentRule*>(1, rule), false);
-        auto* unbend = manager->CreateUnbendFeatureBuilder(nullptr);
-        unbend->SetReferenceEntity(referenceFace);
-        unbend->SetFaceCollector(collector);
-        failureStage = "commit unbend";
-        AppendDebugLog("unbend commit begin referenceFace=" +
-            std::to_string(referenceFace->Tag()) + " collectorFaces=" +
-            std::to_string(bendFaces.size()));
-        NXOpen::Features::Feature* unbendFeature = unbend->CommitFeature();
-        unbend->Destroy();
+        NXOpen::Features::Feature* unbendFeature = nullptr;
+        if (reuseChain_ != nullptr)
+        {
+            failureStage = "reuse unbend";
+            unbendFeature = ActivateReusedFeature(reuseChain_->front());
+        }
+        else
+        {
+            NXOpen::FaceDumbRule* rule =
+                part->ScRuleFactory()->CreateRuleFaceDumb(bendFaces);
+            NXOpen::ScCollector* collector = part->ScCollectors()->CreateCollector();
+            collector->ReplaceRules(
+                std::vector<NXOpen::SelectionIntentRule*>(1, rule), false);
+            auto* unbend = manager->CreateUnbendFeatureBuilder(nullptr);
+            unbend->SetReferenceEntity(referenceFace);
+            unbend->SetFaceCollector(collector);
+            failureStage = "commit unbend";
+            AppendDebugLog("unbend commit begin referenceFace=" +
+                std::to_string(referenceFace->Tag()) + " collectorFaces=" +
+                std::to_string(bendFaces.size()));
+            unbendFeature = unbend->CommitFeature();
+            unbend->Destroy();
+        }
         if (unbendFeature == nullptr)
             throw std::runtime_error("钣金体全部折弯一次伸直失败。");
         AppendDebugLog("unbend commit success feature=" +
@@ -1835,13 +2935,44 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
             std::to_string(lineProfiles.size()));
         const std::size_t profileCount = profiles.size() + lineProfiles.size();
         if (profileCount == 0) throw std::runtime_error("展平状态创建折弯标记失败。");
+        std::vector<NXOpen::Features::Feature*> reuseTools;
+        if (reuseChain_ != nullptr)
+        {
+            failureStage = "match reused tools";
+            std::vector<bool> wanted;
+            if (!profiles.empty()) wanted.push_back(false);
+            if (!lineProfiles.empty()) wanted.push_back(true);
+            std::vector<bool> existing;
+            for (std::size_t index = 1; index + 2 < reuseChain_->size(); ++index)
+            {
+                auto* extrude = dynamic_cast<NXOpen::Features::Feature*>(
+                    NXOpen::NXObjectManager::Get((*reuseChain_)[index]));
+                if (extrude == nullptr)
+                    throw std::runtime_error("折弯标记缺口的内部特征已丢失。");
+                reuseTools.push_back(extrude);
+                existing.push_back(IsMarkingLineTool(extrude));
+            }
+            AppendDebugLog("reuse tools existing=" + std::to_string(existing.size()) +
+                " wanted=" + std::to_string(wanted.size()));
+            if (existing != wanted)
+                throw std::runtime_error(
+                    "标记方式（缺口 / 标记线）的组合已改变，无法在原特征上修改。"
+                    "请删除该折弯标记缺口后重新创建。");
+        }
         std::vector<ToolRecord> tools;
+        std::size_t reuseIndex = 0;
+        const auto nextReuseTool = [&]() -> NXOpen::Features::Feature*
+        {
+            if (reuseChain_ == nullptr) return nullptr;
+            NXOpen::Features::Feature* extrude = reuseTools[reuseIndex++];
+            return ActivateReusedFeature(extrude->Tag());
+        };
         if (!profiles.empty())
         {
             ToolRecord groupedTool;
             failureStage = "create combined notch extrusion tool";
             if (!CreateInternalSketchExtrudeTool(
-                    normal, profiles, thickness, groupedTool))
+                    normal, profiles, thickness, groupedTool, 0.0, nextReuseTool()))
                 throw std::runtime_error("全部缺口合并草图拉伸失败。");
             tools.push_back(groupedTool);
         }
@@ -1850,13 +2981,21 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
             ToolRecord lineTool;
             failureStage = "create shallow marking line tool";
             if (!CreateInternalSketchExtrudeTool(
-                    markingOutward, lineProfiles, thickness, lineTool, kMarkingLineDepth))
+                    markingOutward, lineProfiles, thickness, lineTool,
+                    kMarkingLineDepth, nextReuseTool()))
                 throw std::runtime_error("标记线浅槽拉伸失败。");
             tools.push_back(lineTool);
         }
         NXOpen::Features::Feature* booleanFeature = nullptr;
         failureStage = "subtract combined tool bodies";
-        if (!SubtractToolsOnce(body, tools, booleanFeature, !lineProfiles.empty()) ||
+        if (reuseChain_ != nullptr)
+        {
+            const tag_t booleanTag = (*reuseChain_)[reuseChain_->size() - 2];
+            if (!RetargetSubtractTools(booleanTag, reuseTools))
+                throw std::runtime_error("全部缺口工具体一次布尔减失败。");
+            booleanFeature = ActivateReusedFeature(booleanTag);
+        }
+        else if (!SubtractToolsOnce(body, tools, booleanFeature, !lineProfiles.empty()) ||
             booleanFeature == nullptr)
             throw std::runtime_error("全部缺口工具体一次布尔减失败。");
 
@@ -1865,17 +3004,26 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
         // Boolean; Rebend receives the original selection unchanged.
         AppendDebugLog("rebend selection source=original-unbend-pairs faceCount=" +
             std::to_string(bendFaces.size()));
-        NXOpen::FaceDumbRule* rebendRule =
-            part->ScRuleFactory()->CreateRuleFaceDumb(bendFaces);
-        NXOpen::ScCollector* rebendCollector =
-            part->ScCollectors()->CreateCollector();
-        rebendCollector->ReplaceRules(
-            std::vector<NXOpen::SelectionIntentRule*>(1, rebendRule), false);
-        auto* rebend = manager->CreateRebendFeatureBuilder(nullptr);
-        rebend->SetFaceCollector(rebendCollector);
-        failureStage = "commit rebend";
-        NXOpen::Features::Feature* rebendFeature = rebend->CommitFeature();
-        rebend->Destroy();
+        NXOpen::Features::Feature* rebendFeature = nullptr;
+        if (reuseChain_ != nullptr)
+        {
+            failureStage = "reuse rebend";
+            rebendFeature = ActivateReusedFeature(reuseChain_->back());
+        }
+        else
+        {
+            NXOpen::FaceDumbRule* rebendRule =
+                part->ScRuleFactory()->CreateRuleFaceDumb(bendFaces);
+            NXOpen::ScCollector* rebendCollector =
+                part->ScCollectors()->CreateCollector();
+            rebendCollector->ReplaceRules(
+                std::vector<NXOpen::SelectionIntentRule*>(1, rebendRule), false);
+            auto* rebend = manager->CreateRebendFeatureBuilder(nullptr);
+            rebend->SetFaceCollector(rebendCollector);
+            failureStage = "commit rebend";
+            rebendFeature = rebend->CommitFeature();
+            rebend->Destroy();
+        }
         if (rebendFeature == nullptr)
             throw std::runtime_error("创建缺口后重新折弯失败。");
         failureStage = "update model after rebend";
@@ -1898,6 +3046,7 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
         AppendDebugLog("ProcessBody NXException stage=" + failureStage +
             " code=" + std::to_string(ex.ErrorCode()) + " message=" +
             ex.Message());
+        LogUpdateUndoFeature();
         session_->UndoToMark(mark, "折弯标记缺口失败回退");
         throw;
     }
@@ -1913,6 +3062,64 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
         AppendDebugLog("ProcessBody unknown exception stage=" + failureStage);
         session_->UndoToMark(mark, "折弯标记缺口失败回退");
         throw;
+    }
+}
+
+NXOpen::Features::Feature* BendMarkNotchDialog::ActivateReusedFeature(tag_t tag) const
+{
+    auto* feature = IsAlive(tag)
+        ? dynamic_cast<NXOpen::Features::Feature*>(NXOpen::NXObjectManager::Get(tag))
+        : nullptr;
+    if (feature == nullptr)
+        throw std::runtime_error("折弯标记缺口的内部特征已丢失。");
+    feature->MakeCurrentFeature();
+    AppendDebugLog("reuse activate feature=" + std::to_string(tag));
+    return feature;
+}
+
+bool BendMarkNotchDialog::IsMarkingLineTool(NXOpen::Features::Feature* extrude) const
+{
+    NXOpen::Part* part = session_->Parts()->Work();
+    NXOpen::Features::ExtrudeBuilder* builder =
+        part->Features()->CreateExtrudeBuilder(extrude);
+    const double start = builder->Limits()->StartExtend()->Value()->Value();
+    builder->Destroy();
+    return std::fabs(start + kMarkingLineDepth) < 1.0e-9;
+}
+
+bool BendMarkNotchDialog::RetargetSubtractTools(
+    tag_t booleanTag, const std::vector<NXOpen::Features::Feature*>& extrudes) const
+{
+    auto* feature = IsAlive(booleanTag)
+        ? dynamic_cast<NXOpen::Features::BooleanFeature*>(
+              NXOpen::NXObjectManager::Get(booleanTag))
+        : nullptr;
+    if (feature == nullptr || extrudes.empty()) return false;
+    NXOpen::Part* part = session_->Parts()->Work();
+    NXOpen::Features::BooleanBuilder* builder = nullptr;
+    try
+    {
+        // Feature-body intent keeps every tool body when an edit changes
+        // how many notches the extrusions produce.
+        builder = part->Features()->CreateBooleanBuilderUsingCollector(feature);
+        NXOpen::ScCollector* toolCollector = part->ScCollectors()->CreateCollector();
+        NXOpen::BodyFeatureRule* toolRule =
+            part->ScRuleFactory()->CreateRuleBodyFeature(extrudes);
+        toolCollector->ReplaceRules(
+            std::vector<NXOpen::SelectionIntentRule*>(1, toolRule), false);
+        builder->SetToolBodyCollector(toolCollector);
+        builder->CommitFeature();
+        builder->Destroy();
+        AppendDebugLog("reuse subtract retargeted feature=" + std::to_string(booleanTag) +
+            " extrudes=" + std::to_string(extrudes.size()));
+        return true;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("reuse subtract retarget failed code=" +
+            std::to_string(ex.ErrorCode()) + " message=" + ex.Message());
+        if (builder != nullptr) builder->Destroy();
+        return false;
     }
 }
 
@@ -2007,7 +3214,8 @@ bool BendMarkNotchDialog::SubtractToolsOnce(
 bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
     const NXOpen::Vector3d& normalInput,
     const std::vector<NotchProfile>& profiles,
-    double thickness, ToolRecord& tool, double cutDepth) const
+    double thickness, ToolRecord& tool, double cutDepth,
+    NXOpen::Features::Feature* reuseExtrude) const
 {
     tool = ToolRecord();
     NXOpen::Part* part = session_->Parts()->Work();
@@ -2016,8 +3224,32 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
         if (profile.circleRadius <= kTolerance && profile.polygon.size() < 3)
             return false;
 
-    const NXOpen::Vector3d normal = Normalize(normalInput);
-    const NXOpen::Point3d origin = profiles.front().center;
+    NXOpen::Sketch* reuseSketch = nullptr;
+    if (reuseExtrude != nullptr)
+    {
+        for (NXOpen::Features::Feature* parent : reuseExtrude->GetParents())
+        {
+            auto* sketchParent = dynamic_cast<NXOpen::Features::SketchFeature*>(parent);
+            if (sketchParent != nullptr)
+            {
+                reuseSketch = sketchParent->Sketch();
+                break;
+            }
+        }
+        AppendDebugLog("reuse extrude=" + std::to_string(reuseExtrude->Tag()) +
+            " sketch=" + std::to_string(reuseSketch == nullptr ? 0 : reuseSketch->Tag()));
+        if (reuseSketch == nullptr) return false;
+    }
+
+    NXOpen::Vector3d normal = Normalize(normalInput);
+    NXOpen::Point3d origin = profiles.front().center;
+    if (reuseSketch != nullptr)
+    {
+        // Profiles are projected onto the existing sketch plane.
+        const NXOpen::Matrix3x3 orientation = reuseSketch->Orientation()->Element();
+        origin = reuseSketch->Origin();
+        normal = Normalize({orientation.Zx, orientation.Zy, orientation.Zz});
+    }
     const NXOpen::Vector3d reference =
         std::fabs(normal.Z) < 0.9 ? NXOpen::Vector3d{0.0, 0.0, 1.0}
                                   : NXOpen::Vector3d{1.0, 0.0, 0.0};
@@ -2094,6 +3326,12 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
     };
     try
     {
+      if (reuseSketch != nullptr)
+      {
+        sketch = reuseSketch;
+      }
+      else
+      {
         failureStage = "create sketch plane, axis and origin";
         NXOpen::Plane* plane = part->Planes()->CreatePlane(
             origin, normal, NXOpen::SmartObject::UpdateOptionWithinModeling);
@@ -2148,9 +3386,30 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
         AppendDebugLog("sketch commit success sketch=" +
             std::to_string(sketch->Tag()) + " feature=" +
             std::to_string(sketchFeature->Tag()));
+      }
 
         failureStage = "activate sketch";
         sketch->Activate(NXOpen::Sketch::ViewReorientFalse);
+        if (reuseSketch != nullptr)
+        {
+            failureStage = "delete previous sketch geometry";
+            std::vector<NXOpen::TaggedObject*> previous;
+            for (NXOpen::NXObject* geometry : sketch->GetAllGeometry())
+                if (geometry != nullptr) previous.push_back(geometry);
+            if (!previous.empty())
+            {
+                const NXOpen::Session::UndoMarkId deleteMark = session_->SetUndoMark(
+                    NXOpen::Session::MarkVisibilityInvisible, "折弯标记缺口草图清除");
+                NXOpen::Update* update = session_->UpdateManager();
+                update->ClearDeleteList();
+                update->ClearErrorList();
+                update->AddObjectsToDeleteList(previous);
+                const int errors = update->DoUpdate(deleteMark);
+                AppendDebugLog("reuse sketch cleared geometry=" +
+                    std::to_string(previous.size()) +
+                    " errors=" + std::to_string(errors));
+            }
+        }
         for (std::size_t profileIndex = 0;
              profileIndex < profiles.size(); ++profileIndex)
         {
@@ -2237,6 +3496,20 @@ bool BendMarkNotchDialog::CreateInternalSketchExtrudeTool(
         AppendDebugLog("sketch geometry query count=" +
             std::to_string(profileCurves.size()) + " firstCurve=" +
             std::to_string(profileCurves.front()->Tag()));
+        if (reuseExtrude != nullptr)
+        {
+            failureStage = "collect reused extrusion tool bodies";
+            for (NXOpen::Body* toolBody : reuseExtrude->GetBodies())
+                if (toolBody != nullptr && IsAlive(toolBody->Tag()))
+                    tool.bodyTags.push_back(toolBody->Tag());
+            if (tool.bodyTags.empty())
+                throw std::runtime_error("取得合并缺口拉伸工具体失败。");
+            tool.featureTag = reuseExtrude->Tag();
+            AppendDebugLog("reuse extrude updated feature=" +
+                std::to_string(tool.featureTag) + " toolBodies=" +
+                std::to_string(tool.bodyTags.size()));
+            return true;
+        }
 
         failureStage = "configure extrude builder";
         extrudeBuilder = part->Features()->CreateExtrudeBuilder(nullptr);

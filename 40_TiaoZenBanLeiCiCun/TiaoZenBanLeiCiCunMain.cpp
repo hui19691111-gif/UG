@@ -86,7 +86,7 @@ extern "C" DllExport void ufusr(char*, int* returnCode, int)
 {
     TiaoZenWriteLog(
         "INFO",
-        "================ 板件调尺启动 ================ 版本=1.0.1");
+        "================ 板件调尺启动 ================ 版本=1.0.6");
     if (returnCode != nullptr)
     {
         *returnCode = 0;
@@ -131,10 +131,7 @@ extern "C" DllExport void ufusr(char*, int* returnCode, int)
                 std::to_string(ex.ErrorCode()) +
                 "，message=" +
                 (ex.Message() != nullptr ? ex.Message() : "<null>"));
-        NXOpen::UI::GetUI()->NXMessageBox()->Show(
-            "板件调尺",
-            NXOpen::NXMessageBox::DialogTypeError,
-            ex.Message());
+        TiaoZenShowNxError(ex.Message());
         if (returnCode != nullptr)
         {
             *returnCode = ex.ErrorCode();
@@ -143,10 +140,7 @@ extern "C" DllExport void ufusr(char*, int* returnCode, int)
     catch (...)
     {
         TiaoZenWriteLog("ERROR", "ufusr 捕获未知异常。");
-        NXOpen::UI::GetUI()->NXMessageBox()->Show(
-            "板件调尺",
-            NXOpen::NXMessageBox::DialogTypeError,
-            "板件调尺发生未处理异常。");
+        TiaoZenShowError("板件调尺发生未处理异常。");
         if (returnCode != nullptr)
         {
             *returnCode = -1;
