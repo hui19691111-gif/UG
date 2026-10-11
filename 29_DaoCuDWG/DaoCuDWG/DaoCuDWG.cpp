@@ -473,14 +473,82 @@ bool CollectDwgExportItems(const std::vector<NXOpen::Part*>& parts,
     return true;
 }
 
-// 写后台任务文件并拉起 worker；NX 侧到这一步就结束，不参与翻译
+// 读取 config\DaoCuDWG.ini 里的 workers=N；读不到就按 CPU 逻辑核心数自动定
+int ResolveDwgShardCount(const std::wstring& pluginRoot)
+{
+    const std::wstring iniPath = pluginRoot + L"\\config\\DaoCuDWG.ini";
+    HANDLE file = CreateFileW(iniPath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        char buffer[4096] = {0};
+        DWORD read = 0;
+        const BOOL ok = ReadFile(file, buffer, sizeof(buffer) - 1, &read, NULL);
+        CloseHandle(file);
+        if (ok == TRUE)
+        {
+            std::string text(buffer, read);
+            size_t position = 0;
+            while (position < text.size())
+            {
+                const size_t end = text.find('\n', position);
+                const std::string line = text.substr(position, end == std::string::npos ? std::string::npos : end - position);
+                position = end == std::string::npos ? text.size() : end + 1;
+
+                const size_t first = line.find_first_not_of(" \t\r");
+                if (first == std::string::npos)
+                {
+                    continue;   // 空行
+                }
+                const std::string trimmed = line.substr(first);
+                if (trimmed.empty() || trimmed[0] == ';' || trimmed[0] == '#')
+                {
+                    continue;
+                }
+                const size_t separator = trimmed.find('=');
+                if (separator == std::string::npos)
+                {
+                    continue;
+                }
+                if (trimmed.substr(0, separator).find("workers") == std::string::npos)
+                {
+                    continue;
+                }
+
+                const int configured = atoi(trimmed.substr(separator + 1).c_str());
+                if (configured >= 1 && configured <= 16)
+                {
+                    return configured;
+                }
+            }
+        }
+    }
+
+    SYSTEM_INFO systemInfo;
+    ZeroMemory(&systemInfo, sizeof(systemInfo));
+    GetSystemInfo(&systemInfo);
+    int autoShards = static_cast<int>(systemInfo.dwNumberOfProcessors) / 4;
+    if (autoShards < 1)
+    {
+        autoShards = 1;
+    }
+    if (autoShards > 4)
+    {
+        autoShards = 4;
+    }
+    return autoShards;
+}
+
+// 写后台任务文件并拉起 worker；NX 侧到这一步就结束，不参与翻译。
+// 页数多时按 workers 分片并行拉起多个 worker（每片一个后台 NX 会话），总时间约除以片数。
 bool SubmitBackgroundDwgJob(const std::vector<std::string>& sourcePaths,
                             const std::vector<std::string>& sheetNames,
                             const std::vector<std::string>& outputPaths,
                             const std::vector<double>& scaleValues,
+                            int& launchedShards,
                             std::string& errorText)
 {
     errorText.clear();
+    launchedShards = 0;
     if (sourcePaths.empty() || sourcePaths.size() != outputPaths.size() || sourcePaths.size() != sheetNames.size())
     {
         errorText = "后台导出清单不完整。";
@@ -516,54 +584,121 @@ bool SubmitBackgroundDwgJob(const std::vector<std::string>& sourcePaths,
     CreateDirectoryW(jobsDir.c_str(), NULL);
     CreateDirectoryW(workerLogsDir.c_str(), NULL);
 
-    const std::string jobId = "dwg_" + std::to_string(GetTickCount64());
-    const std::wstring jobIdWide = WideFromUtf8(jobId.c_str());
-    const std::wstring jobPath = jobsDir + L"\\" + jobIdWide + L".job";
-    const std::wstring workerLogPath = workerLogsDir + L"\\" + jobIdWide + L".log";
-
-    std::string text;
-    text += "job_id=" + jobId + "\n";
-    text += "job_group_id=" + jobId + "\n";
-    text += "kind=dwg\n";
-    text += "source_part_path=" + EscapeJobValue(sourcePaths[0]) + "\n";
-    text += "settings_file_path=\n";
-    text += "worker_log_path=" + EscapeJobValue(Utf8FromWide(workerLogPath)) + "\n";
-    text += "popup_title=" + EscapeJobValue("导出DWG") + "\n";
-    text += "success_popup_auto_close=true\n";
-    text += "show_progress_toast=true\n";
-    text += "open_output_folder_after_finish=false\n";
-    // 保持“导出DWG”原有的模型空间效果，不用工具箱的 Drafting 默认值
-    text += "dwg_output_to_drafting=false\n";
-    // 对齐改造前的 translator 参数：R2004 + ViewEditMode + 曲线/注释/结构全开
-    text += "dwg_legacy_exporter_options=true\n";
-    text += "import_filter_group=all\n";
-    text += "item_count=" + std::to_string(outputPaths.size()) + "\n";
-    for (size_t i = 0; i < outputPaths.size(); ++i)
+    int shardCount = ResolveDwgShardCount(pluginRoot);
+    if (shardCount > static_cast<int>(outputPaths.size()))
     {
-        const std::string indexText = std::to_string(i);
-        text += "item_" + indexText + "_source_file_path=" + EscapeJobValue(sourcePaths[i]) + "\n";
-        text += "item_" + indexText + "_sheet_name=" + EscapeJobValue(sheetNames[i]) + "\n";
-        text += "item_" + indexText + "_output_file_path=" + EscapeJobValue(outputPaths[i]) + "\n";
-        text += "item_" + indexText + "_import_format=step\n";
-        if (i < scaleValues.size() && scaleValues[i] > 0.0)
+        shardCount = static_cast<int>(outputPaths.size());
+    }
+    if (shardCount < 1)
+    {
+        shardCount = 1;
+    }
+
+    const std::string batchId = std::to_string(GetTickCount64());
+
+    // 全批预期产物清单：交给“主片”统计整批落盘数，界面上只显示一个状态窗
+    const std::wstring watchPath = jobsDir + L"\\dwg_" + WideFromUtf8(batchId.c_str()) + L"_watch.txt";
+    {
+        std::string watchText;
+        for (size_t i = 0; i < outputPaths.size(); ++i)
         {
-            text += "item_" + indexText + "_export_scale_value=" + FormatInvariantDouble(scaleValues[i]) + "\n";
+            watchText += outputPaths[i] + "\n";
+        }
+        if (!WriteUtf8File(watchPath, watchText))
+        {
+            errorText = "进度监视清单写入失败：" + Utf8FromWide(watchPath);
+            return false;
         }
     }
 
-    if (!WriteUtf8File(jobPath, text))
+    for (int shard = 0; shard < shardCount; ++shard)
     {
-        errorText = "后台任务文件写入失败：" + Utf8FromWide(jobPath);
-        return false;
+        // 轮转分配，避免某一片全是重件
+        std::vector<size_t> indices;
+        for (size_t i = static_cast<size_t>(shard); i < outputPaths.size(); i += static_cast<size_t>(shardCount))
+        {
+            indices.push_back(i);
+        }
+        if (indices.empty())
+        {
+            continue;
+        }
+
+        const std::string jobId = "dwg_" + batchId + "_" + std::to_string(shard + 1);
+        const std::wstring jobIdWide = WideFromUtf8(jobId.c_str());
+        const std::wstring jobPath = jobsDir + L"\\" + jobIdWide + L".job";
+        const std::wstring workerLogPath = workerLogsDir + L"\\" + jobIdWide + L".log";
+
+        // 只有主片（第 1 片）显示状态窗，且数字是“整批已完成/总页数”，全批次只有一个窗
+        std::string title = "导出DWG";
+        if (shard > 0 && shardCount > 1)
+        {
+            title += " " + std::to_string(shard + 1) + "/" + std::to_string(shardCount);
+        }
+
+        std::string text;
+        text += "job_id=" + jobId + "\n";
+        text += "job_group_id=dwg_" + batchId + "\n";
+        text += "kind=dwg\n";
+        text += "source_part_path=" + EscapeJobValue(sourcePaths[indices[0]]) + "\n";
+        text += "settings_file_path=\n";
+        text += "worker_log_path=" + EscapeJobValue(Utf8FromWide(workerLogPath)) + "\n";
+        text += "popup_title=" + EscapeJobValue(title) + "\n";
+        text += "success_popup_auto_close=true\n";
+        if (shard == 0)
+        {
+            // 主片：一个状态窗 + 全批落盘计数，收尾时按全批清单报结果
+            text += "show_progress_toast=true\n";
+            text += "progress_watch_file=" + EscapeJobValue(Utf8FromWide(watchPath)) + "\n";
+        }
+        else
+        {
+            text += "show_progress_toast=false\n";
+        }
+        text += "progress_toast_slot=0\n";
+        text += "progress_toast_slots=1\n";
+        text += "open_output_folder_after_finish=false\n";
+        // 保持“导出DWG”原有的模型空间效果，不用工具箱的 Drafting 默认值
+        text += "dwg_output_to_drafting=false\n";
+        // 对齐改造前的 translator 参数：R2004 + ViewEditMode + 曲线/注释/结构全开
+        text += "dwg_legacy_exporter_options=true\n";
+        // 连续提交 + 批末统一校验：实测逐页等待会把并发翻译串行化（30 s/页 vs 7 s/页）
+        text += "dwg_async_batch=true\n";
+        // 限流：每个 worker 同时在飞的翻译数（实测全发会灌爆 ugto2d/dxfdwg，导致丢页+翻译器孤儿）
+        text += "dwg_batch_wave_size=2\n";
+        text += "import_filter_group=all\n";
+        text += "item_count=" + std::to_string(indices.size()) + "\n";
+        for (size_t k = 0; k < indices.size(); ++k)
+        {
+            const size_t i = indices[k];
+            const std::string indexText = std::to_string(k);
+            text += "item_" + indexText + "_source_file_path=" + EscapeJobValue(sourcePaths[i]) + "\n";
+            text += "item_" + indexText + "_sheet_name=" + EscapeJobValue(sheetNames[i]) + "\n";
+            text += "item_" + indexText + "_output_file_path=" + EscapeJobValue(outputPaths[i]) + "\n";
+            text += "item_" + indexText + "_import_format=step\n";
+            if (i < scaleValues.size() && scaleValues[i] > 0.0)
+            {
+                text += "item_" + indexText + "_export_scale_value=" + FormatInvariantDouble(scaleValues[i]) + "\n";
+            }
+        }
+
+        if (!WriteUtf8File(jobPath, text))
+        {
+            errorText = "后台任务文件写入失败：" + Utf8FromWide(jobPath);
+            return launchedShards > 0;
+        }
+
+        if (!RunWorkerProcess(workerExe, jobPath))
+        {
+            errorText = "后台导出程序启动失败（Win32 error " + std::to_string(GetLastError()) + "）：" +
+                        Utf8FromWide(workerExe) + "\n已成功启动 " + std::to_string(launchedShards) + " 片";
+            return launchedShards > 0;
+        }
+
+        launchedShards++;
     }
 
-    if (!RunWorkerProcess(workerExe, jobPath))
-    {
-        errorText = "后台导出程序启动失败（Win32 error " + std::to_string(GetLastError()) + "）：" + Utf8FromWide(workerExe);
-        return false;
-    }
-
-    return true;
+    return launchedShards > 0;
 }
 }
 //------------------------------------------------------------------------------
@@ -1076,11 +1211,13 @@ int DaoCuDWG::apply_cb()
 			else
 			{
 				std::string submitError;
-				if (SubmitBackgroundDwgJob(itemSourcePaths, itemSheetNames, itemOutputPaths, itemScaleValues, submitError))
+				int launchedShards = 0;
+				if (SubmitBackgroundDwgJob(itemSourcePaths, itemSheetNames, itemOutputPaths, itemScaleValues, launchedShards, submitError))
 				{
 					submittedPageCount = static_cast<int>(itemOutputPaths.size());
 					const std::string submitted = Utf8LiteralToLocale("已提交后台导出：共") + std::to_string(submittedPageCount) +
-                        Utf8LiteralToLocale("页，NX 可以继续操作，完成后会有提示。\n");
+                        Utf8LiteralToLocale("页，分") + std::to_string(launchedShards) +
+                        Utf8LiteralToLocale("片并行，NX 可以继续操作，完成后会有提示。\n");
 					UF_UI_open_listing_window();
 					UF_UI_write_listing_window(submitted.c_str());
 
