@@ -266,6 +266,11 @@ private:
     NXOpen::BlockStyler::StringBlock* stringHoleMarker;// Block type: String
     NXOpen::BlockStyler::DoubleBlock* doubleRInnerThreshold;// Block type: Double
     NXOpen::BlockStyler::Toggle* toggleBendNote;// Block type: Toggle
+    NXOpen::BlockStyler::Toggle* toggleBendNoteDirection;// Block type: Toggle
+    NXOpen::BlockStyler::Toggle* toggleBendNoteAngle;// Block type: Toggle
+    NXOpen::BlockStyler::Toggle* toggleBendNoteInnerR;// Block type: Toggle
+    NXOpen::BlockStyler::Toggle* toggleBendNoteKFactor;// Block type: Toggle
+    NXOpen::BlockStyler::UIBlock* groupBendNoteContent;// Block type: Group
     NXOpen::BlockStyler::DoubleBlock* doubleBendNoteTextHeight;// Block type: Double
     NXOpen::BlockStyler::Toggle* toggleBreakBendLine;// Block type: Toggle
     NXOpen::BlockStyler::DoubleBlock* doubleBendLineEdgeDistance;// Block type: Double

@@ -3496,6 +3496,21 @@ std::vector<tag_t> AskFeatureFaces(tag_t featureTag)
     return faces;
 }
 
+int gPendingMarkFaceColor = -1;
+
+struct PendingMarkFaceColorScope
+{
+    explicit PendingMarkFaceColorScope(int color)
+    {
+        gPendingMarkFaceColor = color;
+    }
+
+    ~PendingMarkFaceColorScope()
+    {
+        gPendingMarkFaceColor = -1;
+    }
+};
+
 void SetMarkFaceAttribute(tag_t faceTag)
 {
     Face* face = dynamic_cast<Face*>(NXObjectManager::Get(faceTag));
@@ -3510,6 +3525,11 @@ void SetMarkFaceAttribute(tag_t faceTag)
     }
     catch (...)
     {
+    }
+
+    if (gPendingMarkFaceColor >= 1 && gPendingMarkFaceColor <= 216)
+    {
+        UF_OBJ_set_color(faceTag, gPendingMarkFaceColor);
     }
 }
 
@@ -6492,7 +6512,9 @@ BiaoJiXian_BJ::BiaoJiXian_BJ()
       CurveLayerModeOption(NULL),
       CustomCurveLayer(NULL),
       CurveColorPicker(NULL),
-      CurveLineFont(NULL)
+      CurveLineFont(NULL),
+      MarkFaceRecolor(NULL),
+      MarkFaceColorPicker(NULL)
 {
     theSession = Session::GetSession();
     theUI = UI::GetUI();
@@ -6715,6 +6737,8 @@ void BiaoJiXian_BJ::initialize_cb()
     CustomCurveLayer = dynamic_cast<IntegerBlock*>(theDialog->TopBlock()->FindBlock("CustomCurveLayer"));
     CurveColorPicker = dynamic_cast<ObjectColorPicker*>(theDialog->TopBlock()->FindBlock("CurveColorPicker"));
     CurveLineFont = dynamic_cast<LineFont*>(theDialog->TopBlock()->FindBlock("CurveLineFont"));
+    MarkFaceRecolor = dynamic_cast<Toggle*>(theDialog->TopBlock()->FindBlock("MarkFaceRecolor"));
+    MarkFaceColorPicker = dynamic_cast<ObjectColorPicker*>(theDialog->TopBlock()->FindBlock("MarkFaceColorPicker"));
     LoadRememberedDialogValues();
     ConfigureSelectionFilters();
     }
@@ -6834,6 +6858,28 @@ int BiaoJiXian_BJ::apply_cb()
                 session->DeleteUndoMark(runMarkId, "BiaoJiXian Run");
             }
             return 0;
+        }
+
+        const bool recolorMarkFaces =
+            MarkFaceRecolor != NULL &&
+            MarkFaceColorPicker != NULL &&
+            GetToggleValue(MarkFaceRecolor);
+        const int markFaceColor = recolorMarkFaces ? GetCurveColorValue(MarkFaceColorPicker) : -1;
+        const PendingMarkFaceColorScope markFaceColorScope(markFaceColor);
+        if (markMode != 2)
+        {
+            for (std::size_t faceIndex = 0; faceIndex < selectedFaces.size(); ++faceIndex)
+            {
+                if (selectedFaces[faceIndex] != NULL)
+                {
+                    SetMarkFaceAttribute(selectedFaces[faceIndex]->Tag());
+                }
+            }
+            std::ostringstream markLog;
+            markLog << "Marked selected faces=" << selectedFaces.size()
+                    << ", recolor=" << (recolorMarkFaces ? 1 : 0)
+                    << ", color=" << markFaceColor;
+            DebugLog(markLog.str());
         }
 
         auto askContinueWithoutFlatPattern = [&](bool& asked, bool& allowed) -> bool
@@ -7295,7 +7341,7 @@ int BiaoJiXian_BJ::update_cb(NXOpen::BlockStyler::UIBlock* block)
         }
         modeUpdateInProgress = false;
     }
-    else if (block == MarkOutputMode || block == CurveLayerModeOption)
+    else if (block == MarkOutputMode || block == CurveLayerModeOption || block == MarkFaceRecolor)
     {
         RefreshUiState();
     }
@@ -7309,7 +7355,9 @@ int BiaoJiXian_BJ::update_cb(NXOpen::BlockStyler::UIBlock* block)
         block == CurveLayerModeOption ||
         block == CustomCurveLayer ||
         block == CurveColorPicker ||
-        block == CurveLineFont)
+        block == CurveLineFont ||
+        block == MarkFaceRecolor ||
+        block == MarkFaceColorPicker)
     {
         SaveRememberedDialogValues();
     }
@@ -7367,6 +7415,12 @@ void BiaoJiXian_BJ::RefreshUiState()
         SetShow(GrooveWidth, true);
         SetEnable(GrooveWidth, true);
     }
+    const bool recolorMarkFaces = GetToggleValue(MarkFaceRecolor);
+    if (MarkFaceColorPicker != NULL)
+    {
+        SetShow(MarkFaceColorPicker, recolorMarkFaces);
+        SetEnable(MarkFaceColorPicker, recolorMarkFaces);
+    }
 }
 
 void BiaoJiXian_BJ::ConfigureSelectionFilters()
@@ -7385,7 +7439,7 @@ void BiaoJiXian_BJ::ConfigureFaceFilter() const
     try
     {
         SourceBody->SetMaximumScopeAsString("Within Work Part and Components");
-        SourceBody->SetSelectModeAsString("Single");
+        SourceBody->SetSelectModeAsString("Multiple");
         SourceBody->SetInterpartSelectionAsString("Simple");
         SourceBody->SetAllowConvergentObject(false);
 
@@ -7436,7 +7490,8 @@ void BiaoJiXian_BJ::ConfigureEdgeFilter() const
 
 void BiaoJiXian_BJ::NormalizeFaceSelection() const
 {
-    if (SourceBody == NULL)
+    static bool normalizing = false;
+    if (normalizing || SourceBody == NULL)
     {
         return;
     }
@@ -7448,7 +7503,7 @@ void BiaoJiXian_BJ::NormalizeFaceSelection() const
     }
 
     std::vector<NXOpen::TaggedObject*> planarFaces;
-    planarFaces.reserve(1);
+    planarFaces.reserve(selectedObjects.size());
 
     for (std::vector<NXOpen::TaggedObject*>::const_iterator it = selectedObjects.begin(); it != selectedObjects.end(); ++it)
     {
@@ -7462,13 +7517,25 @@ void BiaoJiXian_BJ::NormalizeFaceSelection() const
         if (AskFaceOwningSolidBody(face->Tag()) != NULL_TAG && AskFaceNormal(face->Tag(), normal))
         {
             planarFaces.push_back(face);
-            break;
         }
     }
 
     if (planarFaces.size() != selectedObjects.size())
     {
-        SourceBody->SetSelectedObjects(planarFaces);
+        normalizing = true;
+        try
+        {
+            SourceBody->SetSelectedObjects(planarFaces);
+        }
+        catch (const NXException& ex)
+        {
+            DebugLog(std::string("NormalizeFaceSelection failed: ") + ex.Message());
+        }
+        catch (...)
+        {
+            DebugLog("NormalizeFaceSelection failed: unknown exception");
+        }
+        normalizing = false;
     }
 }
 
@@ -7575,6 +7642,39 @@ void BiaoJiXian_BJ::SetLineFontValue(NXOpen::BlockStyler::LineFont* block, int v
     delete properties;
 }
 
+bool BiaoJiXian_BJ::GetToggleValue(NXOpen::BlockStyler::Toggle* block) const
+{
+    if (block == NULL)
+    {
+        return false;
+    }
+
+    try
+    {
+        return block->Value();
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+void BiaoJiXian_BJ::SetToggleValue(NXOpen::BlockStyler::Toggle* block, bool value) const
+{
+    if (block == NULL)
+    {
+        return;
+    }
+
+    try
+    {
+        block->SetValue(value);
+    }
+    catch (...)
+    {
+    }
+}
+
 void BiaoJiXian_BJ::SetColorValue(NXOpen::BlockStyler::ObjectColorPicker* block, int value) const
 {
     if (block == NULL)
@@ -7604,6 +7704,8 @@ void BiaoJiXian_BJ::LoadRememberedDialogValues() const
     SetIntegerValue(CustomCurveLayer, ReadConfigInt("CustomCurveLayer", 1));
     SetColorValue(CurveColorPicker, ReadConfigInt("CurveColor", 36));
     SetLineFontValue(CurveLineFont, ReadConfigInt("CurveLineFont", 3));
+    SetToggleValue(MarkFaceRecolor, ReadConfigInt("MarkFaceRecolor", 0) != 0);
+    SetColorValue(MarkFaceColorPicker, ReadConfigInt("MarkFaceColor", 186));
 }
 
 void BiaoJiXian_BJ::SaveRememberedDialogValues() const
@@ -7618,6 +7720,8 @@ void BiaoJiXian_BJ::SaveRememberedDialogValues() const
     if (CurveLayerModeOption != NULL) WriteConfigInt("CurveLayerModeOption", GetEnumerationValue(CurveLayerModeOption));
     if (CustomCurveLayer != NULL) WriteConfigInt("CustomCurveLayer", GetIntegerValue(CustomCurveLayer));
     if (CurveColorPicker != NULL) WriteConfigInt("CurveColor", GetCurveColorValue(CurveColorPicker));
+    if (MarkFaceRecolor != NULL) WriteConfigInt("MarkFaceRecolor", GetToggleValue(MarkFaceRecolor) ? 1 : 0);
+    if (MarkFaceColorPicker != NULL) WriteConfigInt("MarkFaceColor", GetCurveColorValue(MarkFaceColorPicker));
     if (CurveLineFont != NULL)
     {
         PropertyList* properties = CurveLineFont->GetProperties();
@@ -7659,7 +7763,6 @@ std::vector<NXOpen::Face*> BiaoJiXian_BJ::GetSelectedFaces() const
             if (AskFaceOwningSolidBody(face->Tag()) != NULL_TAG && AskFaceNormal(face->Tag(), normal))
             {
                 faces.push_back(face);
-                break;
             }
         }
     }

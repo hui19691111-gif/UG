@@ -43,6 +43,7 @@
 #include "../../../common/ZhihuiEmbeddedDialog.hpp"
 #include "../embedded_dialog_resources.h"
 #include <NXOpen/PartLoadStatus.hxx>
+#include <NXOpen/PartSaveStatus.hxx>
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
 
@@ -389,18 +390,51 @@ bool IsBackgroundExportRunning()
     return true;
 }
 
-// 只做枚举：走装配收集部件 -> 每件取图纸页 -> 生成输出路径/比例，并统计未保存部件
+// 后台翻译读的是磁盘文件。已有路径但会话里改过的零件，先存盘再导出。
+// SaveComponentsFalse：只存这一件，不连带把整棵装配里其它改过的组件都写出去。
+// CloseAfterSaveFalse：存完保持打开，否则当前工程图会话会被关掉。
+bool TrySaveModifiedPart(NXOpen::Part* part)
+{
+    NXOpen::PartSaveStatus* status = NULL;
+    try
+    {
+        status = part->Save(NXOpen::BasePart::SaveComponentsFalse,
+                            NXOpen::BasePart::CloseAfterSaveFalse);
+        const bool saved = status == NULL || status->NumberUnsavedParts() == 0;
+        delete status;
+        return saved;
+    }
+    catch (const NXOpen::NXException&)
+    {
+        delete status;
+        return false;
+    }
+    catch (const std::exception&)
+    {
+        delete status;
+        return false;
+    }
+    catch (...)
+    {
+        delete status;
+        return false;
+    }
+}
+
+// 只做枚举：走装配收集部件 -> 有路径且已修改的先保存 -> 每件取图纸页 -> 生成输出路径/比例
 bool CollectDwgExportItems(const std::vector<NXOpen::Part*>& parts,
                            const NXString& folderPath,
                            std::vector<std::string>& sourcePaths,
                            std::vector<std::string>& sheetNames,
                            std::vector<std::string>& outputPaths,
                            std::vector<double>& scaleValues,
+                           int& savedPartCount,
                            int& unsavedPartCount,
                            int& unsavedPathPartCount,
                            std::string& errorText)
 {
     errorText.clear();
+    savedPartCount = 0;
     unsavedPartCount = 0;
     unsavedPathPartCount = 0;
 
@@ -447,17 +481,6 @@ bool CollectDwgExportItems(const std::vector<NXOpen::Part*>& parts,
             continue;
         }
 
-        try
-        {
-            if (part->IsModified())
-            {
-                unsavedPartCount++;
-            }
-        }
-        catch (exception&)
-        {
-        }
-
         NXString partNameNX;
         NXString partPathNX;
         try
@@ -474,9 +497,31 @@ bool CollectDwgExportItems(const std::vector<NXOpen::Part*>& parts,
         const char* partPathUtf8 = partPathNX.GetUTF8Text();
         if (partPathUtf8 == NULL || partPathUtf8[0] == '\0')
         {
-            // 从未保存过的新件没有磁盘路径，后台 worker 打不开它；这里单独计数并提示，不静默跳过
+            // 从未保存过的新件没有磁盘路径，Save 也没有目标文件名，不能代存
             unsavedPathPartCount++;
             continue;
+        }
+
+        bool modified = false;
+        try
+        {
+            modified = part->IsModified();
+        }
+        catch (exception&)
+        {
+            modified = false;
+        }
+        if (modified)
+        {
+            if (TrySaveModifiedPart(part))
+            {
+                savedPartCount++;
+            }
+            else
+            {
+                // 保存失败仍提交磁盘上的旧版本，由调用方提示
+                unsavedPartCount++;
+            }
         }
 
         for (size_t s = 0; s < sheets.size(); ++s)
@@ -665,7 +710,8 @@ bool SubmitBackgroundDwgJob(const std::vector<std::string>& sourcePaths,
 
     for (int shard = 0; shard < shardCount; ++shard)
     {
-        // 轮转分配，避免某一片全是重件
+        // 按页轮转分给 workers 个后台进程。配置 workers=4 时，四路同时导出。
+        // 每一路一次只提交一页，本路这一页没结束不会再叠一页。
         std::vector<size_t> indices;
         for (size_t i = static_cast<size_t>(shard); i < outputPaths.size(); i += static_cast<size_t>(shardCount))
         {
@@ -675,6 +721,7 @@ bool SubmitBackgroundDwgJob(const std::vector<std::string>& sourcePaths,
         {
             continue;
         }
+        const int waveSize = 1;
 
         const std::string jobId = "dwg_" + batchId + "_" + std::to_string(shard + 1);
         const std::wstring jobIdWide = WideFromUtf8(jobId.c_str());
@@ -717,7 +764,7 @@ bool SubmitBackgroundDwgJob(const std::vector<std::string>& sourcePaths,
         // 连续提交 + 批末统一校验：实测逐页等待会把并发翻译串行化（30 s/页 vs 7 s/页）
         text += "dwg_async_batch=true\n";
         // 限流：每个 worker 同时在飞的翻译数（实测全发会灌爆 ugto2d/dxfdwg，导致丢页+翻译器孤儿）
-        text += "dwg_batch_wave_size=2\n";
+        text += "dwg_batch_wave_size=" + std::to_string(waveSize) + "\n";
         text += "import_filter_group=all\n";
         // 常驻 worker 空闲多久自动退出（复用热会话，单页导出免冷启动）
         text += "resident_idle_seconds=600\n";
@@ -1112,7 +1159,8 @@ int DaoCuDWG::apply_cb()
 		//遍历实例
 		Assemblies::ComponentAssembly* componentassembly = workPart->ComponentAssembly();//获取装配底层（BaseWork为当前工作装配，basedisplaypart为当前显示的装配 两种结果是不一样的）
 		Assemblies::Component* rootcomponent = componentassembly->RootComponent();//获取rootcomponent
-		if (rootcomponent == NULL)//不是装配时，只导出当前工作部件的所有图纸页
+		const bool singlePart = rootcomponent == NULL;
+		if (singlePart)//不是装配时，只导出当前工作部件的所有图纸页
 		{
             VecPart.push_back(workPart);
 		}
@@ -1254,7 +1302,7 @@ int DaoCuDWG::apply_cb()
 			}
 		}
 
-		//===== DWG：只枚举清单并提交后台 worker，NX 不再参与翻译 =====
+		//===== DWG：单部件和装配都提交后台 worker =====
 		int submittedPageCount = 0;
 		if (Thetoggle0 == true)
 		{
@@ -1262,12 +1310,13 @@ int DaoCuDWG::apply_cb()
 			std::vector<std::string> itemSheetNames;
 			std::vector<std::string> itemOutputPaths;
 			std::vector<double> itemScaleValues;
+			int savedPartCount = 0;
 			int unsavedPartCount = 0;
 			int unsavedPathPartCount = 0;
 			std::string collectError;
 
 			if (!CollectDwgExportItems(VecPart, ThenativeFolderBrowser0, itemSourcePaths, itemSheetNames,
-                                       itemOutputPaths, itemScaleValues, unsavedPartCount, unsavedPathPartCount, collectError))
+                                       itemOutputPaths, itemScaleValues, savedPartCount, unsavedPartCount, unsavedPathPartCount, collectError))
 			{
 				theUI->NXMessageBox()->Show(NXString("导出DWG", NXString::UTF8),
                                             NXOpen::NXMessageBox::DialogTypeError,
@@ -1275,8 +1324,19 @@ int DaoCuDWG::apply_cb()
 			}
 			else if (itemOutputPaths.empty())
 			{
-				UF_UI_open_listing_window();
-				UF_UI_write_listing_window(Utf8LiteralToLocale("没有找到任何图纸页，未提交后台导出。\n").c_str());
+				if (unsavedPathPartCount > 0)
+				{
+					const std::string warning = Utf8LiteralToLocale("有") + std::to_string(unsavedPathPartCount) +
+                        Utf8LiteralToLocale("个部件从未保存、没有磁盘路径，其图纸页没有提交。");
+					theUI->NXMessageBox()->Show(NXString("导出DWG", NXString::UTF8),
+                                                NXOpen::NXMessageBox::DialogTypeWarning,
+                                                NXString(warning.c_str(), NXString::UTF8));
+				}
+				else
+				{
+					UF_UI_open_listing_window();
+					UF_UI_write_listing_window(Utf8LiteralToLocale("没有找到任何图纸页，未提交后台导出。\n").c_str());
+				}
 			}
 			else
 			{
@@ -1286,11 +1346,16 @@ int DaoCuDWG::apply_cb()
 				if (SubmitBackgroundDwgJob(itemSourcePaths, itemSheetNames, itemOutputPaths, itemScaleValues, launchedShards, servedByResident, submitError))
 				{
 					submittedPageCount = static_cast<int>(itemOutputPaths.size());
-					const std::string submitted = Utf8LiteralToLocale("已提交后台导出：共") + std::to_string(submittedPageCount) +
+					std::string submitted = Utf8LiteralToLocale("已提交后台导出：共") + std::to_string(submittedPageCount) +
                         Utf8LiteralToLocale("页，分") + std::to_string(launchedShards) +
                         Utf8LiteralToLocale("片并行") +
                         (servedByResident ? Utf8LiteralToLocale("（首片已交给常驻热会话，秒级完成）") : std::string()) +
                         Utf8LiteralToLocale("，NX 可以继续操作，完成后会有提示。\n");
+					if (savedPartCount > 0)
+					{
+						submitted += Utf8LiteralToLocale("导出前已保存 ") + std::to_string(savedPartCount) +
+                            Utf8LiteralToLocale(" 个未存盘部件。\n");
+					}
 					UF_UI_open_listing_window();
 					UF_UI_write_listing_window(submitted.c_str());
 
@@ -1298,7 +1363,7 @@ int DaoCuDWG::apply_cb()
 					if (unsavedPartCount > 0)
 					{
 						warning = Utf8LiteralToLocale("有") + std::to_string(unsavedPartCount) +
-                            Utf8LiteralToLocale("个部件未保存，后台导出的是磁盘上已保存的版本。");
+                            Utf8LiteralToLocale("个部件保存失败，后台导出的是磁盘上已保存的版本。");
 					}
 					if (unsavedPathPartCount > 0)
 					{

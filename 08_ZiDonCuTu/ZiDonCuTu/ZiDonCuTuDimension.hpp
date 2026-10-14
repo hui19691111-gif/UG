@@ -114,10 +114,19 @@ bool CreateFlatPatternHoleCoordinateDimensions(
 bool CreateFlatPatternHoleAttributeNotes(
 	NXOpen::Drawings::BaseView* baseView,
 	const std::string& markerStart = "");
+struct FlatPatternBendNoteContent
+{
+	bool includeDirection;
+	bool includeAngle;
+	bool includeInnerRadius;
+	bool includeNeutralFactor;
+};
+
 bool CreateFlatPatternBendNotes(
 	NXOpen::Drawings::BaseView* baseView,
 	NXOpen::Features::FlatPattern* flatPattern,
-	double textHeight);
+	double textHeight,
+	const FlatPatternBendNoteContent& content);
 bool BreakFlatPatternBendLines(
 	NXOpen::Drawings::BaseView* baseView,
 	NXOpen::Features::FlatPattern* flatPattern,

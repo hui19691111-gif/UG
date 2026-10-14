@@ -4,7 +4,9 @@
 
 #include "PILianDaoCuZKTDialog.hpp"
 
+#include <NXOpen/Annotations_Annotation.hxx>
 #include <NXOpen/Annotations_AnnotationManager.hxx>
+#include <NXOpen/Annotations_LetteringPreferences.hxx>
 #include <NXOpen/Annotations_DimensionCollection.hxx>
 #include <NXOpen/Annotations_DimensionMeasurementBuilder.hxx>
 #include <NXOpen/Annotations_DimensionStyleBuilder.hxx>
@@ -103,6 +105,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <iomanip>
 #include <io.h>
 #include <map>
 #include <set>
@@ -155,6 +158,12 @@ struct CommandOptions
     bool categoryLayout;
     bool annotateMaxDimension;
     bool showBendLines;
+    bool bendNotes;
+    bool bendNoteDirection;
+    bool bendNoteAngle;
+    bool bendNoteInnerRadius;
+    bool bendNoteNeutralFactor;
+    double bendNoteTextHeight;
     bool breakBendLines;
     double bendLineEdgeDistance;
     double bendUpKeepLength;
@@ -324,10 +333,39 @@ static double GetDoubleValue(DoubleBlock* block, double fallback)
     return value;
 }
 
+static void SetBendNoteContentVisible(NXOpen::BlockStyler::UIBlock* block, bool visible)
+{
+    if (block == NULL)
+    {
+        return;
+    }
+    block->SetShow(visible);
+    block->SetEnable(visible);
+}
+
+static void UpdateBendNoteContentState(
+    Toggle* bendNote,
+    NXOpen::BlockStyler::UIBlock* bendNoteContent,
+    Toggle* bendNoteDirection,
+    Toggle* bendNoteAngle,
+    Toggle* bendNoteInnerRadius,
+    Toggle* bendNoteNeutralFactor,
+    DoubleBlock* bendNoteTextHeight)
+{
+    const bool visible = GetToggleValue(bendNote, false);
+    SetBendNoteContentVisible(bendNoteContent, visible);
+    SetBendNoteContentVisible(bendNoteDirection, visible);
+    SetBendNoteContentVisible(bendNoteAngle, visible);
+    SetBendNoteContentVisible(bendNoteInnerRadius, visible);
+    SetBendNoteContentVisible(bendNoteNeutralFactor, visible);
+    SetBendNoteContentVisible(bendNoteTextHeight, visible);
+}
+
 static void UpdateBendLineDialogState(
     NXOpen::BlockStyler::UIBlock* changedBlock,
     Toggle* showBendLines,
     Toggle* breakBendLines,
+    Toggle* bendNote,
     DoubleBlock* bendLineEdgeDistance,
     DoubleBlock* bendUpKeepLength,
     DoubleBlock* bendDownKeepLength)
@@ -339,12 +377,18 @@ static void UpdateBendLineDialogState(
 
     bool showEnabled = GetToggleValue(showBendLines, false);
     bool breakEnabled = GetToggleValue(breakBendLines, false);
+    bool noteEnabled = GetToggleValue(bendNote, false);
     if (changedBlock == showBendLines && !showEnabled)
     {
         breakBendLines->SetValue(false);
         breakEnabled = false;
+        if (bendNote != NULL && noteEnabled)
+        {
+            bendNote->SetValue(false);
+            noteEnabled = false;
+        }
     }
-    else if (breakEnabled && !showEnabled)
+    else if ((breakEnabled || noteEnabled) && !showEnabled)
     {
         showBendLines->SetValue(true);
         showEnabled = true;
@@ -404,12 +448,24 @@ static void LoadPILianDaoCuZKTDialogMemory(
     DoubleBlock* viewSpacing,
     DoubleBlock* rowSpacing,
     DoubleBlock* noteTextSize,
-    DoubleBlock* dimensionGlobalScale)
+    DoubleBlock* dimensionGlobalScale,
+    Toggle* bendNote,
+    Toggle* bendNoteDirection,
+    Toggle* bendNoteAngle,
+    Toggle* bendNoteInnerRadius,
+    Toggle* bendNoteNeutralFactor,
+    DoubleBlock* bendNoteTextHeight)
 {
     const wchar_t* fileName = L"PILianDaoCuZKT_state.ini";
     zhihui_dialog_memory::LoadLogical(fileName, L"categoryLayout", categoryLayout);
     zhihui_dialog_memory::LoadLogical(fileName, L"annotateMaxDimension", annotateMaxDimension);
     zhihui_dialog_memory::LoadLogical(fileName, L"showBendLines", showBendLines);
+    zhihui_dialog_memory::LoadLogical(fileName, L"bendNote", bendNote);
+    zhihui_dialog_memory::LoadLogical(fileName, L"bendNoteDirection", bendNoteDirection);
+    zhihui_dialog_memory::LoadLogical(fileName, L"bendNoteAngle", bendNoteAngle);
+    zhihui_dialog_memory::LoadLogical(fileName, L"bendNoteInnerRadius", bendNoteInnerRadius);
+    zhihui_dialog_memory::LoadLogical(fileName, L"bendNoteNeutralFactor", bendNoteNeutralFactor);
+    zhihui_dialog_memory::LoadDouble(fileName, L"bendNoteTextHeight", bendNoteTextHeight);
     zhihui_dialog_memory::LoadLogical(fileName, L"breakBendLines", breakBendLines);
     zhihui_dialog_memory::LoadDouble(fileName, L"bendLineEdgeDistance", bendLineEdgeDistance);
     zhihui_dialog_memory::LoadDouble(fileName, L"bendUpKeepLength", bendUpKeepLength);
@@ -443,12 +499,24 @@ static void SavePILianDaoCuZKTDialogMemory(
     DoubleBlock* viewSpacing,
     DoubleBlock* rowSpacing,
     DoubleBlock* noteTextSize,
-    DoubleBlock* dimensionGlobalScale)
+    DoubleBlock* dimensionGlobalScale,
+    Toggle* bendNote,
+    Toggle* bendNoteDirection,
+    Toggle* bendNoteAngle,
+    Toggle* bendNoteInnerRadius,
+    Toggle* bendNoteNeutralFactor,
+    DoubleBlock* bendNoteTextHeight)
 {
     const wchar_t* fileName = L"PILianDaoCuZKT_state.ini";
     zhihui_dialog_memory::SaveLogical(fileName, L"categoryLayout", categoryLayout);
     zhihui_dialog_memory::SaveLogical(fileName, L"annotateMaxDimension", annotateMaxDimension);
     zhihui_dialog_memory::SaveLogical(fileName, L"showBendLines", showBendLines);
+    zhihui_dialog_memory::SaveLogical(fileName, L"bendNote", bendNote);
+    zhihui_dialog_memory::SaveLogical(fileName, L"bendNoteDirection", bendNoteDirection);
+    zhihui_dialog_memory::SaveLogical(fileName, L"bendNoteAngle", bendNoteAngle);
+    zhihui_dialog_memory::SaveLogical(fileName, L"bendNoteInnerRadius", bendNoteInnerRadius);
+    zhihui_dialog_memory::SaveLogical(fileName, L"bendNoteNeutralFactor", bendNoteNeutralFactor);
+    zhihui_dialog_memory::SaveDouble(fileName, L"bendNoteTextHeight", bendNoteTextHeight);
     zhihui_dialog_memory::SaveLogical(fileName, L"breakBendLines", breakBendLines);
     zhihui_dialog_memory::SaveDouble(fileName, L"bendLineEdgeDistance", bendLineEdgeDistance);
     zhihui_dialog_memory::SaveDouble(fileName, L"bendUpKeepLength", bendUpKeepLength);
@@ -4240,6 +4308,433 @@ static bool TryGetDraftingLineDrawingPoints(
         UF_VIEW_map_model_to_drawing(view->Tag(), lineData.end_point, end) == 0;
 }
 
+struct BendNoteContent
+{
+    bool includeDirection;
+    bool includeAngle;
+    bool includeInnerRadius;
+    bool includeNeutralFactor;
+};
+
+static const double kBendNotePi = 3.14159265358979323846;
+
+static std::string FormatBendNoteNumber(double value, int decimals)
+{
+    if (decimals < 0)
+    {
+        decimals = 0;
+    }
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(decimals) << value;
+    std::string result = text.str();
+    const size_t dot = result.find('.');
+    if (dot != std::string::npos)
+    {
+        while (!result.empty() && result.back() == '0')
+        {
+            result.pop_back();
+        }
+        if (!result.empty() && result.back() == '.')
+        {
+            result.pop_back();
+        }
+    }
+    return result.empty() || result == "-" ? "0" : result;
+}
+
+static std::string FormatBendAngleText(double angleDegrees)
+{
+    const double rounded = std::round(angleDegrees * 10.0) / 10.0;
+    std::ostringstream text;
+    if (std::fabs(rounded - std::round(rounded)) < 1.0e-6)
+    {
+        text << static_cast<int>(std::round(rounded));
+    }
+    else
+    {
+        text << std::fixed << std::setprecision(1) << rounded;
+    }
+    text << "\xC2\xB0";
+    return text.str();
+}
+
+static std::string FormatBendNoteText(
+    const BendNoteContent& content,
+    const char* directionUtf8,
+    bool hasAngle,
+    double angleDegrees,
+    bool hasBendParameters,
+    double innerRadius,
+    double neutralFactor)
+{
+    std::string text;
+    if (content.includeDirection && directionUtf8 != NULL)
+    {
+        text += directionUtf8;
+    }
+    if (content.includeAngle && hasAngle)
+    {
+        text += FormatBendAngleText(angleDegrees);
+    }
+    if (content.includeInnerRadius && hasBendParameters)
+    {
+        if (!text.empty())
+        {
+            text += " ";
+        }
+        text += "R";
+        text += FormatBendNoteNumber(std::fabs(innerRadius), 3);
+    }
+    if (content.includeNeutralFactor && hasBendParameters)
+    {
+        if (!text.empty())
+        {
+            text += " ";
+        }
+        text += "K";
+        text += FormatBendNoteNumber(neutralFactor, 3);
+    }
+    return text;
+}
+
+static bool TryMeasureBendAngleDegrees(NXOpen::Face* bendFace, double& degrees)
+{
+    degrees = 0.0;
+    if (bendFace == NULL)
+    {
+        return false;
+    }
+
+    int faceType = 0;
+    double facePoint[3] = { 0.0, 0.0, 0.0 };
+    double faceDirection[3] = { 0.0, 0.0, 0.0 };
+    double faceBox[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    double faceRadius = 0.0;
+    double faceRadData = 0.0;
+    int faceNormDir = 0;
+    double uvMinMax[4] = { 0.0, 0.0, 0.0, 0.0 };
+    if (UF_MODL_ask_face_data(
+            bendFace->Tag(),
+            &faceType,
+            facePoint,
+            faceDirection,
+            faceBox,
+            &faceRadius,
+            &faceRadData,
+            &faceNormDir) == 0 &&
+        faceType == UF_MODL_CYLINDRICAL_FACE &&
+        UF_MODL_ask_face_uv_minmax(bendFace->Tag(), uvMinMax) == 0)
+    {
+        double span = std::fabs(uvMinMax[1] - uvMinMax[0]);
+        while (span > (2.0 * kBendNotePi))
+        {
+            span -= 2.0 * kBendNotePi;
+        }
+        const double faceDegrees = span * 180.0 / kBendNotePi;
+        if (faceDegrees > 1.0e-3 && faceDegrees < 359.0)
+        {
+            degrees = faceDegrees;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool TryReadSheetMetalBendParameters(
+    NXOpen::Face* bendFace,
+    double& innerRadius,
+    double& neutralFactor)
+{
+    innerRadius = 0.0;
+    neutralFactor = 0.0;
+    if (bendFace == NULL)
+    {
+        return false;
+    }
+    try
+    {
+        NXOpen::Part* part = dynamic_cast<NXOpen::Part*>(bendFace->OwningPart());
+        if (part == NULL || part->Features() == NULL || part->Features()->SheetmetalManager() == NULL)
+        {
+            return false;
+        }
+        const NXOpen::Features::SheetMetal::SheetmetalBendParameters parameters =
+            part->Features()->SheetmetalManager()->GetBendParameters(bendFace);
+        innerRadius = parameters.InnerRadius;
+        neutralFactor = parameters.NeutralFactor;
+        return true;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine(std::string("[BendNote] bend parameters failed: ") + ex.Message());
+    }
+    catch (...)
+    {
+        LogLine("[BendNote] bend parameters failed");
+    }
+    return false;
+}
+
+static bool CreateFlatPatternBendNote(
+    NXOpen::Part* workPart,
+    NXOpen::Drawings::BaseView* view,
+    const NXOpen::Point3d& drawingPoint,
+    const std::string& noteText,
+    double textHeight,
+    double textAngleRadians)
+{
+    const double textAngleDegrees = textAngleRadians * 180.0 / kBendNotePi;
+    if (workPart == NULL || view == NULL || noteText.empty() || workPart->Annotations() == NULL)
+    {
+        return false;
+    }
+
+    NXOpen::Drawings::DraftingView* draftingView =
+        dynamic_cast<NXOpen::Drawings::DraftingView*>(NXOpen::NXObjectManager::Get(view->Tag()));
+    if (draftingView == NULL)
+    {
+        return false;
+    }
+
+    NXOpen::Annotations::SimpleDraftingAid* nullAid(NULL);
+    NXOpen::Annotations::DraftingNoteBuilder* builder = NULL;
+    NXOpen::NXObject* created = NULL;
+    try
+    {
+        builder = workPart->Annotations()->CreateDraftingNoteBuilder(nullAid);
+        if (builder == NULL)
+        {
+            return false;
+        }
+
+        NXOpen::Annotations::Annotation::AssociativeOriginData assocOrigin;
+        NXOpen::Point* nullPoint(NULL);
+        NXOpen::Annotations::Annotation* nullAnnotation(NULL);
+        assocOrigin.OriginType = NXOpen::Annotations::AssociativeOriginTypeRelativeToView;
+        assocOrigin.View = draftingView;
+        assocOrigin.ViewOfGeometry = draftingView;
+        assocOrigin.PointOnGeometry = nullPoint;
+        assocOrigin.VertAnnotation = nullAnnotation;
+        assocOrigin.VertAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+        assocOrigin.HorizAnnotation = nullAnnotation;
+        assocOrigin.HorizAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+        assocOrigin.AlignedAnnotation = nullAnnotation;
+        assocOrigin.DimensionLine = 0;
+        assocOrigin.AssociatedView = draftingView;
+        assocOrigin.AssociatedPoint = nullPoint;
+        assocOrigin.OffsetAnnotation = nullAnnotation;
+        assocOrigin.OffsetAlignmentPosition = NXOpen::Annotations::AlignmentPositionTopLeft;
+        assocOrigin.XOffsetFactor = 0.0;
+        assocOrigin.YOffsetFactor = 0.0;
+        assocOrigin.StackAlignmentPosition = NXOpen::Annotations::StackAlignmentPositionAbove;
+        builder->Origin()->SetAssociativeOrigin(assocOrigin);
+        builder->Origin()->SetInferRelativeToGeometry(false);
+        builder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
+        builder->Style()->LetteringStyle()->SetGeneralTextSize(std::max(0.1, textHeight));
+        builder->Style()->LetteringStyle()->SetAngle(textAngleDegrees);
+        builder->Origin()->SetOriginPoint(drawingPoint);
+
+        std::vector<NXOpen::NXString> lines(1);
+        lines[0] = NXOpen::NXString(noteText.c_str(), NXOpen::NXString::UTF8);
+        builder->Text()->TextBlock()->SetText(lines);
+        created = builder->Commit();
+
+        NXOpen::Annotations::Annotation* createdAnnotation =
+            dynamic_cast<NXOpen::Annotations::Annotation*>(created);
+        if (createdAnnotation != NULL)
+        {
+            NXOpen::Annotations::LetteringPreferences* letteringPreferences =
+                createdAnnotation->GetLetteringPreferences();
+            if (letteringPreferences != NULL)
+            {
+                letteringPreferences->SetAngle(textAngleDegrees);
+                createdAnnotation->SetLetteringPreferences(letteringPreferences);
+                delete letteringPreferences;
+            }
+            createdAnnotation->RedisplayObject();
+        }
+        if (created != NULL)
+        {
+            UF_DRAW_attach_note_to_view(created->Tag(), view->Tag());
+            UF_OBJ_set_layer(created->Tag(), 1);
+        }
+        LogLine("[BendNote] created text=" + noteText
+            + " angleDeg=" + FormatReal(textAngleDegrees)
+            + " point=(" + FormatReal(drawingPoint.X) + "," + FormatReal(drawingPoint.Y) + ")");
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine(std::string("[BendNote] create failed: ") + ex.Message());
+    }
+    catch (...)
+    {
+        LogLine("[BendNote] create failed");
+    }
+
+    if (builder != NULL)
+    {
+        try { builder->Destroy(); } catch (...) {}
+    }
+    return created != NULL;
+}
+
+static int CreateBendNotesForObjects(
+    NXOpen::Part* workPart,
+    NXOpen::Drawings::BaseView* view,
+    const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+    const std::map<tag_t, NXOpen::Drawings::DraftingCurve*>& parentIndex,
+    const std::vector<NXOpen::Features::FlatPattern::ObjectDataFace>& objects,
+    const char* directionUtf8,
+    double textHeight,
+    const BendNoteContent& content,
+    std::unordered_set<tag_t>& usedFlatObjectTags)
+{
+    int createdCount = 0;
+    for (size_t i = 0; i < objects.size(); ++i)
+    {
+        NXOpen::Curve* flatCurve = objects[i].FlatPatternObject;
+        if (flatCurve == NULL || flatCurve->Tag() == NULL_TAG ||
+            !usedFlatObjectTags.insert(flatCurve->Tag()).second)
+        {
+            continue;
+        }
+
+        NXOpen::Drawings::DraftingCurve* curve = NULL;
+        const std::map<tag_t, NXOpen::Drawings::DraftingCurve*>::const_iterator found =
+            parentIndex.find(flatCurve->Tag());
+        if (found != parentIndex.end())
+        {
+            curve = found->second;
+        }
+        else
+        {
+            curve = FindDraftingCurveForFlatObject(curves, flatCurve);
+        }
+        if (curve == NULL)
+        {
+            LogLine(std::string("[BendNote] no drafting curve direction=") + directionUtf8);
+            continue;
+        }
+
+        double startPoint[2] = { 0.0, 0.0 };
+        double endPoint[2] = { 0.0, 0.0 };
+        if (!TryGetDraftingLineDrawingPoints(view, curve, startPoint, endPoint))
+        {
+            LogLine("[BendNote] cannot map line tag="
+                + std::to_string(static_cast<unsigned long long>(curve->Tag())));
+            continue;
+        }
+
+        double angleDegrees = 0.0;
+        const bool angleMeasured = content.includeAngle &&
+            TryMeasureBendAngleDegrees(objects[i].FormedBodyObject, angleDegrees);
+        if (content.includeAngle && !angleMeasured)
+        {
+            LogLine("[BendNote] skip, cylindrical angle unavailable tag="
+                + std::to_string(static_cast<unsigned long long>(curve->Tag())));
+            continue;
+        }
+        if (angleMeasured)
+        {
+            angleDegrees = 180.0 - angleDegrees;
+            if (angleDegrees < 0.0)
+            {
+                angleDegrees = -angleDegrees;
+            }
+        }
+
+        double innerRadius = 0.0;
+        double neutralFactor = 0.0;
+        const bool hasBendParameters = (content.includeInnerRadius || content.includeNeutralFactor) &&
+            TryReadSheetMetalBendParameters(objects[i].FormedBodyObject, innerRadius, neutralFactor);
+        const NXOpen::Point3d drawingPoint(
+            (startPoint[0] + endPoint[0]) * 0.5,
+            (startPoint[1] + endPoint[1]) * 0.5,
+            0.0);
+        double textAngleRadians = std::atan2(
+            endPoint[1] - startPoint[1],
+            endPoint[0] - startPoint[0]);
+        if (textAngleRadians > kBendNotePi * 0.5)
+        {
+            textAngleRadians -= kBendNotePi;
+        }
+        else if (textAngleRadians <= -kBendNotePi * 0.5)
+        {
+            textAngleRadians += kBendNotePi;
+        }
+
+        const std::string noteText = FormatBendNoteText(
+            content,
+            directionUtf8,
+            angleMeasured,
+            angleDegrees,
+            hasBendParameters,
+            innerRadius,
+            neutralFactor);
+        if (noteText.empty())
+        {
+            continue;
+        }
+        if (CreateFlatPatternBendNote(workPart, view, drawingPoint, noteText, textHeight, textAngleRadians))
+        {
+            ++createdCount;
+        }
+    }
+    return createdCount;
+}
+
+static int CreateFlatPatternBendNotes(
+    NXOpen::Part* workPart,
+    NXOpen::Drawings::BaseView* view,
+    NXOpen::Features::FlatPattern* flatPattern,
+    const std::vector<NXOpen::Drawings::DraftingCurve*>& curves,
+    const BendNoteContent& content,
+    double textHeight)
+{
+    if (workPart == NULL || view == NULL || flatPattern == NULL)
+    {
+        return 0;
+    }
+    if (!content.includeDirection &&
+        !content.includeAngle &&
+        !content.includeInnerRadius &&
+        !content.includeNeutralFactor)
+    {
+        LogLine("[BendNote] skipped, no content selected");
+        return 0;
+    }
+
+    const std::map<tag_t, NXOpen::Drawings::DraftingCurve*> parentIndex = BuildDraftingCurveParentIndex(curves);
+    std::unordered_set<tag_t> used;
+    int createdCount = 0;
+    try
+    {
+        std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> objects;
+        flatPattern->GetBendUpCenterLines(objects);
+        createdCount += CreateBendNotesForObjects(
+            workPart, view, curves, parentIndex, objects,
+            "\xE4\xB8\x8A\xE6\x8A\x98", textHeight, content, used);
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine(std::string("[BendNote] get up lines failed: ") + ex.Message());
+    }
+    try
+    {
+        std::vector<NXOpen::Features::FlatPattern::ObjectDataFace> objects;
+        flatPattern->GetBendDownCenterLines(objects);
+        createdCount += CreateBendNotesForObjects(
+            workPart, view, curves, parentIndex, objects,
+            "\xE4\xB8\x8B\xE6\x8A\x98", textHeight, content, used);
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine(std::string("[BendNote] get down lines failed: ") + ex.Message());
+    }
+    LogLine("[BendNote] createdCount=" + std::to_string(createdCount));
+    return createdCount;
+}
+
 static bool TrimLargeArcMarkerCurve(
     NXOpen::Drawings::BaseView* view,
     NXOpen::Drawings::DraftingCurve* curve,
@@ -5716,6 +6211,21 @@ static void FinalizeCreatedViews(
                 options.bendUpKeepLength,
                 options.bendDownKeepLength);
         }
+        if (options.bendNotes && flatPattern != NULL)
+        {
+            BendNoteContent bendNoteContent;
+            bendNoteContent.includeDirection = options.bendNoteDirection;
+            bendNoteContent.includeAngle = options.bendNoteAngle;
+            bendNoteContent.includeInnerRadius = options.bendNoteInnerRadius;
+            bendNoteContent.includeNeutralFactor = options.bendNoteNeutralFactor;
+            CreateFlatPatternBendNotes(
+                workPart,
+                created.view,
+                flatPattern,
+                curves,
+                bendNoteContent,
+                options.bendNoteTextHeight);
+        }
 
         DraftRect displayedRect = created.rect;
         if (RectFromMappedVisibleCurves(created.view, curves, displayedRect))
@@ -5903,7 +6413,7 @@ static DrawingRunSummary RunBatchFlatPatternDrawing(const CommandOptions& option
     summary.totalCount = items.size();
     SortFlatPatternItemsForClassBatches(items);
     DeleteExistingPluginSheets(workPart);
-    const bool needBendCurves = options.showBendLines || options.breakBendLines;
+    const bool needBendCurves = options.showBendLines || options.breakBendLines || options.bendNotes;
     ApplyFlatPatternDefaultBendCurveVisibility(workPart, needBendCurves);
     DraftingDelayUpdateGuard draftingDelayGuard(workPart);
     UfSuppressViewUpdateGuard suppressViewUpdateGuard;
@@ -6109,6 +6619,13 @@ static DrawingRunSummary RunBatchFlatPatternDrawing(const CommandOptions& option
 PILianDaoCuZKTDialog::PILianDaoCuZKTDialog()
 {
     LogLine("[Dialog::ctor] begin");
+    bend_note = NULL;
+    bend_note_content = NULL;
+    bend_note_direction = NULL;
+    bend_note_angle = NULL;
+    bend_note_inner_r = NULL;
+    bend_note_k_factor = NULL;
+    bend_note_text_height = NULL;
     PILianDaoCuZKTDialog::theSession = NXOpen::Session::GetSession();
     PILianDaoCuZKTDialog::theUI = UI::GetUI();
     theDlxFileName = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_PILIANDAOCUZKTDIALOG_DLX);
@@ -6202,6 +6719,13 @@ void PILianDaoCuZKTDialog::initialize_cb()
         category_layout = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("category_layout"));
         annotate_max_dimension = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("annotate_max_dimension"));
         show_bend_lines = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("show_bend_lines"));
+        bend_note = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("bend_note"));
+        bend_note_content = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("bend_note_content"));
+        bend_note_direction = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("bend_note_direction"));
+        bend_note_angle = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("bend_note_angle"));
+        bend_note_inner_r = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("bend_note_inner_r"));
+        bend_note_k_factor = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("bend_note_k_factor"));
+        bend_note_text_height = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("bend_note_text_height"));
         break_bend_lines = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("break_bend_lines"));
         bend_line_edge_distance = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("bend_line_edge_distance"));
         bend_up_keep_length = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("bend_up_keep_length"));
@@ -6235,14 +6759,29 @@ void PILianDaoCuZKTDialog::initialize_cb()
             view_spacing,
             row_spacing,
             note_text_size,
-            dimension_global_scale);
+            dimension_global_scale,
+            bend_note,
+            bend_note_direction,
+            bend_note_angle,
+            bend_note_inner_r,
+            bend_note_k_factor,
+            bend_note_text_height);
         UpdateBendLineDialogState(
             NULL,
             show_bend_lines,
             break_bend_lines,
+            bend_note,
             bend_line_edge_distance,
             bend_up_keep_length,
             bend_down_keep_length);
+        UpdateBendNoteContentState(
+            bend_note,
+            bend_note_content,
+            bend_note_direction,
+            bend_note_angle,
+            bend_note_inner_r,
+            bend_note_k_factor,
+            bend_note_text_height);
         UpdateLargeArcMarkerDialogState(
             large_arc_marker_lines,
             large_arc_radius_ratio,
@@ -6258,33 +6797,74 @@ void PILianDaoCuZKTDialog::initialize_cb()
 
 void PILianDaoCuZKTDialog::dialogShown_cb()
 {
+    try
+    {
     UpdateBendLineDialogState(
         NULL,
         show_bend_lines,
         break_bend_lines,
+        bend_note,
         bend_line_edge_distance,
         bend_up_keep_length,
         bend_down_keep_length);
+    UpdateBendNoteContentState(
+        bend_note,
+        bend_note_content,
+        bend_note_direction,
+        bend_note_angle,
+        bend_note_inner_r,
+        bend_note_k_factor,
+        bend_note_text_height);
     UpdateLargeArcMarkerDialogState(
         large_arc_marker_lines,
         large_arc_radius_ratio,
         large_arc_marker_edge_distance,
         large_arc_marker_keep_length);
     LogLine("[dialogShown_cb] shown");
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine(std::string("[dialogShown_cb] NXException: ") + ex.Message());
+    }
+    catch (const std::exception& ex)
+    {
+        LogLine(std::string("[dialogShown_cb] exception: ") + ex.what());
+    }
+    catch (...)
+    {
+        LogLine("[dialogShown_cb] unknown exception");
+    }
 }
 
 int PILianDaoCuZKTDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
 {
-    if (block == show_bend_lines || block == break_bend_lines)
+    try
+    {
+    if (block == show_bend_lines || block == break_bend_lines || block == bend_note)
     {
         UpdateBendLineDialogState(
             block,
             show_bend_lines,
             break_bend_lines,
+            bend_note,
             bend_line_edge_distance,
             bend_up_keep_length,
             bend_down_keep_length);
+        UpdateBendNoteContentState(
+            bend_note,
+            bend_note_content,
+            bend_note_direction,
+            bend_note_angle,
+            bend_note_inner_r,
+            bend_note_k_factor,
+            bend_note_text_height);
         LogLine("[update_cb] bend line controls linked");
+    }
+    else if (block == bend_note_text_height &&
+        bend_note_text_height != NULL &&
+        bend_note_text_height->Value() <= 0.0)
+    {
+        bend_note_text_height->SetValue(2.0);
     }
     else if (block == large_arc_marker_lines)
     {
@@ -6294,6 +6874,19 @@ int PILianDaoCuZKTDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
             large_arc_marker_edge_distance,
             large_arc_marker_keep_length);
         LogLine("[update_cb] large arc marker controls linked");
+    }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogLine(std::string("[update_cb] NXException: ") + ex.Message());
+    }
+    catch (const std::exception& ex)
+    {
+        LogLine(std::string("[update_cb] exception: ") + ex.what());
+    }
+    catch (...)
+    {
+        LogLine("[update_cb] unknown exception");
     }
     return 0;
 }
@@ -6320,11 +6913,23 @@ int PILianDaoCuZKTDialog::ok_cb()
             view_spacing,
             row_spacing,
             note_text_size,
-            dimension_global_scale);
+            dimension_global_scale,
+            bend_note,
+            bend_note_direction,
+            bend_note_angle,
+            bend_note_inner_r,
+            bend_note_k_factor,
+            bend_note_text_height);
         CommandOptions options;
         options.categoryLayout = GetToggleValue(category_layout, true);
         options.annotateMaxDimension = GetToggleValue(annotate_max_dimension, true);
-        options.showBendLines = GetToggleValue(show_bend_lines, false);
+        options.bendNotes = GetToggleValue(bend_note, false);
+        options.bendNoteDirection = GetToggleValue(bend_note_direction, true);
+        options.bendNoteAngle = GetToggleValue(bend_note_angle, true);
+        options.bendNoteInnerRadius = GetToggleValue(bend_note_inner_r, false);
+        options.bendNoteNeutralFactor = GetToggleValue(bend_note_k_factor, false);
+        options.bendNoteTextHeight = ClampPositive(GetDoubleValue(bend_note_text_height, 2.0), 2.0);
+        options.showBendLines = GetToggleValue(show_bend_lines, false) || options.bendNotes;
         options.breakBendLines = options.showBendLines && GetToggleValue(break_bend_lines, true);
         options.bendLineEdgeDistance = std::max(0.0, GetDoubleValue(bend_line_edge_distance, 3.0));
         options.bendUpKeepLength = ClampPositive(GetDoubleValue(bend_up_keep_length, 5.0), 5.0);
@@ -6342,6 +6947,12 @@ int PILianDaoCuZKTDialog::ok_cb()
         LogLine("[ok_cb] options categoryLayout=" + std::to_string(options.categoryLayout ? 1 : 0)
             + " annotateMaxDimension=" + std::to_string(options.annotateMaxDimension ? 1 : 0)
             + " showBendLines=" + std::to_string(options.showBendLines ? 1 : 0)
+            + " bendNotes=" + std::to_string(options.bendNotes ? 1 : 0)
+            + " bendNoteContent=" + std::to_string(options.bendNoteDirection ? 1 : 0)
+            + "/" + std::to_string(options.bendNoteAngle ? 1 : 0)
+            + "/" + std::to_string(options.bendNoteInnerRadius ? 1 : 0)
+            + "/" + std::to_string(options.bendNoteNeutralFactor ? 1 : 0)
+            + " bendNoteTextHeight=" + FormatReal(options.bendNoteTextHeight)
             + " breakBendLines=" + std::to_string(options.breakBendLines ? 1 : 0)
             + " bendBreak=" + FormatReal(options.bendLineEdgeDistance) + "/" + FormatReal(options.bendUpKeepLength) + "/" + FormatReal(options.bendDownKeepLength)
             + " largeArcMarker=" + std::to_string(options.largeArcMarkerLines ? 1 : 0)

@@ -71,6 +71,13 @@ private:
     NXOpen::BlockStyler::Toggle* category_layout;// Block type: Toggle
     NXOpen::BlockStyler::Toggle* annotate_max_dimension;// Block type: Toggle
     NXOpen::BlockStyler::Toggle* show_bend_lines;// Block type: Toggle
+    NXOpen::BlockStyler::Toggle* bend_note;// Block type: Toggle
+    NXOpen::BlockStyler::Group* bend_note_content;// Block type: Group
+    NXOpen::BlockStyler::Toggle* bend_note_direction;// Block type: Toggle
+    NXOpen::BlockStyler::Toggle* bend_note_angle;// Block type: Toggle
+    NXOpen::BlockStyler::Toggle* bend_note_inner_r;// Block type: Toggle
+    NXOpen::BlockStyler::Toggle* bend_note_k_factor;// Block type: Toggle
+    NXOpen::BlockStyler::DoubleBlock* bend_note_text_height;// Block type: Double
     NXOpen::BlockStyler::Toggle* break_bend_lines;// Block type: Toggle
     NXOpen::BlockStyler::DoubleBlock* bend_line_edge_distance;// Block type: Double
     NXOpen::BlockStyler::DoubleBlock* bend_up_keep_length;// Block type: Double

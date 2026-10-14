@@ -1,6 +1,9 @@
 ﻿#include "ZiDonCuTuDimension.hpp"
 #include "ZiDonCuTuSupport.hpp"
 #include <uf_drf.h>
+#include <NXOpen/Features_FeatureCollection.hxx>
+#include <NXOpen/Features_SheetMetal_SheetmetalManager.hxx>
+#include <NXOpen/Part.hxx>
 #include <NXOpen/Annotations_Annotation.hxx>
 #include <NXOpen/Annotations_OrdinateDimension.hxx>
 #include <NXOpen/Annotations_OrdinateDimensionBuilder.hxx>
@@ -5591,11 +5594,42 @@ bool TryMeasureBendAngleDegrees(NXOpen::Face* bendFace, double& degrees)
 	return false;
 }
 
-std::string FormatBendNoteText(const char* directionUtf8, double angleDegrees)
+std::string FormatCompactNumber(double value, int decimals)
 {
+	if (decimals < 0)
+	{
+		decimals = 0;
+	}
+	if (decimals > 6)
+	{
+		decimals = 6;
+	}
 	std::ostringstream text;
-	text << directionUtf8;
+	text << std::fixed << std::setprecision(decimals) << value;
+	std::string result = text.str();
+	const size_t dot = result.find('.');
+	if (dot != std::string::npos)
+	{
+		while (!result.empty() && result.back() == '0')
+		{
+			result.pop_back();
+		}
+		if (!result.empty() && result.back() == '.')
+		{
+			result.pop_back();
+		}
+	}
+	if (result.empty() || result == "-")
+	{
+		return "0";
+	}
+	return result;
+}
+
+std::string FormatBendAngleText(double angleDegrees)
+{
 	const double rounded = std::round(angleDegrees * 10.0) / 10.0;
+	std::ostringstream text;
 	if (std::fabs(rounded - std::round(rounded)) < 1.0e-6)
 	{
 		text << static_cast<int>(std::round(rounded));
@@ -5606,6 +5640,81 @@ std::string FormatBendNoteText(const char* directionUtf8, double angleDegrees)
 	}
 	text << "\xC2\xB0";
 	return text.str();
+}
+
+bool TryReadSheetMetalBendParameters(
+	NXOpen::Face* bendFace,
+	double& innerRadius,
+	double& neutralFactor)
+{
+	innerRadius = 0.0;
+	neutralFactor = 0.0;
+	if (bendFace == NULL)
+	{
+		return false;
+	}
+	try
+	{
+		NXOpen::Part* part = dynamic_cast<NXOpen::Part*>(bendFace->OwningPart());
+		if (part == NULL || part->Features() == NULL || part->Features()->SheetmetalManager() == NULL)
+		{
+			return false;
+		}
+		const NXOpen::Features::SheetMetal::SheetmetalBendParameters parameters =
+			part->Features()->SheetmetalManager()->GetBendParameters(bendFace);
+		innerRadius = parameters.InnerRadius;
+		neutralFactor = parameters.NeutralFactor;
+		return true;
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		BendNoteDebugLog(std::string("[BendNote] bend parameters failed: ") + ex.Message());
+		return false;
+	}
+	catch (...)
+	{
+		BendNoteDebugLog("[BendNote] bend parameters failed: unknown exception");
+		return false;
+	}
+}
+
+std::string FormatBendNoteText(
+	const FlatPatternBendNoteContent& content,
+	const char* directionUtf8,
+	bool hasAngle,
+	double angleDegrees,
+	bool hasBendParameters,
+	double innerRadius,
+	double neutralFactor)
+{
+	std::string text;
+	if (content.includeDirection && directionUtf8 != NULL)
+	{
+		text += directionUtf8;
+	}
+	if (content.includeAngle && hasAngle)
+	{
+		text += FormatBendAngleText(angleDegrees);
+	}
+	if (content.includeInnerRadius && hasBendParameters)
+	{
+		if (!text.empty())
+		{
+			text += " ";
+		}
+		text += "R";
+		text += FormatCompactNumber(std::fabs(innerRadius), 3);
+	}
+	if (content.includeNeutralFactor && hasBendParameters)
+	{
+		if (!text.empty())
+		{
+			text += " ";
+		}
+		text += "K";
+		text += FormatCompactNumber(neutralFactor, 3);
+	}
+	return text;
 }
 
 bool CreateFlatPatternBendNote(
@@ -5736,6 +5845,7 @@ bool CreateFlatPatternBendNotesForObjects(
 	const std::vector<NXOpen::Features::FlatPattern::ObjectDataFace>& objects,
 	const char* directionUtf8,
 	double textHeight,
+	const FlatPatternBendNoteContent& content,
 	std::unordered_set<tag_t>& usedFlatPatternCurveTags)
 {
 	bool createdAny = false;
@@ -5773,8 +5883,9 @@ bool CreateFlatPatternBendNotesForObjects(
 		}
 
 		double angleDegrees = 0.0;
-		bool angleMeasured = TryMeasureBendAngleDegrees(objects[i].FormedBodyObject, angleDegrees);
-		if (!angleMeasured)
+		const bool angleMeasured = content.includeAngle &&
+			TryMeasureBendAngleDegrees(objects[i].FormedBodyObject, angleDegrees);
+		if (content.includeAngle && !angleMeasured)
 		{
 			std::ostringstream log;
 			log << "[BendNote] skip no cylindrical angle"
@@ -5782,11 +5893,19 @@ bool CreateFlatPatternBendNotesForObjects(
 			BendNoteDebugLog(log.str());
 			continue;
 		}
-		angleDegrees = 180.0 - angleDegrees;
-		if (angleDegrees < 0.0)
+		if (angleMeasured)
 		{
-			angleDegrees = -angleDegrees;
+			angleDegrees = 180.0 - angleDegrees;
+			if (angleDegrees < 0.0)
+			{
+				angleDegrees = -angleDegrees;
+			}
 		}
+
+		double innerRadius = 0.0;
+		double neutralFactor = 0.0;
+		const bool hasBendParameters = (content.includeInnerRadius || content.includeNeutralFactor) &&
+			TryReadSheetMetalBendParameters(objects[i].FormedBodyObject, innerRadius, neutralFactor);
 
 		const NXOpen::Point3d drawingPoint(
 			(startPoint[0] + endPoint[0]) * 0.5,
@@ -5813,7 +5932,14 @@ bool CreateFlatPatternBendNotesForObjects(
 				<< " mid=(" << drawingPoint.X << "," << drawingPoint.Y << ")";
 			BendNoteDebugLog(log.str());
 		}
-		const std::string noteText = FormatBendNoteText(directionUtf8, angleDegrees);
+		const std::string noteText = FormatBendNoteText(
+			content,
+			directionUtf8,
+			angleMeasured,
+			angleDegrees,
+			hasBendParameters,
+			innerRadius,
+			neutralFactor);
 		createdAny = CreateFlatPatternBendNote(
 			baseView,
 			draftingCurve,
@@ -7280,7 +7406,8 @@ bool CreateFlatPatternHoleCoordinateDimensions(
 bool CreateFlatPatternBendNotes(
 	NXOpen::Drawings::BaseView* baseView,
 	NXOpen::Features::FlatPattern* flatPattern,
-	double textHeight)
+	double textHeight,
+	const FlatPatternBendNoteContent& content)
 {
 	try
 	{
@@ -7294,6 +7421,14 @@ bool CreateFlatPatternBendNotes(
 	if (baseView == NULL || flatPattern == NULL)
 	{
 		BendNoteDebugLog("[BendNote] baseView or flatPattern is null");
+		return false;
+	}
+	if (!content.includeDirection &&
+		!content.includeAngle &&
+		!content.includeInnerRadius &&
+		!content.includeNeutralFactor)
+	{
+		BendNoteDebugLog("[BendNote] no content selected");
 		return false;
 	}
 
@@ -7319,6 +7454,7 @@ bool CreateFlatPatternBendNotes(
 			upObjects,
 			"\xE4\xB8\x8A\xE6\x8A\x98",
 			textHeight,
+			content,
 			usedFlatPatternCurveTags) || createdAny;
 	}
 	catch (const NXOpen::NXException& ex)
@@ -7339,6 +7475,7 @@ bool CreateFlatPatternBendNotes(
 			downObjects,
 			"\xE4\xB8\x8B\xE6\x8A\x98",
 			textHeight,
+			content,
 			usedFlatPatternCurveTags) || createdAny;
 	}
 	catch (const NXOpen::NXException& ex)

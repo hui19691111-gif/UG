@@ -19,6 +19,7 @@
 #include <NXOpen/BlockStyler_ObjectColorPicker.hxx>
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_SelectObject.hxx>
+#include <NXOpen/BlockStyler_Toggle.hxx>
 #include <NXOpen/BlockStyler_UIBlock.hxx>
 #include <NXOpen/Body.hxx>
 #include <NXOpen/Callback.hxx>
@@ -101,6 +102,8 @@ private:
     void SetIntegerValue(NXOpen::BlockStyler::IntegerBlock* block, int value) const;
     void SetLineFontValue(NXOpen::BlockStyler::LineFont* block, int value) const;
     void SetColorValue(NXOpen::BlockStyler::ObjectColorPicker* block, int value) const;
+    bool GetToggleValue(NXOpen::BlockStyler::Toggle* block) const;
+    void SetToggleValue(NXOpen::BlockStyler::Toggle* block, bool value) const;
     void LoadRememberedDialogValues() const;
     void SaveRememberedDialogValues() const;
 
@@ -178,6 +181,12 @@ private:
 
     // 曲线线型选择器。
     NXOpen::BlockStyler::LineFont* CurveLineFont;
+
+    // 标记面改色开关。勾选后显示标记面取色器。
+    NXOpen::BlockStyler::Toggle* MarkFaceRecolor;
+
+    // 标记面颜色。仅在改色开关勾选时显示，确定或应用时写到所有选择的面上。
+    NXOpen::BlockStyler::ObjectColorPicker* MarkFaceColorPicker;
 };
 
 #endif

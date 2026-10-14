@@ -1436,6 +1436,10 @@ static void SaveZiDonCuTuDialogState(
 	NXOpen::BlockStyler::StringBlock* holeMarkerBlock,
 	NXOpen::BlockStyler::DoubleBlock* innerRThresholdBlock,
 	NXOpen::BlockStyler::Toggle* bendNoteToggleBlock,
+	NXOpen::BlockStyler::Toggle* bendNoteDirectionToggleBlock,
+	NXOpen::BlockStyler::Toggle* bendNoteAngleToggleBlock,
+	NXOpen::BlockStyler::Toggle* bendNoteInnerRToggleBlock,
+	NXOpen::BlockStyler::Toggle* bendNoteKFactorToggleBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendNoteTextHeightBlock,
 	NXOpen::BlockStyler::Toggle* breakBendLineToggleBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineEdgeDistanceBlock,
@@ -1473,6 +1477,10 @@ static void SaveZiDonCuTuDialogState(
 		file << "hole_marker=" << EncodeConfigEscapes(GetStringBlockValue(holeMarkerBlock, "A")) << "\r\n";
 		file << "inner_r_threshold=" << GetDoubleBlockValue(innerRThresholdBlock, 0.5) << "\r\n";
 		file << "bend_note=" << (GetToggleBlockValue(bendNoteToggleBlock, false) ? 1 : 0) << "\r\n";
+		file << "bend_note_direction=" << (GetToggleBlockValue(bendNoteDirectionToggleBlock, true) ? 1 : 0) << "\r\n";
+		file << "bend_note_angle=" << (GetToggleBlockValue(bendNoteAngleToggleBlock, true) ? 1 : 0) << "\r\n";
+		file << "bend_note_inner_r=" << (GetToggleBlockValue(bendNoteInnerRToggleBlock, false) ? 1 : 0) << "\r\n";
+		file << "bend_note_k_factor=" << (GetToggleBlockValue(bendNoteKFactorToggleBlock, false) ? 1 : 0) << "\r\n";
 		file << "bend_note_text_height=" << GetDoubleBlockValue(bendNoteTextHeightBlock, 2.0) << "\r\n";
 		file << "break_bend_line=" << (GetToggleBlockValue(breakBendLineToggleBlock, false) ? 1 : 0) << "\r\n";
 		file << "bend_line_edge_distance=" << GetDoubleBlockValue(bendLineEdgeDistanceBlock, 0.0) << "\r\n";
@@ -1504,6 +1512,10 @@ static void RestoreZiDonCuTuDialogState(
 	NXOpen::BlockStyler::StringBlock* holeMarkerBlock,
 	NXOpen::BlockStyler::DoubleBlock* innerRThresholdBlock,
 	NXOpen::BlockStyler::Toggle* bendNoteToggleBlock,
+	NXOpen::BlockStyler::Toggle* bendNoteDirectionToggleBlock,
+	NXOpen::BlockStyler::Toggle* bendNoteAngleToggleBlock,
+	NXOpen::BlockStyler::Toggle* bendNoteInnerRToggleBlock,
+	NXOpen::BlockStyler::Toggle* bendNoteKFactorToggleBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendNoteTextHeightBlock,
 	NXOpen::BlockStyler::Toggle* breakBendLineToggleBlock,
 	NXOpen::BlockStyler::DoubleBlock* bendLineEdgeDistanceBlock,
@@ -1549,6 +1561,22 @@ static void RestoreZiDonCuTuDialogState(
 		if (bendNoteToggleBlock != NULL)
 		{
 			bendNoteToggleBlock->SetValue(ConfigReadBool(path, "bend_note", GetToggleBlockValue(bendNoteToggleBlock, false)));
+		}
+		if (bendNoteDirectionToggleBlock != NULL)
+		{
+			bendNoteDirectionToggleBlock->SetValue(ConfigReadBool(path, "bend_note_direction", true));
+		}
+		if (bendNoteAngleToggleBlock != NULL)
+		{
+			bendNoteAngleToggleBlock->SetValue(ConfigReadBool(path, "bend_note_angle", true));
+		}
+		if (bendNoteInnerRToggleBlock != NULL)
+		{
+			bendNoteInnerRToggleBlock->SetValue(ConfigReadBool(path, "bend_note_inner_r", false));
+		}
+		if (bendNoteKFactorToggleBlock != NULL)
+		{
+			bendNoteKFactorToggleBlock->SetValue(ConfigReadBool(path, "bend_note_k_factor", false));
 		}
 		if (bendNoteTextHeightBlock != NULL)
 		{
@@ -1615,15 +1643,31 @@ static void UpdateHoleMarkerControls(
 
 static void UpdateBendNoteControls(
 	NXOpen::BlockStyler::Toggle* bendNoteToggle,
+	NXOpen::BlockStyler::UIBlock* contentGroup,
+	NXOpen::BlockStyler::Toggle* directionToggle,
+	NXOpen::BlockStyler::Toggle* angleToggle,
+	NXOpen::BlockStyler::Toggle* innerRadiusToggle,
+	NXOpen::BlockStyler::Toggle* neutralFactorToggle,
 	NXOpen::BlockStyler::DoubleBlock* textHeightBlock)
 {
-	if (textHeightBlock == NULL)
+	const bool showBendNoteSettings = GetToggleBlockValue(bendNoteToggle, false);
+	NXOpen::BlockStyler::UIBlock* blocks[] = {
+		contentGroup,
+		directionToggle,
+		angleToggle,
+		innerRadiusToggle,
+		neutralFactorToggle,
+		textHeightBlock
+	};
+	for (size_t i = 0; i < sizeof(blocks) / sizeof(blocks[0]); ++i)
 	{
-		return;
+		if (blocks[i] == NULL)
+		{
+			continue;
+		}
+		blocks[i]->SetShow(showBendNoteSettings);
+		blocks[i]->SetEnable(showBendNoteSettings);
 	}
-	const bool showTextHeight = GetToggleBlockValue(bendNoteToggle, false);
-	textHeightBlock->SetShow(showTextHeight);
-	textHeightBlock->SetEnable(showTextHeight);
 }
 
 static void UpdateManualTemplateControls(
@@ -11585,6 +11629,11 @@ void ZiDonCuTu::initialize_cb()
 		stringHoleMarker = dynamic_cast<NXOpen::BlockStyler::StringBlock*>(theDialog->TopBlock()->FindBlock("stringHoleMarker"));
 		doubleRInnerThreshold = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleRInnerThreshold"));
 		toggleBendNote = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendNote"));
+		toggleBendNoteDirection = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendNoteDirection"));
+		toggleBendNoteAngle = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendNoteAngle"));
+		toggleBendNoteInnerR = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendNoteInnerR"));
+		toggleBendNoteKFactor = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBendNoteKFactor"));
+		groupBendNoteContent = theDialog->TopBlock()->FindBlock("groupBendNoteContent");
 		doubleBendNoteTextHeight = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendNoteTextHeight"));
 		toggleBreakBendLine = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggleBreakBendLine1"));
 		doubleBendLineEdgeDistance = dynamic_cast<NXOpen::BlockStyler::DoubleBlock*>(theDialog->TopBlock()->FindBlock("doubleBendLineEdgeDistance"));
@@ -11722,6 +11771,10 @@ void ZiDonCuTu::dialogShown_cb()
 			stringHoleMarker,
 			doubleRInnerThreshold,
 			toggleBendNote,
+			toggleBendNoteDirection,
+			toggleBendNoteAngle,
+			toggleBendNoteInnerR,
+			toggleBendNoteKFactor,
 			doubleBendNoteTextHeight,
 			toggleBreakBendLine,
 			doubleBendLineEdgeDistance,
@@ -11768,7 +11821,14 @@ void ZiDonCuTu::dialogShown_cb()
 			enum01->SetShow(false);
 		}
 		UpdateHoleMarkerControls(toggleHoleAttribute, stringHoleMarker);
-		UpdateBendNoteControls(toggleBendNote, doubleBendNoteTextHeight);
+		UpdateBendNoteControls(
+			toggleBendNote,
+			groupBendNoteContent,
+			toggleBendNoteDirection,
+			toggleBendNoteAngle,
+			toggleBendNoteInnerR,
+			toggleBendNoteKFactor,
+			doubleBendNoteTextHeight);
 		UpdateBreakBendLineControls(toggleBreakBendLine, doubleBendLineEdgeDistance, doubleBendLineUpKeepLength, doubleBendLineDownKeepLength);
 		UpdateLargeArcMarkerLineControls(toggleLargeArcMarkerLine, doubleLargeArcMarkerEdgeDistance, doubleLargeArcMarkerKeepLength);
 		UpdateManualTemplateControls(toggleManualTemplate, stringManualTemplatePath, buttonBrowseTemplate);
@@ -11813,6 +11873,10 @@ int ZiDonCuTu::apply_cb()
 			stringHoleMarker,
 			doubleRInnerThreshold,
 			toggleBendNote,
+			toggleBendNoteDirection,
+			toggleBendNoteAngle,
+			toggleBendNoteInnerR,
+			toggleBendNoteKFactor,
 			doubleBendNoteTextHeight,
 			toggleBreakBendLine,
 			doubleBendLineEdgeDistance,
@@ -13479,7 +13543,14 @@ int ZiDonCuTu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 		{
 			blockName = "toggleBendNote";
 			phase = "toggleBendNote";
-			UpdateBendNoteControls(toggleBendNote, doubleBendNoteTextHeight);
+			UpdateBendNoteControls(
+			toggleBendNote,
+			groupBendNoteContent,
+			toggleBendNoteDirection,
+			toggleBendNoteAngle,
+			toggleBendNoteInnerR,
+			toggleBendNoteKFactor,
+			doubleBendNoteTextHeight);
 		}
 		else if (block == doubleBendNoteTextHeight)
 		{
@@ -17240,7 +17311,12 @@ int ZiDonCuTu::aabb_cb()
 				}
 				if (bendNoteEnabled && matchedFlatPattern != NULL)
 				{
-					CreateFlatPatternBendNotes(baseView3C, matchedFlatPattern, bendNoteTextHeight);
+					FlatPatternBendNoteContent bendNoteContent;
+					bendNoteContent.includeDirection = GetToggleBlockValue(toggleBendNoteDirection, true);
+					bendNoteContent.includeAngle = GetToggleBlockValue(toggleBendNoteAngle, true);
+					bendNoteContent.includeInnerRadius = GetToggleBlockValue(toggleBendNoteInnerR, false);
+					bendNoteContent.includeNeutralFactor = GetToggleBlockValue(toggleBendNoteKFactor, false);
+					CreateFlatPatternBendNotes(baseView3C, matchedFlatPattern, bendNoteTextHeight, bendNoteContent);
 				}
 				else if (bendNoteEnabled)
 				{
