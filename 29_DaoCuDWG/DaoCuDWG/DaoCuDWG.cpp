@@ -292,9 +292,59 @@ bool WriteUtf8File(const std::wstring& path, const std::string& text)
     return ok == TRUE && written == text.size();
 }
 
-bool RunWorkerProcess(const std::wstring& workerExe, const std::wstring& jobPath)
+// worker 常驻期间持有该命名互斥体：存在即表示“已有热的常驻 worker”，
+// 这时只写任务文件 + 放触发文件，让热会话直接干活，省掉每次冷启动的 ~30 秒
+bool IsResidentWorkerRunning()
+{
+    HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\ZhsmExportWorkerResident");
+    if (mutex == NULL)
+    {
+        return false;
+    }
+
+    CloseHandle(mutex);
+    return true;
+}
+
+// 把 <jobId>.ready 放出来，常驻 worker 认领后就开跑。
+// 必须确认它真的认领了（触发文件被消费）：常驻 worker 可能刚好在空闲退出，
+// 这时触发文件会没人接，必须退回“自己起一个进程”，不能把这一片任务丢掉
+bool TriggerResidentWorker(const std::wstring& jobPath)
+{
+    const size_t dot = jobPath.find_last_of(L'.');
+    if (dot == std::wstring::npos)
+    {
+        return false;
+    }
+    const std::wstring readyPath = jobPath.substr(0, dot) + L".ready";
+
+    HANDLE file = CreateFileW(readyPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+    CloseHandle(file);
+
+    for (int attempt = 0; attempt < 12; ++attempt)   // 最多等 ~3 秒
+    {
+        if (GetFileAttributesW(readyPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+        {
+            return true;   // 已被常驻 worker 取走
+        }
+        Sleep(250);
+    }
+
+    DeleteFileW(readyPath.c_str());
+    return false;
+}
+
+bool RunWorkerProcess(const std::wstring& workerExe, const std::wstring& jobPath, bool resident)
 {
     std::wstring commandLine = L"\"" + workerExe + L"\" --job \"" + jobPath + L"\"";
+    if (resident)
+    {
+        commandLine += L" --resident";
+    }
     std::vector<wchar_t> commandBuffer(commandLine.begin(), commandLine.end());
     commandBuffer.push_back(L'\0');
 
@@ -545,10 +595,12 @@ bool SubmitBackgroundDwgJob(const std::vector<std::string>& sourcePaths,
                             const std::vector<std::string>& outputPaths,
                             const std::vector<double>& scaleValues,
                             int& launchedShards,
+                            bool& servedByResident,
                             std::string& errorText)
 {
     errorText.clear();
     launchedShards = 0;
+    servedByResident = false;
     if (sourcePaths.empty() || sourcePaths.size() != outputPaths.size() || sourcePaths.size() != sheetNames.size())
     {
         errorText = "后台导出清单不完整。";
@@ -667,6 +719,8 @@ bool SubmitBackgroundDwgJob(const std::vector<std::string>& sourcePaths,
         // 限流：每个 worker 同时在飞的翻译数（实测全发会灌爆 ugto2d/dxfdwg，导致丢页+翻译器孤儿）
         text += "dwg_batch_wave_size=2\n";
         text += "import_filter_group=all\n";
+        // 常驻 worker 空闲多久自动退出（复用热会话，单页导出免冷启动）
+        text += "resident_idle_seconds=600\n";
         text += "item_count=" + std::to_string(indices.size()) + "\n";
         for (size_t k = 0; k < indices.size(); ++k)
         {
@@ -688,11 +742,27 @@ bool SubmitBackgroundDwgJob(const std::vector<std::string>& sourcePaths,
             return launchedShards > 0;
         }
 
-        if (!RunWorkerProcess(workerExe, jobPath))
+        // 有热的常驻 worker 就直接派单；没有就让首个分片进程自己常驻下来供后续复用
+        const bool residentAlive = IsResidentWorkerRunning();
+        bool launched = false;
+        if (residentAlive)
         {
-            errorText = "后台导出程序启动失败（Win32 error " + std::to_string(GetLastError()) + "）：" +
-                        Utf8FromWide(workerExe) + "\n已成功启动 " + std::to_string(launchedShards) + " 片";
-            return launchedShards > 0;
+            launched = TriggerResidentWorker(jobPath);
+            if (launched)
+            {
+                servedByResident = true;
+            }
+        }
+
+        if (!launched)
+        {
+            launched = RunWorkerProcess(workerExe, jobPath, shard == 0 && !residentAlive);
+            if (!launched)
+            {
+                errorText = "后台导出程序启动失败（Win32 error " + std::to_string(GetLastError()) + "）：" +
+                            Utf8FromWide(workerExe) + "\n已成功启动 " + std::to_string(launchedShards) + " 片";
+                return launchedShards > 0;
+            }
         }
 
         launchedShards++;
@@ -1210,14 +1280,17 @@ int DaoCuDWG::apply_cb()
 			}
 			else
 			{
-				std::string submitError;
+                std::string submitError;
 				int launchedShards = 0;
-				if (SubmitBackgroundDwgJob(itemSourcePaths, itemSheetNames, itemOutputPaths, itemScaleValues, launchedShards, submitError))
+				bool servedByResident = false;
+				if (SubmitBackgroundDwgJob(itemSourcePaths, itemSheetNames, itemOutputPaths, itemScaleValues, launchedShards, servedByResident, submitError))
 				{
 					submittedPageCount = static_cast<int>(itemOutputPaths.size());
 					const std::string submitted = Utf8LiteralToLocale("已提交后台导出：共") + std::to_string(submittedPageCount) +
                         Utf8LiteralToLocale("页，分") + std::to_string(launchedShards) +
-                        Utf8LiteralToLocale("片并行，NX 可以继续操作，完成后会有提示。\n");
+                        Utf8LiteralToLocale("片并行") +
+                        (servedByResident ? Utf8LiteralToLocale("（首片已交给常驻热会话，秒级完成）") : std::string()) +
+                        Utf8LiteralToLocale("，NX 可以继续操作，完成后会有提示。\n");
 					UF_UI_open_listing_window();
 					UF_UI_write_listing_window(submitted.c_str());
 

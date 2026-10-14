@@ -144,6 +144,21 @@ tag_t HoleTool(const Plan& p,const Hole& h){
 tag_t Prism(const std::vector<Vec>& points,Vec direction,double length,double units){
     std::vector<tag_t> curves;for(size_t i=0;i<points.size();++i)curves.push_back(Line(points[i],points[(i+1)%points.size()]));return Extrude(curves,direction,length,units);
 }
+tag_t SharpHeelCut(const Plan& p,const Bend& b,double extra){
+    // 只用于外R内尖角。B、C 各是一条圆弧，不离散成折线。内外都是圆弧的转角不走这里。
+    double R=b.heelRadius,t=p.source.thickness,alpha=b.angle/2,centre=b.start+b.allowance/2,gap=p.gap/2;
+    double Ri=R-t,neutral=(R-(1-p.settings.kFactor)*t)*b.angle,half=neutral/2+gap;
+    double x0=centre-half,x1=centre+half,top=t,depth=BendDepth(p,b),deep=depth+extra,corner=std::min(R,depth);
+    auto loc=[&](double x,double y){if(b.reversed)y=depth-y;return CutPoint(p,b,x,y,-extra);};
+    auto onArc=[&](double side,double phi){return loc(side>0?x1-Ri*sin(phi):x0+Ri*sin(phi),top+Ri*(1-cos(phi)));};
+    std::vector<tag_t> curves;auto line=[&](Vec a,Vec c){if(Length(a-c)>1e-8)curves.push_back(Line(a,c));};
+    line(loc(x0,deep),loc(x1,deep));line(loc(x1,deep),loc(x1,corner));line(loc(x1,corner),onArc(1,alpha));
+    curves.push_back(Arc(onArc(1,alpha),onArc(1,alpha/2),onArc(1,0)));
+    line(loc(x1,top),loc(x0,top));
+    curves.push_back(Arc(onArc(-1,0),onArc(-1,alpha/2),onArc(-1,alpha)));
+    line(onArc(-1,alpha),loc(x0,corner));line(loc(x0,corner),loc(x0,deep));
+    return Extrude(curves,b.acrossZ?p.flatInside:p.flatWidth,(b.acrossZ?p.source.depth:p.source.width)+2*extra,p.source.unitsPerMm);
+}
 tag_t RevolvedTriangle(const std::vector<Vec>& points,Vec center,Vec normal,double angle){
     std::vector<tag_t> curves;for(size_t i=0;i<points.size();++i)curves.push_back(Line(points[i],points[(i+1)%points.size()]));
     char zero[]="0";auto end=Number(angle*180/pi);char* limits[]={zero,end.data()},*offsets[]={zero,zero};
@@ -238,8 +253,9 @@ tag_t Create(const Plan& p,std::vector<tag_t>* construction){
     tag_t feature=0;try{Check(UF_MODL_subtract_bodies_with_retained_options(body,hollow,false,false,&feature));}catch(const std::exception& e){throw std::runtime_error(std::string("伸直空心管体创建失败：")+e.what());}
     TrimRoundEnds(p,body);
     for(const auto& bend:p.bends){
-        auto points=Notch(p,bend,u);for(auto& q:points)q=CutPoint(p,bend,q.x,q.y,-u);
-        tag_t cut=Prism(points,bend.acrossZ?p.flatInside:width,(bend.acrossZ?d:w)+2*u,u);
+        tag_t cut=0;
+        if(bend.sharpHeel)cut=SharpHeelCut(p,bend,u);
+        else{auto points=Notch(p,bend,u);for(auto& q:points)q=CutPoint(p,bend,q.x,q.y,-u);cut=Prism(points,bend.acrossZ?p.flatInside:width,(bend.acrossZ?d:w)+2*u,u);}
         if(p.source.round){
             // Protect an angular strip through the complete radial wall. A
             // horizontal cut alone would taper the bridge to zero at its sides.
@@ -253,10 +269,12 @@ tag_t Create(const Plan& p,std::vector<tag_t>* construction){
     auto* output=dynamic_cast<Body*>(NXObjectManager::Get(body));
     if(!output||!output->IsSolidBody()||Volume(body)<=0)throw std::runtime_error("伸直未生成有效实体。");
     // Every hinge must retain exactly one wall; verify solid material and removed stock.
-    for(const auto& b:p.bends){double depth=BendDepth(p,b),breadth=b.acrossZ?d:w;for(double z:{std::max(t/2,p.source.cornerRadius),breadth/2,breadth-std::max(t/2,p.source.cornerRadius)})for(double y:{t/2,t+(depth-t)/2}){
-        Vec q=CutPoint(p,b,b.start+b.allowance/2,b.reversed?depth-y:y,z);double xyz[]={q.x,q.y,q.z};int status=0;
-        Check(UF_MODL_ask_point_containment(xyz,body,&status));if(status!=(y<t?1:2))throw std::runtime_error("连接壁或切口检查失败。");
-    }}
+    for(const auto& b:p.bends){double depth=BendDepth(p,b),breadth=b.acrossZ?d:w;
+        struct Probe{double y;int expect;};std::vector<Probe> probes={{t/2,1},{t+(depth-t)/2,2}};
+        for(double z:{std::max(t/2,p.source.cornerRadius),breadth/2,breadth-std::max(t/2,p.source.cornerRadius)})for(const auto& probe:probes){
+            Vec q=CutPoint(p,b,b.start+b.allowance/2,b.reversed?depth-probe.y:probe.y,z);double xyz[]={q.x,q.y,q.z};int status=0;
+            Check(UF_MODL_ask_point_containment(xyz,body,&status));if(status!=probe.expect)throw std::runtime_error("连接壁或切口检查失败。");
+        }}
     if(p.source.round)for(const auto& b:p.bends)for(double angle:{-.9*BridgeHalfAngle(p),0.,.9*BridgeHalfAngle(p)})for(double radius:{d/2-t*.1,d/2-t*.9}){
         Vec q=at(b.start+b.allowance/2,d/2-radius*cos(angle),w/2+radius*sin(angle));double xyz[]={q.x,q.y,q.z};int status=0;Check(UF_MODL_ask_point_containment(xyz,body,&status));if(status!=1)throw std::runtime_error("圆管连接带未保留完整壁厚，已取消生成。");
     }

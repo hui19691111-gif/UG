@@ -1,5 +1,7 @@
 #include "TubePlan.hpp"
 #include <algorithm>
+#include <map>
+#include <set>
 #include <stdexcept>
 namespace tube_straighten {
 Vec Unit(Vec v){double n=Length(v);if(n<1e-12)throw std::runtime_error("无效方向。");return v*(1/n);}
@@ -23,13 +25,14 @@ static Plan BasePlan(const Source& source,const Settings& settings,bool hasCuts)
     if(source.spatial)p.flatOrigin=p.flatOrigin-p.flatInside*(d/2)-p.flatWidth*(w/2);
     if(hasCuts&&(!std::isfinite(settings.radiusMm)||settings.radiusMm<0||!std::isfinite(settings.kFactor)||settings.kFactor<=0||settings.kFactor>1||!std::isfinite(settings.gapMm)||settings.gapMm<0))throw std::runtime_error("内弯半径、切缝不得为负；连接壁 K 系数须大于 0 且不大于 1。");
     p.radius=hasCuts?settings.radiusMm*u:0;p.gap=hasCuts?settings.gapMm*u:0;
+    // 内弯半径的上限按每个切口单独核对(见 BuildPlan/BuildMachinePlan): 内R=0 的单刀切口
+    // 允许取到 截面高-壁厚, 因为它按该半径做成圆弧根部; 分段 V 口仍要求更小的半径。
     if(!hasCuts)p.settings.cutSource=false;
     if(p.settings.cutSource)p.settings.hideSource=false;
     if(source.round){
         if(hasCuts&&(!std::isfinite(settings.bridgeWidthMm)||settings.bridgeWidthMm<=0||settings.bridgeWidthMm*u>pi*d/4))throw std::runtime_error("圆管连接带宽须大于 0，且不超过外圆周长的四分之一。");
         if(!source.holes.empty())throw std::runtime_error("带孔槽圆管暂不支持展开，已取消生成以免丢孔。");
     }
-    if(hasCuts&&p.radius+t>=d-t)throw std::runtime_error("内弯半径过大，切口无法在对侧管壁闭合。");
     return p;
 }
 static Plan BuildSpatialPlan(const Source& source,const Settings& settings,double phase){
@@ -65,20 +68,29 @@ static Plan BuildSpatialPlan(const Source& source,const Settings& settings,doubl
 static Plan BuildPlan(const Source& source,const Settings& settings,double phase){
     auto p=BasePlan(source,settings,true);double u=source.unitsPerMm,t=source.thickness,d=source.depth;
     if(settings.divisions<2||settings.divisions>180)throw std::runtime_error("圆弧分段数须为 2–180。");
+    double tolerance=1e-4*u;
     auto append=[&](Vec v){if(p.polygon.empty()||Length(v-p.polygon.back())>1e-6*u)p.polygon.push_back(v);};
-    double totalAngle=0;
+    // 内R=0 的圆弧(外侧半径等于该方向的截面高)不细分成多个切口: 该弯位只保留正中一个切口,
+    // 圆弧区的料长仍按外壁展开, 于是外侧壁长度与真实弯位一致, 其余三面在该处切开后焊接。
+    // 内R>0 的圆弧照旧按圆弧分段数切 N 个 V 形切口。
+    std::vector<const Span*> wholeArcs;double totalAngle=0;
     for(const auto& s:source.spans){
         append(s.a);
         if(s.radius){
             double outer=s.radius+(Dot(s.normal,source.normal)<0?d:0);
-            if(outer<=d||s.angle<=0||s.angle>pi+1e-7)throw std::runtime_error("圆弧须小于等于 180°，且外侧半径须大于方通高度。");
-            double step=s.angle/settings.divisions;
+            if(s.angle<=0||s.angle>pi+1e-7)throw std::runtime_error("圆弧须小于等于 180°。");
+            // 外侧半径小于截面高: 内侧是尖角(外R内尖角), 仍按单刀切口处理, 根部按外侧圆弧切。
+            // 外侧半径必须大于壁厚, 否则保留壁被切穿, 折回后外侧不再是连续圆弧。
+            if(outer<d-tolerance&&source.round)throw std::runtime_error("圆管圆弧内侧半径为负，无法按外R内尖角展开。");
+            if(outer<d-tolerance&&outer<=t+tolerance)throw std::runtime_error("外侧圆弧半径必须大于壁厚，内侧才能保持尖角。");
+            bool whole=outer<=d+tolerance;double step=s.angle/settings.divisions;
             // Circumscribed tangent polygon keeps both end positions and tangents.
             for(int i=0;i<settings.divisions;++i){
                 double a=i==0?0:(i+phase)*step,b=i+1==settings.divisions?s.angle:(i+1+phase)*step;
                 append(s.center+(s.Point((a+b)/(2*s.angle))-s.center)*(1/std::cos((b-a)/2)));
-                p.errorMm=std::max(p.errorMm,outer/u*(1/std::cos((b-a)/2)-1));
+                if(!whole)p.errorMm=std::max(p.errorMm,outer/u*(1/std::cos((b-a)/2)-1));
             }
+            if(whole)wholeArcs.push_back(&s);
         }
         append(s.b);
     }
@@ -88,6 +100,21 @@ static Plan BuildPlan(const Source& source,const Settings& settings,double phase
         if(Length(a-b)<1e-7)p.polygon.erase(p.polygon.begin()+i);else ++i;
     }
     if(p.polygon.size()<3)throw std::runtime_error("选择中没有圆弧或转角，无需伸直。");
+    // 找出内R=0 圆弧上的多边形顶点: 除最靠弯位中间的一个留作单刀切口外, 其余顶点都不切。
+    std::set<size_t> quiet;std::map<size_t,double> relief;std::map<size_t,double> heel;std::map<size_t,const Span*> heelArc;
+    for(const Span* arc:wholeArcs){
+        Vec base=arc->a-arc->center;double best=1e100;size_t middle=0;std::vector<size_t> hits;
+        for(size_t i=1;i+1<p.polygon.size();++i){
+            Vec radial=p.polygon[i]-arc->center;radial=radial-arc->normal*Dot(radial,arc->normal);
+            double angle=std::atan2(Dot(Cross(base,radial),arc->normal),Dot(base,radial));
+            if(angle<-1e-6||angle>arc->angle+1e-6)continue;hits.push_back(i);
+            double distance=std::abs(angle-arc->angle/2);if(distance<best){best=distance;middle=i;}
+        }
+        if(hits.empty())continue;for(size_t i:hits)quiet.insert(i);quiet.erase(middle);relief[middle]=arc->angle;
+        double outer=arc->radius+(Dot(arc->normal,source.normal)<0?d:0);
+        // 外侧半径不大于截面高(含内R=0)都按外R内尖角切: 沿中线切开, 只伸直外侧壁厚。
+        if(!source.round&&outer>t+tolerance&&outer<=d+tolerance){heel[middle]=outer;heelArc[middle]=arc;}
+    }
     std::vector<double> setbacks(p.polygon.size(),0),allowances(p.polygon.size(),0),angles(p.polygon.size(),0);
     for(size_t i=1;i+1<p.polygon.size();++i){
         auto a=Unit(p.polygon[i]-p.polygon[i-1]),b=Unit(p.polygon[i+1]-p.polygon[i]);
@@ -96,17 +123,50 @@ static Plan BuildPlan(const Source& source,const Settings& settings,double phase
         totalAngle+=std::abs(angle);angles[i]=angle;setbacks[i]=(p.radius+t-(angle<0?d:0))*std::tan(std::abs(angle)/2);allowances[i]=(p.radius+settings.kFactor*t)*std::abs(angle);
     }
     if(source.round&&totalAngle>pi+1e-6)throw std::runtime_error("圆管当前支持总转向不超过 180°。");
+    std::vector<int> bendAt(p.polygon.size(),-1);std::vector<double> stationAt(p.polygon.size(),0),straightAt(p.polygon.size(),0);
+    std::vector<size_t> reliefBends;double station=0;
     for(size_t i=0;i+1<p.polygon.size();++i){
         double straight=Length(p.polygon[i+1]-p.polygon[i])-setbacks[i]-setbacks[i+1];
+        bool kept=i+2<p.polygon.size()&&!quiet.count(i+1);
         // At the opposite wall adjacent mitres must leave positive material.
-        double cuts=(i?std::max(0.,d-p.radius-t)*std::tan(std::abs(angles[i])/2)+p.gap/2:0)+(i+2<p.polygon.size()?std::max(0.,d-p.radius-t)*std::tan(std::abs(angles[i+1])/2)+p.gap/2:0);
-        if(straight-cuts<=.01*u)throw std::runtime_error("切口重叠或切到端部；请增大段长、减小转角/切缝，或检查外侧边选择。");
-        p.segments.push_back({p.polygon[i]+Unit(p.polygon[i+1]-p.polygon[i])*setbacks[i],Unit(p.polygon[i+1]-p.polygon[i]),p.length,straight,i?int(i)-1:-1,i+2<p.polygon.size()?int(i):-1});
-        p.length+=straight;
+        double cuts=(i&&!quiet.count(i)?std::max(0.,d-p.radius-t)*std::tan(std::abs(angles[i])/2)+p.gap/2:0)+(kept?std::max(0.,d-p.radius-t)*std::tan(std::abs(angles[i+1])/2)+p.gap/2:0);
+        // 内R=0 的单刀切口按整个转角张开, 范围远大于一个分段切口, 由下面单独核对。
+        if(!quiet.count(i)&&!quiet.count(i+1)&&!relief.count(i+1)&&straight-cuts<=.01*u)throw std::runtime_error("切口重叠或切到端部；请增大段长、减小转角/切缝，或检查外侧边选择。");
+        stationAt[i]=station;straightAt[i]=straight;station+=straight;
         if(i+2<p.polygon.size()){
-            p.bends.push_back({std::abs(angles[i+1]),p.length,allowances[i+1],setbacks[i+1],p.polygon[i+1],Unit(p.polygon[i+1]-p.polygon[i]),Unit(p.polygon[i+2]-p.polygon[i+1]),angles[i+1]<0});
-            p.length+=allowances[i+1];
+            size_t v=i+1;
+            if(relief.count(v)){
+                // 内R=0 的单刀切口按“一条缝”给: 根部只留 K×壁厚×θ, 不受对话框内弯半径影响,
+                // 否则内弯半径填大时根部会变成十几毫米宽的矩形槽(和现场期望的斜缝不符)。
+                double angle=relief[v],allowance=settings.kFactor*t*angle,center=station+allowances[v]/2;reliefBends.push_back(p.bends.size());
+                p.bends.push_back({angle,center-allowance/2,allowance,setbacks[v],p.polygon[v],Unit(p.polygon[v]-p.polygon[v-1]),Unit(p.polygon[v+1]-p.polygon[v]),angles[v]<0});
+                p.bends.back().relief=true;
+                // 根部圆弧半径由零件定: 保留壁内表面半径 = 弯位外R − 壁厚 (30×30×2、拐角R30 就是 28),
+                // 折回后这条圆弧正好是原管弯位内表面, 外侧壁就是原管圆弧。
+                p.bends.back().reliefRadius=std::max(0.,d-t);
+                if(heel.count(v)){p.bends.back().sharpHeel=true;p.bends.back().heelRadius=heel[v];}
+                bendAt[v]=static_cast<int>(p.bends.size())-1;
+            }else if(!quiet.count(v)){
+                if(p.radius+t>=d-t)throw std::runtime_error("内弯半径过大，切口无法在对侧管壁闭合。");
+                p.bends.push_back({std::abs(angles[v]),station,allowances[v],setbacks[v],p.polygon[v],Unit(p.polygon[v]-p.polygon[v-1]),Unit(p.polygon[v+1]-p.polygon[v]),angles[v]<0});
+                bendAt[v]=static_cast<int>(p.bends.size())-1;
+            }
+            station+=allowances[v];
         }
+    }
+    p.length=station;
+    for(size_t i=0;i+1<p.polygon.size();++i)p.segments.push_back({p.polygon[i]+Unit(p.polygon[i+1]-p.polygon[i])*setbacks[i],Unit(p.polygon[i+1]-p.polygon[i]),stationAt[i],straightAt[i],bendAt[i],bendAt[i+1]});
+    // 切口原先落在细分顶点上，底边两端会偏离原管直段。改放到原圆弧两端的中点，底边长度才跟伸直前一致。
+    auto flatStation=[&](Vec q){double best=1e100,x=0;for(const auto& s:p.segments){if(!(s.length>0))continue;double along=std::clamp(Dot(q-s.origin,s.axis),0.,s.length);double dist=Length(q-(s.origin+s.axis*along));if(dist<best){best=dist;x=s.start+along;}}if(!(best<1e-3*u))throw std::runtime_error("外R内尖角未能定位圆弧端点。");return x;};
+    for(const auto& item:heelArc){auto& b=p.bends[bendAt[item.first]];double mid=(flatStation(item.second->a)+flatStation(item.second->b))/2;b.start=mid-b.allowance/2;}
+    // 单刀切口按整个转角张开(且根部是圆弧), 直接按实际切口轮廓核对是否越过端部或压到别的切口。
+    auto extent=[&](const Bend& b,double& x0,double& x1){
+        auto points=Notch(p,b,0.);x0=1e100;x1=-1e100;for(const auto& q:points){x0=std::min(x0,q.x);x1=std::max(x1,q.x);}
+    };
+    for(size_t index:reliefBends){
+        double x0=0,x1=0;extent(p.bends[index],x0,x1);
+        if(x0<.01*u||x1>p.length-.01*u)throw std::runtime_error("单刀切口越过方通端部；请加大内弯半径（V 口会变窄）或加长端部直段。");
+        for(size_t j=0;j<p.bends.size();++j){if(j==index)continue;double y0=0,y1=0;extent(p.bends[j],y0,y1);if(x0<y1-1e-9&&y0<x1-1e-9)throw std::runtime_error("单刀切口与相邻切口重叠；请加大内弯半径或减少切口数。");}
     }
     return p;
 }
@@ -119,7 +179,13 @@ static Plan BuildMachinePlan(const Source& input,const Settings& settings){
     const size_t count=source.spans.size();double totalAngle=0;bool hasCuts=false,hasArcs=false;
     std::vector<double> angles(count+1,0);std::vector<int> bendIndex(count+1,-1);
     for(size_t i=0;i<count;++i){const auto& s=source.spans[i];
-        if(s.radius){double outer=s.radius+(Dot(s.normal,source.normal)<0?source.depth:0);if(!std::isfinite(s.radius)||outer<=source.depth||!std::isfinite(s.angle)||s.angle<=0||s.angle>pi+1e-7)throw std::runtime_error("圆弧须小于等于 180°，且外侧半径须大于管高。");hasArcs=true;totalAngle+=s.angle;}
+        if(s.radius){double outer=s.radius+(Dot(s.normal,source.normal)<0?source.depth:0);
+            // 整体圆弧(弯管机)按截面中心线计长, 弯位内侧半径必须为正: 内R=0 时外侧壁需要的料长
+            // 约为中心线的两倍, 等壁厚方通拉不出来。内R=0 请保持“圆弧多段伸直”开启, 程序会在该
+            // 弯位自动只切一刀。空间方通每段带的是截面中心线半径, 沿用原下限。
+            if(!std::isfinite(s.radius)||!std::isfinite(s.angle)||s.angle<=0||s.angle>pi+1e-7)throw std::runtime_error("圆弧须小于等于 180°，且半径须有效。");
+            if(outer<=source.depth+1e-4*source.unitsPerMm)throw std::runtime_error(source.spatial?"空间圆弧外侧半径须大于管高。":"外侧半径不大于截面高（内R=0 或外R内尖角）不能用整体圆弧（弯管机）展开。请保持“圆弧多段伸直”开启，程序会在该弯位自动只切一刀。");
+            hasArcs=true;totalAngle+=s.angle;}
         if(i){Vec a=source.spans[i-1].Tangent(1),b=s.Tangent(0);double angle=std::atan2(Dot(Cross(a,b),source.normal),Dot(a,b));
             if(std::abs(angle)>pi*.75)throw std::runtime_error("单个转角须不超过 135°。");
             if(Length(a-b)>1e-7){if(s.radius||source.spans[i-1].radius)throw std::runtime_error("圆弧与相邻管段须相切。");angles[i]=angle;totalAngle+=std::abs(angle);hasCuts=true;}
@@ -139,7 +205,7 @@ static Plan BuildMachinePlan(const Source& input,const Settings& settings){
             if(length-cuts<=.01*u)throw std::runtime_error("切口重叠或切到圆弧/端部；请检查转角附近的直段长度。");
             p.segments.push_back({s.a+s.Tangent(0)*setbacks[i],s.Tangent(0),p.length,length,bendIndex[i],bendIndex[i+1]});p.length+=length;
         }
-        if(angles[i+1]!=0){p.bends.push_back({std::abs(angles[i+1]),p.length,allowances[i+1],setbacks[i+1],s.b,s.Tangent(1),source.spans[i+1].Tangent(0),angles[i+1]<0});p.length+=allowances[i+1];}
+        if(angles[i+1]!=0){if(p.radius+t>=d-t)throw std::runtime_error("内弯半径过大，切口无法在对侧管壁闭合。");p.bends.push_back({std::abs(angles[i+1]),p.length,allowances[i+1],setbacks[i+1],s.b,s.Tangent(1),source.spans[i+1].Tangent(0),angles[i+1]<0});p.length+=allowances[i+1];}
     }
     return p;
 }
@@ -202,8 +268,22 @@ static bool AddSourceSlots(Plan& p){
             for(const auto& arc:p.source.spans)if(arc.radius&&Dot(arc.normal,b.normal)>1-1e-7){Vec radial=b.vertex-arc.center;radial=radial-arc.normal*Dot(radial,arc.normal);if(Length(radial)<1e-9*u)continue;double angle=atan2(Dot(Cross(arc.a-arc.center,radial),arc.normal),Dot(arc.a-arc.center,radial));if(angle<=1e-9||angle>=arc.angle-1e-9)continue;double distance=Length(arc.center+Unit(radial)*arc.radius-b.vertex);if(distance<best){best=distance;slot.pathRadius=arc.radius+slot.depth/2;slot.center=arc.center-slot.widthDirection*(slot.width/2);slot.origin=slot.center+Unit(radial)*slot.pathRadius;slot.axis=Unit(Cross(arc.normal,radial));remaining=std::min(angle,arc.angle-angle);}}
             if(!slot.pathRadius||best>p.errorMm*u+1e-4*u)throw std::runtime_error("未能对应空间圆弧切口。");if(h+.01*u>=(slot.pathRadius-slot.depth)*sin(std::min(remaining,pi/2)))throw std::runtime_error("空间管间隙槽越过圆弧端部。");
         }else{
+        if(b.sharpHeel&&b.heelRadius<d-1e-4*u)throw std::runtime_error("外R小于截面高的内尖角暂不能在原管上开槽，请先关闭“在原管切间隙槽”。");
         bool corner=false;for(size_t j=1;j<p.source.spans.size();++j)if(Length(b.vertex-p.source.spans[j].a)<1e-5*u&&Length(p.source.spans[j-1].Tangent(1)-p.source.spans[j].Tangent(0))>1e-7){corner=true;break;}
         if(corner){slot.origin=b.vertex;if(b.reversed)slot.origin=slot.origin+(Cross(p.source.normal,b.incoming)+Cross(p.source.normal,b.outgoing))*(d/(1+Dot(b.incoming,b.outgoing)));slot.axis=Unit(slot.incoming+slot.outgoing);slot.cornerCos=std::cos(b.angle/2);}
+        else if(b.relief){
+            // 内R=0 的弯位只有正中一刀: 槽位固定在圆弧正中, 根部弧面按保留壁内表面生成。
+            double best=1e100;
+            for(const auto& arc:p.source.spans)if(arc.radius&&(Dot(arc.normal,p.source.normal)<0)==b.reversed){
+                Vec radial=b.vertex-arc.center;radial=radial-p.source.normal*Dot(radial,p.source.normal);if(Length(radial)<1e-9*u)continue;
+                double angle=std::atan2(Dot(Cross(arc.a-arc.center,radial),arc.normal),Dot(arc.a-arc.center,radial));
+                double distance=std::abs(angle-arc.angle/2);if(distance>best)continue;
+                Vec mid=arc.a-arc.center;mid=mid-arc.normal*Dot(mid,arc.normal);mid=Rotate(mid,arc.normal,arc.angle/2);
+                if(Length(mid)<1e-9*u)throw std::runtime_error("内R=0 的圆弧半径无效，无法在原管开槽。");
+                best=distance;slot.pathRadius=arc.radius+(b.reversed?d:0);slot.center=arc.center;slot.origin=arc.center+Unit(mid)*slot.pathRadius;slot.axis=Unit(Cross(arc.normal,mid));
+            }
+            if(!slot.pathRadius)throw std::runtime_error("未能把内R=0 的单刀切口对应到原管圆弧。");
+        }
         else{
             double best=1e100,remaining=0;
             for(const auto& arc:p.source.spans)if(arc.radius&&(Dot(arc.normal,p.source.normal)<0)==b.reversed){
@@ -272,8 +352,35 @@ Plan MakePlan(const Source& source,const Settings& settings){
     throw std::runtime_error("孔槽与切口、连接折弯区或截面圆角冲突，无法保持原孔位。请减小/调整切口数；程序不会移动或删掉原孔。");
 }
 std::vector<Vec> Notch(const Plan& p,const Bend& b,double extraDepth){
-    double root=p.source.thickness+p.radius,top=p.source.round?-p.source.unitsPerMm:p.source.thickness,deep=BendDepth(p,b)+extraDepth;
+    double top=p.source.round?-p.source.unitsPerMm:p.source.thickness,deep=BendDepth(p,b)+extraDepth;
     double slope=std::tan(b.angle/2),a=b.start-p.gap/2,c=b.start+b.allowance+p.gap/2;
+    if(b.sharpHeel){
+        // 转角从中线切开, 只把外侧壁厚的中性层圆弧伸直, 内壁圆弧和分割线保持原形。
+        // A = 中性层弧长, 落在保留壁内表面上。B/C = 半径 R-壁厚 的内壁圆弧。D = 角平分线, 收到内尖角。
+        double R=b.heelRadius,t=p.source.thickness,alpha=b.angle/2,centre=b.start+b.allowance/2,gap=p.gap/2;
+        if(!(R>t)||!(alpha>1e-8))throw std::runtime_error("外R内尖角的外侧半径无效。");
+        double Ri=R-t,neutral=(R-(1-p.settings.kFactor)*t)*b.angle,half=neutral/2+gap,x0=centre-half,x1=centre+half;
+        int steps=std::max(8,p.settings.divisions);std::vector<Vec> v;
+        auto push=[&](double x,double y){Vec q{x,y,0};if(v.empty()||Length(q-v.back())>1e-9)v.push_back(q);};
+        for(int i=0;i<=steps;++i){double phi=alpha*double(i)/steps;push(x0+Ri*std::sin(phi),top+Ri*(1-std::cos(phi)));}
+        push(x0,std::min(R,BendDepth(p,b)));push(x0,deep);push(x1,deep);push(x1,std::min(R,BendDepth(p,b)));
+        for(int i=steps;i>=0;--i){double phi=alpha*double(i)/steps;push(x1-Ri*std::sin(phi),top+Ri*(1-std::cos(phi)));}
+        if(v.size()>1&&Length(v.back()-v.front())<1e-8)v.pop_back();
+        if(b.reversed)for(auto& q:v)q.y=BendDepth(p,b)-q.y;
+        return v;
+    }
+    if(b.relief){
+        // 内R=0 的单刀切口: 把三个面在“弯位弦长”范围内一直切到保留壁内表面(平底), 即
+        // 半宽 = (截面高-壁厚)×sin(转角/2)。平料上根部是平底直线, 折回后这条边就是
+        // 半径 = 截面高-壁厚 的圆弧; 根部不能再留圆弧鼓包, 也不收成尖点。
+        double R=std::max(0.,b.reliefRadius>0?b.reliefRadius:p.source.depth-p.source.thickness);
+        double half=R*std::sin(b.angle/2)+p.gap/2;
+        double centre=(a+c)/2;
+        std::vector<Vec> v={{centre-half,top,0},{centre+half,top,0},{centre+half,deep,0},{centre-half,deep,0}};
+        if(b.reversed)for(auto& q:v)q.y=BendDepth(p,b)-q.y;
+        return v;
+    }
+    double root=p.source.thickness+p.radius;
     std::vector<Vec> v={{a,top,0},{c,top,0}};
     if(root>top+1e-9)v.push_back({c,root,0});
     v.push_back({c+(deep-root)*slope,deep,0});v.push_back({a-(deep-root)*slope,deep,0});
@@ -322,5 +429,21 @@ std::vector<std::pair<Vec,Vec>> Preview(const Plan& p){
     for(const auto& b:p.bends){auto cut=Notch(p,b);for(double z:{0.,b.acrossZ?p.source.depth:p.source.width})for(size_t i=0;i<cut.size();++i){auto a=cut[i],c=cut[(i+1)%cut.size()];lines.push_back({CutPoint(p,b,a.x,a.y,z),CutPoint(p,b,c.x,c.y,z)});}}
     for(size_t i=0;i<p.source.holes.size();++i){auto h=FlatHole(p,i);for(const auto& c:h.profile){int n=c.radius?48:1;for(int j=0;j<n;++j){auto a=c.Point(double(j)/n),b=c.Point(double(j+1)/n);lines.push_back({FlatPoint(p,a.x,a.y,a.z),FlatPoint(p,b.x,b.y,b.z)});}}}
     return lines;
+}
+double SharpHeelCornerVolume(double outerRadius,double angle,double depth,double width,double thickness){
+    // Side-view area of one outer-radius / sharp-inside corner, between the tangent planes.
+    // s = X·n of the inner boundary. s<0 puts that boundary past the arc centre (sharp inside).
+    if(!(outerRadius>thickness)||!(angle>1e-9)||angle>pi+1e-8||!(depth>2*thickness)||!(width>2*thickness))return -1;
+    auto cheek=[&](double radius,double s){
+        if(radius<=1e-12||s>=radius)return 0.;
+        double a=angle/2,sector=angle/2*radius*radius;
+        if(s<=0)return sector+s*s*std::tan(a);
+        if(s<=radius*std::cos(a)*(1+1e-12))return sector-s*s*std::tan(a);
+        int n=720;double area=0;
+        for(int i=0;i<n;++i){double phi=-a+angle*(i+.5)/n,c1=std::cos(phi-a),c2=std::cos(phi+a);if(c1<=1e-12||c2<=1e-12)continue;double r0=std::max(s/c1,s/c2);if(r0<radius)area+=(radius*radius-r0*r0)/2*(angle/n);}
+        return area;
+    };
+    double solid=cheek(outerRadius,outerRadius-depth),cavity=cheek(outerRadius-thickness,outerRadius-depth+thickness);
+    if(!(solid>cavity))return -1;return solid*width-cavity*(width-2*thickness);
 }
 }

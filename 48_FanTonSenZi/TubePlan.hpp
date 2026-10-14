@@ -48,7 +48,7 @@ struct Settings {
     bool useAnchor=false;
     Vec anchorPoint;
 };
-struct Bend {double angle=0,start=0,allowance=0,setback=0;Vec vertex,incoming,outgoing;bool reversed=false,acrossZ=false;Vec normal,widthDirection;};
+struct Bend {double angle=0,start=0,allowance=0,setback=0;Vec vertex,incoming,outgoing;bool reversed=false,acrossZ=false;Vec normal,widthDirection;bool relief=false;double reliefRadius=0;bool sharpHeel=false;double heelRadius=0;};
 struct Segment {Vec origin,axis;double start=0,length=0;int beforeBend=-1,afterBend=-1;Vec frameY,frameZ;};
 struct MachineArc {Span source;double start=0,length=0,neutralRadius=0;};
 // A transverse gap in the actual curved source, not in its tangent polygon.
@@ -72,6 +72,9 @@ struct Plan {
     Vec flatOrigin,flatAxis,flatInside,flatWidth;
 };
 Plan MakePlan(const Source&,const Settings&);
+// Corner volume of an outer-radius / sharp-inside rectangular tube, between the
+// two outer tangent planes. Straight legs are not included.
+double SharpHeelCornerVolume(double outerRadius,double angle,double depth,double width,double thickness);
 // Cut outline in flat longitudinal/depth coordinates. y=0 is the retained outer wall.
 std::vector<Vec> Notch(const Plan&,const Bend&,double extraDepth=0);
 std::vector<std::pair<Vec,Vec>> Preview(const Plan&);

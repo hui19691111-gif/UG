@@ -69,6 +69,60 @@ int main(){try{
     rev.segmentArcs=false;rev.tubeKFactor=.42;rev.anchorPoint={90,150,30};auto reverseK=MakePlan(reverse,rev);Require(std::abs(reverseK.length-(340+(260-3.2)*pi/2))<1e-8,"reverse K must use each bend's inner radius");
     rev.tubeKFactor=.5;const auto& secondArc=reverse.spans[3];Vec arcCenter=secondArc.Point(.4)+Cross(reverse.normal,secondArc.Tangent(.4))*10+Vec{0,0,15};rev.anchorPoint=arcCenter;auto arcAnchor=MakePlan(reverse,rev);double station=arcAnchor.machineArcs[1].start+arcAnchor.machineArcs[1].length*.4;Require(Length(FlatPoint(arcAnchor,station,10,15)-arcCenter)<1e-8&&Length(arcAnchor.flatAxis-secondArc.Tangent(.4))<1e-8,"clicked arc section/tangent moved");
     Source zigzag=reverse;zigzag.spans={{{0,0,0},{150,0,0}},{{150,0,0},{150,150,0}},{{150,150,0},{300,150,0}}};rev.useAnchor=false;rev.cutSource=true;auto zp=MakePlan(zigzag,rev);Require(zp.bends.size()==2&&!zp.bends[0].reversed&&zp.bends[1].reversed&&zp.sourceSlots[1].reversed,"reverse sharp corner lost");
+    // 内R=0 的圆弧转角(外侧半径=截面高): 逐弯位自动判断——该弯位只切正中一刀, 圆弧料长保留;
+    // 内R>0 的圆弧照旧按分段数切 V 口; 整体圆弧(弯管机)与内R<0 一律拒绝。
+    Source zero;zero.width=40;zero.depth=30;zero.thickness=2;zero.normal=zero.widthDirection={0,0,1};
+    zero.spans={{{30,-100,0},{30,0,0}},{{30,0,0},{0,30,0},{0,0,0},{0,0,1},30,pi/2},{{0,30,0},{-100,30,0}}};
+    Settings zeroSeg;zeroSeg.divisions=180;zeroSeg.gapMm=0;
+    auto zeroPlan=MakePlan(zero,zeroSeg);
+    Require(zeroPlan.bends.size()==1&&std::abs(zeroPlan.bends[0].angle-pi/2)<1e-9&&zeroPlan.bends[0].sharpHeel&&std::abs(zeroPlan.bends[0].heelRadius-30)<1e-9,"inner radius zero must keep one sharp-heel cut");
+    auto zeroNotch=Notch(zeroPlan,zeroPlan.bends[0]);double zeroMid=zeroPlan.bends[0].start+zeroPlan.bends[0].allowance/2;
+    double zeroA=(30-(1-zeroSeg.kFactor)*2)*(pi/2),zeroHalf=zeroA/2,zeroRi=28;
+    Require(std::abs(zeroNotch.front().y-2)<1e-6&&std::abs(zeroNotch.front().x-(zeroMid-zeroHalf))<1e-4,"inner radius zero neutral opening");
+    Require(std::abs(zeroNotch.front().x-100)<.02,"inner radius zero left leg length changed");
+    bool zeroFoot=false,zeroArc=false,zeroLow=false;double zeroArcY=2+zeroRi*(1-std::cos(pi/4)),zeroArcX=zeroHalf-zeroRi*std::sin(pi/4);
+    for(const auto& q:zeroNotch){if(q.y<2-1e-4)zeroLow=true;if(std::abs(q.y-30)<1e-3&&std::abs(std::abs(q.x-zeroMid)-zeroHalf)<1e-3)zeroFoot=true;if(std::abs(q.y-zeroArcY)<1e-3&&std::abs(std::abs(q.x-zeroMid)-zeroArcX)<1e-3)zeroArc=true;}
+    Require(zeroFoot&&zeroArc&&!zeroLow,"inner radius zero arc and split line");
+    Require(std::abs(zeroPlan.length-(200+(30-(1-zeroSeg.kFactor)*2)*pi/2))<.01,"inner radius zero length must follow the outer wall, not the centre line");
+    Require(Length(FlatPoint(zeroPlan,0,0,0)-zero.spans.front().a)<1e-9,"inner radius zero start cap moved");
+    Settings zeroCut=zeroSeg;zeroCut.gapMm=.2;zeroCut.cutSource=true;auto zeroSlot=MakePlan(zero,zeroCut);
+    Require(zeroSlot.sourceSlots.size()==1&&zeroSlot.sourceSlots[0].pathRadius>0,"inner radius zero source slot missing");
+    Require(std::abs(std::atan2(zeroSlot.sourceSlots[0].origin.y,zeroSlot.sourceSlots[0].origin.x)-pi/4)<1e-6,"inner radius zero source slot not at the middle of the arc");
+    Settings zeroWhole=zeroSeg;zeroWhole.segmentArcs=false;zeroWhole.tubeKFactor=.5;bool wholeRejected=false;
+    try{MakePlan(zero,zeroWhole);}catch(const std::exception&){wholeRejected=true;}
+    Require(wholeRejected,"inner radius zero accepted by whole-arc machine bending");
+    Source negativeRadius=zero;negativeRadius.spans[1].radius=29.5;negativeRadius.spans[1].a={29.5,0,0};negativeRadius.spans[1].b={0,29.5,0};negativeRadius.spans[0].b={29.5,0,0};negativeRadius.spans[2].a={0,29.5,0};
+    auto nearHeel=MakePlan(negativeRadius,zeroSeg);
+    Require(nearHeel.bends.size()==1&&nearHeel.bends[0].sharpHeel&&std::abs(nearHeel.bends[0].heelRadius-29.5)<1e-9,"outer radius just under section height must be a sharp heel");
+    Source heel;heel.width=40;heel.depth=30;heel.thickness=2;heel.normal=heel.widthDirection={0,0,1};
+    heel.spans={{{12,-100,0},{12,0,0}},{{12,0,0},{0,12,0},{0,0,0},{0,0,1},12,pi/2},{{0,12,0},{-100,12,0}}};
+    Settings heelOpt;heelOpt.divisions=180;heelOpt.gapMm=0;heelOpt.kFactor=.4;
+    auto heelPlan=MakePlan(heel,heelOpt);
+    Require(heelPlan.bends.size()==1&&heelPlan.bends[0].sharpHeel&&std::abs(heelPlan.bends[0].angle-pi/2)<1e-9,"sharp heel keeps one full-angle cut");
+    Require(std::abs(heelPlan.length-(200+(12-(1-.4)*2)*pi/2))<.05,"sharp heel length follows the outer wall");
+    auto cut=Notch(heelPlan,heelPlan.bends[0]);double mid=heelPlan.bends[0].start+heelPlan.bends[0].allowance/2;
+    double heelA=(12-(1-.4)*2)*(pi/2),heelHalf=heelA/2,heelRi=10;
+    Require(std::abs(cut.front().y-2)<1e-6&&std::abs(cut.front().x-(mid-heelHalf))<1e-4,"sharp heel neutral opening");
+    Require(std::abs(cut.front().x-100)<.02,"sharp heel left leg length changed");
+    bool heelCorner=false,heelFoot=false,heelArc=false,heelLow=false;double heelArcY=2+heelRi*(1-std::cos(pi/4)),heelArcX=heelHalf-heelRi*std::sin(pi/4);
+    for(const auto& q:cut){if(q.y<2-1e-4)heelLow=true;if(std::abs(q.y-12)<1e-3&&std::abs(std::abs(q.x-mid)-heelHalf)<1e-3)heelCorner=true;if(std::abs(q.y-30)<1e-3&&std::abs(std::abs(q.x-mid)-heelHalf)<1e-3)heelFoot=true;if(std::abs(q.y-heelArcY)<1e-3&&std::abs(std::abs(q.x-mid)-heelArcX)<1e-3)heelArc=true;}
+    Require(heelCorner&&heelFoot&&heelArc&&!heelLow,"sharp heel keeps the inner arc and the split line");
+    double solid=pi/4*144+18*18,cavity=pi/4*100+16*16,expectV=solid*40-cavity*36;
+    Require(std::abs(SharpHeelCornerVolume(12,pi/2,30,40,2)-expectV)<1e-6,"sharp heel corner volume");
+    Settings heelWhole=heelOpt;heelWhole.segmentArcs=false;heelWhole.tubeKFactor=.5;bool heelMachine=false;
+    try{MakePlan(heel,heelWhole);}catch(const std::exception&){heelMachine=true;}
+    Require(heelMachine,"sharp heel accepted by whole-arc machine bending");
+    Settings heelSlot=heelOpt;heelSlot.gapMm=.2;heelSlot.cutSource=true;bool slotRejected=false;
+    try{MakePlan(heel,heelSlot);}catch(const std::exception&){slotRejected=true;}
+    Require(slotRejected,"sharp heel source slot accepted");
+    Source tooTight=heel;tooTight.spans[1].radius=2;tooTight.spans[1].a={2,0,0};tooTight.spans[1].b={0,2,0};tooTight.spans[0].b={2,0,0};tooTight.spans[2].a={0,2,0};
+    bool thinRejected=false;try{MakePlan(tooTight,heelOpt);}catch(const std::exception&){thinRejected=true;}
+    Require(thinRejected,"heel radius equal to thickness accepted");
+    // 同一条管上混合: 内R=0 的弯位一个切口, 内R>0 的弯位照旧按分段数切 V 口。
+    Source mixed=zero;mixed.spans.push_back({{-100,30,0},{-300,-170,0},{-100,-170,0},{0,0,1},200,pi/2});mixed.spans.push_back({{-300,-170,0},{-300,-300,0}});
+    auto mixedPlan=MakePlan(mixed,zeroSeg);int full=0;for(const auto& b:mixedPlan.bends)full+=std::abs(b.angle-pi/2)<1e-9;
+    Require(mixedPlan.bends.size()==zeroSeg.divisions+1&&full==1,"mixed inner radii per-corner mode selection");
+    std::cout<<"PASS: inner radius zero flat relief, sharp heel notch, outer-wall length, machine-mode and source-slot rejection, mixed corners\n";
     std::cout<<"PASS: opposite arc directions, alternating retained walls, reverse notch refolding, source-slot radii, middle/arc fixed frames, signed K lengths and reverse corners\n";
     std::cout<<"PASS: whole arc, tube K, mixed corner, multiple radii, straight holes and deforming-hole rejection, enabled-mode regression\n";
     std::cout<<"PASS: allowance, setbacks, physical miter closure, arc endpoint/tangent, convergence, invalid inputs\n";return 0;

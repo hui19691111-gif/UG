@@ -819,10 +819,12 @@ namespace
         bool componentVisible;
         bool hasSheetmetalFeature;
         int componentLayer;
+        std::map<std::string, std::string> attributes;
     };
 
     NXString U8(const char* text);
     std::wstring PathTextToWide(const std::string& text);
+    std::string WidePathToUtf8(const std::wstring& text);
     std::string ReadAllText(const std::string& path);
     bool WriteAllText(const std::string& path, const std::string& text);
 
@@ -1048,6 +1050,75 @@ namespace
         return 0;
     }
 
+    std::string FormatBatchUserAttributeValue(const NXObject::AttributeInformation& attribute)
+    {
+        switch (attribute.Type)
+        {
+        case NXObject::AttributeType::AttributeTypeString:
+            return TrimCopy(NormalizeUtf8Message(ToUtf8(attribute.StringValue)));
+        case NXObject::AttributeType::AttributeTypeInteger:
+            return std::to_string(attribute.IntegerValue);
+        case NXObject::AttributeType::AttributeTypeReal:
+        {
+            std::ostringstream stream;
+            stream << std::setprecision(12) << attribute.RealValue;
+            return stream.str();
+        }
+        case NXObject::AttributeType::AttributeTypeBoolean:
+            return attribute.BooleanValue ? "True" : "False";
+        default:
+            break;
+        }
+
+        return std::string();
+    }
+
+    std::map<std::string, std::string> CollectPartUserAttributes(Part* part)
+    {
+        std::map<std::string, std::string> values;
+        if (part == NULL)
+        {
+            return values;
+        }
+
+        try
+        {
+            std::vector<NXObject::AttributeInformation> attributes = part->GetUserAttributes();
+            for (size_t i = 0; i < attributes.size(); ++i)
+            {
+                if (attributes[i].Unset)
+                {
+                    continue;
+                }
+
+                const std::string title = TrimCopy(NormalizeUtf8Message(ToUtf8(attributes[i].Title)));
+                if (title.empty())
+                {
+                    continue;
+                }
+
+                bool exists = false;
+                for (std::map<std::string, std::string>::const_iterator it = values.begin(); it != values.end(); ++it)
+                {
+                    if (_stricmp(it->first.c_str(), title.c_str()) == 0)
+                    {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists)
+                {
+                    values[title] = FormatBatchUserAttributeValue(attributes[i]);
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        return values;
+    }
+
     void CollectBatchPartCandidates(Component* component, std::vector<BatchPartCandidate>& candidates, std::set<tag_t>& seenParts)
     {
         if (component == NULL)
@@ -1103,6 +1174,7 @@ namespace
                     candidate.componentVisible = IsComponentVisibleForBatchList(child);
                     candidate.hasSheetmetalFeature = PartHasBatchSheetmetalFeature(prototypePart);
                     candidate.componentLayer = ComponentLayerForBatchList(child);
+                    candidate.attributes = CollectPartUserAttributes(prototypePart);
                     candidates.push_back(candidate);
                 }
             }
@@ -1317,6 +1389,10 @@ namespace
     const int BatchPickerListWidth = 1208;
     const int BatchPickerWindowWidth = 1252;
     const int BatchAttributeComboDropHeight = 260;
+    const int BatchPickerListTop = 212;
+    const int BatchPickerListHeight = 262;
+    const int BatchPickerButtonTop = 486;
+    const int BatchPickerWindowHeight = 600;
 
     struct BatchPartPickerPersistedState
     {
@@ -1324,6 +1400,19 @@ namespace
         bool hasAttributes = false;
         std::set<std::string> checkedPartNames;
         bool hasCheckedPartNames = false;
+        bool removeKeywordMatches = false;
+        std::string keywordMatches;
+        bool removeKeywordNonMatches = false;
+        std::string keywordNonMatches;
+        bool removeHasAttribute = false;
+        std::string hasAttributeName;
+        bool removeMissingAttribute = false;
+        std::string missingAttributeName;
+        bool removeAttributeEquals = false;
+        std::string equalsAttributeName;
+        std::string equalsAttributeValue;
+        bool removeWithoutAttributeValue = false;
+        std::string withoutAttributeValue;
     };
 
     struct BatchPartPickerState
@@ -1343,6 +1432,19 @@ namespace
         HWND hasQuantityFilterCheck;
         HWND noSheetmetalFeatureFilterCheck;
         HWND visibleComponentFilterCheck;
+        HWND removeKeywordMatchesCheck;
+        HWND removeKeywordNonMatchesCheck;
+        HWND removeHasAttributeCheck;
+        HWND removeMissingAttributeCheck;
+        HWND removeAttributeEqualsCheck;
+        HWND removeWithoutAttributeValueCheck;
+        HWND keywordMatchesEdit;
+        HWND keywordNonMatchesEdit;
+        HWND hasAttributeEdit;
+        HWND missingAttributeEdit;
+        HWND equalsAttributeNameEdit;
+        HWND equalsAttributeValueEdit;
+        HWND withoutAttributeValueEdit;
         HWND layerModeCombo;
         HWND layerFilterEdit;
         HWND comboBoxes[BatchAttributeColumnCount];
@@ -1743,6 +1845,151 @@ namespace
         }
     }
 
+    std::wstring TrimWideCopy(const std::wstring& text)
+    {
+        size_t begin = 0;
+        while (begin < text.size() && iswspace(text[begin]) != 0)
+        {
+            ++begin;
+        }
+
+        size_t end = text.size();
+        while (end > begin && iswspace(text[end - 1]) != 0)
+        {
+            --end;
+        }
+
+        return text.substr(begin, end - begin);
+    }
+
+    bool WideTextEqualsIgnoreCase(const std::wstring& left, const std::wstring& right)
+    {
+        return LowerWideCopy(left) == LowerWideCopy(right);
+    }
+
+    bool PickerBoxChecked(HWND control)
+    {
+        return control != NULL && SendMessageW(control, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
+
+    std::wstring PickerBoxText(HWND control)
+    {
+        return TrimWideCopy(GetWindowTextWideString(control));
+    }
+
+    bool CandidateHasAttributeName(const BatchPartCandidate& candidate, const std::wstring& attributeName, std::wstring* value)
+    {
+        if (attributeName.empty())
+        {
+            return false;
+        }
+
+        for (std::map<std::string, std::string>::const_iterator it = candidate.attributes.begin(); it != candidate.attributes.end(); ++it)
+        {
+            if (WideTextEqualsIgnoreCase(PathTextToWide(it->first), attributeName))
+            {
+                if (value != NULL)
+                {
+                    *value = PathTextToWide(it->second);
+                }
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool CandidateHasAttributeValue(const BatchPartCandidate& candidate, const std::wstring& attributeValue)
+    {
+        if (attributeValue.empty())
+        {
+            return false;
+        }
+
+        for (std::map<std::string, std::string>::const_iterator it = candidate.attributes.begin(); it != candidate.attributes.end(); ++it)
+        {
+            if (WideTextEqualsIgnoreCase(PathTextToWide(it->second), attributeValue))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Keyword rules only look at the displayed part name. Attribute rules compare
+    // every user attribute, and English names/values are case-insensitive.
+    bool BatchKeywordRulesExclude(const BatchPartPickerState* state, size_t candidateIndex)
+    {
+        if (state == NULL || state->candidates == NULL || candidateIndex >= state->candidates->size())
+        {
+            return false;
+        }
+
+        const BatchPartCandidate& candidate = (*state->candidates)[candidateIndex];
+        const std::wstring partName = PathTextToWide(candidate.partName);
+        if (PickerBoxChecked(state->removeKeywordMatchesCheck))
+        {
+            const std::wstring keyword = PickerBoxText(state->keywordMatchesEdit);
+            if (!keyword.empty() && ContainsIgnoreCaseWide(partName, keyword))
+            {
+                return true;
+            }
+        }
+
+        if (PickerBoxChecked(state->removeKeywordNonMatchesCheck))
+        {
+            const std::wstring keyword = PickerBoxText(state->keywordNonMatchesEdit);
+            if (!keyword.empty() && !ContainsIgnoreCaseWide(partName, keyword))
+            {
+                return true;
+            }
+        }
+
+        if (PickerBoxChecked(state->removeHasAttributeCheck))
+        {
+            const std::wstring attributeName = PickerBoxText(state->hasAttributeEdit);
+            if (!attributeName.empty() && CandidateHasAttributeName(candidate, attributeName, NULL))
+            {
+                return true;
+            }
+        }
+
+        if (PickerBoxChecked(state->removeMissingAttributeCheck))
+        {
+            const std::wstring attributeName = PickerBoxText(state->missingAttributeEdit);
+            if (!attributeName.empty() && !CandidateHasAttributeName(candidate, attributeName, NULL))
+            {
+                return true;
+            }
+        }
+
+        if (PickerBoxChecked(state->removeAttributeEqualsCheck))
+        {
+            const std::wstring attributeName = PickerBoxText(state->equalsAttributeNameEdit);
+            const std::wstring expectedValue = PickerBoxText(state->equalsAttributeValueEdit);
+            std::wstring actualValue;
+            if (!attributeName.empty() &&
+                !expectedValue.empty() &&
+                CandidateHasAttributeName(candidate, attributeName, &actualValue) &&
+                WideTextEqualsIgnoreCase(actualValue, expectedValue))
+            {
+                return true;
+            }
+        }
+
+        if (PickerBoxChecked(state->removeWithoutAttributeValueCheck))
+        {
+            const std::wstring expectedValue = PickerBoxText(state->withoutAttributeValueEdit);
+            if (!expectedValue.empty() && !CandidateHasAttributeValue(candidate, expectedValue))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     bool BatchPartCandidateMatchesFilter(const BatchPartPickerState* state, size_t candidateIndex, const std::wstring& filterText)
     {
         if (state == NULL || state->candidates == NULL || candidateIndex >= state->candidates->size())
@@ -1838,6 +2085,15 @@ namespace
         const std::wstring filterText = GetWindowTextWideString(state->filterEdit);
         for (size_t i = 0; i < state->candidates->size(); ++i)
         {
+            if (BatchKeywordRulesExclude(state, i))
+            {
+                if (i < state->checkedCandidates.size())
+                {
+                    state->checkedCandidates[i] = false;
+                }
+                continue;
+            }
+
             if (!BatchPartCandidateMatchesFilter(state, i, filterText))
             {
                 continue;
@@ -2010,6 +2266,19 @@ namespace
                 state.checkedPartNames.insert(value);
                 state.hasCheckedPartNames = true;
             }
+            else if (key == "kwMatchOn") state.removeKeywordMatches = value == "1";
+            else if (key == "kwMatch") state.keywordMatches = value;
+            else if (key == "kwMissOn") state.removeKeywordNonMatches = value == "1";
+            else if (key == "kwMiss") state.keywordNonMatches = value;
+            else if (key == "attrHasOn") state.removeHasAttribute = value == "1";
+            else if (key == "attrHas") state.hasAttributeName = value;
+            else if (key == "attrMissingOn") state.removeMissingAttribute = value == "1";
+            else if (key == "attrMissing") state.missingAttributeName = value;
+            else if (key == "attrEqOn") state.removeAttributeEquals = value == "1";
+            else if (key == "attrEqName") state.equalsAttributeName = value;
+            else if (key == "attrEqValue") state.equalsAttributeValue = value;
+            else if (key == "attrValueOn") state.removeWithoutAttributeValue = value == "1";
+            else if (key == "attrValue") state.withoutAttributeValue = value;
         }
 
         return state;
@@ -2046,8 +2315,104 @@ namespace
             }
         }
 
+        output << "kwMatchOn=" << (PickerBoxChecked(state->removeKeywordMatchesCheck) ? "1" : "0") << "\n";
+        output << "kwMatch=" << EncodePickerStateValue(WidePathToUtf8(PickerBoxText(state->keywordMatchesEdit))) << "\n";
+        output << "kwMissOn=" << (PickerBoxChecked(state->removeKeywordNonMatchesCheck) ? "1" : "0") << "\n";
+        output << "kwMiss=" << EncodePickerStateValue(WidePathToUtf8(PickerBoxText(state->keywordNonMatchesEdit))) << "\n";
+        output << "attrHasOn=" << (PickerBoxChecked(state->removeHasAttributeCheck) ? "1" : "0") << "\n";
+        output << "attrHas=" << EncodePickerStateValue(WidePathToUtf8(PickerBoxText(state->hasAttributeEdit))) << "\n";
+        output << "attrMissingOn=" << (PickerBoxChecked(state->removeMissingAttributeCheck) ? "1" : "0") << "\n";
+        output << "attrMissing=" << EncodePickerStateValue(WidePathToUtf8(PickerBoxText(state->missingAttributeEdit))) << "\n";
+        output << "attrEqOn=" << (PickerBoxChecked(state->removeAttributeEqualsCheck) ? "1" : "0") << "\n";
+        output << "attrEqName=" << EncodePickerStateValue(WidePathToUtf8(PickerBoxText(state->equalsAttributeNameEdit))) << "\n";
+        output << "attrEqValue=" << EncodePickerStateValue(WidePathToUtf8(PickerBoxText(state->equalsAttributeValueEdit))) << "\n";
+        output << "attrValueOn=" << (PickerBoxChecked(state->removeWithoutAttributeValueCheck) ? "1" : "0") << "\n";
+        output << "attrValue=" << EncodePickerStateValue(WidePathToUtf8(PickerBoxText(state->withoutAttributeValueEdit))) << "\n";
+
         WriteAllText(BatchPartPickerStatePath(), output.str());
     }
+
+    HWND CreatePickerCheck(BatchPartPickerState* state, HWND parent, HINSTANCE instance, const wchar_t* text, int x, int y, int width, int id)
+    {
+        HWND control = CreateWindowW(
+            L"BUTTON",
+            text,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            x,
+            y,
+            width,
+            22,
+            parent,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+            instance,
+            NULL);
+        AddPickerControl(state, control);
+        return control;
+    }
+
+    HWND CreatePickerEdit(BatchPartPickerState* state, HWND parent, HINSTANCE instance, int x, int y, int width, int id)
+    {
+        HWND control = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            WC_EDITW,
+            L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            x,
+            y,
+            width,
+            22,
+            parent,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+            instance,
+            NULL);
+        AddPickerControl(state, control);
+        return control;
+    }
+
+    void CreatePickerStatic(BatchPartPickerState* state, HWND parent, HINSTANCE instance, const wchar_t* text, int x, int y, int width)
+    {
+        AddPickerControl(state, CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE, x, y + 2, width, 20, parent, NULL, instance, NULL));
+    }
+
+    void RestorePickerCheck(HWND control, bool checked)
+    {
+        if (control != NULL)
+        {
+            SendMessageW(control, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+    }
+
+    void RestorePickerText(HWND control, const std::string& text)
+    {
+        if (control != NULL)
+        {
+            const std::wstring wide = PathTextToWide(text);
+            SetWindowTextW(control, wide.c_str());
+        }
+    }
+
+    void ClearPickerKeywordRules(BatchPartPickerState* state)
+    {
+        if (state == NULL)
+        {
+            return;
+        }
+
+        RestorePickerCheck(state->removeKeywordMatchesCheck, false);
+        RestorePickerCheck(state->removeKeywordNonMatchesCheck, false);
+        RestorePickerCheck(state->removeHasAttributeCheck, false);
+        RestorePickerCheck(state->removeMissingAttributeCheck, false);
+        RestorePickerCheck(state->removeAttributeEqualsCheck, false);
+        RestorePickerCheck(state->removeWithoutAttributeValueCheck, false);
+        RestorePickerText(state->keywordMatchesEdit, std::string());
+        RestorePickerText(state->keywordNonMatchesEdit, std::string());
+        RestorePickerText(state->hasAttributeEdit, std::string());
+        RestorePickerText(state->missingAttributeEdit, std::string());
+        RestorePickerText(state->equalsAttributeNameEdit, std::string());
+        RestorePickerText(state->equalsAttributeValueEdit, std::string());
+        RestorePickerText(state->withoutAttributeValueEdit, std::string());
+    }
+
     LRESULT CALLBACK BatchPartPickerWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         const int kIdList = 1001;
@@ -2061,6 +2426,19 @@ namespace
         const int kIdNoSheetmetalFeatureFilter = 1011;
         const int kIdVisibleComponentFilter = 1012;
         const int kIdLayerMode = 1013;
+        const int kIdRemoveKeywordMatches = 1020;
+        const int kIdRemoveKeywordNonMatches = 1021;
+        const int kIdRemoveHasAttribute = 1022;
+        const int kIdRemoveMissingAttribute = 1023;
+        const int kIdRemoveAttributeEquals = 1024;
+        const int kIdRemoveWithoutAttributeValue = 1025;
+        const int kIdKeywordMatchesEdit = 1030;
+        const int kIdKeywordNonMatchesEdit = 1031;
+        const int kIdHasAttributeEdit = 1032;
+        const int kIdMissingAttributeEdit = 1033;
+        const int kIdEqualsAttributeNameEdit = 1034;
+        const int kIdEqualsAttributeValueEdit = 1035;
+        const int kIdWithoutAttributeValueEdit = 1036;
         const int kIdFirstCombo = 1100;
         const int kIdOk = IDOK;
         const int kIdCancel = IDCANCEL;
@@ -2102,18 +2480,87 @@ namespace
                 AddPickerControl(state, CreateWindowW(L"STATIC", L"\u4F8B:1-20,35,40", WS_CHILD | WS_VISIBLE, 1090, 12, 92, 22, hwnd, NULL, instance, NULL));
                 state->filterClearButton = CreateWindowW(L"BUTTON", L"\u6E05\u7A7A", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 1184, 10, 42, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdFilterClear)), instance, NULL);
                 AddPickerControl(state, state->filterClearButton);
-                state->hasMaterialFilterCheck = CreateWindowW(L"BUTTON", L"\u6709\u6750\u6599\u5C5E\u6027\u503C", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 584, 40, 116, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdHasMaterialFilter)), instance, NULL);
+                state->hasMaterialFilterCheck = CreateWindowW(L"BUTTON", L"\u6709\u6750\u6599\u5C5E\u6027\u503C", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 16, 42, 132, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdHasMaterialFilter)), instance, NULL);
                 AddPickerControl(state, state->hasMaterialFilterCheck);
-                state->hasQuantityFilterCheck = CreateWindowW(L"BUTTON", L"\u6709\u6570\u91CF\u5C5E\u6027\u503C", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 708, 40, 116, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdHasQuantityFilter)), instance, NULL);
+                state->hasQuantityFilterCheck = CreateWindowW(L"BUTTON", L"\u6709\u6570\u91CF\u5C5E\u6027\u503C", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 164, 42, 132, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdHasQuantityFilter)), instance, NULL);
                 AddPickerControl(state, state->hasQuantityFilterCheck);
-                state->noSheetmetalFeatureFilterCheck = CreateWindowW(L"BUTTON", L"\u90E8\u4EF6\u4E0D\u542B\u94A3\u91D1\u7279\u5F81", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 832, 40, 146, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdNoSheetmetalFeatureFilter)), instance, NULL);
+                state->noSheetmetalFeatureFilterCheck = CreateWindowW(L"BUTTON", L"\u90E8\u4EF6\u4E0D\u542B\u94A3\u91D1\u7279\u5F81", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 312, 42, 168, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdNoSheetmetalFeatureFilter)), instance, NULL);
                 AddPickerControl(state, state->noSheetmetalFeatureFilterCheck);
-                state->visibleComponentFilterCheck = CreateWindowW(L"BUTTON", L"\u663E\u793A\u7684\u90E8\u4EF6", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 986, 40, 120, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdVisibleComponentFilter)), instance, NULL);
+                state->visibleComponentFilterCheck = CreateWindowW(L"BUTTON", L"\u663E\u793A\u7684\u90E8\u4EF6", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 496, 42, 120, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdVisibleComponentFilter)), instance, NULL);
                 AddPickerControl(state, state->visibleComponentFilterCheck);
+
+                const int ruleRow0 = 100;
+                const int ruleRow1 = 132;
+                const int ruleRow2 = 164;
+                const int ruleCol1 = 28;
+                const int ruleCol2 = 632;
+                const int ruleCheckWidth = 150;
+                const int ruleLabelWidth = 56;
+                const int ruleEditWidth = 188;
+                const int ruleHintWidth = 162;
+                const int ruleLabelX = 158;
+                const int ruleEditX = 218;
+                const int ruleHintX = 414;
+                HWND ruleGroup = CreateWindowW(
+                    L"BUTTON",
+                    L"\u6309\u5173\u952E\u8BCD\u548C\u5C5E\u6027\u8FC7\u6EE4\uFF08\u6BCF\u6761\u89C4\u5219\u72EC\u7ACB\u8F93\u5165\uFF09",
+                    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_GROUPBOX,
+                    12,
+                    76,
+                    1212,
+                    124,
+                    hwnd,
+                    NULL,
+                    instance,
+                    NULL);
+                AddPickerControl(state, ruleGroup);
+                SetWindowPos(ruleGroup, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                const BatchPartPickerPersistedState* persisted = state->persistedState;
+                state->removeKeywordMatchesCheck = CreatePickerCheck(state, hwnd, instance, L"\u79FB\u9664\u5305\u542B\u5173\u952E\u8BCD", ruleCol1, ruleRow0, ruleCheckWidth, kIdRemoveKeywordMatches);
+                CreatePickerStatic(state, hwnd, instance, L"\u5173\u952E\u8BCD", ruleCol1 + ruleLabelX, ruleRow0, ruleLabelWidth);
+                state->keywordMatchesEdit = CreatePickerEdit(state, hwnd, instance, ruleCol1 + ruleEditX, ruleRow0, ruleEditWidth, kIdKeywordMatchesEdit);
+                CreatePickerStatic(state, hwnd, instance, L"\u4EC5\u9488\u5BF9\u90E8\u4EF6\u540D\u79F0", ruleCol1 + ruleHintX, ruleRow0, ruleHintWidth);
+                state->removeKeywordNonMatchesCheck = CreatePickerCheck(state, hwnd, instance, L"\u79FB\u9664\u4E0D\u5305\u542B\u5173\u952E\u8BCD", ruleCol1, ruleRow1, ruleCheckWidth, kIdRemoveKeywordNonMatches);
+                CreatePickerStatic(state, hwnd, instance, L"\u5173\u952E\u8BCD", ruleCol1 + ruleLabelX, ruleRow1, ruleLabelWidth);
+                state->keywordNonMatchesEdit = CreatePickerEdit(state, hwnd, instance, ruleCol1 + ruleEditX, ruleRow1, ruleEditWidth, kIdKeywordNonMatchesEdit);
+                CreatePickerStatic(state, hwnd, instance, L"\u4EC5\u9488\u5BF9\u90E8\u4EF6\u540D\u79F0", ruleCol1 + ruleHintX, ruleRow1, ruleHintWidth);
+                state->removeHasAttributeCheck = CreatePickerCheck(state, hwnd, instance, L"\u79FB\u9664\u5177\u6709\u5C5E\u6027\u540D", ruleCol1, ruleRow2, ruleCheckWidth, kIdRemoveHasAttribute);
+                CreatePickerStatic(state, hwnd, instance, L"\u5C5E\u6027\u540D", ruleCol1 + ruleLabelX, ruleRow2, ruleLabelWidth);
+                state->hasAttributeEdit = CreatePickerEdit(state, hwnd, instance, ruleCol1 + ruleEditX, ruleRow2, ruleEditWidth, kIdHasAttributeEdit);
+                CreatePickerStatic(state, hwnd, instance, L"\u4E0D\u533A\u5206\u82F1\u6587\u5927\u5C0F\u5199", ruleCol1 + ruleHintX, ruleRow2, ruleHintWidth);
+                state->removeMissingAttributeCheck = CreatePickerCheck(state, hwnd, instance, L"\u79FB\u9664\u7F3A\u5C11\u5C5E\u6027\u540D", ruleCol2, ruleRow0, ruleCheckWidth, kIdRemoveMissingAttribute);
+                CreatePickerStatic(state, hwnd, instance, L"\u5C5E\u6027\u540D", ruleCol2 + ruleLabelX, ruleRow0, ruleLabelWidth);
+                state->missingAttributeEdit = CreatePickerEdit(state, hwnd, instance, ruleCol2 + ruleEditX, ruleRow0, ruleEditWidth, kIdMissingAttributeEdit);
+                CreatePickerStatic(state, hwnd, instance, L"\u4E0D\u533A\u5206\u82F1\u6587\u5927\u5C0F\u5199", ruleCol2 + ruleHintX, ruleRow0, ruleHintWidth);
+                state->removeAttributeEqualsCheck = CreatePickerCheck(state, hwnd, instance, L"\u79FB\u9664\u5C5E\u6027\u540D\u548C\u503C\u76F8\u7B49", ruleCol2, ruleRow1, ruleCheckWidth, kIdRemoveAttributeEquals);
+                CreatePickerStatic(state, hwnd, instance, L"\u5C5E\u6027\u540D", ruleCol2 + ruleLabelX, ruleRow1, ruleLabelWidth);
+                state->equalsAttributeNameEdit = CreatePickerEdit(state, hwnd, instance, ruleCol2 + ruleEditX, ruleRow1, 130, kIdEqualsAttributeNameEdit);
+                CreatePickerStatic(state, hwnd, instance, L"\u5C5E\u6027\u503C", ruleCol2 + 358, ruleRow1, ruleLabelWidth);
+                state->equalsAttributeValueEdit = CreatePickerEdit(state, hwnd, instance, ruleCol2 + 418, ruleRow1, 158, kIdEqualsAttributeValueEdit);
+                state->removeWithoutAttributeValueCheck = CreatePickerCheck(state, hwnd, instance, L"\u79FB\u9664\u6CA1\u6709\u8BE5\u5C5E\u6027\u503C", ruleCol2, ruleRow2, ruleCheckWidth, kIdRemoveWithoutAttributeValue);
+                CreatePickerStatic(state, hwnd, instance, L"\u5C5E\u6027\u503C", ruleCol2 + ruleLabelX, ruleRow2, ruleLabelWidth);
+                state->withoutAttributeValueEdit = CreatePickerEdit(state, hwnd, instance, ruleCol2 + ruleEditX, ruleRow2, ruleEditWidth, kIdWithoutAttributeValueEdit);
+                CreatePickerStatic(state, hwnd, instance, L"\u68C0\u67E5\u5168\u90E8\u5C5E\u6027\u503C", ruleCol2 + ruleHintX, ruleRow2, ruleHintWidth);
+                if (persisted != NULL)
+                {
+                    RestorePickerCheck(state->removeKeywordMatchesCheck, persisted->removeKeywordMatches);
+                    RestorePickerText(state->keywordMatchesEdit, persisted->keywordMatches);
+                    RestorePickerCheck(state->removeKeywordNonMatchesCheck, persisted->removeKeywordNonMatches);
+                    RestorePickerText(state->keywordNonMatchesEdit, persisted->keywordNonMatches);
+                    RestorePickerCheck(state->removeHasAttributeCheck, persisted->removeHasAttribute);
+                    RestorePickerText(state->hasAttributeEdit, persisted->hasAttributeName);
+                    RestorePickerCheck(state->removeMissingAttributeCheck, persisted->removeMissingAttribute);
+                    RestorePickerText(state->missingAttributeEdit, persisted->missingAttributeName);
+                    RestorePickerCheck(state->removeAttributeEqualsCheck, persisted->removeAttributeEquals);
+                    RestorePickerText(state->equalsAttributeNameEdit, persisted->equalsAttributeName);
+                    RestorePickerText(state->equalsAttributeValueEdit, persisted->equalsAttributeValue);
+                    RestorePickerCheck(state->removeWithoutAttributeValueCheck, persisted->removeWithoutAttributeValue);
+                    RestorePickerText(state->withoutAttributeValueEdit, persisted->withoutAttributeValue);
+                }
                 state->listX = 14;
-                state->listY = 68;
+                state->listY = BatchPickerListTop;
                 state->listWidth = BatchPickerListWidth;
-                state->listHeight = 298;
+                state->listHeight = BatchPickerListHeight;
             }
             state->listView = CreateWindowExW(
                 WS_EX_CLIENTEDGE,
@@ -2160,10 +2607,10 @@ namespace
                 }
             }
 
-            AddPickerControl(state, CreateWindowW(L"BUTTON", L"\u5168\u9009", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 14, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSelectAll)), instance, NULL));
-            AddPickerControl(state, CreateWindowW(L"BUTTON", L"\u5168\u4E0D\u9009", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 96, 380, 84, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClearAll)), instance, NULL));
-            AddPickerControl(state, CreateWindowW(L"BUTTON", L"\u786E\u5B9A", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 860, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdOk)), instance, NULL));
-            AddPickerControl(state, CreateWindowW(L"BUTTON", L"\u53D6\u6D88", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 946, 380, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCancel)), instance, NULL));
+            AddPickerControl(state, CreateWindowW(L"BUTTON", L"\u5168\u9009", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 14, BatchPickerButtonTop, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdSelectAll)), instance, NULL));
+            AddPickerControl(state, CreateWindowW(L"BUTTON", L"\u5168\u4E0D\u9009", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 96, BatchPickerButtonTop, 84, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdClearAll)), instance, NULL));
+            AddPickerControl(state, CreateWindowW(L"BUTTON", L"\u786E\u5B9A", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 1060, BatchPickerButtonTop, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdOk)), instance, NULL));
+            AddPickerControl(state, CreateWindowW(L"BUTTON", L"\u53D6\u6D88", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 1146, BatchPickerButtonTop, 76, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCancel)), instance, NULL));
             return 0;
         }
         case WM_NOTIFY:
@@ -2223,7 +2670,15 @@ namespace
                 return 0;
             }
 
-            if ((commandId == kIdFilterEdit || commandId == kIdLayerFilter) && notifyCode == EN_CHANGE)
+            if ((commandId == kIdFilterEdit ||
+                 commandId == kIdLayerFilter ||
+                 commandId == kIdKeywordMatchesEdit ||
+                 commandId == kIdKeywordNonMatchesEdit ||
+                 commandId == kIdHasAttributeEdit ||
+                 commandId == kIdMissingAttributeEdit ||
+                 commandId == kIdEqualsAttributeNameEdit ||
+                 commandId == kIdEqualsAttributeValueEdit ||
+                 commandId == kIdWithoutAttributeValueEdit) && notifyCode == EN_CHANGE)
             {
                 SyncBatchPartVisibleChecksToModel(state);
                 PopulateFilteredBatchPartListView(state);
@@ -2242,7 +2697,13 @@ namespace
             if ((commandId == kIdHasMaterialFilter ||
                  commandId == kIdHasQuantityFilter ||
                  commandId == kIdNoSheetmetalFeatureFilter ||
-                 commandId == kIdVisibleComponentFilter) &&
+                 commandId == kIdVisibleComponentFilter ||
+                 commandId == kIdRemoveKeywordMatches ||
+                 commandId == kIdRemoveKeywordNonMatches ||
+                 commandId == kIdRemoveHasAttribute ||
+                 commandId == kIdRemoveMissingAttribute ||
+                 commandId == kIdRemoveAttributeEquals ||
+                 commandId == kIdRemoveWithoutAttributeValue) &&
                 notifyCode == BN_CLICKED)
             {
                 SyncBatchPartVisibleChecksToModel(state);
@@ -2261,6 +2722,7 @@ namespace
                 if (state->hasQuantityFilterCheck != NULL) SendMessageW(state->hasQuantityFilterCheck, BM_SETCHECK, BST_UNCHECKED, 0);
                 if (state->noSheetmetalFeatureFilterCheck != NULL) SendMessageW(state->noSheetmetalFeatureFilterCheck, BM_SETCHECK, BST_UNCHECKED, 0);
                 if (state->visibleComponentFilterCheck != NULL) SendMessageW(state->visibleComponentFilterCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                ClearPickerKeywordRules(state);
                 PopulateFilteredBatchPartListView(state);
                 RepositionHeaderCombos(state);
                 return 0;
@@ -2288,6 +2750,10 @@ namespace
                 state->selectedIndices.clear();
                 for (size_t i = 0; i < state->checkedCandidates.size(); ++i)
                 {
+                    if (BatchKeywordRulesExclude(state, i))
+                    {
+                        state->checkedCandidates[i] = false;
+                    }
                     if (state->checkedCandidates[i])
                     {
                         state->selectedIndices.push_back(static_cast<int>(i));
@@ -2421,12 +2887,12 @@ namespace
         HWND hwnd = CreateWindowExW(
             WS_EX_DLGMODALFRAME,
             className,
-            L"Batch sheet metal parts",
+            L"\u6279\u91CF\u8F6C\u94A3\u91D1",
             WS_CAPTION | WS_SYSMENU | WS_BORDER,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             BatchPickerWindowWidth,
-            468,
+            BatchPickerWindowHeight,
             parent,
             NULL,
             instance,

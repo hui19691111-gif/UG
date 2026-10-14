@@ -11,6 +11,9 @@
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/BodyDumbRule.hxx>
 #include <NXOpen/Callback.hxx>
+#include <NXOpen/Curve.hxx>
+#include <NXOpen/CurveCollection.hxx>
+#include <NXOpen/CurveDumbRule.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
 #include <NXOpen/Edge.hxx>
@@ -45,6 +48,7 @@
 #include <NXOpen/GeometricUtilities_BooleanToolBuilder.hxx>
 #include <NXOpen/GeometricUtilities_FacePlaneToolBuilder.hxx>
 #include <NXOpen/GeometricUtilities_Limits.hxx>
+#include <NXOpen/Line.hxx>
 #include <NXOpen/NXException.hxx>
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/NXObjectManager.hxx>
@@ -3660,8 +3664,9 @@ bool CaiRBanDialog::CreateArcPanel(
     };
     std::vector<NXOpen::Face*> facesToThicken{face};
     std::vector<TangentEnd> tangentEnds;
-    const bool extendTangentFaces =
-        cutDistances[0] > kTolerance || cutDistances[1] > kTolerance;
+    std::array<bool, 2> trimEnd{{false, false}};
+    std::array<double, 2> trimOffsets{{0.0, 0.0}};
+    std::array<double, 2> trimReach{{0.0, 0.0}};
     {
         for (NXOpen::Edge* edge : face->GetEdges())
         {
@@ -3755,10 +3760,6 @@ bool CaiRBanDialog::CreateArcPanel(
                 }) != tangentEnds.end();
             if (!alreadyFound)
             {
-                if (extendTangentFaces)
-                {
-                    facesToThicken.push_back(tangentFace);
-                }
                 tangentEnds.push_back(
                     {tangentFace, edge, midpoint, away});
             }
@@ -3790,10 +3791,62 @@ bool CaiRBanDialog::CreateArcPanel(
                 (*handleDirections)[index] = tangentEnds[index].awayDirection;
             }
         }
+
+        // A trim plane on the tangent edge, or past the end of that face,
+        // does not intersect the solid. NX then rejects the preview and the
+        // drag handles disappear. Keep a face only while its cut is positive,
+        // and trim it only while the plane stays inside the face.
+        constexpr double kTrimClearance = 0.05;
+        for (std::size_t index = 0; index < tangentEnds.size() && index < 2;
+             ++index)
+        {
+            const double requested = cutDistances[index];
+            if (requested <= kTolerance)
+            {
+                continue;
+            }
+            double reach = 0.0;
+            for (NXOpen::Edge* adjacentEdge :
+                 tangentEnds[index].tangentFace->GetEdges())
+            {
+                if (adjacentEdge == nullptr)
+                {
+                    continue;
+                }
+                NXOpen::Point3d first;
+                NXOpen::Point3d second;
+                try
+                {
+                    adjacentEdge->GetVertices(&first, &second);
+                }
+                catch (...)
+                {
+                    continue;
+                }
+                for (const NXOpen::Point3d& point : {first, second})
+                {
+                    const double distance = Dot(
+                        Subtract(point, tangentEnds[index].edgeMidpoint),
+                        tangentEnds[index].awayDirection);
+                    if (distance > reach)
+                    {
+                        reach = distance;
+                    }
+                }
+            }
+            facesToThicken.push_back(tangentEnds[index].tangentFace);
+            if (reach > kTrimClearance &&
+                requested < reach - kTrimClearance)
+            {
+                trimEnd[index] = true;
+                trimOffsets[index] = requested;
+                trimReach[index] = reach;
+            }
+        }
     }
 
     NXOpen::Features::ThickenBuilder* thicken = nullptr;
-    NXOpen::Features::TrimBody2Builder* trim = nullptr;
+    NXOpen::Features::ExtrudeBuilder* cutExtrude = nullptr;
     NXOpen::Features::OffsetFaceBuilder* innerOffset = nullptr;
     std::string stage = "创建圆弧板加厚";
     try
@@ -3827,52 +3880,142 @@ bool CaiRBanDialog::CreateArcPanel(
             createdFeatureTags->push_back(thickenFeature->Tag());
         }
 
-        for (std::size_t index = 0;
-             extendTangentFaces && index < tangentEnds.size(); ++index)
+        for (std::size_t index = 0; index < tangentEnds.size() && index < 2;
+             ++index)
         {
-            stage = "创建并执行第 " + std::to_string(index + 1) +
-                    " 个修剪平面";
-            const TangentEnd& end = tangentEnds[index];
-            const NXOpen::Point3d planeOrigin =
-                Move(end.edgeMidpoint, end.awayDirection,
-                     cutDistances[index]);
-            NXOpen::Plane* plane = workPart->Planes()->CreatePlane(
-                planeOrigin, end.awayDirection,
-                NXOpen::SmartObject::UpdateOptionWithinModeling);
-
-            trim = workPart->Features()->CreateTrimBody2Builder(nullptr);
-            NXOpen::SelectionIntentRuleOptions* targetOptions =
-                workPart->ScRuleFactory()->CreateRuleOptions();
-            targetOptions->SetSelectedFromInactive(false);
-            NXOpen::BodyDumbRule* targetRule =
-                workPart->ScRuleFactory()->CreateRuleBodyDumb(
-                    std::vector<NXOpen::Body*>{panelBody}, true,
-                    targetOptions);
-            delete targetOptions;
-            NXOpen::ScCollector* targetCollector =
-                workPart->ScCollectors()->CreateCollector();
-            targetCollector->ReplaceRules(
-                std::vector<NXOpen::SelectionIntentRule*>{targetRule}, false);
-            trim->SetTargetBodyCollector(targetCollector);
-            trim->BooleanTool()->SetToolOption(
-                NXOpen::GeometricUtilities::BooleanToolBuilder::
-                    BooleanToolTypeNewPlane);
-            trim->BooleanTool()->FacePlaneTool()->SetToolPlane(plane);
-            // Plane normal points from the arc toward the tangent flange, so
-            // the default side retains the arc and cuts the excess extension.
-            trim->BooleanTool()->SetReverseDirection(false);
-            trim->SetTolerance(0.001);
-            NXOpen::Features::Feature* trimFeature = trim->CommitFeature();
-            trim->Destroy();
-            trim = nullptr;
-            if (trimFeature == nullptr || trimFeature->GetBodies().empty())
+            if (!trimEnd[index])
             {
-                throw std::runtime_error("NX 未返回修剪后的圆弧板实体。");
+                continue;
             }
-            panelBody = trimFeature->GetBodies().front();
-            if (createdFeatureTags != nullptr)
+            stage = "切除第 " + std::to_string(index + 1) +
+                    " 端多余延伸";
+            const TangentEnd& end = tangentEnds[index];
+            NXOpen::Point3d facePoint;
+            NXOpen::Vector3d faceNormal;
+            if (!FacePlaneData(end.tangentFace, facePoint, faceNormal))
             {
-                createdFeatureTags->push_back(trimFeature->Tag());
+                throw std::runtime_error("无法读取相切平面的方向。");
+            }
+            const NXOpen::Point3d cutOrigin =
+                Move(end.edgeMidpoint, end.awayDirection, trimOffsets[index]);
+            double axialMin = (std::numeric_limits<double>::max)();
+            double axialMax = std::numeric_limits<double>::lowest();
+            for (NXOpen::Edge* adjacentEdge : end.tangentFace->GetEdges())
+            {
+                if (adjacentEdge == nullptr)
+                {
+                    continue;
+                }
+                NXOpen::Point3d first;
+                NXOpen::Point3d second;
+                try
+                {
+                    adjacentEdge->GetVertices(&first, &second);
+                }
+                catch (...)
+                {
+                    continue;
+                }
+                for (const NXOpen::Point3d& point : {first, second})
+                {
+                    const double axial = Dot(Subtract(point, cutOrigin),
+                                              cylinderAxis);
+                    axialMin = (std::min)(axialMin, axial);
+                    axialMax = (std::max)(axialMax, axial);
+                }
+            }
+            constexpr double kToolMargin = 1.0;
+            axialMin -= kToolMargin;
+            axialMax += kToolMargin;
+            const double normalHalf = thickness + kToolMargin;
+            const double toolLength =
+                (trimReach[index] - trimOffsets[index]) + kToolMargin;
+            const std::array<NXOpen::Point3d, 4> corners{
+                Move(Move(cutOrigin, cylinderAxis, axialMin), faceNormal,
+                     -normalHalf),
+                Move(Move(cutOrigin, cylinderAxis, axialMax), faceNormal,
+                     -normalHalf),
+                Move(Move(cutOrigin, cylinderAxis, axialMax), faceNormal,
+                     normalHalf),
+                Move(Move(cutOrigin, cylinderAxis, axialMin), faceNormal,
+                     normalHalf)};
+            std::vector<NXOpen::Curve*> curves;
+            curves.reserve(4);
+            for (std::size_t corner = 0; corner < corners.size(); ++corner)
+            {
+                NXOpen::Line* line = workPart->Curves()->CreateLine(
+                    corners[corner], corners[(corner + 1) % corners.size()]);
+                UF_OBJ_set_blank_status(line->Tag(), UF_OBJ_BLANKED);
+                curves.push_back(line);
+            }
+
+            cutExtrude = workPart->Features()->CreateExtrudeBuilder(nullptr);
+            try
+            {
+                NXOpen::Section* section = workPart->Sections()->CreateSection(
+                    0.000095, 0.0001, 0.5);
+                cutExtrude->SetSection(section);
+                section->SetDistanceTolerance(0.0001);
+                section->SetChainingTolerance(0.000095);
+                section->SetAllowedEntityTypes(
+                    NXOpen::Section::AllowTypesOnlyCurves);
+                NXOpen::CurveDumbRule* curveRule =
+                    workPart->ScRuleFactory()->CreateRuleCurveDumb(curves);
+                section->AddToSection(
+                    std::vector<NXOpen::SelectionIntentRule*>{curveRule},
+                    curves.front(), nullptr, nullptr, cutOrigin,
+                    NXOpen::Section::ModeCreate, false);
+                NXOpen::Direction* direction =
+                    workPart->Directions()->CreateDirection(
+                        cutOrigin, end.awayDirection,
+                        NXOpen::SmartObject::UpdateOptionWithinModeling);
+                cutExtrude->SetDirection(direction);
+                cutExtrude->Limits()->StartExtend()->SetValue("0");
+                cutExtrude->Limits()->EndExtend()->SetValue(
+                    Number(toolLength).c_str());
+                // The tool starts at this end's cut plane and runs only along
+                // that flange. It does not cross the arc onto the other end.
+                cutExtrude->BooleanOperation()->SetType(
+                    NXOpen::GeometricUtilities::BooleanOperation::
+                        BooleanTypeSubtract);
+                cutExtrude->BooleanOperation()->SetTargetBodies(
+                    std::vector<NXOpen::Body*>{panelBody});
+                NXOpen::Features::Feature* cutFeature =
+                    cutExtrude->CommitFeature();
+                cutExtrude->Destroy();
+                cutExtrude = nullptr;
+                if (cutFeature == nullptr || cutFeature->GetBodies().empty())
+                {
+                    throw std::runtime_error("NX 未返回切除后的圆弧板实体。");
+                }
+                panelBody = cutFeature->GetBodies().front();
+                if (createdFeatureTags != nullptr)
+                {
+                    createdFeatureTags->push_back(cutFeature->Tag());
+                }
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                if (cutExtrude != nullptr)
+                {
+                    cutExtrude->Destroy();
+                    cutExtrude = nullptr;
+                }
+                for (NXOpen::Curve* curve : curves)
+                {
+                    if (curve != nullptr &&
+                        UF_OBJ_ask_status(curve->Tag()) == UF_OBJ_ALIVE)
+                    {
+                        UF_OBJ_delete_object(curve->Tag());
+                    }
+                }
+                const char* message = ex.Message();
+                if (message != nullptr &&
+                    std::string(message).find("outside") != std::string::npos)
+                {
+                    continue;
+                }
+                throw;
             }
         }
 
@@ -3987,7 +4130,7 @@ bool CaiRBanDialog::CreateArcPanel(
     catch (const NXOpen::NXException& ex)
     {
         if (thicken != nullptr) thicken->Destroy();
-        if (trim != nullptr) trim->Destroy();
+        if (cutExtrude != nullptr) cutExtrude->Destroy();
         if (innerOffset != nullptr) innerOffset->Destroy();
         error = stage + "：" +
                 (ex.Message() != nullptr ? ex.Message() : "NXOpen 建模失败。");
@@ -3995,7 +4138,7 @@ bool CaiRBanDialog::CreateArcPanel(
     catch (const std::exception& ex)
     {
         if (thicken != nullptr) thicken->Destroy();
-        if (trim != nullptr) trim->Destroy();
+        if (cutExtrude != nullptr) cutExtrude->Destroy();
         if (innerOffset != nullptr) innerOffset->Destroy();
         error = stage + "：" + ex.what();
     }

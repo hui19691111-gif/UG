@@ -13,6 +13,7 @@
 #include <NXOpen/Assemblies_AssemblyManager.hxx>
 #include <NXOpen/Assemblies_CreateNewComponentBuilder.hxx>
 #include <NXOpen/Body.hxx>
+#include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/Callback.hxx>
 #include <NXOpen/Direction.hxx>
 #include <NXOpen/DirectionCollection.hxx>
@@ -61,6 +62,7 @@
 #include <uf_mtx.h>
 #include <uf_modl.h>
 #include <uf_modl_utilities.h>
+#include <uf_layer.h>
 #include <uf_obj.h>
 #include <uf_object_types.h>
 #include <uf_part.h>
@@ -101,6 +103,7 @@ const char* kColorMatchedBodiesToggleBlockId = "colorMatchedBodiesToggle";
 const char* kRetainBodiesToggleBlockId = "retainBodiesToggle";
 const char* kInheritBodyAttributesToggleBlockId = "inheritBodyAttributesToggle";
 const char* kInheritPartAttributesToggleBlockId = "inheritPartAttributesToggle";
+const char* kAutoSelectSameBodiesToggleBlockId = "autoSelectSameBodiesToggle";
 const char* kFindSameBodiesButtonBlockId = "findSameBodiesButton";
 const char* kNameModeBlockId = "nameMode";
 const char* kNameCustomTextBlockId = "nameCustomText";
@@ -145,6 +148,7 @@ const wchar_t* kRetainBodiesStateKey = L"RetainBodies";
 const wchar_t* kColorMatchedBodiesStateKey = L"ColorMatchedBodies";
 const wchar_t* kInheritBodyAttributesStateKey = L"InheritBodyAttributes";
 const wchar_t* kInheritPartAttributesStateKey = L"InheritPartAttributes";
+const wchar_t* kAutoSelectSameBodiesStateKey = L"AutoSelectSameBodies";
 const char* kSerialToken = "\x7B\xE6\xB5\x81\xE6\xB0\xB4\xE5\x8F\xB7\x7D";
 const char* kCustomToken = "\x7B\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\x7D";
 const char* kWorkPartToken = "\x7B\xE5\xB7\xA5\xE4\xBD\x9C\xE9\x83\xA8\xE4\xBB\xB6\xE5\x90\x8D\x7D";
@@ -173,6 +177,7 @@ std::string gSelectedOutputDirectory;
 bool gColorMatchedBodies = true;
 bool gInheritBodyAttributes = true;
 bool gInheritPartAttributes = true;
+bool gAutoSelectSameBodies = false;
 
 std::string GetCurrentModuleDirectory()
 {
@@ -5272,6 +5277,7 @@ public:
           retainBodiesToggle(NULL),
           inheritBodyAttributesToggle(NULL),
           inheritPartAttributesToggle(NULL),
+          autoSelectSameBodiesToggle(NULL),
           findSameBodiesButton(NULL),
           nameMode(NULL),
           nameCustomText(NULL),
@@ -5285,6 +5291,7 @@ public:
           namingControlsInitializing(false),
           rememberedOptionsInitializing(false),
           postApplyResetting(false),
+          autoSelectingSameBodies(false),
           retainOriginalBodies(false),
           cachedSearchDataValid(false),
           lastConversionCreatedPart(false),
@@ -5333,6 +5340,7 @@ private:
     NXOpen::BlockStyler::UIBlock* retainBodiesToggle;
     NXOpen::BlockStyler::UIBlock* inheritBodyAttributesToggle;
     NXOpen::BlockStyler::UIBlock* inheritPartAttributesToggle;
+    NXOpen::BlockStyler::UIBlock* autoSelectSameBodiesToggle;
     NXOpen::BlockStyler::Button* findSameBodiesButton;
     NXOpen::BlockStyler::Enumeration* nameMode;
     NXOpen::BlockStyler::StringBlock* nameCustomText;
@@ -5346,7 +5354,9 @@ private:
     bool namingControlsInitializing;
     bool rememberedOptionsInitializing;
     bool postApplyResetting;
+    bool autoSelectingSameBodies;
     bool retainOriginalBodies;
+    std::set<tag_t> lastAutoExpandedTags;
     std::vector<AssemblyPreviewRow> previewRows;
     std::vector<NXOpen::BlockStyler::Node*> previewNodes;
     std::vector<tag_t> previewSelectionTags;
@@ -5366,6 +5376,9 @@ private:
         retainBodiesToggle = NULL;
         inheritBodyAttributesToggle = NULL;
         inheritPartAttributesToggle = NULL;
+        autoSelectSameBodiesToggle = NULL;
+        autoSelectingSameBodies = false;
+        lastAutoExpandedTags.clear();
         findSameBodiesButton = NULL;
         nameMode = NULL;
         nameCustomText = NULL;
@@ -5399,6 +5412,7 @@ private:
             UpdateColorMatchedBodiesOption();
             UpdateRetainBodiesOption();
             UpdateInheritAttributeOptions();
+            UpdateAutoSelectSameBodiesOption();
             WritePreviewDebugLog("Initialize end");
         }
         catch (const NXOpen::NXException& ex)
@@ -5553,10 +5567,41 @@ private:
                 }
                 WritePreviewDebugLog("Update routed to inheritPartAttributesToggle");
             }
+            else if (block == autoSelectSameBodiesToggle ||
+                     blockName == kAutoSelectSameBodiesToggleBlockId)
+            {
+                autoSelectSameBodiesToggle = block;
+                UpdateAutoSelectSameBodiesOption();
+                if (!rememberedOptionsInitializing)
+                {
+                    WriteDialogStateInt(
+                        kAutoSelectSameBodiesStateKey,
+                        gAutoSelectSameBodies ? 1 : 0);
+                    if (!gAutoSelectSameBodies)
+                    {
+                        lastAutoExpandedTags.clear();
+                    }
+                    else if (!autoSelectingSameBodies)
+                    {
+                        ExpandSelectionWithDisplayedSameBodies();
+                        const std::vector<tag_t> tags = GetCurrentSelectionTags();
+                        if (!tags.empty())
+                        {
+                            RefreshAssemblyPreview();
+                            HighlightPreviewRow(tags);
+                        }
+                    }
+                }
+                WritePreviewDebugLog("Update routed to autoSelectSameBodiesToggle");
+            }
             else if (block == bodySelection || blockName == kBodySelectionBlockId)
             {
                 bodySelection = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(block);
                 InitializeAssemblyList();
+                if (!autoSelectingSameBodies)
+                {
+                    ExpandSelectionWithDisplayedSameBodies();
+                }
                 std::vector<NXOpen::Body*> selectedBodies = GetSelectedBodies();
                 RefreshBodyAttributeMembers(selectedBodies);
                 if (GetNamingMode() == NamingModeBodyAttribute ||
@@ -5569,6 +5614,7 @@ private:
                 WritePreviewDebugLog(line.str());
                 if (selectedBodies.empty())
                 {
+                    lastAutoExpandedTags.clear();
                     ClearAssemblyList();
                     previewSelectionTags.clear();
                     ClearCachedSearchData();
@@ -5577,6 +5623,10 @@ private:
                 else
                 {
                     RefreshAssemblyPreview();
+                    if (gAutoSelectSameBodies)
+                    {
+                        HighlightPreviewRow(GetCurrentSelectionTags());
+                    }
                     WritePreviewDebugLog("Update routed to RefreshAssemblyPreview");
                 }
             }
@@ -5671,6 +5721,12 @@ private:
                 topBlock,
                 kInheritPartAttributesToggleBlockId);
         }
+        if (autoSelectSameBodiesToggle == NULL)
+        {
+            autoSelectSameBodiesToggle = FindBlockRecursive(
+                topBlock,
+                kAutoSelectSameBodiesToggleBlockId);
+        }
         if (findSameBodiesButton == NULL)
         {
             findSameBodiesButton = dynamic_cast<NXOpen::BlockStyler::Button*>(
@@ -5725,6 +5781,7 @@ private:
              << ", retainToggle=" << PointerText(retainBodiesToggle)
              << ", inheritBodyToggle=" << PointerText(inheritBodyAttributesToggle)
              << ", inheritPartToggle=" << PointerText(inheritPartAttributesToggle)
+             << ", autoSelectToggle=" << PointerText(autoSelectSameBodiesToggle)
              << ", button=" << PointerText(findSameBodiesButton)
              << ", nameMode=" << PointerText(nameMode)
              << ", nameCustomText=" << PointerText(nameCustomText)
@@ -5890,6 +5947,9 @@ private:
             SetLogicalBlockValue(
                 inheritPartAttributesToggle,
                 ReadDialogStateInt(kInheritPartAttributesStateKey, 1) != 0);
+            SetLogicalBlockValue(
+                autoSelectSameBodiesToggle,
+                ReadDialogStateInt(kAutoSelectSameBodiesStateKey, 0) != 0);
         }
         catch (...)
         {
@@ -6362,6 +6422,23 @@ private:
             (gInheritBodyAttributes ? "true" : "false") +
             ", part=" +
             (gInheritPartAttributes ? "true" : "false"));
+    }
+
+    void UpdateAutoSelectSameBodiesOption()
+    {
+        if (autoSelectSameBodiesToggle == NULL)
+        {
+            gAutoSelectSameBodies = false;
+            return;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties =
+            autoSelectSameBodiesToggle->GetProperties();
+        gAutoSelectSameBodies = properties->GetLogical("Value");
+        delete properties;
+        WritePreviewDebugLog(
+            std::string("Auto select same bodies=") +
+            (gAutoSelectSameBodies ? "true" : "false"));
     }
 
     void InitializeAssemblyList()
@@ -7297,6 +7374,235 @@ private:
         }
 
         return bodyType == UF_MODL_SOLID_BODY;
+    }
+
+    bool IsDisplayedSolidBody(tag_t bodyTag)
+    {
+        if (!IsSolidBody(bodyTag))
+        {
+            return false;
+        }
+
+        UF_OBJ_disp_props_t displayProperties = {};
+        if (UF_OBJ_ask_display_properties(bodyTag, &displayProperties) != 0 ||
+            displayProperties.blank_status != UF_OBJ_NOT_BLANKED)
+        {
+            return false;
+        }
+
+        int layerStatus = UF_LAYER_INACTIVE_LAYER;
+        if (UF_LAYER_ask_status(displayProperties.layer, &layerStatus) != 0)
+        {
+            return false;
+        }
+
+        return layerStatus != UF_LAYER_INACTIVE_LAYER;
+    }
+
+    std::vector<NXOpen::Body*> FindUnselectedDisplayedSameBodies(
+        const std::vector<NXOpen::Body*>& selectedBodies)
+    {
+        std::vector<NXOpen::Body*> matches;
+        if (selectedBodies.empty() ||
+            session == NULL ||
+            session->Parts() == NULL ||
+            session->Parts()->Work() == NULL ||
+            session->Parts()->Work()->Bodies() == NULL)
+        {
+            return matches;
+        }
+
+        std::set<tag_t> selectedTags;
+        std::vector<BodyFingerprint> references;
+        references.reserve(selectedBodies.size());
+        for (std::size_t index = 0; index < selectedBodies.size(); ++index)
+        {
+            NXOpen::Body* body = selectedBodies[index];
+            if (body == NULL)
+            {
+                continue;
+            }
+
+            selectedTags.insert(body->Tag());
+            try
+            {
+                references.push_back(BuildFingerprint(body));
+            }
+            catch (const NXOpen::NXException&)
+            {
+                WritePreviewDebugLog("Auto select skipped a selected body fingerprint");
+            }
+            catch (...)
+            {
+                WritePreviewDebugLog("Auto select skipped a selected body fingerprint");
+            }
+        }
+        if (references.empty())
+        {
+            return matches;
+        }
+
+        NXOpen::BodyCollection* bodies = session->Parts()->Work()->Bodies();
+        for (NXOpen::BodyCollection::iterator it = bodies->begin();
+             it != bodies->end();
+             ++it)
+        {
+            NXOpen::Body* candidate = *it;
+            if (candidate == NULL || selectedTags.count(candidate->Tag()) != 0)
+            {
+                continue;
+            }
+            if (!IsDisplayedSolidBody(candidate->Tag()))
+            {
+                continue;
+            }
+
+            BodyFingerprint candidateFingerprint;
+            try
+            {
+                candidateFingerprint = BuildFingerprint(candidate);
+            }
+            catch (...)
+            {
+                continue;
+            }
+
+            for (std::size_t referenceIndex = 0;
+                 referenceIndex < references.size();
+                 ++referenceIndex)
+            {
+                std::string rejectReason;
+                BodyMatchInfo matchInfo = {};
+                bool coordinateDebugCanceled = false;
+                int coordinateDebugStep = 0;
+                bool matched = false;
+                try
+                {
+                    matched = CompareFingerprints(
+                        references[referenceIndex],
+                        candidateFingerprint,
+                        NULL,
+                        &coordinateDebugStep,
+                        NULL,
+                        &coordinateDebugCanceled,
+                        &matchInfo,
+                        rejectReason);
+                }
+                catch (...)
+                {
+                    matched = false;
+                }
+                if (matched)
+                {
+                    matches.push_back(candidate);
+                    break;
+                }
+            }
+        }
+
+        std::ostringstream line;
+        line << "Auto select displayed candidates matched=" << matches.size();
+        WritePreviewDebugLog(line.str());
+        return matches;
+    }
+
+    void ExpandSelectionWithDisplayedSameBodies()
+    {
+        if (!gAutoSelectSameBodies ||
+            autoSelectingSameBodies ||
+            bodySelection == NULL)
+        {
+            return;
+        }
+
+        const std::vector<NXOpen::Body*> selectedBodies = GetSelectedBodies();
+        std::set<tag_t> currentTags;
+        for (std::size_t index = 0; index < selectedBodies.size(); ++index)
+        {
+            if (selectedBodies[index] != NULL)
+            {
+                currentTags.insert(selectedBodies[index]->Tag());
+            }
+        }
+        if (currentTags.empty())
+        {
+            lastAutoExpandedTags.clear();
+            return;
+        }
+
+        if (!lastAutoExpandedTags.empty() &&
+            currentTags.size() <= lastAutoExpandedTags.size())
+        {
+            bool subset = true;
+            for (std::set<tag_t>::const_iterator it = currentTags.begin();
+                 it != currentTags.end();
+                 ++it)
+            {
+                if (lastAutoExpandedTags.count(*it) == 0)
+                {
+                    subset = false;
+                    break;
+                }
+            }
+            if (subset)
+            {
+                lastAutoExpandedTags = currentTags;
+                return;
+            }
+        }
+
+        const std::vector<NXOpen::Body*> matches =
+            FindUnselectedDisplayedSameBodies(selectedBodies);
+        if (matches.empty())
+        {
+            lastAutoExpandedTags = currentTags;
+            return;
+        }
+
+        std::vector<NXOpen::TaggedObject*> objects;
+        std::set<tag_t> expandedTags = currentTags;
+        objects.reserve(selectedBodies.size() + matches.size());
+        for (std::size_t index = 0; index < selectedBodies.size(); ++index)
+        {
+            if (selectedBodies[index] != NULL)
+            {
+                objects.push_back(selectedBodies[index]);
+            }
+        }
+        for (std::size_t index = 0; index < matches.size(); ++index)
+        {
+            if (matches[index] == NULL ||
+                !expandedTags.insert(matches[index]->Tag()).second)
+            {
+                continue;
+            }
+            objects.push_back(matches[index]);
+        }
+        if (expandedTags.size() == currentTags.size())
+        {
+            lastAutoExpandedTags = currentTags;
+            return;
+        }
+
+        autoSelectingSameBodies = true;
+        try
+        {
+            bodySelection->SetSelectedObjects(objects);
+            lastAutoExpandedTags = expandedTags;
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogCallbackError("Auto select same bodies NXException", ex.Message());
+        }
+        catch (const std::exception& ex)
+        {
+            LogCallbackError("Auto select same bodies exception", ex.what());
+        }
+        catch (...)
+        {
+            LogCallbackError("Auto select same bodies exception", "Cannot select same bodies.");
+        }
+        autoSelectingSameBodies = false;
     }
 
     void ConfigureBodySelectionFilter()

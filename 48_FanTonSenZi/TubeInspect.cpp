@@ -11,6 +11,9 @@
 #include <uf_modl.h>
 #include <uf_part.h>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -19,6 +22,10 @@ using namespace NXOpen;
 void Check(int n){if(n){char m[1024]={};UF_get_fail_message(n,m);throw std::runtime_error(std::string(m)+" ("+std::to_string(n)+")");}}
 double Volume(tag_t body){double acc[11]={.99999999},props[47]={},stats[13]={};Check(UF_MODL_ask_mass_props_3d(&body,1,1,4,1,1,acc,props,stats));return props[1];}
 namespace {
+// Optional recogniser trace: set ZH_TUBE_DEBUG=1 and read
+// %TEMP%\Zhihui-FanTonSenZi-debug.log. Never affects the geometry.
+bool TraceOn(){static int state=-1;if(state<0){const char* v=std::getenv("ZH_TUBE_DEBUG");state=v&&*v&&*v!='0'?1:0;}return state==1;}
+void Trace(const std::string& s){if(!TraceOn())return;try{std::filesystem::path p=std::filesystem::temp_directory_path()/"Zhihui-FanTonSenZi-debug.log";FILE* f=nullptr;if(_wfopen_s(&f,p.wstring().c_str(),L"ab")==0&&f){std::string line=s+"\n";std::fwrite(line.data(),1,line.size(),f);std::fclose(f);}}catch(...){}}
 Vec V(const double* v){return {v[0],v[1],v[2]};}
 struct Eval {
     UF_EVAL_p_t value=nullptr;double limits[2]={};
@@ -67,11 +74,13 @@ Rect Rectangle(const Loop& loop,Vec origin,Vec y,Vec z,double tol){
     return r;
 }
 bool LooksLikeCap(Face* face,double tol){
-    auto loops=Loops(face->Tag());if(loops.size()!=2)return false;const Loop *outer=nullptr,*inner=nullptr;
+    auto loops=Loops(face->Tag());if(loops.size()!=2){Trace(" cap? "+std::to_string(face->Tag())+" loops="+std::to_string(loops.size()));return false;}const Loop *outer=nullptr,*inner=nullptr;
     for(const auto& l:loops){if(l.type==1)outer=&l;if(l.type==2)inner=&l;}if(!outer||!inner)return false;
     try{auto edge=ReadSpan(outer->edges.front());Vec y=edge.Tangent(0),z=Cross(Data(face).normal,y);auto a=Rectangle(*outer,edge.a,y,z,tol),b=Rectangle(*inner,edge.a,y,z,tol);double t=b.ymin-a.ymin;
-        return t>tol&&std::abs(a.ymax-b.ymax-t)<tol&&std::abs(b.zmin-a.zmin-t)<tol&&std::abs(a.zmax-b.zmax-t)<tol&&std::abs(b.r-std::max(0.,a.r-t))<tol;
-    }catch(const std::exception&){return false;}
+        bool ok=t>tol&&std::abs(a.ymax-b.ymax-t)<tol&&std::abs(b.zmin-a.zmin-t)<tol&&std::abs(a.zmax-b.zmax-t)<tol&&std::abs(b.r-std::max(0.,a.r-t))<tol;
+        if(!ok)Trace(" cap? "+std::to_string(face->Tag())+" ring mismatch outer="+std::to_string(a.ymax-a.ymin)+"x"+std::to_string(a.zmax-a.zmin)+" r="+std::to_string(a.r)+" inner="+std::to_string(b.ymax-b.ymin)+"x"+std::to_string(b.zmax-b.zmin)+" r="+std::to_string(b.r)+" t="+std::to_string(t));
+        return ok;
+    }catch(const std::exception& e){Trace(" cap? "+std::to_string(face->Tag())+" reject "+e.what());return false;}
 }
 // STEP and sweep bodies often keep a separate planar face at each tangent
 // join. Follow only shared-edge, coplanar faces on this body. Their common
@@ -144,28 +153,58 @@ Source Inspect(const std::vector<tag_t>& tags){
     auto cap=InspectCap(body,origin,s.spans.front().Tangent(0),normal,s.unitsPerMm),end=InspectCap(body,s.spans.back().b,s.spans.back().Tangent(1),normal,s.unitsPerMm);
     if(std::abs(cap.w-end.w)>tol||std::abs(cap.d-end.d)>tol||std::abs(cap.t-end.t)>tol||std::abs(cap.r-end.r)>tol||std::abs(cap.shift-end.shift)>tol||Dot(cap.width,end.width)<1-1e-7)throw std::runtime_error("方通两端截面不一致或路径换边。");
     s.width=cap.w;s.depth=cap.d;s.thickness=cap.t;s.cornerRadius=cap.r;s.widthDirection=cap.width;OffsetPath(s.spans,normal,cap.shift);
-    double centerLength=0;for(size_t i=0;i<s.spans.size();++i){auto& span=s.spans[i];centerLength+=span.radius?(span.radius-Dot(span.normal,normal)*cap.d/2)*span.angle:Length(span.b-span.a);if(i){auto a=s.spans[i-1].Tangent(1),b=span.Tangent(0);double angle=std::atan2(Dot(Cross(a,b),normal),Dot(a,b));if(std::abs(angle)>pi*.75)throw std::runtime_error("单个转角须不超过 135°。");centerLength-=cap.d*std::tan(angle/2);}}
+    auto area=[](double w,double d,double r){return w*d-(4-pi)*r*r;};
+    double sharpA=area(cap.w,cap.d,0)-area(cap.w-2*cap.t,cap.d-2*cap.t,0);
+    double roundA=area(cap.w,cap.d,cap.r)-area(cap.w-2*cap.t,cap.d-2*cap.t,std::max(0.,cap.r-cap.t));
+    double scale=sharpA>1e-9?roundA/sharpA:1,expected=0;int heels=0;
+    for(size_t i=0;i<s.spans.size();++i){auto& span=s.spans[i];
+        if(!span.radius)expected+=Length(span.b-span.a)*roundA;
+        else{double outer=span.radius+(Dot(span.normal,normal)<0?cap.d:0);
+            if(outer<cap.d-tol){if(outer<=cap.t+tol)throw std::runtime_error("外侧圆弧半径必须大于壁厚，内侧才能保持尖角。");
+                double corner=SharpHeelCornerVolume(outer,span.angle,cap.d,cap.w,cap.t);if(corner<=0)throw std::runtime_error("外R内尖角的体积核对失败。");expected+=corner*scale;++heels;}
+            else expected+=(span.radius-Dot(span.normal,normal)*cap.d/2)*span.angle*roundA;}
+        if(i){auto a=s.spans[i-1].Tangent(1),b=span.Tangent(0);double angle=std::atan2(Dot(Cross(a,b),normal),Dot(a,b));if(std::abs(angle)>pi*.75)throw std::runtime_error("单个转角须不超过 135°。");expected-=cap.d*std::tan(angle/2)*roundA;}}
     ReadHoles(s,body);
     for(auto* face:body->GetFaces()){int type=Data(face).type;if(type!=16&&type!=19&&type!=22)throw std::runtime_error("存在不支持的自由曲面、倒角或孔槽形状。");}
-    auto area=[](double w,double d,double r){return w*d-(4-pi)*r*r;};
-    double expected=(area(cap.w,cap.d,cap.r)-area(cap.w-2*cap.t,cap.d-2*cap.t,std::max(0.,cap.r-cap.t)))*centerLength;
     for(const auto& h:s.holes)expected-=h.area*h.length;
     double actual=Volume(s.body)*1e9*std::pow(s.unitsPerMm,3);
-    if(expected<=0||std::abs(actual-expected)>std::max(expected*1e-6,std::pow(tol,3)))throw std::runtime_error("截面或孔槽核对不一致。当前支持平直管壁上的贯穿圆孔/闭合槽；盲孔、斜孔、曲壁孔或变截面不能直接展开。");
-    return s;
+    Trace("AUDIT expected="+std::to_string(expected)+" actual="+std::to_string(actual)+" diff="+std::to_string(actual-expected)+" rel="+std::to_string(expected>0?std::abs(actual-expected)/expected:0.)+" heels="+std::to_string(heels)+" section="+std::to_string(s.width)+"x"+std::to_string(s.depth)+" t="+std::to_string(s.thickness)+" R="+std::to_string(s.cornerRadius)+" spans="+std::to_string(s.spans.size())+" holes="+std::to_string(s.holes.size()));
+    // 真实零件在弯位的微小偏差: model2 约 2e-5, 用户 90° 内尖角方通约 2.3e-4。
+    // 认错路径(内侧折线)在同一零件上是 1.4e-2, 所以容差取 3e-4 仍能分开。
+    if(expected<=0||std::abs(actual-expected)>std::max(expected*3e-4,std::pow(tol,3)))throw std::runtime_error("截面或孔槽核对不一致。当前支持平直管壁上的贯穿圆孔/闭合槽；盲孔、斜孔、曲壁孔或变截面不能直接展开。");return s;
 }
 static Source InspectSideFace(tag_t tag){
     auto* face=dynamic_cast<Face*>(NXObjectManager::Get(tag));auto* part=Session::GetSession()->Parts()->Work();if(!face||face->IsOccurrence()||face->OwningPart()!=part||!face->GetBody()->IsSolidBody())throw std::runtime_error("请选择当前工作零件方通上的一个外侧平面。");
     auto data=Data(face);if(data.type!=22||IsRoundCap(tag))return InspectRoundFace(tag);
     int units=0;Check(UF_PART_ask_units(part->Tag(),&units));const double tol=1e-5*(units==ENGLISH?1/25.4:1);
-    const auto ring=SideBoundary(face,tol);
+    const auto ring=SideBoundary(face,tol);Trace("SIDE face="+std::to_string(tag)+" normal=("+std::to_string(data.normal.x)+","+std::to_string(data.normal.y)+","+std::to_string(data.normal.z)+") ring="+std::to_string(ring.size()));
     std::set<tag_t> ends;
     for(auto* other:face->GetBody()->GetFaces()){auto fd=Data(other);if(fd.type!=22||std::abs(Dot(data.normal,fd.normal))>1e-6)continue;if(!LooksLikeCap(other,tol))continue;
         for(auto* e:other->GetEdges())if(std::find(ring.begin(),ring.end(),e->Tag())!=ring.end())ends.insert(e->Tag());}
+    Trace("SIDE ends="+std::to_string(ends.size()));
     if(ends.size()!=2)throw std::runtime_error("所选面及相邻共面侧面未连到两个端口。请选择弯曲平面两侧的大侧面，直段或圆弧上的分面均可；不要选端面、内壁或圆角面。");
     std::vector<tag_t> remaining;for(auto e:ring)if(!ends.count(e))remaining.push_back(e);std::string failure="未找到完整方通路径。";
     while(!remaining.empty()){std::vector<tag_t> chain={remaining.back()};remaining.pop_back();bool changed=true;while(changed){changed=false;for(auto it=remaining.begin();it!=remaining.end();){auto e=ReadSpan(*it,true);bool match=false;for(auto t:chain){auto c=ReadSpan(t,true);for(auto a:{e.a,e.b})for(auto b:{c.a,c.b})if(Length(a-b)<tol)match=true;}if(match){chain.push_back(*it);it=remaining.erase(it);changed=true;}else ++it;}}
-        try{auto result=Inspect(chain);if(std::abs(Dot(result.normal,data.normal))<1-1e-7)throw std::runtime_error("所选面不是弯曲路径所在平面的侧面。");return result;}catch(const std::exception& e){failure=e.what();}}
+        try{auto result=Inspect(chain);if(std::abs(Dot(result.normal,data.normal))<1-1e-7)throw std::runtime_error("所选面不是弯曲路径所在平面的侧面。");Trace("SIDE chain edges="+std::to_string(chain.size())+" accepted");return result;}catch(const std::exception& e){Trace("SIDE chain edges="+std::to_string(chain.size())+" reject "+e.what());failure=e.what();}}
+    throw std::runtime_error(failure);
+}
+// 90° 内尖角的侧面常被拆成只挨一个端口的平面，圆柱面把它们隔开，按共面分面统计端口边就会失败。
+// 这里改在侧面所在平面上收集外轮廓（含圆柱上落在该平面的圆弧），再连到两个端口。
+static Source InspectPlanarOutline(Body* body){
+    auto* part=Session::GetSession()->Parts()->Work();int units=0;Check(UF_PART_ask_units(part->Tag(),&units));const double tol=1e-4*(units==ENGLISH?1/25.4:1);
+    std::vector<Face*> caps;for(auto* f:body->GetFaces())if(Data(f).type==22&&LooksLikeCap(f,tol))caps.push_back(f);
+    if(caps.size()!=2)throw std::runtime_error("方通须有两个完整等壁厚矩形端口。");
+    std::set<tag_t> capEdges;for(auto* f:caps)for(auto* e:f->GetEdges())capEdges.insert(e->Tag());
+    std::string failure="弯位侧面不在同一平面，或没有连到两个端口。";
+    for(auto* face:body->GetFaces()){
+        auto fd=Data(face);if(fd.type!=22)continue;bool touches=false;for(auto* e:face->GetEdges())if(capEdges.count(e->Tag()))touches=true;if(!touches)continue;
+        Vec normal=Unit(fd.normal);std::vector<tag_t> edges;
+        for(auto* e:body->GetEdges())if(!capEdges.count(e->Tag())){try{auto s=ReadSpan(e->Tag(),true);bool near=std::abs(Dot(s.a-fd.point,normal))<=tol&&std::abs(Dot(s.b-fd.point,normal))<=tol;if(s.radius)near=near&&std::abs(Dot(s.Point(.5)-fd.point,normal))<=tol&&std::abs(Dot(s.normal,normal))>1-1e-5;if(near)edges.push_back(e->Tag());}catch(const std::exception&){}}
+        std::vector<tag_t> remaining=edges;Source chosen;int bestArcs=-1;
+        while(!remaining.empty()){std::vector<tag_t> chain={remaining.back()};remaining.pop_back();bool changed=true;while(changed){changed=false;for(auto it=remaining.begin();it!=remaining.end();){auto e=ReadSpan(*it,true);bool match=false;for(auto t:chain){auto c=ReadSpan(t,true);for(auto a:{e.a,e.b})for(auto b:{c.a,c.b})if(Length(a-b)<tol)match=true;}if(match){chain.push_back(*it);it=remaining.erase(it);changed=true;}else ++it;}}
+            try{auto result=Inspect(chain);if(std::abs(Dot(result.normal,normal))<1-1e-7)throw std::runtime_error("轮廓不在侧面所在平面。");int arcs=0;for(const auto& span:result.spans)if(span.radius)++arcs;if(arcs>bestArcs){chosen=result;bestArcs=arcs;}Trace("PLANE chain edges="+std::to_string(chain.size())+" arcs="+std::to_string(arcs)+" accepted");}catch(const std::exception& e){Trace("PLANE chain edges="+std::to_string(chain.size())+" reject "+e.what());failure=e.what();}}
+        if(bestArcs>=0)return chosen;
+    }
     throw std::runtime_error(failure);
 }
 static Source InspectSpatial(Body* body){
@@ -209,7 +248,7 @@ static Source InspectSpatial(Body* body){
             if(Length(direction)<.9)continue;for(const auto& loop:Loops(face->Tag()))if(loop.type==2){Hole h;h.direction=direction;h.length=s.thickness;h.profile=Chain(loop.edges,tol,true);Vec base=h.profile.front().a;double area=0;for(const auto& c:h.profile){area+=Dot(Cross(c.a-base,c.b-base),direction)/2;if(c.radius)area+=Dot(c.normal,direction)*c.radius*c.radius*(c.angle-sin(c.angle))/2;}h.area=std::abs(area);for(const auto& c:h.profile)for(double f:{.125,.375,.625,.875}){auto q=c.Point(f)+direction*s.thickness;double xyz[]={q.x,q.y,q.z};int where=0;Check(UF_MODL_ask_point_containment(xyz,s.body,&where));if(where!=3)throw std::runtime_error("空间方通只支持平壁等截面贯穿孔槽。");}s.holes.push_back(h);}
         }
         auto area=[](double d,double w,double r){return d*w-(4-pi)*r*r;};double expected=(area(s.depth,s.width,s.cornerRadius)-area(s.depth-2*s.thickness,s.width-2*s.thickness,std::max(0.,s.cornerRadius-s.thickness)))*totalLength;for(const auto& h:s.holes)expected-=h.area*h.length;
-        double actual=Volume(s.body)*1e9*std::pow(u,3);if(expected<=0||std::abs(expected-actual)>expected*1e-6)throw std::runtime_error("空间路径、截面或孔槽体积核对不一致，已取消生成。");
+        double actual=Volume(s.body)*1e9*std::pow(u,3);if(expected<=0||std::abs(expected-actual)>expected*3e-4)throw std::runtime_error("空间路径、截面或孔槽体积核对不一致，已取消生成。");
         return s;
     }catch(const std::exception& e){failure=e.what();}
     throw std::runtime_error(failure);
@@ -218,11 +257,12 @@ Source InspectFace(tag_t tag){
     auto* face=dynamic_cast<Face*>(NXObjectManager::Get(tag));auto* part=Session::GetSession()->Parts()->Work();
     if(!face||!part||face->IsOccurrence()||face->OwningPart()!=part||!face->GetBody()->IsSolidBody())throw std::runtime_error("请选择当前工作零件管件上的一个面。");
     if(Data(face).type!=22||IsRoundCap(tag))return InspectRoundFace(tag);
-    std::string failure;try{return InspectSideFace(tag);}catch(const std::exception& e){failure=e.what();}
+    std::string side;try{return InspectSideFace(tag);}catch(const std::exception& e){side=e.what();}
     // The selected planar face is the placement reference; an exterior side
     // patch elsewhere on this same body supplies the complete bending path.
     for(auto* other:face->GetBody()->GetFaces())if(other!=face&&Data(other).type==22){try{return InspectSideFace(other->Tag());}catch(const std::exception&){}}
-    try{return InspectSpatial(face->GetBody());}catch(const std::exception& e){failure=e.what();}
-    throw std::runtime_error("未能从所选平面所在实体识别完整等壁厚方通。"+failure);
+    std::string plane;try{return InspectPlanarOutline(face->GetBody());}catch(const std::exception& e){plane=e.what();}
+    std::string whole;try{return InspectSpatial(face->GetBody());}catch(const std::exception& e){whole=e.what();}
+    throw std::runtime_error("未能从所选平面所在实体识别完整等壁厚方通。所选面："+side+"；平面轮廓："+plane+"；整管查找："+whole);
 }
 }
