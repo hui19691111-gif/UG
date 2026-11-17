@@ -19,6 +19,7 @@
 #include <NXOpen/BlockStyler_Tree.hxx>
 #include <NXOpen/BlockStyler_UIBlock.hxx>
 
+#include "../../../common/ZhihuiContextHelp.hpp"
 #include <uf.h>
 #include <uf_assem.h>
 #include <uf_attr.h>
@@ -1849,6 +1850,7 @@ namespace
                 throw std::runtime_error("无法获取 UG 用户界面。");
             }
             const std::string dlxSystemPath = Utf8ToSystem(dlxPath.u8string());
+            zhihui_context_help::EnsureGlobalHelpLoaded();
             dialog_ = ui->CreateDialog(dlxSystemPath.c_str());
             if (dialog_ == nullptr)
             {

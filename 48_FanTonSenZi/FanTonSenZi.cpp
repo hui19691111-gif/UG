@@ -1,4 +1,8 @@
 #include "FanTonSenZi.hpp"
+#include "../../common/ZhihuiContextHelp.hpp"
+#ifdef CreateDialog
+#undef CreateDialog
+#endif
 #include "TubeCustomFeature.hpp"
 #include <NXOpen/Features_CustomFeature.hxx>
 #include <NXOpen/Features_CustomFeatureClassManager.hxx>
@@ -44,6 +48,7 @@ struct QuietDisplay {
 };
 }
 FanTonSenZiDialog::FanTonSenZiDialog(){
+    zhihui_context_help::EnsureGlobalHelpLoaded();
     tube_straighten::RequireFeatureClass();
     edited_=NXOpen::Session::GetSession()->CustomFeatureClassManager()->GetEditedCustomFeature();
     dialog_=NXOpen::UI::GetUI()->CreateDialog((ModuleDir()/"FanTonSenZi.dlx").u8string().c_str());

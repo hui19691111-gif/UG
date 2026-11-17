@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>写入部件属性｜图文使用帮助</title>
+  <style>
+    :root { --blue:#087aa5; --blue-dark:#075d7b; --soft:#e8f6fb; --ink:#23313b; --muted:#61717d; --line:#d7e1e7; --good:#0c7a55; --warn:#9a5b00; }
+    * { box-sizing: border-box; }
+    body { margin:0; color:var(--ink); background:#f4f7f9; font:15px/1.72 "Microsoft YaHei UI","Microsoft YaHei",Arial,sans-serif; }
+    a { color:var(--blue-dark); }
+    code { font-family:Consolas,"Microsoft YaHei UI",monospace; }
+    .hero { color:#fff; background:linear-gradient(128deg,#075d7b,#0985b2 62%,#32a4c4); padding:32px 24px 28px; }
+    .wrap { width:min(1080px,calc(100% - 32px)); margin:0 auto; }
+    .eyebrow { margin:0 0 6px; letter-spacing:.08em; font-size:13px; opacity:.86; }
+    h1 { margin:0; font-size:clamp(28px,4vw,40px); line-height:1.25; }
+    .lead { max-width:760px; margin:12px 0 0; font-size:16px; }
+    main { padding:24px 0 40px; }
+    section { margin:0 0 18px; padding:22px; background:#fff; border:1px solid var(--line); border-radius:13px; }
+    h2 { margin:0 0 12px; color:var(--blue-dark); font-size:22px; }
+    h3 { margin:16px 0 8px; font-size:17px; }
+    p { margin:8px 0; }
+    ol, ul { margin:8px 0; padding-left:22px; }
+    li + li { margin-top:5px; }
+    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    .card { padding:14px 16px; border:1px solid var(--line); border-radius:10px; }
+    .ok { background:#eaf7f1; border-color:#b9dfcb; }
+    .no { background:#fff0ee; border-color:#efc9c3; }
+    .ok h3 { color:var(--good); margin:0 0 6px; }
+    .no h3 { color:#b3261e; margin:0 0 6px; }
+    .note, .warn { margin:12px 0; padding:12px 14px; border-left:4px solid var(--blue); border-radius:7px; background:var(--soft); }
+    .warn { border-left-color:#e08a00; background:#fff6df; }
+    figure { margin:0; }
+    figure svg { display:block; width:100%; height:auto; background:#fff; border:1px solid var(--line); border-radius:10px; }
+    figcaption { margin-top:8px; color:var(--muted); font-size:13px; text-align:center; }
+    table { width:100%; border-collapse:collapse; margin:8px 0; font-size:14px; }
+    th, td { padding:8px 10px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { background:#edf7fa; color:#174458; white-space:nowrap; }
+    .path { color:#174458; background:#eef3f5; border-radius:5px; padding:1px 6px; }
+    .footer { color:var(--muted); text-align:center; font-size:13px; }
+    @media (max-width:800px) { .grid2 { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <p class="eyebrow">UG 智辉钣金插件</p>
+      <h1>写入部件属性</h1>
+      <p class="lead">给当前工作零件填写客户、机型、名称、图号、颜色、材料和数量。零件里的每个实体还会写上同样的材料。装配里的其他子件不会一起改。</p>
+    </div>
+  </header>
+  <main class="wrap">
+    <section>
+      <h2>先看这个功能写到哪里</h2>
+      <div class="grid2">
+        <figure>
+          <svg viewBox="0 0 520 280" role="img" aria-label="属性写入位置示意图">
+            <rect x="8" y="8" width="504" height="264" rx="12" fill="#f7fbfd" stroke="#d7e1e7"/>
+            <rect x="28" y="36" width="200" height="210" rx="10" fill="#e8f6fb" stroke="#087aa5"/>
+            <text x="128" y="64" text-anchor="middle" font-size="16" font-weight="700" fill="#075d7b">当前工作零件</text>
+            <text x="48" y="96" font-size="14" fill="#23313b">客户、机型、名称</text>
+            <text x="48" y="122" font-size="14" fill="#23313b">图号、颜色、材料</text>
+            <text x="48" y="148" font-size="14" fill="#23313b">数量（整数）</text>
+            <text x="48" y="190" font-size="13" fill="#61717d">只写这一个零件</text>
+            <text x="48" y="212" font-size="13" fill="#61717d">不会改其他子件</text>
+            <rect x="268" y="36" width="220" height="210" rx="10" fill="#eaf7f1" stroke="#0c7a55"/>
+            <text x="378" y="64" text-anchor="middle" font-size="16" font-weight="700" fill="#0c7a55">零件里的每个实体</text>
+            <text x="288" y="110" font-size="15" fill="#23313b">只写 cailiao</text>
+            <text x="288" y="138" font-size="14" fill="#23313b">值和“材料”相同</text>
+            <text x="288" y="180" font-size="13" fill="#61717d">不写客户、图号、数量</text>
+            <text x="288" y="204" font-size="13" fill="#61717d">没有实体也能写零件属性</text>
+          </svg>
+          <figcaption>左边是零件属性，右边是实体属性</figcaption>
+        </figure>
+        <div>
+          <div class="card ok">
+            <h3>适合</h3>
+            <ul>
+              <li>只填当前这一个零件。</li>
+              <li>材料要同时写到这个零件里的全部实体。</li>
+              <li>在装配里，已经把要填的子件设成了工作部件。</li>
+            </ul>
+          </div>
+          <div class="card no" style="margin-top:12px">
+            <h3>不要用它来做这些事</h3>
+            <ul>
+              <li>一次改装配里很多零件：用“批量写入部件属性”。</li>
+              <li>统计焊件数量：用“自动分层与统计焊件数量”。</li>
+              <li>它不会写 sulian、编号或图层。</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>四步写完</h2>
+      <figure>
+        <svg viewBox="0 0 920 150" role="img" aria-label="四步操作">
+          <rect width="920" height="150" fill="#fff"/>
+          <g font-family="Microsoft YaHei UI, Microsoft YaHei, Arial">
+            <rect x="10" y="18" width="200" height="114" rx="10" fill="#e8f6fb" stroke="#087aa5"/>
+            <circle cx="36" cy="46" r="14" fill="#087aa5"/><text x="36" y="51" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">1</text>
+            <text x="58" y="51" font-size="15" font-weight="700" fill="#075d7b">确认工作部件</text>
+            <text x="24" y="82" font-size="13" fill="#23313b">装配里先把目标零件</text>
+            <text x="24" y="104" font-size="13" fill="#23313b">设为工作部件</text>
+            <rect x="240" y="18" width="200" height="114" rx="10" fill="#e8f6fb" stroke="#087aa5"/>
+            <circle cx="266" cy="46" r="14" fill="#087aa5"/><text x="266" y="51" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">2</text>
+            <text x="288" y="51" font-size="15" font-weight="700" fill="#075d7b">填写信息</text>
+            <text x="254" y="82" font-size="13" fill="#23313b">客户、机型、名称</text>
+            <text x="254" y="104" font-size="13" fill="#23313b">编号、颜色、材料</text>
+            <rect x="470" y="18" width="200" height="114" rx="10" fill="#e8f6fb" stroke="#087aa5"/>
+            <circle cx="496" cy="46" r="14" fill="#087aa5"/><text x="496" y="51" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">3</text>
+            <text x="518" y="51" font-size="15" font-weight="700" fill="#075d7b">核对数量</text>
+            <text x="484" y="82" font-size="13" fill="#23313b">自动值不对就勾选</text>
+            <text x="484" y="104" font-size="13" fill="#23313b">“手动输入”</text>
+            <rect x="700" y="18" width="200" height="114" rx="10" fill="#eaf7f1" stroke="#0c7a55"/>
+            <circle cx="726" cy="46" r="14" fill="#0c7a55"/><text x="726" y="51" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">4</text>
+            <text x="748" y="51" font-size="15" font-weight="700" fill="#0c7a55">确定并保存</text>
+            <text x="714" y="82" font-size="13" fill="#23313b">点确定后保存 prt</text>
+            <text x="714" y="104" font-size="13" fill="#23313b">不保存，属性会丢</text>
+          </g>
+        </svg>
+        <figcaption>只改下拉框还不会写入，要点“应用”或“确定”</figcaption>
+      </figure>
+      <div class="warn"><strong>装配里最容易写错零件。</strong>只在装配导航器里点亮一个组件，工作部件并没有变。写入对象永远是当前工作部件。</div>
+    </section>
+
+    <section>
+      <h2>对话框每一项写到哪</h2>
+      <div class="grid2">
+        <figure>
+          <svg viewBox="0 0 360 560" role="img" aria-label="写入部件属性对话框示意">
+            <rect width="360" height="560" fill="#f3f5f7"/>
+            <rect x="0" y="0" width="360" height="36" fill="#0b6f91"/>
+            <text x="14" y="24" fill="#fff" font-size="15" font-family="Microsoft YaHei UI, Microsoft YaHei">写入部件属性</text>
+            <text x="332" y="24" fill="#fff" font-size="16" text-anchor="end">?</text>
+            <g font-family="Microsoft YaHei UI, Microsoft YaHei" font-size="13" fill="#23313b">
+              <text x="16" y="64">客户</text>
+              <rect x="110" y="46" width="230" height="26" rx="3" fill="#fff" stroke="#b7c3cb"/>
+              <text x="120" y="64" fill="#075d7b">创易</text>
+              <text x="16" y="104">机型</text>
+              <rect x="110" y="86" width="230" height="26" rx="3" fill="#fff" stroke="#b7c3cb"/>
+              <text x="120" y="104" fill="#8aa0ab">填写整机型号</text>
+              <text x="16" y="144">零件名称</text>
+              <rect x="110" y="126" width="230" height="26" rx="3" fill="#fff" stroke="#b7c3cb"/>
+              <text x="120" y="144" fill="#075d7b">当前零件名</text>
+              <text x="16" y="184">编号</text>
+              <rect x="110" y="166" width="230" height="26" rx="3" fill="#fff" stroke="#b7c3cb"/>
+              <text x="120" y="184" fill="#8aa0ab">图号或内部编号</text>
+              <text x="16" y="224">颜色</text>
+              <rect x="110" y="206" width="230" height="26" rx="3" fill="#fff" stroke="#b7c3cb"/>
+              <text x="120" y="224" fill="#075d7b">白色</text>
+              <text x="16" y="264">材料</text>
+              <rect x="110" y="246" width="230" height="26" rx="3" fill="#fff" stroke="#b7c3cb"/>
+              <text x="120" y="264" fill="#075d7b">冷板</text>
+              <text x="16" y="304">数量</text>
+              <rect x="110" y="286" width="150" height="26" rx="3" fill="#eef2f4" stroke="#b7c3cb"/>
+              <text x="120" y="304" fill="#075d7b">1</text>
+              <rect x="272" y="290" width="14" height="14" rx="2" fill="#fff" stroke="#087aa5"/>
+              <text x="292" y="303" font-size="12">手动输入</text>
+              <rect x="16" y="336" width="328" height="32" rx="4" fill="#fff" stroke="#087aa5"/>
+              <text x="180" y="357" text-anchor="middle" fill="#075d7b">打开配置文件</text>
+            </g>
+            <rect x="0" y="508" width="360" height="52" fill="#eceff1"/>
+            <g font-family="Microsoft YaHei UI, Microsoft YaHei" font-size="13">
+              <rect x="16" y="520" width="72" height="28" rx="3" fill="#087aa5"/><text x="52" y="539" text-anchor="middle" fill="#fff">确定</text>
+              <rect x="100" y="520" width="72" height="28" rx="3" fill="#fff" stroke="#b7c3cb"/><text x="136" y="539" text-anchor="middle" fill="#23313b">应用</text>
+              <rect x="184" y="520" width="72" height="28" rx="3" fill="#fff" stroke="#b7c3cb"/><text x="220" y="539" text-anchor="middle" fill="#23313b">取消</text>
+            </g>
+          </svg>
+          <figcaption>界面示意。右上角“？”打开本页</figcaption>
+        </figure>
+        <div>
+          <table>
+            <thead><tr><th>界面</th><th>写入后的属性</th></tr></thead>
+            <tbody>
+              <tr><td>客户</td><td>零件属性“客户”</td></tr>
+              <tr><td>机型</td><td>零件属性“机型”</td></tr>
+              <tr><td>零件名称</td><td>零件属性“名称”。打开时默认是当前零件名，可以改</td></tr>
+              <tr><td>编号</td><td>零件属性“图号”</td></tr>
+              <tr><td>颜色</td><td>零件属性“颜色”</td></tr>
+              <tr><td>材料</td><td>零件属性“材料”，同时写到每个实体的 cailiao</td></tr>
+              <tr><td>数量</td><td>零件的整数属性“数量”。实体上没有数量</td></tr>
+              <tr><td>打开配置文件</td><td>打开客户、颜色、材料的下拉列表文件，本身不写属性</td></tr>
+            </tbody>
+          </table>
+          <div class="note"><strong>确定</strong>写入并关闭。<strong>应用</strong>写入但窗口留着。<strong>取消</strong>只放弃还没提交的内容；已经点过“应用”的不会被取消撤回。</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>数量怎么填</h2>
+      <figure>
+        <svg viewBox="0 0 860 210" role="img" aria-label="数量规则">
+          <rect width="860" height="210" fill="#fff"/>
+          <g font-family="Microsoft YaHei UI, Microsoft YaHei">
+            <rect x="16" y="70" width="170" height="64" rx="8" fill="#e8f6fb" stroke="#087aa5"/>
+            <text x="101" y="98" text-anchor="middle" font-size="14" font-weight="700" fill="#075d7b">不勾选手动输入</text>
+            <text x="101" y="118" text-anchor="middle" font-size="12" fill="#61717d">数量框不能改</text>
+            <polygon points="196,102 220,102 220,94 236,110 220,126 220,118 196,118" fill="#087aa5"/>
+            <rect x="246" y="24" width="250" height="56" rx="8" fill="#fff6df" stroke="#e08a00"/>
+            <text x="371" y="46" text-anchor="middle" font-size="13" font-weight="700" fill="#9a5b00">零件已有大于 0 的数量</text>
+            <text x="371" y="66" text-anchor="middle" font-size="12" fill="#23313b">沿用原来的数量</text>
+            <rect x="246" y="96" width="250" height="56" rx="8" fill="#eaf7f1" stroke="#0c7a55"/>
+            <text x="371" y="118" text-anchor="middle" font-size="13" font-weight="700" fill="#0c7a55">没有旧数量，且在装配里</text>
+            <text x="371" y="138" text-anchor="middle" font-size="12" fill="#23313b">按未抑制的实例个数</text>
+            <rect x="246" y="168" width="250" height="32" rx="8" fill="#f4f7f9" stroke="#d7e1e7"/>
+            <text x="371" y="189" text-anchor="middle" font-size="12" fill="#23313b">单零件或统计不到时，显示 1</text>
+            <rect x="560" y="70" width="280" height="64" rx="8" fill="#eaf7f1" stroke="#0c7a55"/>
+            <text x="700" y="96" text-anchor="middle" font-size="14" font-weight="700" fill="#0c7a55">勾选“手动输入”</text>
+            <text x="700" y="116" text-anchor="middle" font-size="12" fill="#23313b">只接受大于 0 的整数</text>
+          </g>
+        </svg>
+        <figcaption>装配里明明有 6 个，自动数量仍是 1：先看这个零件原来的“数量”是不是 1</figcaption>
+      </figure>
+      <p>0、负数、小数、空着、带“件”或单位，都会被拒绝，并提示“数量必须是大于 0 的整数。”</p>
+    </section>
+
+    <section>
+      <h2>增加客户、颜色、材料</h2>
+      <p>点“打开配置文件”，编辑：</p>
+      <p><span class="path">D:\UG智辉钣金插件\config\Write_Prat_Attr.ini</span></p>
+      <div class="grid2">
+        <div class="card">
+          <h3>可以改的三组</h3>
+          <p><code>[客户]</code> <code>[颜色]</code> <code>[材料]</code></p>
+          <p>分组名下面一行一个选项。可以增删，也可以调整顺序。不要删掉方括号里的组名。</p>
+          <p>空行，以及以 <code>#</code> 或 <code>;</code> 开头的行会被忽略。重复选项会自动去掉。</p>
+        </div>
+        <div class="card">
+          <h3>改完怎样出现在下拉框</h3>
+          <ol>
+            <li>用记事本保存，编码用 UTF-8。</li>
+            <li>先关掉记事本，再关掉当前对话框。</li>
+            <li>重新打开“写入部件属性”，下拉列表才会更新。</li>
+          </ol>
+          <p><code>[Dialog]</code> 记的是上次用过的值，一般不用手改。</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>写完后去哪里核对</h2>
+      <table>
+        <thead><tr><th>看哪里</th><th>应该有</th><th>不应该有</th></tr></thead>
+        <tbody>
+          <tr><td>当前零件属性</td><td>客户、机型、名称、图号、颜色、材料、数量</td><td></td></tr>
+          <tr><td>当前零件的每个实体</td><td>cailiao，值和材料一致</td><td>客户、机型、名称、图号、颜色、数量</td></tr>
+          <tr><td>装配里的其他子件</td><td>保持原样</td><td>不会被这次操作改掉</td></tr>
+        </tbody>
+      </table>
+      <div class="warn">点确定或应用之后，还要保存零件文件。关闭时选择不保存，这次填写的属性会丢掉。</div>
+    </section>
+
+    <section>
+      <h2>遇到这些情况</h2>
+      <table>
+        <thead><tr><th>现象</th><th>怎么处理</th></tr></thead>
+        <tbody>
+          <tr><td>写到了别的零件</td><td>执行前看 NX 的工作部件，不要只看显示部件或选中的组件。</td></tr>
+          <tr><td>其他子件没一起写上</td><td>这是正常的。要逐个设为工作部件，或改用批量写入。</td></tr>
+          <tr><td>实体上没有数量</td><td>数量只属于零件。实体只看 cailiao。</td></tr>
+          <tr><td>新加的选项不在下拉框里</td><td>确认 ini 已保存，然后关掉对话框再打开。</td></tr>
+          <tr><td>点取消后属性还在</td><td>之前已经点过应用。取消不会撤回已经写入的内容。</td></tr>
+          <tr><td>右上角问号没有内容</td><td>确认 <span class="path">D:\UG智辉钣金插件\application\Write_Prat_AttrHelp</span> 里有本页和 map 文件，然后重新打开这个命令。</td></tr>
+          <tr><td>打不开配置文件</td><td>看日志 <span class="path">D:\UG智辉钣金插件\logs\Write_Prat_Attr_open_config.log</span>。里面有这次为什么没打开，把该文件发给支持人员。</td></tr>
+          <tr><td>还是失败</td><td>看日志 <span class="path">D:\UG智辉钣金插件\logs\Write_Prat_Attr.log</span>。</td></tr>
+        </tbody>
+      </table>
+    </section>
+    <p class="footer">写入部件属性图文帮助 · 2026-10-15</p>
+  </main>
+</body>
+</html>

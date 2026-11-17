@@ -1,4 +1,8 @@
 #include "ZeWanMoNi.hpp"
+#include "../../common/ZhihuiContextHelp.hpp"
+#ifdef CreateDialog
+#undef CreateDialog
+#endif
 #include "ToolThumbnails.hpp"
 #include <NXOpen/BlockStyler_Tree.hxx>
 #include <NXOpen/BlockStyler_Node.hxx>
@@ -48,6 +52,7 @@ NXOpen::BlockStyler::SelectObject* Selector(NXOpen::BlockStyler::UIBlock* b){aut
 NXOpen::BlockStyler::Tree* ToolTree(NXOpen::BlockStyler::UIBlock* b){auto* t=dynamic_cast<NXOpen::BlockStyler::Tree*>(b);if(!t)throw std::runtime_error("刀具列表控件不可用。");return t;}
 }
 ZeWanMoNiDialog::ZeWanMoNiDialog(){
+    zhihui_context_help::EnsureGlobalHelpLoaded();
     auto file=(ModuleDir()/L"ZeWanMoNi.dlx").u8string();dialog_=NXOpen::UI::GetUI()->CreateDialog(file.c_str());
     dialog_->AddInitializeHandler(NXOpen::make_callback(this,&ZeWanMoNiDialog::Initialize));
     dialog_->AddDialogShownHandler(NXOpen::make_callback(this,&ZeWanMoNiDialog::Shown));

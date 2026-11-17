@@ -1,4 +1,5 @@
 #include "TiaoZenMenJianXi.hpp"
+#include "../../common/ZhihuiContextHelp.hpp"
 #include "DoorGapOverlay.hpp"
 #include "DoorGapGeometry.hpp"
 #include "../40_TiaoZenBanLeiCiCun/PanelSkirtGeometry.hpp"
@@ -226,6 +227,7 @@ private:
 }
 
 DoorGapDialog::DoorGapDialog() {
+    zhihui_context_help::EnsureGlobalHelpLoaded();
     session_=NXOpen::Session::GetSession();
     ui_=NXOpen::UI::GetUI();
     dialog_=ui_->CreateDialog(DlxPath().c_str());

@@ -22,6 +22,7 @@
 #include <optional>
 #include <sstream>
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <vector>
 
@@ -32,6 +33,11 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 namespace
 {
     constexpr const char* kDialogMemoryRegistryPath = "Software\\Zhihui\\KonBiaoZu";
+    constexpr double kDefaultMarkerTextHeight = 2.0;
+    constexpr double kMinMarkerTextHeight = 0.5;
+    constexpr double kMaxMarkerTextHeight = 20.0;
+    // Registry stores the height in 1/100 units to keep the DWORD memory format.
+    constexpr double kMarkerTextHeightRegistryScale = 100.0;
 
     DWORD ReadRegistryDword(HKEY key, const char* name, DWORD fallback)
     {
@@ -223,6 +229,7 @@ namespace KonBiaoZu
           annotationTypeBlock_(nullptr),
           letterToggleBlock_(nullptr),
           markerStartBlock_(nullptr),
+          markerTextHeightBlock_(nullptr),
           weldNutSeriesBlock_(nullptr),
           pemNutSeriesBlock_(nullptr),
           pemScrewSeriesBlock_(nullptr),
@@ -280,6 +287,7 @@ namespace KonBiaoZu
         annotationTypeBlock_ = dialog_->TopBlock()->FindBlock("annotation_type");
         letterToggleBlock_ = dialog_->TopBlock()->FindBlock("letter_toggle");
         markerStartBlock_ = dialog_->TopBlock()->FindBlock("marker_start");
+        markerTextHeightBlock_ = dialog_->TopBlock()->FindBlock("marker_text_height");
         weldNutSeriesBlock_ = dialog_->TopBlock()->FindBlock("weld_nut_series");
         pemNutSeriesBlock_ = dialog_->TopBlock()->FindBlock("pem_nut_series");
         pemScrewSeriesBlock_ = dialog_->TopBlock()->FindBlock("pem_screw_series");
@@ -380,6 +388,7 @@ namespace KonBiaoZu
         const int lengthValue = GetLengthValue();
         const bool enableLetterTag = GetLetterToggle();
         const std::string markerStart = GetMarkerStart();
+        const double markerTextHeight = GetMarkerTextHeight();
         NXOpen::TaggedObject* explicitSelectedObject = GetSelectedCircleObject();
         NXOpen::TaggedObject* selectedObject = explicitSelectedObject != nullptr ? explicitSelectedObject : GetEffectiveSelectedCircleObject();
         if (selectedObject == nullptr)
@@ -662,7 +671,7 @@ namespace KonBiaoZu
                     markerPoint.X += 1.5;
                     markerPoint.Y += 1.5;
                     const tag_t noteTag =
-                        draftingService_.CreateDraftingNote(group.viewTag, markerPoint, markerCode, 2.0);
+                        draftingService_.CreateDraftingNote(group.viewTag, markerPoint, markerCode, markerTextHeight);
                     if (noteTag != NULL_TAG)
                     {
                         ++createdNotes;
@@ -699,7 +708,7 @@ namespace KonBiaoZu
                     markerPoint.X += 1.5;
                     markerPoint.Y += 1.5;
                     const tag_t noteTag =
-                        draftingService_.CreateDraftingNote(circleGroup.viewTag, markerPoint, effectiveMarkerCode, 2.0);
+                        draftingService_.CreateDraftingNote(circleGroup.viewTag, markerPoint, effectiveMarkerCode, markerTextHeight);
                     if (noteTag != NULL_TAG)
                     {
                         ++createdNotes;
@@ -844,6 +853,26 @@ namespace KonBiaoZu
         }
 
         return value;
+    }
+
+    double KonBiaoZuDialog::GetMarkerTextHeight() const
+    {
+        if (markerTextHeightBlock_ == nullptr)
+        {
+            return kDefaultMarkerTextHeight;
+        }
+
+        NXOpen::BlockStyler::PropertyList* properties = markerTextHeightBlock_->GetProperties();
+        const double value = properties->GetDouble("Value");
+        delete properties;
+
+        // Reject NaN/<=0 so a bad value can never reach the note builder.
+        if (!(value > 0.0))
+        {
+            return kDefaultMarkerTextHeight;
+        }
+
+        return std::clamp(value, kMinMarkerTextHeight, kMaxMarkerTextHeight);
     }
 
     std::string KonBiaoZuDialog::GetSelectedSubtype() const
@@ -1001,6 +1030,22 @@ namespace KonBiaoZu
             delete properties;
         }
 
+        if (markerTextHeightBlock_ != nullptr)
+        {
+            NXOpen::BlockStyler::PropertyList* properties = markerTextHeightBlock_->GetProperties();
+            const double current = properties->GetDouble("Value");
+            const DWORD fallback =
+                static_cast<DWORD>(std::lround(std::clamp(current, kMinMarkerTextHeight, kMaxMarkerTextHeight) *
+                                              kMarkerTextHeightRegistryScale));
+            const double saved =
+                static_cast<double>(ReadRegistryDword(key, "MarkerTextHeight", fallback)) /
+                kMarkerTextHeightRegistryScale;
+            properties->SetDouble(
+                "Value",
+                std::clamp(saved, kMinMarkerTextHeight, kMaxMarkerTextHeight));
+            delete properties;
+        }
+
         if (lengthBlock_ != nullptr)
         {
             NXOpen::BlockStyler::PropertyList* properties = lengthBlock_->GetProperties();
@@ -1063,6 +1108,19 @@ namespace KonBiaoZu
         {
             NXOpen::BlockStyler::PropertyList* properties = markerStartBlock_->GetProperties();
             WriteRegistryString(key, "MarkerStart", properties->GetString("Value").GetText());
+            delete properties;
+        }
+        if (markerTextHeightBlock_ != nullptr)
+        {
+            NXOpen::BlockStyler::PropertyList* properties = markerTextHeightBlock_->GetProperties();
+            const double value = std::clamp(
+                properties->GetDouble("Value"),
+                kMinMarkerTextHeight,
+                kMaxMarkerTextHeight);
+            WriteRegistryDword(
+                key,
+                "MarkerTextHeight",
+                static_cast<DWORD>(std::lround(value * kMarkerTextHeightRegistryScale)));
             delete properties;
         }
         if (lengthBlock_ != nullptr)

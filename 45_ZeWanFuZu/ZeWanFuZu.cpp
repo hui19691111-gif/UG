@@ -3,6 +3,7 @@
 #include <NXOpen/Features_CustomFeature.hxx>
 #include <NXOpen/Features_CustomFeatureData.hxx>
 #include <NXOpen/Features_CustomFeatureClassManager.hxx>
+#include "../../common/ZhihuiContextHelp.hpp"
 #include "../../common/ZhihuiDialogMemory.hpp"
 #ifdef CreateDialog
 #undef CreateDialog
@@ -56,6 +57,7 @@ void Log(const std::string& message) noexcept {
 }
 }
 ZeWanFuZuDialog::ZeWanFuZuDialog() {
+    zhihui_context_help::EnsureGlobalHelpLoaded();
     bend_assist::RequireFeatureClass();
     edited_=NXOpen::Session::GetSession()->CustomFeatureClassManager()->GetEditedCustomFeature();
     if(edited_ && std::string(edited_->FeatureData()->ClassName().GetText())!=bend_assist::featureClass)

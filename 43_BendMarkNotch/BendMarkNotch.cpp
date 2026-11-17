@@ -1,5 +1,6 @@
 #include "BendMarkNotch.hpp"
 #include "BendMarkNotchCustomFeatureShared.hpp"
+#include "../../common/ZhihuiContextHelp.hpp"
 #include "../../common/ZhihuiDialogMemory.hpp"
 
 #ifdef CreateDialog
@@ -67,6 +68,7 @@
 #include <NXOpen/ScCollector.hxx>
 #include <NXOpen/ScCollectorCollection.hxx>
 #include <NXOpen/ScRuleFactory.hxx>
+#include <NXOpen/SelectEdge.hxx>
 #include <NXOpen/SelectFace.hxx>
 #include <NXOpen/Selection.hxx>
 #include <NXOpen/SelectionIntentRule.hxx>
@@ -101,7 +103,9 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <map>
 #include <memory>
+#include <queue>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -109,6 +113,14 @@
 
 namespace
 {
+struct RebendBoundaryException : public std::runtime_error
+{
+    explicit RebendBoundaryException(const std::string& message)
+        : std::runtime_error(message)
+    {
+    }
+};
+
 constexpr double kTolerance = 1.0e-6;
 constexpr double kMarkingLineWidth = 0.001;
 constexpr double kMarkingLineDepth = 0.001;
@@ -408,6 +420,7 @@ BendMarkNotchDialog::BendMarkNotchDialog()
       status_(nullptr), initialized_(false), shown_(false), updating_(false),
       editedFeatureTag_(NULL_TAG)
 {
+    zhihui_context_help::EnsureGlobalHelpLoaded();
     try
     {
         NXOpen::Features::CustomFeature* edited =
@@ -1046,9 +1059,13 @@ void BendMarkNotchDialog::ShowError(const std::string& text) const noexcept
     AppendDebugLog("callback error: " + text);
     try
     {
-        ui_->NXMessageBox()->Show("折弯标记缺口",
-                              NXOpen::NXMessageBox::DialogTypeError,
-                              text.c_str());
+        if (ui_ != nullptr && ui_->NXMessageBox() != nullptr)
+        {
+            ui_->NXMessageBox()->Show(
+                NXOpen::NXString("折弯标记缺口", NXOpen::NXString::UTF8),
+                NXOpen::NXMessageBox::DialogTypeError,
+                NXOpen::NXString(text, NXOpen::NXString::UTF8));
+        }
     }
     catch (...) { AppendDebugLog("Unable to display callback error"); }
 }
@@ -1137,10 +1154,12 @@ int BendMarkNotchDialog::Execute()
         NXOpen::Session::MarkVisibilityVisible, "折弯标记缺口");
     DisplaySuppressionGuard displayGuard;
     pendingInternalFeatureTags_.clear();
+    skippedBendCount_ = 0;
     try
     {
         int bodyCount = 0;
         int notchCount = 0;
+        int skippedBodyCount = 0;
         bool rebuilt = false;
         bool showMarkSet = false;
         NXOpen::Session::UndoMarkId showMark =
@@ -1214,10 +1233,58 @@ int BendMarkNotchDialog::Execute()
                 existingNodes.push_back(insertionFeature);
                 insertionFeature = previous;
             }
+            if (existingNodes.empty() && body != nullptr && IsAlive(body->Tag()))
+            {
+                bool hasBentBends = false;
+                try
+                {
+                    std::vector<NXOpen::Face*> innerFaces;
+                    std::vector<NXOpen::Features::SheetMetal::SheetmetalBendState>
+                        bendStates;
+                    workPart->Features()->SheetmetalManager()->GetInnerBendFaces(
+                        body, innerFaces, bendStates);
+                    for (std::size_t idx = 0; idx < innerFaces.size(); ++idx)
+                    {
+                        if (innerFaces[idx] != nullptr &&
+                            (idx >= bendStates.size() ||
+                             bendStates[idx] !=
+                                 NXOpen::Features::SheetMetal::SheetmetalBendStateFlat))
+                        {
+                            hasBentBends = true;
+                            break;
+                        }
+                    }
+                }
+                catch (const NXOpen::NXException&) { hasBentBends = true; }
+                if (!hasBentBends)
+                {
+                    AppendDebugLog("skip flat plate body without bends body=" +
+                        std::to_string(body->Tag()));
+                    continue;
+                }
+            }
             // Read the committed upward face before rolling model history back.
             // A largest-web heuristic must not choose the meaning of up/down.
-            NXOpen::Face* upwardFace = (separate || MarkingMethod(commonNotch_) == 1)
-                ? FlatPatternUpwardFace(flatPattern) : nullptr;
+            NXOpen::Face* rawFlatUpward = TryGetFlatPatternUpwardFace(flatPattern);
+            const tag_t rawFlatUpwardTag =
+                rawFlatUpward == nullptr ? NULL_TAG : rawFlatUpward->Tag();
+            int rawFlatUpwardType = 0;
+            if (rawFlatUpward != nullptr)
+            {
+                int normDir = 0;
+                double pt[3] = {}, dir[3] = {}, box[6] = {}, r1 = 0.0, r2 = 0.0;
+                UF_MODL_ask_face_data(rawFlatUpward->Tag(), &rawFlatUpwardType,
+                    pt, dir, box, &r1, &r2, &normDir);
+            }
+            NXOpen::Face* sameSkinWeb = ResolveSameSkinWebFace(body, rawFlatUpward);
+            const tag_t sameSkinWebTag =
+                sameSkinWeb == nullptr ? NULL_TAG : sameSkinWeb->Tag();
+            NXOpen::Face* upwardFace = nullptr;
+            if (separate || MarkingMethod(commonNotch_) == 1)
+            {
+                upwardFace = sameSkinWeb != nullptr
+                    ? sameSkinWeb : FlatPatternUpwardFace(flatPattern);
+            }
             {
                 std::ostringstream log;
                 log << "body insertion body="
@@ -1290,6 +1357,35 @@ int BendMarkNotchDialog::Execute()
             // internal feature tags from a previous body leak into this one.
             pendingInternalFeatureTags_.clear();
             const int created = ProcessBody(body, upwardFace);
+            if (created == -2)
+            {
+                const std::string stopMessage =
+                    "重新折弯失败（Cannot create rebend），已停止并保留当前展开及缺口状态供检查。";
+                SetStatus(stopMessage);
+                try
+                {
+                    if (ui_ != nullptr && ui_->NXMessageBox() != nullptr)
+                    {
+                        ui_->NXMessageBox()->Show(
+                            NXOpen::NXString("折弯标记缺口", NXOpen::NXString::UTF8),
+                            NXOpen::NXMessageBox::DialogTypeWarning,
+                            NXOpen::NXString(stopMessage, NXOpen::NXString::UTF8));
+                    }
+                }
+                catch (const NXOpen::NXException&) {}
+                pendingInternalFeatureTags_.clear();
+                return 0;
+            }
+            if (created < 0)
+            {
+                // An existing notch node was suppressed above; skipping now
+                // would leave it off. Cancel the whole run instead.
+                if (!existingNodes.empty())
+                    throw std::runtime_error(
+                        "缺口打在折弯相切边界后，NX 无法重新折弯该钣金体"
+                        "（Cannot create rebend），原有折弯标记缺口已保留。");
+                ++skippedBodyCount;
+            }
             if (created > 0)
             {
                 const bool retargeted = !existingNodes.empty();
@@ -1313,6 +1409,12 @@ int BendMarkNotchDialog::Execute()
                     std::to_string(body == nullptr ? 0 : body->Tag()) +
                     " internalFeatures=" +
                     std::to_string(pendingInternalFeatureTags_.size()));
+                if (flatPattern != nullptr && IsAlive(flatPattern->Tag()) &&
+                    (rawFlatUpwardTag == NULL_TAG || !IsAlive(rawFlatUpwardTag) ||
+                     rawFlatUpwardType == UF_MODL_CYLINDRICAL_FACE))
+                {
+                    RepairFlatPatternUpwardFace(flatPattern, body, sameSkinWebTag);
+                }
                 if (retargeted)
                 {
                     std::set<tag_t> kept(
@@ -1482,60 +1584,81 @@ int BendMarkNotchDialog::Execute()
                         ex.Message());
                     LogUpdateUndoFeature();
                     LogUpdateErrors();
-                    if (!rebuilt) throw;
-                    // The failed roll undoes itself and can leave the node
-                    // looking inactive. Accept that one failure and stop on
-                    // the reused node so the new notches stay current.
-                    NXOpen::Features::Feature* kept = nullptr;
-                    if (reusedNotchTag != NULL_TAG && IsAlive(reusedNotchTag))
+                    bool repairedAndRestored = false;
+                    if (flatPattern != nullptr && IsAlive(flatPattern->Tag()) &&
+                        RepairFlatPatternUpwardFace(flatPattern, body, sameSkinWebTag))
                     {
-                        kept = dynamic_cast<NXOpen::Features::Feature*>(
-                            NXOpen::NXObjectManager::Get(reusedNotchTag));
-                        if (kept != nullptr && kept->Tag() != reusedNotchTag)
-                            kept = nullptr;
-                        if (kept == nullptr)
+                        try
                         {
-                            for (NXOpen::Features::Feature* feature :
-                                 workPart->Features()->GetFeatures())
+                            restoreTarget->MakeCurrentFeature();
+                            repairedAndRestored = true;
+                            AppendDebugLog("restore current feature succeeded after flat pattern repair target=" +
+                                std::to_string(restoreTarget->Tag()));
+                        }
+                        catch (const NXOpen::NXException& retryEx)
+                        {
+                            AppendDebugLog("restore current feature retry failed code=" +
+                                std::to_string(retryEx.ErrorCode()) + " message=" +
+                                retryEx.Message());
+                        }
+                    }
+                    if (!repairedAndRestored)
+                    {
+                        if (!rebuilt) throw;
+                        // The failed roll undoes itself and can leave the node
+                        // looking inactive. Accept that one failure and stop on
+                        // the reused node so the new notches stay current.
+                        NXOpen::Features::Feature* kept = nullptr;
+                        if (reusedNotchTag != NULL_TAG && IsAlive(reusedNotchTag))
+                        {
+                            kept = dynamic_cast<NXOpen::Features::Feature*>(
+                                NXOpen::NXObjectManager::Get(reusedNotchTag));
+                            if (kept != nullptr && kept->Tag() != reusedNotchTag)
+                                kept = nullptr;
+                            if (kept == nullptr)
                             {
-                                if (feature != nullptr &&
-                                    feature->Tag() == reusedNotchTag)
+                                for (NXOpen::Features::Feature* feature :
+                                     workPart->Features()->GetFeatures())
                                 {
-                                    kept = feature;
-                                    break;
+                                    if (feature != nullptr &&
+                                        feature->Tag() == reusedNotchTag)
+                                    {
+                                        kept = feature;
+                                        break;
+                                    }
                                 }
                             }
                         }
-                    }
-                    AppendDebugLog("restore kept notch feature=" +
-                        std::to_string(kept == nullptr ? 0 : kept->Tag()) +
-                        " alive=" +
-                        std::to_string(kept != nullptr && IsAlive(kept->Tag()) ? 1 : 0));
-                    if (kept != nullptr && IsAlive(kept->Tag()))
-                    {
-                        UF_MODL_update_option_t previousOption =
-                            UF_MODL_UPDATE_UNDO;
-                        const bool optionSet =
-                            UF_MODL_ask_update_fail_option(&previousOption) == 0 &&
-                            UF_MODL_set_update_fail_option(
-                                UF_MODL_UPDATE_ACCEPT_ALL) == 0;
-                        try
+                        AppendDebugLog("restore kept notch feature=" +
+                            std::to_string(kept == nullptr ? 0 : kept->Tag()) +
+                            " alive=" +
+                            std::to_string(kept != nullptr && IsAlive(kept->Tag()) ? 1 : 0));
+                        if (kept != nullptr && IsAlive(kept->Tag()))
                         {
-                            kept->MakeCurrentFeature();
-                            AppendDebugLog("restore kept notch current=" +
-                                std::to_string(kept->Tag()));
+                            UF_MODL_update_option_t previousOption =
+                                UF_MODL_UPDATE_UNDO;
+                            const bool optionSet =
+                                UF_MODL_ask_update_fail_option(&previousOption) == 0 &&
+                                UF_MODL_set_update_fail_option(
+                                    UF_MODL_UPDATE_ACCEPT_ALL) == 0;
+                            try
+                            {
+                                kept->MakeCurrentFeature();
+                                AppendDebugLog("restore kept notch current=" +
+                                    std::to_string(kept->Tag()));
+                            }
+                            catch (const NXOpen::NXException& keptEx)
+                            {
+                                AppendDebugLog(
+                                    "restore kept notch failed code=" +
+                                    std::to_string(keptEx.ErrorCode()) +
+                                    " message=" + keptEx.Message());
+                                LogUpdateUndoFeature();
+                                LogUpdateErrors();
+                            }
+                            if (optionSet)
+                                UF_MODL_set_update_fail_option(previousOption);
                         }
-                        catch (const NXOpen::NXException& keptEx)
-                        {
-                            AppendDebugLog(
-                                "restore kept notch failed code=" +
-                                std::to_string(keptEx.ErrorCode()) +
-                                " message=" + keptEx.Message());
-                            LogUpdateUndoFeature();
-                            LogUpdateErrors();
-                        }
-                        if (optionSet)
-                            UF_MODL_set_update_fail_option(previousOption);
                     }
                 }
             }
@@ -1589,7 +1712,15 @@ int BendMarkNotchDialog::Execute()
             }
         }
         if (notchCount == 0)
+        {
+            if (skippedBodyCount > 0)
+                throw std::runtime_error(
+                    "缺口打在折弯相切边界后，NX 无法重新折弯"
+                    "（Cannot create rebend），已跳过 " +
+                    std::to_string(skippedBodyCount) +
+                    " 个钣金体，模型未修改。");
             throw std::runtime_error("未找到可伸直并标记的折弯。");
+        }
         if (!showMarkSet)
         {
             showMark = session_->SetUndoMark(
@@ -1629,6 +1760,26 @@ int BendMarkNotchDialog::Execute()
         std::ostringstream message;
         message << "完成：处理 " << bodyCount << " 个钣金体，创建 "
                 << notchCount << " 个折弯端部缺口。";
+        if (skippedBodyCount > 0)
+        {
+            std::ostringstream warning;
+            warning << "有 " << skippedBodyCount << " 个钣金体（共 "
+                    << skippedBendCount_ << " 处折弯）在相切边界打缺口后，"
+                    << "NX 无法重新折弯（Cannot create rebend），已跳过，"
+                    << "这些钣金体未打缺口。";
+            message << warning.str();
+            try
+            {
+                if (ui_ != nullptr && ui_->NXMessageBox() != nullptr)
+                {
+                    ui_->NXMessageBox()->Show(
+                        NXOpen::NXString("折弯标记缺口", NXOpen::NXString::UTF8),
+                        NXOpen::NXMessageBox::DialogTypeWarning,
+                        NXOpen::NXString(warning.str(), NXOpen::NXString::UTF8));
+                }
+            }
+            catch (const NXOpen::NXException&) {}
+        }
         SetStatus(message.str());
         pendingInternalFeatureTags_.clear();
         return 0;
@@ -1796,7 +1947,11 @@ void BendMarkNotchDialog::RebuildEditedFeature()
             insertion->MakeCurrentFeature();
 
         const int created = ProcessBody(body, upwardFace);
-        if (created <= 0) throw std::runtime_error("未找到可伸直并标记的折弯。");
+        if (created < 0)
+            throw std::runtime_error(
+                "缺口打在折弯相切边界后，NX 无法重新折弯该钣金体"
+                "（Cannot create rebend），本次编辑未生效。");
+        if (created == 0) throw std::runtime_error("未找到可伸直并标记的折弯。");
         if (!CreateCustomFeatureNode())
             throw std::runtime_error("创建折弯标记缺口特征失败。");
 
@@ -2483,6 +2638,198 @@ NXOpen::Face* BendMarkNotchDialog::FlatPatternUpwardFace(
     return upward;
 }
 
+// Same query as FlatPatternUpwardFace, but a missing or unreadable face is
+// reported as nullptr instead of an exception.
+NXOpen::Face* BendMarkNotchDialog::TryGetFlatPatternUpwardFace(
+    NXOpen::Features::Feature* feature) const
+{
+    if (feature == nullptr || !IsAlive(feature->Tag())) return nullptr;
+    try
+    {
+        return FlatPatternUpwardFace(feature);
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("flat pattern upward face query failed code=" +
+            std::to_string(ex.ErrorCode()) + " message=" + ex.Message());
+    }
+    catch (const std::exception& ex)
+    {
+        AppendDebugLog(std::string("flat pattern upward face unavailable: ") +
+            ex.what());
+    }
+    return nullptr;
+}
+
+// A planar seed is returned unchanged. A cylindrical seed is a bend face; the
+// planar faces sharing its edges and tangent to it are the webs on the same
+// skin, so the first one keeps the same up/down meaning. Side faces have
+// normals along the cylinder axis and are rejected.
+NXOpen::Face* BendMarkNotchDialog::ResolveSameSkinWebFace(
+    NXOpen::Body* body, NXOpen::Face* seedFace) const
+{
+    if (body == nullptr || seedFace == nullptr || !IsAlive(seedFace->Tag()))
+        return nullptr;
+    int type = 0, normalDirection = 0;
+    double point[3] = {}, direction[3] = {}, box[6] = {};
+    double radius = 0.0, radiusData = 0.0;
+    if (UF_MODL_ask_face_data(seedFace->Tag(), &type, point, direction, box,
+            &radius, &radiusData, &normalDirection) != 0)
+        return nullptr;
+    if (type == UF_MODL_PLANAR_FACE) return seedFace;
+    if (type != UF_MODL_CYLINDRICAL_FACE) return nullptr;
+    const double axisLength = std::sqrt(direction[0] * direction[0] +
+        direction[1] * direction[1] + direction[2] * direction[2]);
+    if (axisLength <= kTolerance) return nullptr;
+    const tag_t bodyTag = body->Tag();
+    try
+    {
+        for (NXOpen::Edge* edge : seedFace->GetEdges())
+        {
+            if (edge == nullptr) continue;
+            for (NXOpen::Face* face : edge->GetFaces())
+            {
+                if (face == nullptr || face == seedFace || !IsAlive(face->Tag()))
+                    continue;
+                tag_t owner = NULL_TAG;
+                if (UF_MODL_ask_face_body(face->Tag(), &owner) != 0 ||
+                    owner != bodyTag)
+                    continue;
+                int faceType = 0, faceNormalDirection = 0;
+                double facePoint[3] = {}, faceNormal[3] = {}, faceBox[6] = {};
+                double r1 = 0.0, r2 = 0.0;
+                if (UF_MODL_ask_face_data(face->Tag(), &faceType, facePoint,
+                        faceNormal, faceBox, &r1, &r2, &faceNormalDirection) != 0 ||
+                    faceType != UF_MODL_PLANAR_FACE)
+                    continue;
+                const double normalLength = std::sqrt(
+                    faceNormal[0] * faceNormal[0] + faceNormal[1] * faceNormal[1] +
+                    faceNormal[2] * faceNormal[2]);
+                if (normalLength <= kTolerance) continue;
+                const double cosine = std::fabs(
+                    (faceNormal[0] * direction[0] + faceNormal[1] * direction[1] +
+                     faceNormal[2] * direction[2]) / (normalLength * axisLength));
+                if (cosine > 1.0e-3) continue;
+                AppendDebugLog("same-skin web seed=" +
+                    std::to_string(seedFace->Tag()) + " web=" +
+                    std::to_string(face->Tag()));
+                return face;
+            }
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        AppendDebugLog("same-skin web query failed code=" +
+            std::to_string(ex.ErrorCode()));
+    }
+    return nullptr;
+}
+
+// Points the flat pattern at a planar web when its stored upward face is
+// dead or is a bend face. Without a valid planar web nothing is changed.
+bool BendMarkNotchDialog::RepairFlatPatternUpwardFace(
+    NXOpen::Features::Feature* flatPattern,
+    NXOpen::Body* body,
+    tag_t preferredWebFaceTag) const
+{
+    if (flatPattern == nullptr || !IsAlive(flatPattern->Tag()) ||
+        body == nullptr || !IsAlive(body->Tag()))
+        return false;
+    auto* web = IsAlive(preferredWebFaceTag)
+        ? dynamic_cast<NXOpen::Face*>(
+              NXOpen::NXObjectManager::Get(preferredWebFaceTag))
+        : nullptr;
+    if (web != nullptr)
+    {
+        tag_t owner = NULL_TAG;
+        int type = 0, normalDirection = 0;
+        double point[3] = {}, direction[3] = {}, box[6] = {};
+        double radius = 0.0, radiusData = 0.0;
+        if (UF_MODL_ask_face_body(web->Tag(), &owner) != 0 ||
+            owner != body->Tag() ||
+            UF_MODL_ask_face_data(web->Tag(), &type, point, direction,
+                box, &radius, &radiusData, &normalDirection) != 0 ||
+            type != UF_MODL_PLANAR_FACE)
+            web = nullptr;
+    }
+    if (web == nullptr) web = FindReferenceFace(body);
+    if (web == nullptr || !IsAlive(web->Tag())) return false;
+
+    const auto findLongestLinearEdge = [](NXOpen::Face* face) -> NXOpen::Edge*
+    {
+        NXOpen::Edge* best = nullptr;
+        double bestLength = -1.0;
+        for (NXOpen::Edge* edge : face->GetEdges())
+        {
+            if (edge == nullptr || !IsAlive(edge->Tag())) continue;
+            int edgeType = 0;
+            if (UF_MODL_ask_edge_type(edge->Tag(), &edgeType) != 0 ||
+                edgeType != UF_MODL_LINEAR_EDGE)
+                continue;
+            NXOpen::Point3d first, second;
+            if (!EdgeEnds(edge, first, second)) continue;
+            const double len = Distance(first, second);
+            if (len > bestLength) { bestLength = len; best = edge; }
+        }
+        return best;
+    };
+
+    auto* manager = session_->Parts()->Work()->Features()->SheetmetalManager();
+    NXOpen::Features::SheetMetal::FlatPatternBuilder* builder = nullptr;
+    try
+    {
+        builder = manager->CreateFlatPatternBuilder(flatPattern);
+        if (builder == nullptr || builder->UpwardFace() == nullptr)
+        {
+            if (builder != nullptr) builder->Destroy();
+            return false;
+        }
+        builder->UpwardFace()->SetValue(web);
+        NXOpen::Edge* xEdge = builder->XAxisEdge() != nullptr
+            ? builder->XAxisEdge()->Value() : nullptr;
+        if (xEdge == nullptr || !IsAlive(xEdge->Tag()))
+        {
+            NXOpen::Edge* bestEdge = findLongestLinearEdge(web);
+            if (bestEdge != nullptr && builder->XAxisEdge() != nullptr)
+                builder->XAxisEdge()->SetValue(bestEdge);
+            else
+                builder->SetOrientation(
+                    NXOpen::Features::SheetMetal::FlatSolidBuilder::
+                        OrientationTypeDefault);
+        }
+        try
+        {
+            builder->CommitFeature();
+        }
+        catch (const NXOpen::NXException& commitEx)
+        {
+            AppendDebugLog("flat pattern commit retry after code=" +
+                std::to_string(commitEx.ErrorCode()) + " message=" +
+                commitEx.Message());
+            NXOpen::Edge* bestEdge = findLongestLinearEdge(web);
+            if (bestEdge != nullptr && builder->XAxisEdge() != nullptr)
+                builder->XAxisEdge()->SetValue(bestEdge);
+            else
+                builder->SetOrientation(
+                    NXOpen::Features::SheetMetal::FlatSolidBuilder::
+                        OrientationTypeDefault);
+            builder->CommitFeature();
+        }
+        builder->Destroy();
+        AppendDebugLog("flat pattern upward face repaired feature=" +
+            std::to_string(flatPattern->Tag()) + " web=" +
+            std::to_string(web->Tag()));
+        return true;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        if (builder != nullptr) builder->Destroy();
+        AppendDebugLog("flat pattern upward face repair failed code=" +
+            std::to_string(ex.ErrorCode()) + " message=" + ex.Message());
+    }
+    return false;
+}
+
 int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFace)
 {
     NXOpen::Part* part = session_->Parts()->Work();
@@ -3012,17 +3359,168 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
         }
         else
         {
-            NXOpen::FaceDumbRule* rebendRule =
-                part->ScRuleFactory()->CreateRuleFaceDumb(bendFaces);
-            NXOpen::ScCollector* rebendCollector =
-                part->ScCollectors()->CreateCollector();
-            rebendCollector->ReplaceRules(
-                std::vector<NXOpen::SelectionIntentRule*>(1, rebendRule), false);
-            auto* rebend = manager->CreateRebendFeatureBuilder(nullptr);
-            rebend->SetFaceCollector(rebendCollector);
             failureStage = "commit rebend";
-            rebendFeature = rebend->CommitFeature();
-            rebend->Destroy();
+            auto tryCommitRebend = [&](const std::vector<NXOpen::Face*>& faces,
+                                       NXOpen::Face* refFace,
+                                       const char* label) -> NXOpen::Features::Feature*
+            {
+                if (faces.empty()) return nullptr;
+                const NXOpen::Session::UndoMarkId attemptMark =
+                    session_->SetUndoMark(
+                        NXOpen::Session::MarkVisibilityInvisible,
+                        "尝试重新折弯");
+                NXOpen::Features::SheetMetal::RebendBuilder* rebend = nullptr;
+                try
+                {
+                    NXOpen::FaceDumbRule* rebendRule =
+                        part->ScRuleFactory()->CreateRuleFaceDumb(faces);
+                    NXOpen::ScCollector* rebendCollector =
+                        part->ScCollectors()->CreateCollector();
+                    rebendCollector->ReplaceRules(
+                        std::vector<NXOpen::SelectionIntentRule*>(1, rebendRule), false);
+                    rebend = manager->CreateRebendFeatureBuilder(nullptr);
+                    if (refFace != nullptr && IsAlive(refFace->Tag()))
+                        rebend->SetReferenceEntity(refFace);
+                    rebend->SetFaceCollector(rebendCollector);
+                    NXOpen::Features::Feature* feat = rebend->CommitFeature();
+                    rebend->Destroy();
+                    rebend = nullptr;
+                    if (feat == nullptr || !IsAlive(feat->Tag()))
+                    {
+                        session_->UndoToMark(attemptMark, nullptr);
+                        return nullptr;
+                    }
+                    const int updateErr =
+                        session_->UpdateManager()->DoUpdate(attemptMark);
+                    int suppressed = 0;
+                    UF_MODL_ask_suppress_feature(feat->Tag(), &suppressed);
+                    std::size_t flatCount = 0;
+                    std::size_t bentCount = 0;
+                    try
+                    {
+                        std::vector<NXOpen::Face*> checkInner;
+                        std::vector<NXOpen::Features::SheetMetal::SheetmetalBendState>
+                            checkStates;
+                        manager->GetInnerBendFaces(body, checkInner, checkStates);
+                        for (std::size_t idx = 0; idx < checkInner.size(); ++idx)
+                        {
+                            if (idx < checkStates.size() &&
+                                checkStates[idx] ==
+                                    NXOpen::Features::SheetMetal::SheetmetalBendStateFlat)
+                                ++flatCount;
+                            else
+                                ++bentCount;
+                        }
+                    }
+                    catch (const NXOpen::NXException&) {}
+                    AppendDebugLog(std::string("rebend verify strategy=") + label +
+                        " faces=" + std::to_string(faces.size()) +
+                        " updateErr=" + std::to_string(updateErr) +
+                        " suppressed=" + std::to_string(suppressed) +
+                        " flat=" + std::to_string(flatCount) +
+                        " bent=" + std::to_string(bentCount));
+                    if (updateErr != 0 || suppressed != 0 || flatCount > 0)
+                    {
+                        session_->UndoToMark(attemptMark, nullptr);
+                        return nullptr;
+                    }
+                    try { session_->DeleteUndoMark(attemptMark, nullptr); }
+                    catch (const NXOpen::NXException&) {}
+                    return feat;
+                }
+                catch (const NXOpen::NXException& ex)
+                {
+                    AppendDebugLog(std::string("rebend failed strategy=") + label +
+                        " faces=" + std::to_string(faces.size()) +
+                        " code=" + std::to_string(ex.ErrorCode()) +
+                        " message=" + ex.Message());
+                    if (rebend != nullptr)
+                    {
+                        try { rebend->Destroy(); } catch (...) {}
+                    }
+                    try { session_->UndoToMark(attemptMark, nullptr); }
+                    catch (const NXOpen::NXException&) {}
+                    return nullptr;
+                }
+            };
+
+            rebendFeature = tryCommitRebend(bendFaces, nullptr, "original-pairs");
+            if (rebendFeature == nullptr)
+            {
+                // Query live faces on the body after SubtractToolsOnce, because
+                // Boolean cuts on tangent boundaries can replace bend/web tags.
+                std::vector<NXOpen::Face*> liveFlatInner;
+                std::vector<NXOpen::Face*> liveAllInner;
+                try
+                {
+                    std::vector<NXOpen::Face*> innerNow;
+                    std::vector<NXOpen::Features::SheetMetal::SheetmetalBendState>
+                        statesNow;
+                    manager->GetInnerBendFaces(body, innerNow, statesNow);
+                    for (std::size_t idx = 0; idx < innerNow.size(); ++idx)
+                    {
+                        NXOpen::Face* f = innerNow[idx];
+                        if (f == nullptr || !IsAlive(f->Tag())) continue;
+                        liveAllInner.push_back(f);
+                        if (idx >= statesNow.size() ||
+                            statesNow[idx] ==
+                                NXOpen::Features::SheetMetal::SheetmetalBendStateFlat)
+                        {
+                            liveFlatInner.push_back(f);
+                        }
+                    }
+                }
+                catch (const NXOpen::NXException&) {}
+
+                std::vector<NXOpen::Face*> liveAllBends;
+                for (NXOpen::Face* f : body->GetFaces())
+                {
+                    if (f == nullptr || !IsAlive(f->Tag())) continue;
+                    try
+                    {
+                        if (manager->GetFaceType(f) ==
+                            NXOpen::Features::SheetMetal::SheetmetalFaceTypeBend)
+                            liveAllBends.push_back(f);
+                    }
+                    catch (const NXOpen::NXException&) {}
+                }
+
+                NXOpen::Face* liveRef = FindReferenceFace(body);
+                AppendDebugLog("rebend fallback query liveFlatInner=" +
+                    std::to_string(liveFlatInner.size()) +
+                    " liveAllInner=" + std::to_string(liveAllInner.size()) +
+                    " liveAllBends=" + std::to_string(liveAllBends.size()) +
+                    " liveRef=" +
+                    std::to_string(liveRef == nullptr ? 0 : liveRef->Tag()));
+
+                if (!liveAllBends.empty())
+                {
+                    rebendFeature = tryCommitRebend(
+                        liveAllBends, nullptr, "live-all-bends");
+                    if (rebendFeature == nullptr && liveRef != nullptr)
+                        rebendFeature = tryCommitRebend(
+                            liveAllBends, liveRef, "live-all-bends+ref");
+                }
+                if (rebendFeature == nullptr && !liveFlatInner.empty())
+                {
+                    rebendFeature = tryCommitRebend(
+                        liveFlatInner, nullptr, "live-flat-inner");
+                    if (rebendFeature == nullptr && liveRef != nullptr)
+                        rebendFeature = tryCommitRebend(
+                            liveFlatInner, liveRef, "live-flat-inner+ref");
+                }
+                if (rebendFeature == nullptr && !liveAllInner.empty() &&
+                    liveAllInner.size() != liveFlatInner.size())
+                {
+                    rebendFeature = tryCommitRebend(
+                        liveAllInner, nullptr, "live-all-inner");
+                    if (rebendFeature == nullptr && liveRef != nullptr)
+                        rebendFeature = tryCommitRebend(
+                            liveAllInner, liveRef, "live-all-inner+ref");
+                }
+            }
+            if (rebendFeature == nullptr)
+                throw RebendBoundaryException("Cannot create rebend. Try changing input selections.");
         }
         if (rebendFeature == nullptr)
             throw std::runtime_error("创建缺口后重新折弯失败。");
@@ -3040,6 +3538,19 @@ int BendMarkNotchDialog::ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFac
             std::to_string(profileCount) + " rebendFeature=" +
             std::to_string(rebendFeature->Tag()));
         return static_cast<int>(profileCount);
+    }
+    catch (const RebendBoundaryException&)
+    {
+        AppendDebugLog("ProcessBody skipped: rebend failed after tangent "
+            "boundary notches body=" +
+            std::to_string(body == nullptr ? 0 : body->Tag()) +
+            " bends=" + std::to_string(bends.size()));
+        LogUpdateUndoFeature();
+        session_->UndoToMark(mark, "折弯标记缺口失败回退");
+        try { session_->DeleteUndoMark(mark, nullptr); }
+        catch (const NXOpen::NXException&) {}
+        skippedBendCount_ += bends.size();
+        return -1;
     }
     catch (const NXOpen::NXException& ex)
     {

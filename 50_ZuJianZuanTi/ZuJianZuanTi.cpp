@@ -1,4 +1,5 @@
 #include "ZuJianZuanTi.hpp"
+#include "../../common/ZhihuiContextHelp.hpp"
 
 #include "ZhihuiDialogMemory.hpp"
 #ifdef CreateDialog
@@ -35,11 +36,13 @@
 #include <uf_ui.h>
 #include <uf_wave.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <map>
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -150,6 +153,73 @@ std::vector<tag_t> ChildComponents(tag_t partOccurrence) {
 
 std::vector<tag_t> AssemblyComponents(tag_t part) {
     return ChildComponents(UF_ASSEM_ask_root_part_occ(part));
+}
+
+bool HasChildComponents(tag_t partOccurrence) {
+    if (partOccurrence == NULL_TAG) return false;
+    tag_t* children = nullptr;
+    const int count = UF_ASSEM_ask_part_occ_children(partOccurrence, &children);
+    UF_free(children);
+    return count > 0;
+}
+
+// Leaf part occurrences only. A part with no children is itself a leaf.
+std::vector<tag_t> LeafComponents(tag_t partOccurrence) {
+    std::vector<tag_t> leaves;
+    if (partOccurrence == NULL_TAG) return leaves;
+    tag_t* children = nullptr;
+    const int count = UF_ASSEM_ask_part_occ_children(partOccurrence, &children);
+    if (count <= 0) {
+        UF_free(children);
+        leaves.push_back(partOccurrence);
+        return leaves;
+    }
+    for (int index = 0; index < count; ++index) {
+        const std::vector<tag_t> nested = LeafComponents(children[index]);
+        leaves.insert(leaves.end(), nested.begin(), nested.end());
+    }
+    UF_free(children);
+    return leaves;
+}
+
+std::vector<tag_t> ConversionTargets(tag_t component) {
+    const std::vector<tag_t> leaves = LeafComponents(component);
+    if (leaves.size() == 1 && leaves[0] == component) return leaves;
+    std::vector<tag_t> targets;
+    targets.push_back(component);
+    for (tag_t child : ChildComponents(component)) {
+        if (HasChildComponents(child)) targets.push_back(child);
+    }
+    targets.insert(targets.end(), leaves.begin(), leaves.end());
+    return targets;
+}
+
+bool IsDescendantOfAny(tag_t component, const std::set<tag_t>& roots) {
+    tag_t parent = NULL_TAG;
+    if (UF_ASSEM_ask_parent_component(component, &parent) != 0) return false;
+    for (int guard = 0; parent != NULL_TAG && guard < 64; ++guard) {
+        if (roots.count(parent) != 0) return true;
+        tag_t next = NULL_TAG;
+        if (UF_ASSEM_ask_parent_component(parent, &next) != 0) break;
+        parent = next;
+    }
+    return false;
+}
+
+void CollectSubtreePrototypes(
+    tag_t component, int depth, std::map<tag_t, int>& depths) {
+    if (component == NULL_TAG) return;
+    const tag_t prototype = UF_ASSEM_ask_prototype_of_occ(component);
+    if (prototype != NULL_TAG) {
+        const auto found = depths.find(prototype);
+        if (found == depths.end() || depth < found->second) depths[prototype] = depth;
+    }
+    tag_t* children = nullptr;
+    const int count = UF_ASSEM_ask_part_occ_children(component, &children);
+    for (int index = 0; index < count; ++index) {
+        CollectSubtreePrototypes(children[index], depth + 1, depths);
+    }
+    UF_free(children);
 }
 
 std::wstring ComponentLabel(tag_t component) {
@@ -385,6 +455,7 @@ bool DeletePartFile(tag_t part, tag_t displayPart) {
 }
 
 ComponentToSolidDialog::ComponentToSolidDialog() {
+    zhihui_context_help::EnsureGlobalHelpLoaded();
     session_ = NXOpen::Session::GetSession();
     dialog_ = NXOpen::UI::GetUI()->CreateDialog(DlxPath().c_str());
     dialog_->AddInitializeHandler(
@@ -686,16 +757,29 @@ bool ComponentToSolidDialog::Convert(std::wstring& message) {
     try {
         std::vector<CopiedBody> copies;
         std::vector<std::wstring> emptyComponents;
-        std::set<tag_t> converted;
+        std::set<tag_t> seenTargets;
+        std::set<tag_t> produced;
+        std::set<tag_t> removalRoots;
         for (tag_t component : components) {
-            if (!converted.insert(component).second) continue;
-            const std::vector<CopiedBody> solids =
-                CopyComponentSolids(work, component, workOccurrence, nullptr);
-            if (solids.empty()) {
-                emptyComponents.push_back(ComponentLabel(component));
-                continue;
+            bool any = false;
+            for (tag_t target : ConversionTargets(component)) {
+                if (!seenTargets.insert(target).second) {
+                    if (produced.count(target) != 0) any = true;
+                    continue;
+                }
+                const std::vector<CopiedBody> solids =
+                    CopyComponentSolids(work, target, workOccurrence, nullptr);
+                if (solids.empty()) {
+                    if (!HasChildComponents(target)) {
+                        emptyComponents.push_back(ComponentLabel(target));
+                    }
+                    continue;
+                }
+                produced.insert(target);
+                any = true;
+                copies.insert(copies.end(), solids.begin(), solids.end());
             }
-            copies.insert(copies.end(), solids.begin(), solids.end());
+            if (any) removalRoots.insert(component);
         }
         if (copies.empty()) {
             session_->UndoToMark(mark, undoName);
@@ -737,11 +821,14 @@ bool ComponentToSolidDialog::Convert(std::wstring& message) {
 
         int deletedComponents = 0;
         int skippedInstances = 0;
-        std::set<tag_t> prototypesToClose;
+        std::map<tag_t, int> prototypeDepth;
         if (deleteComponent) {
+            std::vector<tag_t> roots;
+            for (tag_t component : removalRoots) {
+                if (!IsDescendantOfAny(component, removalRoots)) roots.push_back(component);
+            }
             std::map<tag_t, std::set<tag_t>> selectedByInstance;
-            for (tag_t component : converted) {
-                if (nameCount[component] == 0) continue;
+            for (tag_t component : roots) {
                 const tag_t instance = UF_ASSEM_ask_inst_of_part_occ(component);
                 if (instance != NULL_TAG) selectedByInstance[instance].insert(component);
             }
@@ -756,15 +843,13 @@ bool ComponentToSolidDialog::Convert(std::wstring& message) {
                     ++skippedInstances;
                     continue;
                 }
-                tag_t prototype = NULL_TAG;
-                if (!item.second.empty()) {
-                    prototype = UF_ASSEM_ask_prototype_of_occ(*item.second.begin());
+                for (tag_t component : item.second) {
+                    CollectSubtreePrototypes(component, 0, prototypeDepth);
                 }
                 if (UF_ASSEM_remove_instance(item.first) != 0) {
                     throw NXOpen::NXException::Create("remove component instance failed");
                 }
                 deletedComponents += static_cast<int>(item.second.size());
-                if (prototype != NULL_TAG) prototypesToClose.insert(prototype);
             }
             UF_MODL_update();
         }
@@ -773,7 +858,16 @@ bool ComponentToSolidDialog::Convert(std::wstring& message) {
         int keptFiles = 0;
         if (deleteComponent && !keepFile) {
             const std::vector<tag_t> remaining = AssemblyComponents(display->Tag());
-            for (tag_t prototype : prototypesToClose) {
+            std::vector<std::pair<int, tag_t>> closeOrder;
+            closeOrder.reserve(prototypeDepth.size());
+            for (const auto& item : prototypeDepth) {
+                closeOrder.emplace_back(item.second, item.first);
+            }
+            // Parent assemblies must close before their leaf parts, or UF_PART_close
+            // returns 2 because the leaf is not the root of a loaded assembly.
+            std::sort(closeOrder.begin(), closeOrder.end());
+            for (const auto& item : closeOrder) {
+                const tag_t prototype = item.second;
                 if (FileStillReferenced(prototype, remaining)) {
                     ++keptFiles;
                     continue;
@@ -785,7 +879,7 @@ bool ComponentToSolidDialog::Convert(std::wstring& message) {
 
         selection_->SetSelectedObjects({});
         std::wostringstream text;
-        text << L"已转换 " << converted.size() - emptyComponents.size()
+        text << L"已转换 " << produced.size()
              << L" 个组件，生成 " << copies.size() << L" 个实体。";
         if (deleteComponent) text << L"\n已删除 " << deletedComponents << L" 个组件。";
         if (deleteComponent && !keepFile) {
@@ -801,7 +895,9 @@ bool ComponentToSolidDialog::Convert(std::wstring& message) {
         }
         message = text.str();
         std::ostringstream line;
-        line << "ZuJianZuanTi: bodies=" << copies.size()
+        line << "ZuJianZuanTi: selected=" << components.size()
+             << " targets=" << seenTargets.size()
+             << " bodies=" << copies.size()
              << " deletedComponents=" << deletedComponents
              << " deletedFiles=" << deletedFiles;
         Log(line.str());

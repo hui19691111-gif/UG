@@ -971,8 +971,53 @@ std::string LoadFlatPatternNoteFormat()
 
 std::filesystem::path LayerGroupNoteConfigFilePath()
 {
-    return CurrentModuleDirectory().parent_path() / "config" /
-        "AutoCreateThreeViews_layer_note_format.ini";
+    return CurrentModuleDirectory().parent_path() / L"config" /
+        L"AutoCreateThreeViews_layer_note_format.ini";
+}
+
+std::string StripNoteConfigCommentPrefix(const std::string& text)
+{
+    std::string stripped = Trim(text);
+    while (!stripped.empty() && (stripped.front() == '#' || stripped.front() == ';'))
+    {
+        stripped.erase(stripped.begin());
+        stripped = Trim(stripped);
+    }
+    return stripped;
+}
+
+bool TryParseNoteConfigSectionHeader(const std::string& rawTrimmed, std::string& sectionName)
+{
+    const std::string candidate = StripNoteConfigCommentPrefix(rawTrimmed);
+    if (candidate.size() >= 2 && candidate.front() == '[' && candidate.back() == ']')
+    {
+        sectionName = Trim(candidate.substr(1, candidate.size() - 2));
+        return !sectionName.empty();
+    }
+    return false;
+}
+
+void WriteLayerGroupNoteConfigFile(
+    const std::filesystem::path& path,
+    const std::string& flatLine,
+    const std::string& layerLine)
+{
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file)
+    {
+        throw std::runtime_error("Unable to create note configuration file.");
+    }
+    const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
+    file.write(reinterpret_cast<const char*>(bom), sizeof(bom));
+    file << u8"# 自动三视图的展开图与图层注释格式配置\r\n"
+         << u8"# 在配置行前面加 # 号（或留空）即可关闭对应注释不显示。\r\n"
+         << u8"# 多行注释请使用 \\n，修改保存后下次出图立即生效。\r\n\r\n"
+         << u8"# 展开图下方注释格式（可自定义任意字符串，如：展开图；可用占位符：{文件名}、{编号}、{编号=}、{材料}、{厚度}、{数量}、{镜像}）\r\n"
+         << u8"[展开图注释]\r\n"
+         << flatLine << "\r\n\r\n"
+         << u8"# 按部件内图层出图时的图层注释格式（可用占位符：{图层}、{编号}、{材料}、{数量}）\r\n"
+         << u8"[图层注释]\r\n"
+         << layerLine << "\r\n";
 }
 
 void EnsureDefaultLayerGroupNoteConfigFile()
@@ -982,59 +1027,126 @@ void EnsureDefaultLayerGroupNoteConfigFile()
     std::filesystem::create_directories(path.parent_path(), ignored);
     if (std::filesystem::is_regular_file(path, ignored))
     {
-        return;
+        std::ifstream existing(path, std::ios::binary);
+        if (existing)
+        {
+            std::ostringstream buffer;
+            buffer << existing.rdbuf();
+            const std::string content = buffer.str();
+            if (content.find(u8"展开图注释") != std::string::npos)
+            {
+                return;
+            }
+            existing.close();
+
+            std::istringstream stream(content);
+            std::string line;
+            std::string activeLayerLine;
+            while (std::getline(stream, line))
+            {
+                line = Trim(RemoveUtf8Bom(line));
+                std::string ignoredSection;
+                if (line.empty() || line[0] == '#' || line[0] == ';' ||
+                    TryParseNoteConfigSectionHeader(line, ignoredSection))
+                {
+                    continue;
+                }
+                activeLayerLine = line;
+                break;
+            }
+
+            const std::string flatLine = activeLayerLine.empty()
+                ? std::string(u8"#展开图\\n{编号=}{材料} T={厚度} {数量}PCS{镜像}")
+                : std::string(u8"展开图\\n{编号=}{材料} T={厚度} {数量}PCS{镜像}");
+            const std::string layerLine = activeLayerLine.empty()
+                ? std::string(u8"#编号:{编号}  材料:{材料}  数量:{数量}")
+                : activeLayerLine;
+            WriteLayerGroupNoteConfigFile(path, flatLine, layerLine);
+            return;
+        }
     }
 
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file)
-    {
-        throw std::runtime_error("Unable to create layer note configuration file.");
-    }
-    const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
-    file.write(reinterpret_cast<const char*>(bom), sizeof(bom));
-    file << u8"# 自动三视图的图层注释格式\r\n"
-         << u8"# 可用占位符：{图层}、{编号}、{材料}、{数量}\r\n"
-         << u8"# 多行注释请使用 \\n，修改保存后下次出图立即生效。\r\n\r\n"
-         << u8"[图层注释]\r\n"
-         << u8"编号:{编号}  材料:{材料}  数量:{数量}\r\n";
+    WriteLayerGroupNoteConfigFile(
+        path,
+        u8"展开图\\n{编号=}{材料} T={厚度} {数量}PCS{镜像}",
+        u8"编号:{编号}  材料:{材料}  数量:{数量}");
 }
 
-std::string LoadLayerGroupNoteFormat()
+std::string LoadNoteFormatFromConfigSection(
+    const std::string& targetSection,
+    const std::vector<std::string>& keys)
 {
-    static const std::string defaultFormat =
-        u8"编号:{编号}  材料:{材料}  数量:{数量}";
     try
     {
         EnsureDefaultLayerGroupNoteConfigFile();
         std::ifstream file(LayerGroupNoteConfigFilePath(), std::ios::binary);
+        if (!file)
+        {
+            return "";
+        }
+
         std::string line;
+        std::string currentSection;
+        std::string multiLineFormat;
         while (std::getline(file, line))
         {
             line = Trim(RemoveUtf8Bom(line));
-            if (line.empty() || line[0] == '#' || line[0] == ';' ||
-                (line.front() == '[' && line.back() == ']'))
+            std::string parsedSection;
+            if (TryParseNoteConfigSectionHeader(line, parsedSection))
+            {
+                currentSection = parsedSection;
+                continue;
+            }
+            if (line.empty() || line[0] == '#' || line[0] == ';')
             {
                 continue;
             }
-            const std::string key = "layer_note_format";
-            if (line.compare(0, key.size(), key) == 0)
+            for (const std::string& key : keys)
             {
-                const size_t equal = line.find('=');
-                if (equal != std::string::npos)
+                if (line.compare(0, key.size(), key) == 0)
                 {
-                    line = Trim(line.substr(equal + 1));
+                    const size_t equalPos = line.find('=');
+                    if (equalPos != std::string::npos)
+                    {
+                        line = Trim(line.substr(equalPos + 1));
+                    }
+                    break;
                 }
             }
-            if (!line.empty())
+            line = Trim(DecodeConfigEscapes(line));
+            if (line.empty())
             {
-                return DecodeConfigEscapes(line);
+                continue;
+            }
+            if (currentSection == targetSection || currentSection.empty())
+            {
+                if (!multiLineFormat.empty())
+                {
+                    multiLineFormat += '\n';
+                }
+                multiLineFormat += line;
             }
         }
+        return multiLineFormat;
     }
     catch (...)
     {
+        return "";
     }
-    return defaultFormat;
+}
+
+std::string LoadActiveFlatPatternNoteFormat()
+{
+    return LoadNoteFormatFromConfigSection(
+        u8"展开图注释",
+        {"flat_note_format", "body_note_format"});
+}
+
+std::string LoadLayerGroupNoteFormat()
+{
+    return LoadNoteFormatFromConfigSection(
+        u8"图层注释",
+        {"layer_note_format"});
 }
 
 bool OpenLayerGroupNoteConfigFile()
@@ -1118,6 +1230,12 @@ NXOpen::Body* FindLargestTargetLayerSolidBody(NXOpen::Part* part)
 
 std::string BuildLayerGroupNoteText(NXOpen::Part* part, int targetLayer)
 {
+    std::string text = LoadLayerGroupNoteFormat();
+    if (text.empty())
+    {
+        return "";
+    }
+
     NXOpen::Body* body = FindLargestTargetLayerSolidBody(part);
     std::string number = AttributeReferenceOrValue(
         part, body, {"bianhao", u8"编号", u8"图号"});
@@ -1130,7 +1248,6 @@ std::string BuildLayerGroupNoteText(NXOpen::Part* part, int targetLayer)
             part, body, {"sulian", u8"数量", "qty", "Qty", "QTY"});
     }
 
-    std::string text = LoadLayerGroupNoteFormat();
     ReplaceAllText(text, u8"{图层}", std::to_string(targetLayer));
     ReplaceAllText(text, u8"{编号}", number);
     ReplaceAllText(text, u8"{材料}", material);
@@ -1167,14 +1284,25 @@ std::vector<NXOpen::NXString> BuildDraftNoteLines(const std::string& noteText, b
 
 std::string BuildFlatPatternNoteText(NXOpen::Part* part)
 {
-    NXOpen::Body* body = FirstSolidBody(part);
+    if (LoadActiveFlatPatternNoteFormat().empty()) return "";
+    NXOpen::Body* body = FindLargestTargetLayerSolidBody(part);
+    if (body == nullptr) body = FirstSolidBody(part);
     const std::string material = ObjectAttributeReferenceText(body, "cailiao");
     const std::string thickness = ObjectAttributeReferenceText(body, "Z");
     const std::string quantity = ReadBodyQuantityReferenceText(part, body);
     const std::string mirror = ObjectAttributeReferenceText(body, "MIRR");
     const std::string number = ObjectAttributeReferenceText(body, "bianhao");
 
-    std::string text = LoadFlatPatternNoteFormat();
+    std::string text = LoadActiveFlatPatternNoteFormat();
+    if (text.empty()) return "";
+    if (part != nullptr)
+    {
+        try
+        {
+            ReplaceAllText(text, u8"{文件名}", std::filesystem::u8path(part->Leaf().GetUTF8Text()).stem().u8string());
+        }
+        catch (...) {}
+    }
     ReplaceAllText(text, "{\xE7\xBC\x96\xE5\x8F\xB7=}", number.empty() ? "" : number + "=");
     ReplaceAllText(text, "{\xE7\xBC\x96\xE5\x8F\xB7}", number);
     ReplaceAllText(text, "{\xE6\x9D\x90\xE6\x96\x99}", material);
@@ -17953,7 +18081,7 @@ void CreateFlatPatternNoteBelowView(
                     builder->Style()->LetteringStyle()->SetGeneralTextFont(noteFont);
                 }
             }
-            const std::string displayNoteText = "\xE5\xB1\x95\xE5\xBC\x80\xE5\x9B\xBE\n" + noteText;
+            const std::string displayNoteText = noteText;
             builder->Text()->TextBlock()->SetText(BuildDraftNoteLines(displayNoteText));
 
             NXOpen::Annotations::Annotation::AssociativeOriginData assocOrigin;

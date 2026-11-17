@@ -1,4 +1,8 @@
 #include "StandardPartsLibrary.hpp"
+#include "../../common/ZhihuiContextHelp.hpp"
+#ifdef CreateDialog
+#undef CreateDialog
+#endif
 
 #include <uf.h>
 #include <uf_assem.h>
@@ -3174,6 +3178,7 @@ public:
         : ui_(NXOpen::UI::GetUI()),
           dialog_(ui_->CreateDialog(DialogFilePath().c_str())), resume_(resume)
     {
+        zhihui_context_help::EnsureGlobalHelpLoaded();
         if (resume)
         {
             state_.libraryRootOverride = resume->root;

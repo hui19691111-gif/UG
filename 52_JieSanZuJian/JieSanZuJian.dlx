@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Dialog NX="2412" id="Dialog" icon="JieSanZuJian.bmp" name="Dialog" type="uicomp" title="解散组件" creator="Zhihui" version="1.0.0" Expanded="1" languageInfo="Language and Codeset: simplified chinese 936" ContainerItems="1">
+<item Expanded="1" class="UGS::UICOMP_group" icon="styler_block.bmp" id="selection_group" name="selection_group" presentation="Group" type="uicomp">
+  <PropertyList id="id" mode="0">
+    <Property ClassID="UGS::UI::Comp::Container" dynamic="1" group="Block Specific::" hierarchy="UGS::UICOMP_group" id="Members" mask="16384" name="Members" sname="Members" source="1" type="array">
+      <PropertyList ClassID="UGS::UI::Comp::Container" Expanded="1" hierarchy="UGS::UICOMP_group" icon="tiles_palette.bmp" id="ContainerItems" mode="1">
+        <Property class="UICOMP_selection" hierarchy="" id="component_selection" mask="256" name="component_selection" presentation="Select Object" type="uicomp">
+  <item Expanded="1" class="UICOMP_selection" icon="selection_cursor.bmp" id="component_selection" name="component_selection" presentation="Select Object" type="uicomp">
+    <PropertyList id="id" mode="0">
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="API Name" mask="16400" name="API Name" sname="BlockID" source="3" type="string" value="component_selection"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_selection" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="Label" mask="256" name="Label" sname="LabelString" source="3" type="utfstring" value="选择组件"/>
+      <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="Cue" mask="0" name="Cue" sname="Cue" source="1" type="utfstring" value="选择装配组件。导航器里显示为乘号的多份实例会一起选中"/>
+      <Property ClassID="UGS::UICOMP_selection" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="InterpartSelection" mask="0" name="InterpartSelection" selected="0" sname="InterpartSelection" source="1" type="enum">
+        <Option name="Simple" value="0"/><Option name="Non-associative Interpart Copy Only" value="1"/><Option name="Associative and Non-associative Interpart Copy" value="2"/><Option name="Associative Interpart Copy" value="3"/>
+      </Property>
+      <Property ClassID="UGS::UICOMP_selection" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="StepStatus" mask="16384" name="StepStatus" selected="0" sname="StepStatus" source="1" type="enum">
+        <Option name="Required" value="0"/><Option name="Optional" value="1"/><Option name="Satisfied" value="2"/>
+      </Property>
+      <Property ClassID="UGS::UICOMP_selection" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="Many" mask="256" name="Many" selected="1" sname="SelectMode" source="3" type="enum">
+        <Option name="Single" value="0"/><Option name="Multiple" value="1"/>
+      </Property>
+      <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="DetailedFilter" mask="69632" name="DetailedFilter" size="0" sname="DetailedFilter" source="2" type="selfilter"/>
+      <Property ClassID="UGS::UICOMP_selection" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="MaximumScope" mask="0" name="MaximumScope" selected="3" sname="MaximumScope" source="1" type="enum">
+        <Option name="Entire Assembly" value="3"/><Option name="Within Work Part Only" value="10"/><Option name="Within Work Part and Components" value="11"/>
+      </Property>
+      <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="PickPoint" mask="163844" name="PickPoint" sname="PickPoint" source="3" type="point" value="0.000000 0.000000 0.000000"/>
+      <Property ClassID="UGS::UICOMP_selection" group="Block Specific::" hierarchy="UGS::UICOMP_selection" id="AutomaticProgression" mask="0" name="AutomaticProgression" sname="AutomaticProgression" source="1" type="logical" value="False"/>
+    </PropertyList>
+  </item>
+</Property>
+      </PropertyList>
+    </Property>
+    <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_group" id="API Name" mask="16400" name="API Name" sname="BlockID" source="3" type="string" value="selection_group"/>
+    <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_group" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True"/>
+    <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_group" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True"/>
+    <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_group" id="Expanded" mask="0" name="Expanded" sname="Expanded" source="2" type="logical" value="True"/>
+    <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_group" id="Title" mask="257" name="Title" sname="Label" source="1" type="utfstring" value="选择"/>
+    <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_group" id="Group" mask="4100" name="Group" sname="Group" source="1" type="logical" value="True"/>
+    <Property ClassID="UGS::UICOMP_group" group="Block Specific::" hierarchy="UGS::UICOMP_group" id="Column" mask="16384" name="Column" sname="Column" source="1" type="integer" value="1"/>
+  </PropertyList>
+</item>
+<PropertyList id="id" mode="0">
+  <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True"/>
+  <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True"/>
+  <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True"/>
+  <Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="HideApply" mask="4096" name="HideApply" sname="HideApply" source="3" type="logical" value="True"/>
+  <Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="HelpTag" mask="4096" name="HelpTag" sname="HelpTag" source="3" type="string" value="Zhihui_JieSanZuJian"/>
+  <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="解散组件"/>
+</PropertyList>
+</Dialog>

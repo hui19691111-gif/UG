@@ -1,6 +1,7 @@
 #include "KonFanLaLiao.hpp"
 #include "KonFanLaLiaoCustomFeatureShared.hpp"
 
+#include "../../common/ZhihuiContextHelp.hpp"
 #include "../../common/ZhihuiDialogMemory.hpp"
 
 #include <NXOpen/BlockStyler_PropertyList.hxx>
@@ -515,6 +516,7 @@ KonFanLaLiaoDialog::KonFanLaLiaoDialog()
       refreshing_(false),
       slotsCreated_(false)
 {
+    zhihui_context_help::EnsureGlobalHelpLoaded();
     RepairLegacyTargetBodyCycles();
     dialog_->AddInitializeHandler(
         NXOpen::make_callback(this, &KonFanLaLiaoDialog::initialize_cb));

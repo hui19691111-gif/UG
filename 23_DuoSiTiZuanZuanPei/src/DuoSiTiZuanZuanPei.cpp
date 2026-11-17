@@ -1,4 +1,5 @@
 #include <NXOpen/BlockStyler_BlockDialog.hxx>
+#include <cstring>
 #include <cstdlib>
 #include <stdexcept>
 #include <NXOpen/BlockStyler_Button.hxx>
@@ -11,7 +12,12 @@
 #include <NXOpen/BlockStyler_Tree.hxx>
 #include <NXOpen/BlockStyler_UIBlock.hxx>
 #include <NXOpen/Assemblies_AssemblyManager.hxx>
+#include <NXOpen/Assemblies_Component.hxx>
+#include <NXOpen/Assemblies_ComponentAssembly.hxx>
 #include <NXOpen/Assemblies_CreateNewComponentBuilder.hxx>
+#include <NXOpen/ErrorInfo.hxx>
+#include <NXOpen/ErrorList.hxx>
+#include <NXOpen/PartLoadStatus.hxx>
 #include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/Callback.hxx>
@@ -170,7 +176,8 @@ enum NamingMode
 enum AssemblyOutputMode
 {
     AssemblyOutputModeOnePartPerBodyGroup = 0,
-    AssemblyOutputModeAllBodiesInOnePart = 1
+    AssemblyOutputModeAllBodiesInOnePart = 1,
+    AssemblyOutputModeBodiesToAssemblyGroup = 2
 };
 
 std::string gSelectedOutputDirectory;
@@ -491,6 +498,12 @@ struct MatchedBodyGroup
     std::vector<MatchedBodyInstance> instances;
 };
 
+struct PatternPlacement
+{
+    std::vector<tag_t> bodyTags;
+    RigidTransform3 transformFromTemplate;
+};
+
 struct SameBodySearchData
 {
     std::vector<BodyFingerprint> fingerprints;
@@ -508,6 +521,7 @@ struct AssemblyPreviewRow
     std::string componentName;
     std::string parentName;
     bool manuallyNamed;
+    int displayQuantity;
 };
 
 struct AssemblyConversionResult
@@ -1205,6 +1219,65 @@ double DistanceBetweenPoints(const double lhs[3], const double rhs[3])
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+bool RigidTransformsNearlyEqual(
+    const RigidTransform3& lhs,
+    const RigidTransform3& rhs)
+{
+    if (DistanceBetweenPoints(lhs.origin, rhs.origin) > kDistanceTolerance)
+    {
+        return false;
+    }
+
+    for (int index = 0; index < 9; ++index)
+    {
+        if (!NearlyEqual(lhs.csysMatrix[index], rhs.csysMatrix[index], 1.0e-3))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+Point3 ApplyRigidTransform(const RigidTransform3& transform, const Point3& point)
+{
+    const double source[3] = {point.x, point.y, point.z};
+    double result[3] = {
+        transform.origin[0],
+        transform.origin[1],
+        transform.origin[2]};
+    for (int row = 0; row < 3; ++row)
+    {
+        for (int column = 0; column < 3; ++column)
+        {
+            result[row] += TransformMatrixValue(transform, row, column) * source[column];
+        }
+    }
+    return MakePoint3(result[0], result[1], result[2]);
+}
+
+Point3 RotateByRigidTransform(const RigidTransform3& transform, const Point3& vector)
+{
+    const Point3 zero = MakePoint3(0.0, 0.0, 0.0);
+    return SubtractPoints(
+        ApplyRigidTransform(transform, vector),
+        ApplyRigidTransform(transform, zero));
+}
+
+void AppendUniqueRigidTransform(
+    std::vector<RigidTransform3>& transforms,
+    const RigidTransform3& transform)
+{
+    for (std::size_t index = 0; index < transforms.size(); ++index)
+    {
+        if (RigidTransformsNearlyEqual(transforms[index], transform))
+        {
+            return;
+        }
+    }
+    transforms.push_back(transform);
+}
+
 double DistanceBetweenPoints(const Point3& lhs, const Point3& rhs)
 {
     return PointMagnitude(SubtractPoints(lhs, rhs));
@@ -1584,6 +1657,51 @@ std::string WideToUtf8(const std::wstring& text)
         NULL,
         NULL);
     return result;
+}
+
+std::string WideToLocale(const std::wstring& text)
+{
+    if (text.empty())
+    {
+        return std::string();
+    }
+
+    const int size = WideCharToMultiByte(
+        CP_ACP,
+        0,
+        text.c_str(),
+        -1,
+        NULL,
+        0,
+        NULL,
+        NULL);
+    if (size <= 0)
+    {
+        return std::string();
+    }
+
+    std::string result(static_cast<std::size_t>(size - 1), '\0');
+    WideCharToMultiByte(
+        CP_ACP,
+        0,
+        text.c_str(),
+        -1,
+        &result[0],
+        size,
+        NULL,
+        NULL);
+    return result;
+}
+
+std::string ToLocaleBytes(const std::string& text)
+{
+    if (text.empty())
+    {
+        return text;
+    }
+
+    const std::string localeText = WideToLocale(LocaleToWide(text));
+    return localeText.empty() ? text : localeText;
 }
 
 std::string LocaleBytesToUtf8(const std::string& text)
@@ -2092,7 +2210,7 @@ std::string BuildUniqueComponentPartPath(
     const std::string& directory,
     const std::string& componentStem)
 {
-    const std::string safeStem = SanitizeFileStem(componentStem);
+    const std::string safeStem = ToLocaleBytes(SanitizeFileStem(componentStem));
     for (int suffix = 0; suffix < 1000; ++suffix)
     {
         std::ostringstream name;
@@ -2194,6 +2312,21 @@ std::string BuildSerialComponentName(const std::string& stem, int groupNumber)
          << "_"
          << FormatPaddedNumber(groupNumber, 3);
     return name.str();
+}
+
+std::string BuildAssemblyGroupChildName(
+    const std::string& parentName,
+    int childNumber,
+    const std::string& serialStartText)
+{
+    const std::string serialStart = NormalizeSerialStartText(serialStartText);
+    const int serialNumber =
+        static_cast<int>(std::strtol(serialStart.c_str(), NULL, 10)) + childNumber - 1;
+    const std::string childName =
+        parentName + "-" +
+        FormatPaddedNumber(serialNumber, static_cast<int>(serialStart.size()));
+    const std::string sanitized = SanitizeFileStem(childName);
+    return sanitized.empty() ? SanitizeFileStem(parentName) : sanitized;
 }
 
 std::string BuildComponentNameFromFormat(
@@ -2646,6 +2779,44 @@ void InheritAttributesOntoNewComponent(
     }
 }
 
+NXOpen::Assemblies::Component* AskComponentFromCommit(
+    NXOpen::Part* workPart,
+    NXOpen::NXObject* committedObject,
+    const std::string& componentPartPath)
+{
+    NXOpen::Assemblies::Component* component =
+        dynamic_cast<NXOpen::Assemblies::Component*>(committedObject);
+    if (component != NULL)
+    {
+        return component;
+    }
+
+    const tag_t partTag = UF_PART_ask_part_tag(componentPartPath.c_str());
+    if (workPart == NULL || partTag == NULL_TAG)
+    {
+        return NULL;
+    }
+
+    tag_t* occurrences = NULL;
+    const int count = UF_ASSEM_ask_occs_of_part(workPart->Tag(), partTag, &occurrences);
+    tag_t occurrence = NULL_TAG;
+    if (count > 0 && occurrences != NULL)
+    {
+        occurrence = occurrences[count - 1];
+    }
+    if (occurrences != NULL)
+    {
+        UF_free(occurrences);
+    }
+    if (occurrence == NULL_TAG)
+    {
+        return NULL;
+    }
+
+    return dynamic_cast<NXOpen::Assemblies::Component*>(
+        NXOpen::NXObjectManager::Get(occurrence));
+}
+
 void CreateComponentWithRecordedBuilder(
     NXOpen::Session* session,
     NXOpen::Part* workPart,
@@ -2653,8 +2824,13 @@ void CreateComponentWithRecordedBuilder(
     const std::string& instanceName,
     int units,
     const std::vector<tag_t>& bodyTags,
-    AssemblyConversionResult& result)
+    AssemblyConversionResult& result,
+    NXOpen::Assemblies::Component** createdComponent = NULL)
 {
+    if (createdComponent != NULL)
+    {
+        *createdComponent = NULL;
+    }
     if (session == NULL || session->Parts() == NULL || workPart == NULL ||
         bodyTags.empty())
     {
@@ -2693,8 +2869,9 @@ void CreateComponentWithRecordedBuilder(
     try
     {
         WritePreviewDebugLog("CreateNewComponentBuilder set name=" + instanceName);
+        const std::string localeInstanceName = ToLocaleBytes(instanceName);
         builder->SetNewComponentName(
-            NXOpen::NXString(instanceName, NXOpen::NXString::UTF8));
+            NXOpen::NXString(localeInstanceName, NXOpen::NXString::Locale));
         builder->SetComponentOrigin(
             NXOpen::Assemblies::CreateNewComponentBuilder::ComponentOriginTypeAbsolute);
         WritePreviewDebugLog("CreateNewComponentBuilder set refset");
@@ -2711,7 +2888,7 @@ void CreateComponentWithRecordedBuilder(
         WritePreviewDebugLog("CreateNewComponentBuilder set new file");
         builder->SetNewFile(fileNew);
         WritePreviewDebugLog("CreateNewComponentBuilder commit begin");
-        builder->Commit();
+        NXOpen::NXObject* committedObject = builder->Commit();
         WritePreviewDebugLog("CreateNewComponentBuilder commit end");
         builder->Destroy();
         builder = NULL;
@@ -2719,6 +2896,13 @@ void CreateComponentWithRecordedBuilder(
         session->SetUndoMarkName(undoMark, NXOpen::NXString("Create Same Body Component"));
         session->CleanUpFacetedFacesAndEdges();
         InheritAttributesOntoNewComponent(workPart, componentPartPath, bodies);
+        if (createdComponent != NULL)
+        {
+            *createdComponent = AskComponentFromCommit(
+                workPart,
+                committedObject,
+                componentPartPath);
+        }
         ++result.createdComponents;
     }
     catch (...)
@@ -2775,7 +2959,7 @@ void CreateReferenceComponentPart(
         parentPartTag,
         componentPartPath.c_str(),
         "MODEL",
-        instanceName.c_str(),
+        ToLocaleBytes(instanceName).c_str(),
         units,
         -1,
         origin,
@@ -2807,12 +2991,13 @@ void AddComponentInstance(
         transform.csysMatrix[7],
         transform.csysMatrix[8]};
 
+    const std::string localeInstanceName = ToLocaleBytes(instanceName);
     UF_PART_load_status_t loadStatus = {};
     const int status = UF_ASSEM_add_part_to_assembly2(
         parentPartTag,
         componentPartPath.c_str(),
         "MODEL",
-        instanceName.c_str(),
+        localeInstanceName.c_str(),
         origin,
         csysMatrix,
         -1,
@@ -3466,6 +3651,35 @@ MatchedBodyGroup CombineMatchedBodyGroups(
     return combinedGroup;
 }
 
+std::vector<MatchedBodyGroup> SplitGroupsIntoSingleBodies(
+    const std::vector<MatchedBodyGroup>& groups)
+{
+    std::vector<MatchedBodyGroup> singleGroups;
+    std::set<tag_t> seenTags;
+    for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex)
+    {
+        for (std::size_t instanceIndex = 0;
+             instanceIndex < groups[groupIndex].instances.size();
+             ++instanceIndex)
+        {
+            const MatchedBodyInstance& instance =
+                groups[groupIndex].instances[instanceIndex];
+            if (instance.bodyTag == NULL_TAG ||
+                !seenTags.insert(instance.bodyTag).second)
+            {
+                continue;
+            }
+
+            MatchedBodyGroup singleGroup;
+            MatchedBodyInstance singleInstance = instance;
+            singleInstance.transformFromReference = IdentityTransform();
+            singleGroup.instances.push_back(singleInstance);
+            singleGroups.push_back(singleGroup);
+        }
+    }
+    return singleGroups;
+}
+
 AssemblyConversionResult ConvertAllBodiesToSinglePart(
     NXOpen::Session* session,
     const std::vector<MatchedBodyGroup>& matchedGroups,
@@ -3601,6 +3815,1075 @@ AssemblyConversionResult ConvertAllBodiesToSinglePart(
     return result;
 }
 
+NXOpen::Assemblies::Component* AddEmptyParentComponent(
+    NXOpen::Part* workPart,
+    NXOpen::Part* parentPart,
+    const std::string& parentName)
+{
+    if (workPart == NULL ||
+        workPart->ComponentAssembly() == NULL ||
+        parentPart == NULL)
+    {
+        throw NXOpen::NXException::Create("cannot add an empty parent component");
+    }
+
+    NXOpen::Point3d origin(0.0, 0.0, 0.0);
+    NXOpen::Matrix3x3 orientation;
+    orientation.Xx = 1.0;
+    orientation.Xy = 0.0;
+    orientation.Xz = 0.0;
+    orientation.Yx = 0.0;
+    orientation.Yy = 1.0;
+    orientation.Yz = 0.0;
+    orientation.Zx = 0.0;
+    orientation.Zy = 0.0;
+    orientation.Zz = 1.0;
+
+    const char* referenceSets[] = {"Entire Part", "MODEL"};
+    const std::string localeParentName = ToLocaleBytes(parentName);
+    std::string lastError = "cannot add parent component";
+    for (int index = 0; index < 2; ++index)
+    {
+        NXOpen::PartLoadStatus* loadStatus = NULL;
+        try
+        {
+            NXOpen::Assemblies::Component* component =
+                workPart->ComponentAssembly()->AddComponent(
+                    parentPart,
+                    referenceSets[index],
+                    localeParentName.c_str(),
+                    origin,
+                    orientation,
+                    -1,
+                    &loadStatus);
+            delete loadStatus;
+            if (component == NULL)
+            {
+                throw NXOpen::NXException::Create("parent component was not created");
+            }
+            WritePreviewDebugLog(
+                std::string("Parent component added, refset=") + referenceSets[index]);
+            return component;
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            delete loadStatus;
+            lastError = ex.Message();
+            WritePreviewDebugLog(
+                std::string("Parent component add failed, refset=") +
+                referenceSets[index] +
+                ", " +
+                lastError);
+        }
+    }
+
+    throw NXOpen::NXException::Create(lastError.c_str());
+}
+
+void RestructureChildComponents(
+    NXOpen::Part* workPart,
+    NXOpen::Assemblies::Component* parentComponent,
+    const std::vector<NXOpen::Assemblies::Component*>& childComponents)
+{
+    if (workPart == NULL ||
+        workPart->ComponentAssembly() == NULL ||
+        parentComponent == NULL ||
+        childComponents.empty())
+    {
+        throw NXOpen::NXException::Create("cannot restructure child components");
+    }
+
+    std::vector<NXOpen::Assemblies::Component*> restructuredComponents;
+    NXOpen::ErrorList* errorList = NULL;
+    workPart->ComponentAssembly()->RestructureComponents(
+        childComponents,
+        parentComponent,
+        true,
+        restructuredComponents,
+        &errorList);
+
+    std::string errorText;
+    if (errorList != NULL)
+    {
+        const int errorCount = errorList->Length();
+        for (int index = 0; index < errorCount; ++index)
+        {
+            NXOpen::ErrorInfo* errorInfo = errorList->GetErrorInfo(index);
+            if (errorInfo == NULL)
+            {
+                continue;
+            }
+            if (!errorText.empty())
+            {
+                errorText += "; ";
+            }
+            errorText += errorInfo->Description().GetLocaleText();
+        }
+        delete errorList;
+    }
+
+    if (!errorText.empty() || restructuredComponents.size() != childComponents.size())
+    {
+        std::ostringstream reason;
+        reason << "restructure moved " << restructuredComponents.size()
+               << " of " << childComponents.size();
+        if (!errorText.empty())
+        {
+            reason << ": " << errorText;
+        }
+        throw NXOpen::NXException::Create(reason.str().c_str());
+    }
+}
+
+void AppendComponentFromInstance(
+    tag_t instanceTag,
+    tag_t owningPartTag,
+    std::vector<NXOpen::Assemblies::Component*>& createdComponents)
+{
+    if (instanceTag == NULL_TAG)
+    {
+        return;
+    }
+
+    tag_t* occurrences = NULL;
+    const int count = UF_ASSEM_ask_part_occs_of_inst(instanceTag, &occurrences);
+    tag_t chosen = NULL_TAG;
+    for (int index = 0; index < count && occurrences != NULL; ++index)
+    {
+        tag_t owning = NULL_TAG;
+        if (UF_OBJ_ask_owning_part(occurrences[index], &owning) == 0 &&
+            owning == owningPartTag)
+        {
+            chosen = occurrences[index];
+            break;
+        }
+    }
+    if (chosen == NULL_TAG && count > 0 && occurrences != NULL)
+    {
+        chosen = occurrences[0];
+    }
+
+    if (chosen != NULL_TAG)
+    {
+        NXOpen::Assemblies::Component* component =
+            dynamic_cast<NXOpen::Assemblies::Component*>(
+                NXOpen::NXObjectManager::Get(chosen));
+        if (component != NULL)
+        {
+            createdComponents.push_back(component);
+        }
+    }
+
+    std::ostringstream line;
+    line << "Shared part instance occurrences=" << count
+         << ", chosen=" << chosen;
+    WritePreviewDebugLog(line.str());
+    if (occurrences != NULL)
+    {
+        UF_free(occurrences);
+    }
+}
+
+void CreateBodyGroupComponent(
+    NXOpen::Session* session,
+    NXOpen::Part* workPart,
+    const std::string& outputDirectory,
+    const std::string& childName,
+    const MatchedBodyGroup& group,
+    AssemblyConversionResult& result,
+    std::vector<NXOpen::Assemblies::Component*>& createdComponents)
+{
+    if (session == NULL || workPart == NULL || group.instances.empty())
+    {
+        throw NXOpen::NXException::Create("shape group has no body");
+    }
+
+    const std::string childPartPath =
+        BuildUniqueComponentPartPath(outputDirectory, childName);
+    const int partUnits = AskPartUnits(workPart->Tag());
+    const RigidTransform3 referenceBodyTransform =
+        AskSelectedBodyToAssemblyTransform(group.instances[0].bodyTag);
+    WritePreviewDebugLog(
+        "Assembly group shared part path=" + childPartPath +
+        ", references=" + FormatPaddedNumber(
+            static_cast<int>(group.instances.size()), 1));
+
+    std::vector<NXOpen::Assemblies::Component*> createdHere;
+    NXOpen::Assemblies::Component* firstComponent = NULL;
+    std::vector<tag_t> referenceBody(1, group.instances[0].bodyTag);
+    CreateComponentWithRecordedBuilder(
+        session,
+        workPart,
+        childPartPath,
+        childName,
+        partUnits,
+        referenceBody,
+        result,
+        &firstComponent);
+    if (firstComponent == NULL)
+    {
+        throw NXOpen::NXException::Create("shared part component was not created");
+    }
+    createdHere.push_back(firstComponent);
+
+    for (std::size_t instanceIndex = 1;
+         instanceIndex < group.instances.size();
+         ++instanceIndex)
+    {
+        const RigidTransform3 componentTransform = ComposeTransforms(
+            group.instances[instanceIndex].transformFromReference,
+            referenceBodyTransform);
+        tag_t instanceTag = NULL_TAG;
+        const std::string instanceName =
+            childName + "_" +
+            FormatPaddedNumber(static_cast<int>(instanceIndex + 1), 3);
+        AddComponentInstance(
+            workPart->Tag(),
+            childPartPath,
+            instanceName,
+            componentTransform,
+            &instanceTag);
+        const std::size_t beforeCount = createdHere.size();
+        AppendComponentFromInstance(instanceTag, workPart->Tag(), createdHere);
+        if (createdHere.size() == beforeCount)
+        {
+            throw NXOpen::NXException::Create("shared part reference was not created");
+        }
+        ++result.createdComponents;
+    }
+
+    std::vector<tag_t> extraBodies;
+    AppendOriginalGroupBodyTags(group, extraBodies);
+    AssemblyConversionResult deleteResult = {};
+    DeleteOriginalBodyTagsInBatch(extraBodies, deleteResult);
+    result.deletedOriginalBodies += deleteResult.deletedOriginalBodies;
+
+    result.partFiles.push_back(childPartPath);
+    createdComponents.insert(
+        createdComponents.end(),
+        createdHere.begin(),
+        createdHere.end());
+}
+
+AssemblyConversionResult ConvertBodiesToAssemblyGroup(
+    NXOpen::Session* session,
+    const std::vector<MatchedBodyGroup>& matchedGroups,
+    const std::string& parentName,
+    const std::vector<std::string>& childNames,
+    const std::string& serialStart,
+    bool retainOriginalBodies)
+{
+    AssemblyConversionResult result = {};
+    const std::vector<MatchedBodyGroup>& sourceGroups = matchedGroups;
+    if (session == NULL || sourceGroups.empty())
+    {
+        result.failedGroups = sourceGroups.empty() ? 1 : 0;
+        if (sourceGroups.empty())
+        {
+            result.failureReasons.push_back("assembly group has no bodies");
+        }
+        return result;
+    }
+
+    NXOpen::Part* workPart = session->Parts()->Work();
+    if (workPart == NULL)
+    {
+        result.failedGroups = static_cast<int>(sourceGroups.size());
+        result.failureReasons.push_back("work part is null");
+        return result;
+    }
+
+    const tag_t workPartTag = workPart->Tag();
+    const int partUnits = AskPartUnits(workPartTag);
+    const std::string outputDirectory = BuildAssemblyOutputDirectory(workPart);
+    if (!EnsureDirectoryExists(outputDirectory))
+    {
+        result.failedGroups = static_cast<int>(sourceGroups.size());
+        std::ostringstream reason;
+        reason << "cannot create output directory: " << outputDirectory
+               << ", Win32 error=" << GetLastError();
+        result.failureReasons.push_back(reason.str());
+        return result;
+    }
+
+    const std::string safeParentName = SanitizeFileStem(
+        parentName.empty() ? kDefaultComponentNamePrefix : parentName);
+    std::vector<tag_t> copiedBodyTags;
+    std::vector<MatchedBodyGroup> conversionGroups = sourceGroups;
+    try
+    {
+        if (retainOriginalBodies)
+        {
+            conversionGroups = CopyGroupsAsNonParametricBodies(
+                session,
+                sourceGroups,
+                copiedBodyTags);
+        }
+
+        const std::string parentPartPath =
+            BuildUniqueComponentPartPath(outputDirectory, safeParentName);
+        WritePreviewDebugLog("Assembly group parent path=" + parentPartPath);
+        NXOpen::Part* parentPart = CreateTemplateComponentPart(
+            session,
+            parentPartPath,
+            partUnits);
+        if (parentPart == NULL)
+        {
+            throw NXOpen::NXException::Create("parent part was not created");
+        }
+        SaveComponentPart(parentPart);
+
+        NXOpen::Assemblies::Component* parentComponent = AddEmptyParentComponent(
+            workPart,
+            parentPart,
+            safeParentName);
+        ++result.createdComponents;
+        result.partFiles.push_back(parentPartPath);
+
+        std::vector<NXOpen::Assemblies::Component*> childComponents;
+        childComponents.reserve(conversionGroups.size());
+        for (std::size_t index = 0; index < conversionGroups.size(); ++index)
+        {
+            if (conversionGroups[index].instances.empty())
+            {
+                ++result.failedGroups;
+                result.failureReasons.push_back("assembly group child has no body");
+                continue;
+            }
+
+            try
+            {
+                std::string childName;
+                if (index < childNames.size() && !childNames[index].empty())
+                {
+                    childName = childNames[index];
+                }
+                else
+                {
+                    childName = BuildAssemblyGroupChildName(
+                        safeParentName,
+                        static_cast<int>(index + 1),
+                        serialStart);
+                }
+
+                CreateBodyGroupComponent(
+                    session,
+                    workPart,
+                    outputDirectory,
+                    childName,
+                    conversionGroups[index],
+                    result,
+                    childComponents);
+            }
+            catch (const NXOpen::NXException& ex)
+            {
+                ++result.failedGroups;
+                std::ostringstream reason;
+                reason << "assembly group child " << (index + 1)
+                       << " failed: NX error " << ex.ErrorCode()
+                       << ", " << UfErrorMessage(ex.ErrorCode())
+                       << ", " << ex.Message();
+                result.failureReasons.push_back(reason.str());
+            }
+        }
+
+        if (childComponents.empty())
+        {
+            throw NXOpen::NXException::Create("no child components were created");
+        }
+
+        RestructureChildComponents(workPart, parentComponent, childComponents);
+        InheritAttributesOntoNewComponent(
+            workPart,
+            parentPartPath,
+            std::vector<NXOpen::Body*>());
+        SaveComponentPart(parentPart);
+        result.convertedGroups = static_cast<int>(childComponents.size());
+        WritePreviewDebugLog(
+            "Assembly group parent=" + safeParentName +
+            ", children=" + FormatPaddedNumber(
+                static_cast<int>(childComponents.size()), 1));
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        if (result.failedGroups == 0)
+        {
+            result.failedGroups = 1;
+        }
+        std::ostringstream reason;
+        reason << "assembly group failed: NX error " << ex.ErrorCode()
+               << ", " << UfErrorMessage(ex.ErrorCode())
+               << ", " << ex.Message();
+        result.failureReasons.push_back(reason.str());
+    }
+    catch (const std::exception& ex)
+    {
+        if (result.failedGroups == 0)
+        {
+            result.failedGroups = 1;
+        }
+        result.failureReasons.push_back(
+            std::string("assembly group failed: ") + ex.what());
+    }
+
+    if (retainOriginalBodies)
+    {
+        DeleteWorkPartBodiesSilently(copiedBodyTags, workPartTag);
+        WritePreviewDebugLog("Assembly group: original bodies and parameters kept");
+    }
+    UF_DISP_refresh();
+    return result;
+}
+
+AssemblyConversionResult ConvertConstellationToSinglePart(
+    NXOpen::Session* session,
+    const std::vector<PatternPlacement>& placements,
+    const std::string& componentName,
+    bool retainOriginalBodies)
+{
+    AssemblyConversionResult result = {};
+    if (session == NULL || placements.empty() || placements[0].bodyTags.empty())
+    {
+        result.failedGroups = 1;
+        result.failureReasons.push_back("constellation pattern is empty");
+        return result;
+    }
+
+    NXOpen::Part* workPart = session->Parts()->Work();
+    if (workPart == NULL)
+    {
+        result.failedGroups = 1;
+        result.failureReasons.push_back("work part is null");
+        return result;
+    }
+
+    const tag_t parentPartTag = workPart->Tag();
+    const int parentUnits = AskPartUnits(parentPartTag);
+    const std::string outputDirectory = BuildAssemblyOutputDirectory(workPart);
+    if (!EnsureDirectoryExists(outputDirectory))
+    {
+        result.failedGroups = 1;
+        std::ostringstream reason;
+        reason << "cannot create output directory: " << outputDirectory
+               << ", Win32 error=" << GetLastError();
+        result.failureReasons.push_back(reason.str());
+        return result;
+    }
+
+    const std::string safeName = componentName.empty()
+        ? BuildDefaultComponentName(1)
+        : componentName;
+    const std::string componentPartPath =
+        BuildUniqueComponentPartPath(outputDirectory, safeName);
+
+    std::vector<tag_t> templateBodyTags = placements[0].bodyTags;
+    std::vector<tag_t> copiedBodyTags;
+    try
+    {
+        const RigidTransform3 referenceBodyTransform =
+            AskSelectedBodyToAssemblyTransform(placements[0].bodyTags[0]);
+
+        if (retainOriginalBodies)
+        {
+            MatchedBodyGroup templateGroup;
+            for (std::size_t index = 0; index < templateBodyTags.size(); ++index)
+            {
+                MatchedBodyInstance instance = {};
+                instance.bodyTag = templateBodyTags[index];
+                instance.transformFromReference = IdentityTransform();
+                templateGroup.instances.push_back(instance);
+            }
+            std::vector<MatchedBodyGroup> sourceGroups(1, templateGroup);
+            const std::vector<MatchedBodyGroup> copiedGroups =
+                CopyGroupsAsNonParametricBodies(session, sourceGroups, copiedBodyTags);
+            templateBodyTags.clear();
+            if (!copiedGroups.empty())
+            {
+                for (std::size_t index = 0; index < copiedGroups[0].instances.size(); ++index)
+                {
+                    templateBodyTags.push_back(copiedGroups[0].instances[index].bodyTag);
+                }
+            }
+        }
+
+        if (templateBodyTags.empty())
+        {
+            throw NXOpen::NXException::Create("constellation template bodies are empty");
+        }
+
+        WritePreviewDebugLog("Constellation single part path=" + componentPartPath);
+        CreateComponentWithRecordedBuilder(
+            session,
+            workPart,
+            componentPartPath,
+            BuildComponentInstanceName(1, 1, safeName),
+            parentUnits,
+            templateBodyTags,
+            result);
+
+        for (std::size_t placementIndex = 1;
+             placementIndex < placements.size();
+             ++placementIndex)
+        {
+            const RigidTransform3 componentTransform = ComposeTransforms(
+                placements[placementIndex].transformFromTemplate,
+                referenceBodyTransform);
+            tag_t instanceTag = NULL_TAG;
+            AddComponentInstance(
+                parentPartTag,
+                componentPartPath,
+                BuildComponentInstanceName(
+                    1,
+                    static_cast<int>(placementIndex + 1),
+                    safeName),
+                componentTransform,
+                &instanceTag);
+            ++result.createdComponents;
+            std::ostringstream line;
+            line << "Constellation instance added index=" << (placementIndex + 1)
+                 << ", tag=" << instanceTag;
+            WritePreviewDebugLog(line.str());
+        }
+
+        if (!retainOriginalBodies)
+        {
+            std::vector<tag_t> bodiesToDelete;
+            for (std::size_t placementIndex = 1;
+                 placementIndex < placements.size();
+                 ++placementIndex)
+            {
+                for (std::size_t bodyIndex = 0;
+                     bodyIndex < placements[placementIndex].bodyTags.size();
+                     ++bodyIndex)
+                {
+                    bodiesToDelete.push_back(
+                        placements[placementIndex].bodyTags[bodyIndex]);
+                }
+            }
+            AssemblyConversionResult deleteResult = {};
+            DeleteOriginalBodyTagsInBatch(bodiesToDelete, deleteResult);
+            result.deletedOriginalBodies += deleteResult.deletedOriginalBodies;
+        }
+
+        result.convertedGroups = 1;
+        result.partFiles.push_back(componentPartPath);
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        result.failedGroups = 1;
+        std::ostringstream reason;
+        reason << "constellation single part failed: NX error " << ex.ErrorCode()
+               << ", " << UfErrorMessage(ex.ErrorCode())
+               << ", " << ex.Message();
+        result.failureReasons.push_back(reason.str());
+    }
+    catch (const std::exception& ex)
+    {
+        result.failedGroups = 1;
+        result.failureReasons.push_back(
+            std::string("constellation single part failed: ") + ex.what());
+    }
+
+    if (retainOriginalBodies)
+    {
+        DeleteWorkPartBodiesSilently(copiedBodyTags, parentPartTag);
+        WritePreviewDebugLog(
+            "Constellation single part: original bodies and parameters kept");
+    }
+    UF_DISP_refresh();
+    return result;
+}
+
+tag_t FindReferenceSetByName(tag_t partTag, const char* referenceSetName)
+{
+    if (partTag == NULL_TAG || referenceSetName == NULL)
+    {
+        return NULL_TAG;
+    }
+
+    tag_t object = NULL_TAG;
+    UF_OBJ_cycle_objs_in_part(partTag, UF_reference_set_type, &object);
+    while (object != NULL_TAG)
+    {
+        char objectName[UF_OBJ_NAME_BUFSIZE] = {};
+        if (UF_OBJ_ask_name(object, objectName) == 0 &&
+            std::strcmp(objectName, referenceSetName) == 0)
+        {
+            return object;
+        }
+        UF_OBJ_cycle_objs_in_part(partTag, UF_reference_set_type, &object);
+    }
+    return NULL_TAG;
+}
+
+void RestoreWorkAndDisplayParts(
+    NXOpen::Session* session,
+    NXOpen::Part* originalWorkPart,
+    NXOpen::Part* originalDisplayPart)
+{
+    if (session == NULL || session->Parts() == NULL)
+    {
+        return;
+    }
+
+    if (originalDisplayPart != NULL &&
+        session->Parts()->Display() != originalDisplayPart)
+    {
+        NXOpen::PartLoadStatus* displayLoadStatus = NULL;
+        session->Parts()->SetDisplay(
+            originalDisplayPart,
+            false,
+            true,
+            &displayLoadStatus);
+        delete displayLoadStatus;
+    }
+    if (originalWorkPart != NULL && session->Parts()->Work() != originalWorkPart)
+    {
+        session->Parts()->SetWork(originalWorkPart);
+    }
+}
+
+bool TryAskBodyCentroid(tag_t bodyTag, Point3& centroid);
+
+std::vector<tag_t> ListOwnedSolidBodyTags(NXOpen::Part* part)
+{
+    std::vector<tag_t> tags;
+    if (part == NULL || part->Bodies() == NULL)
+    {
+        return tags;
+    }
+
+    NXOpen::BodyCollection* bodies = part->Bodies();
+    for (NXOpen::BodyCollection::iterator it = bodies->begin(); it != bodies->end(); ++it)
+    {
+        NXOpen::Body* body = *it;
+        if (body == NULL || UF_ASSEM_is_occurrence(body->Tag()))
+        {
+            continue;
+        }
+
+        int bodyType = 0;
+        if (UF_MODL_ask_body_type(body->Tag(), &bodyType) == 0 &&
+            bodyType == UF_MODL_SOLID_BODY)
+        {
+            tags.push_back(body->Tag());
+        }
+    }
+    return tags;
+}
+
+tag_t ResolveBodyPrototypeInPart(tag_t bodyTag, tag_t parentPartTag)
+{
+    if (bodyTag == NULL_TAG || parentPartTag == NULL_TAG)
+    {
+        return NULL_TAG;
+    }
+
+    tag_t candidate = bodyTag;
+    if (UF_ASSEM_is_occurrence(bodyTag))
+    {
+        const tag_t prototype = UF_ASSEM_ask_prototype_of_occ(bodyTag);
+        if (prototype != NULL_TAG)
+        {
+            candidate = prototype;
+        }
+    }
+
+    tag_t owningPartTag = NULL_TAG;
+    if (UF_OBJ_ask_owning_part(candidate, &owningPartTag) == 0 &&
+        owningPartTag == parentPartTag)
+    {
+        return candidate;
+    }
+    return NULL_TAG;
+}
+
+std::vector<tag_t> MatchParentBodiesToCentroids(
+    const std::vector<Point3>& centroids,
+    const std::vector<tag_t>& parentBodies)
+{
+    std::vector<tag_t> matched(centroids.size(), NULL_TAG);
+    std::vector<bool> used(parentBodies.size(), false);
+    for (std::size_t index = 0; index < centroids.size(); ++index)
+    {
+        double bestDistance = 1.0e30;
+        std::size_t bestBody = parentBodies.size();
+        for (std::size_t bodyIndex = 0; bodyIndex < parentBodies.size(); ++bodyIndex)
+        {
+            if (used[bodyIndex])
+            {
+                continue;
+            }
+
+            Point3 centroid;
+            if (!TryAskBodyCentroid(parentBodies[bodyIndex], centroid))
+            {
+                continue;
+            }
+
+            const double distance = DistanceBetweenPoints(centroids[index], centroid);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                bestBody = bodyIndex;
+            }
+        }
+
+        if (bestBody < parentBodies.size() && bestDistance <= 1.0)
+        {
+            used[bestBody] = true;
+            matched[index] = parentBodies[bestBody];
+            std::ostringstream line;
+            line << "Parent body matched slot=" << (index + 1)
+                 << ", tag=" << parentBodies[bestBody]
+                 << ", centroidDelta=" << bestDistance;
+            WritePreviewDebugLog(line.str());
+        }
+    }
+    return matched;
+}
+
+std::vector<MatchedBodyGroup> GroupBodiesByShape(const std::vector<tag_t>& bodyTags);
+
+void CreateChildComponentsInPart(
+    NXOpen::Session* session,
+    NXOpen::Part* parentPart,
+    const std::string& outputDirectory,
+    const std::vector<tag_t>& bodyTags,
+    const std::vector<Point3>& bodyCentroids,
+    const std::string& parentName,
+    const std::vector<std::string>& childNames,
+    const std::string& serialStart,
+    AssemblyConversionResult& result,
+    std::vector<tag_t>& childOccurrenceTags)
+{
+    if (session == NULL || parentPart == NULL || bodyTags.empty())
+    {
+        throw NXOpen::NXException::Create("parent part has no bodies to split");
+    }
+
+    NXOpen::Part* originalWorkPart = session->Parts()->Work();
+    NXOpen::Part* originalDisplayPart = session->Parts()->Display();
+    childOccurrenceTags.clear();
+    try
+    {
+        if (session->Parts()->Work() != parentPart)
+        {
+            session->Parts()->SetWork(parentPart);
+        }
+
+        const std::vector<tag_t> parentBodies = ListOwnedSolidBodyTags(parentPart);
+        const std::vector<tag_t> matchedBodies =
+            MatchParentBodiesToCentroids(bodyCentroids, parentBodies);
+        {
+            std::ostringstream line;
+            line << "Parent part solids=" << parentBodies.size()
+                 << ", templateBodies=" << bodyTags.size();
+            WritePreviewDebugLog(line.str());
+        }
+
+        std::vector<tag_t> resolvedTags;
+        resolvedTags.reserve(bodyTags.size());
+        for (std::size_t index = 0; index < bodyTags.size(); ++index)
+        {
+            tag_t bodyTag = NULL_TAG;
+            if (index < matchedBodies.size())
+            {
+                bodyTag = matchedBodies[index];
+            }
+            if (bodyTag == NULL_TAG)
+            {
+                bodyTag = ResolveBodyPrototypeInPart(bodyTags[index], parentPart->Tag());
+            }
+            tag_t owningPartTag = NULL_TAG;
+            UF_OBJ_ask_owning_part(bodyTags[index], &owningPartTag);
+            {
+                std::ostringstream line;
+                line << "Resolve inner body slot=" << (index + 1)
+                     << ", original=" << bodyTags[index]
+                     << ", status=" << UF_OBJ_ask_status(bodyTags[index])
+                     << ", occurrence=" << UF_ASSEM_is_occurrence(bodyTags[index])
+                     << ", owning=" << owningPartTag
+                     << ", resolved=" << bodyTag;
+                WritePreviewDebugLog(line.str());
+            }
+            if (bodyTag == NULL_TAG)
+            {
+                std::ostringstream reason;
+                reason << "template body " << (index + 1)
+                       << " was not found among " << parentBodies.size()
+                       << " solids in the parent part";
+                throw NXOpen::NXException::Create(reason.str().c_str());
+            }
+            resolvedTags.push_back(bodyTag);
+        }
+
+        const std::vector<MatchedBodyGroup> shapeGroups =
+            GroupBodiesByShape(resolvedTags);
+        {
+            std::ostringstream line;
+            line << "Inner shape groups=" << shapeGroups.size()
+                 << ", templateBodies=" << resolvedTags.size();
+            WritePreviewDebugLog(line.str());
+        }
+
+        const tag_t modelReferenceSet = FindReferenceSetByName(parentPart->Tag(), "MODEL");
+        for (std::size_t groupIndex = 0; groupIndex < shapeGroups.size(); ++groupIndex)
+        {
+            std::string childName;
+            if (groupIndex < childNames.size() && !childNames[groupIndex].empty())
+            {
+                childName = childNames[groupIndex];
+            }
+            else
+            {
+                childName = BuildAssemblyGroupChildName(
+                    parentName,
+                    static_cast<int>(groupIndex + 1),
+                    serialStart);
+            }
+
+            std::vector<NXOpen::Assemblies::Component*> createdComponents;
+            CreateBodyGroupComponent(
+                session,
+                parentPart,
+                outputDirectory,
+                childName,
+                shapeGroups[groupIndex],
+                result,
+                createdComponents);
+            for (std::size_t componentIndex = 0;
+                 componentIndex < createdComponents.size();
+                 ++componentIndex)
+            {
+                NXOpen::Assemblies::Component* childComponent =
+                    createdComponents[componentIndex];
+                if (childComponent == NULL)
+                {
+                    continue;
+                }
+                childOccurrenceTags.push_back(childComponent->Tag());
+                if (modelReferenceSet != NULL_TAG)
+                {
+                    tag_t member = childComponent->Tag();
+                    const int addStatus = UF_ASSEM_add_ref_set_members(
+                        modelReferenceSet,
+                        1,
+                        &member);
+                    std::ostringstream line;
+                    line << "Add child to MODEL status=" << addStatus
+                         << ", child=" << childName
+                         << ", index=" << (componentIndex + 1);
+                    WritePreviewDebugLog(line.str());
+                }
+            }
+        }
+
+        SaveComponentPart(parentPart);
+    }
+    catch (...)
+    {
+        RestoreWorkAndDisplayParts(session, originalWorkPart, originalDisplayPart);
+        throw;
+    }
+    RestoreWorkAndDisplayParts(session, originalWorkPart, originalDisplayPart);
+}
+
+AssemblyConversionResult ConvertConstellationToAssemblyGroup(
+    NXOpen::Session* session,
+    const std::vector<PatternPlacement>& placements,
+    const std::string& parentName,
+    const std::vector<std::string>& childNames,
+    const std::string& serialStart,
+    bool retainOriginalBodies)
+{
+    AssemblyConversionResult result = {};
+    if (session == NULL || placements.empty() || placements[0].bodyTags.empty())
+    {
+        result.failedGroups = 1;
+        result.failureReasons.push_back("assembly group pattern is empty");
+        return result;
+    }
+
+    NXOpen::Part* workPart = session->Parts()->Work();
+    if (workPart == NULL)
+    {
+        result.failedGroups = 1;
+        result.failureReasons.push_back("work part is null");
+        return result;
+    }
+
+    const tag_t upperPartTag = workPart->Tag();
+    const int partUnits = AskPartUnits(upperPartTag);
+    const std::string outputDirectory = BuildAssemblyOutputDirectory(workPart);
+    if (!EnsureDirectoryExists(outputDirectory))
+    {
+        result.failedGroups = 1;
+        std::ostringstream reason;
+        reason << "cannot create output directory: " << outputDirectory
+               << ", Win32 error=" << GetLastError();
+        result.failureReasons.push_back(reason.str());
+        return result;
+    }
+
+    const std::string safeParentName = SanitizeFileStem(
+        parentName.empty() ? kDefaultComponentNamePrefix : parentName);
+    const std::string parentPartPath =
+        BuildUniqueComponentPartPath(outputDirectory, safeParentName);
+
+    std::vector<tag_t> templateBodyTags = placements[0].bodyTags;
+    std::vector<tag_t> copiedBodyTags;
+    try
+    {
+        const RigidTransform3 referenceBodyTransform =
+            AskSelectedBodyToAssemblyTransform(placements[0].bodyTags[0]);
+
+        if (retainOriginalBodies)
+        {
+            MatchedBodyGroup templateGroup;
+            for (std::size_t index = 0; index < templateBodyTags.size(); ++index)
+            {
+                MatchedBodyInstance instance = {};
+                instance.bodyTag = templateBodyTags[index];
+                instance.transformFromReference = IdentityTransform();
+                templateGroup.instances.push_back(instance);
+            }
+            std::vector<MatchedBodyGroup> sourceGroups(1, templateGroup);
+            const std::vector<MatchedBodyGroup> copiedGroups =
+                CopyGroupsAsNonParametricBodies(session, sourceGroups, copiedBodyTags);
+            templateBodyTags.clear();
+            if (!copiedGroups.empty())
+            {
+                for (std::size_t index = 0; index < copiedGroups[0].instances.size(); ++index)
+                {
+                    templateBodyTags.push_back(copiedGroups[0].instances[index].bodyTag);
+                }
+            }
+        }
+
+        if (templateBodyTags.empty())
+        {
+            throw NXOpen::NXException::Create("assembly group template bodies are empty");
+        }
+
+        std::vector<Point3> templateCentroids;
+        templateCentroids.reserve(templateBodyTags.size());
+        for (std::size_t index = 0; index < templateBodyTags.size(); ++index)
+        {
+            Point3 centroid;
+            if (!TryAskBodyCentroid(templateBodyTags[index], centroid))
+            {
+                throw NXOpen::NXException::Create("assembly group template centroid failed");
+            }
+            templateCentroids.push_back(centroid);
+        }
+
+        WritePreviewDebugLog("Assembly group parent path=" + parentPartPath);
+        NXOpen::Assemblies::Component* parentComponent = NULL;
+        CreateComponentWithRecordedBuilder(
+            session,
+            workPart,
+            parentPartPath,
+            safeParentName,
+            partUnits,
+            templateBodyTags,
+            result,
+            &parentComponent);
+
+        for (std::size_t placementIndex = 1;
+             placementIndex < placements.size();
+             ++placementIndex)
+        {
+            const RigidTransform3 componentTransform = ComposeTransforms(
+                placements[placementIndex].transformFromTemplate,
+                referenceBodyTransform);
+            tag_t instanceTag = NULL_TAG;
+            const std::string instanceName =
+                safeParentName + "_" +
+                FormatPaddedNumber(static_cast<int>(placementIndex + 1), 3);
+            AddComponentInstance(
+                upperPartTag,
+                parentPartPath,
+                instanceName,
+                componentTransform,
+                &instanceTag);
+            ++result.createdComponents;
+            std::ostringstream line;
+            line << "Assembly group reference added index=" << (placementIndex + 1)
+                 << ", tag=" << instanceTag;
+            WritePreviewDebugLog(line.str());
+        }
+
+        NXOpen::Part* parentPart = FindLoadedPartByPath(parentPartPath);
+        std::vector<tag_t> childOccurrenceTags;
+        CreateChildComponentsInPart(
+            session,
+            parentPart,
+            outputDirectory,
+            templateBodyTags,
+            templateCentroids,
+            safeParentName,
+            childNames,
+            serialStart,
+            result,
+            childOccurrenceTags);
+
+        if (!retainOriginalBodies)
+        {
+            std::vector<tag_t> bodiesToDelete;
+            for (std::size_t placementIndex = 1;
+                 placementIndex < placements.size();
+                 ++placementIndex)
+            {
+                for (std::size_t bodyIndex = 0;
+                     bodyIndex < placements[placementIndex].bodyTags.size();
+                     ++bodyIndex)
+                {
+                    bodiesToDelete.push_back(
+                        placements[placementIndex].bodyTags[bodyIndex]);
+                }
+            }
+            AssemblyConversionResult deleteResult = {};
+            DeleteOriginalBodyTagsInBatch(bodiesToDelete, deleteResult);
+            result.deletedOriginalBodies += deleteResult.deletedOriginalBodies;
+        }
+
+        result.convertedGroups = static_cast<int>(placements.size());
+        result.partFiles.push_back(parentPartPath);
+        std::ostringstream done;
+        done << "Assembly group parent=" << safeParentName
+             << ", references=" << placements.size()
+             << ", templateBodies=" << templateBodyTags.size();
+        WritePreviewDebugLog(done.str());
+        (void)parentComponent;
+        (void)childOccurrenceTags;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        result.failedGroups = 1;
+        std::ostringstream reason;
+        reason << "assembly group pattern failed: NX error " << ex.ErrorCode()
+               << ", " << UfErrorMessage(ex.ErrorCode())
+               << ", " << ex.Message();
+        result.failureReasons.push_back(reason.str());
+    }
+    catch (const std::exception& ex)
+    {
+        result.failedGroups = 1;
+        result.failureReasons.push_back(
+            std::string("assembly group pattern failed: ") + ex.what());
+    }
+
+    if (retainOriginalBodies)
+    {
+        DeleteWorkPartBodiesSilently(copiedBodyTags, upperPartTag);
+        WritePreviewDebugLog(
+            "Assembly group pattern: original bodies and parameters kept");
+    }
+    UF_DISP_refresh();
+    return result;
+}
+
 int AskPartUnits(tag_t partTag)
 {
     int units = UF_PART_METRIC;
@@ -3690,6 +4973,22 @@ void AskBodyMassProperties(
         centroid[1] = ConvertMassPropsLengthToPartUnits(massProps[4], partUnits, massPropsUnitsCode);
         centroid[2] = ConvertMassPropsLengthToPartUnits(massProps[5], partUnits, massPropsUnitsCode);
     }
+}
+
+bool TryAskBodyCentroid(tag_t bodyTag, Point3& centroid)
+{
+    double coordinates[3] = {};
+    try
+    {
+        AskBodyMassProperties(bodyTag, NULL, coordinates);
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    centroid = MakePoint3(coordinates[0], coordinates[1], coordinates[2]);
+    return true;
 }
 
 double AskEdgeLength(tag_t edgeTag)
@@ -4767,6 +6066,7 @@ bool TryAnchorPlaneGroupMatch(
     std::vector<tag_t>* activeDebugObjectTags,
     bool* coordinateDebugCanceled,
     BodyMatchInfo* matchInfo,
+    std::vector<RigidTransform3>* matchedTransforms,
     std::string& rejectReason)
 {
     if (candidateGroup.faceIndexes.empty())
@@ -4784,6 +6084,8 @@ bool TryAnchorPlaneGroupMatch(
     const PlaneFaceFeature& referenceFace = reference.planeFaces[referenceGroup.faceIndexes[0]];
     const LocalCoordinateSignature referenceSignature =
         BuildLocalCoordinateSignature(reference, referenceFace.frame);
+    const std::size_t collectedBefore =
+        matchedTransforms == NULL ? 0 : matchedTransforms->size();
 
     std::string firstLocalRejectReason;
     for (std::size_t candIndex = 0; candIndex < candidateGroup.faceIndexes.size(); ++candIndex)
@@ -4841,6 +6143,15 @@ bool TryAnchorPlaneGroupMatch(
                     variantIndex,
                     localRejectReason))
             {
+                if (matchedTransforms != NULL)
+                {
+                    AppendUniqueRigidTransform(
+                        *matchedTransforms,
+                        BuildReferenceToCandidateTransform(
+                            referenceFace.frame,
+                            candidateVariantFrame));
+                    continue;
+                }
                 if (matchInfo != NULL)
                 {
                     matchInfo->referenceFrame = referenceFace.frame;
@@ -4873,6 +6184,12 @@ bool TryAnchorPlaneGroupMatch(
                 firstLocalRejectReason = stream.str();
             }
         }
+    }
+
+    if (matchedTransforms != NULL && matchedTransforms->size() > collectedBefore)
+    {
+        rejectReason.clear();
+        return true;
     }
 
     rejectReason = firstLocalRejectReason.empty()
@@ -4970,6 +6287,7 @@ bool BodiesMatchByAnchorPlaneCoordinates(
                 activeDebugObjectTags,
                 coordinateDebugCanceled,
                 matchInfo,
+                NULL,
                 anchorRejectReason))
         {
             return true;
@@ -5001,6 +6319,427 @@ bool BodiesMatchByAnchorPlaneCoordinates(
         ? "no unique or two-count planar anchor group"
         : firstAnchorRejectReason;
     return false;
+}
+
+void CollectMatchingRigidTransforms(
+    const BodyFingerprint& reference,
+    const BodyFingerprint& candidate,
+    std::vector<RigidTransform3>& transforms)
+{
+    for (std::size_t expectedCount = 1; expectedCount <= 2; ++expectedCount)
+    {
+        const int referenceGroupIndex = FindLargestPlaneFaceGroup(reference, expectedCount);
+        if (referenceGroupIndex < 0)
+        {
+            continue;
+        }
+
+        const PlaneFaceGroup& referenceGroup =
+            reference.planeFaceGroups[static_cast<std::size_t>(referenceGroupIndex)];
+        if (referenceGroup.faceIndexes.empty())
+        {
+            continue;
+        }
+        const PlaneFaceFeature& referenceFace =
+            reference.planeFaces[referenceGroup.faceIndexes[0]];
+        const int candidateGroupIndex = FindLargestMatchingPlaneFaceGroup(
+            candidate,
+            referenceFace,
+            expectedCount,
+            NULL);
+        if (candidateGroupIndex < 0)
+        {
+            if (expectedCount == 1)
+            {
+                continue;
+            }
+            return;
+        }
+
+        const PlaneFaceGroup& candidateGroup =
+            candidate.planeFaceGroups[static_cast<std::size_t>(candidateGroupIndex)];
+        std::string rejectReason;
+        int coordinateDebugStep = 0;
+        bool coordinateDebugCanceled = false;
+        const std::size_t collectedBefore = transforms.size();
+        TryAnchorPlaneGroupMatch(
+            reference,
+            referenceGroup,
+            candidate,
+            candidateGroup,
+            NULL,
+            &coordinateDebugStep,
+            NULL,
+            &coordinateDebugCanceled,
+            NULL,
+            &transforms,
+            rejectReason);
+        if (transforms.size() > collectedBefore)
+        {
+            return;
+        }
+    }
+}
+
+void CollectCentroidConsistentAnchorTransforms(
+    const BodyFingerprint& reference,
+    const BodyFingerprint& candidate,
+    const Point3& referenceCentroid,
+    const Point3& candidateCentroid,
+    double tolerance,
+    std::vector<RigidTransform3>& transforms)
+{
+    static const int zRotationVariants[] = {0, 3, 5, 6};
+    for (std::size_t expectedCount = 1; expectedCount <= 2; ++expectedCount)
+    {
+        const int referenceGroupIndex = FindLargestPlaneFaceGroup(reference, expectedCount);
+        if (referenceGroupIndex < 0)
+        {
+            continue;
+        }
+
+        const PlaneFaceGroup& referenceGroup =
+            reference.planeFaceGroups[static_cast<std::size_t>(referenceGroupIndex)];
+        if (referenceGroup.faceIndexes.empty())
+        {
+            continue;
+        }
+
+        const PlaneFaceFeature& referenceSignatureFace =
+            reference.planeFaces[referenceGroup.faceIndexes[0]];
+        const int candidateGroupIndex = FindLargestMatchingPlaneFaceGroup(
+            candidate,
+            referenceSignatureFace,
+            expectedCount,
+            NULL);
+        if (candidateGroupIndex < 0)
+        {
+            continue;
+        }
+
+        const PlaneFaceGroup& candidateGroup =
+            candidate.planeFaceGroups[static_cast<std::size_t>(candidateGroupIndex)];
+        for (std::size_t referenceIndex = 0;
+             referenceIndex < referenceGroup.faceIndexes.size();
+             ++referenceIndex)
+        {
+            const PlaneFaceFeature& referenceFace =
+                reference.planeFaces[referenceGroup.faceIndexes[referenceIndex]];
+            for (std::size_t candidateIndex = 0;
+                 candidateIndex < candidateGroup.faceIndexes.size();
+                 ++candidateIndex)
+            {
+                const PlaneFaceFeature& candidateFace =
+                    candidate.planeFaces[candidateGroup.faceIndexes[candidateIndex]];
+                for (std::size_t variant = 0;
+                     variant < sizeof(zRotationVariants) / sizeof(zRotationVariants[0]);
+                     ++variant)
+                {
+                    const Frame3 candidateVariantFrame = ApplyFrameCoordinateVariant(
+                        candidateFace.frame,
+                        zRotationVariants[variant]);
+                    const RigidTransform3 transform = BuildReferenceToCandidateTransform(
+                        referenceFace.frame,
+                        candidateVariantFrame);
+                    const Point3 predictedCentroid = ApplyRigidTransform(
+                        transform,
+                        referenceCentroid);
+                    if (DistanceBetweenPoints(predictedCentroid, candidateCentroid) <= tolerance)
+                    {
+                        AppendUniqueRigidTransform(transforms, transform);
+                    }
+                }
+            }
+        }
+    }
+}
+
+bool MakeRightHandedFrame(
+    const Point3& centroid,
+    Point3 xAxis,
+    Point3 yAxis,
+    Point3 zAxis,
+    Frame3& frame)
+{
+    if (!NormalizePoint(xAxis) || !NormalizePoint(yAxis) || !NormalizePoint(zAxis))
+    {
+        return false;
+    }
+
+    if (DotPoint(CrossPoint(xAxis, yAxis), zAxis) < 0.0)
+    {
+        zAxis = ScalePoint(zAxis, -1.0);
+    }
+
+    frame.origin = centroid;
+    frame.xAxis = xAxis;
+    frame.yAxis = yAxis;
+    frame.zAxis = zAxis;
+    return true;
+}
+
+void AppendPrincipalAxisVariants(
+    const Frame3& referenceFrame,
+    const Frame3& candidateFrame,
+    std::vector<RigidTransform3>& transforms)
+{
+    const Point3 candidateAxes[3] = {
+        candidateFrame.xAxis,
+        candidateFrame.yAxis,
+        candidateFrame.zAxis};
+    for (int xIndex = 0; xIndex < 3; ++xIndex)
+    {
+        for (int xSign = -1; xSign <= 1; xSign += 2)
+        {
+            for (int yIndex = 0; yIndex < 3; ++yIndex)
+            {
+                if (yIndex == xIndex)
+                {
+                    continue;
+                }
+                for (int ySign = -1; ySign <= 1; ySign += 2)
+                {
+                    Frame3 variant = candidateFrame;
+                    variant.xAxis = ScalePoint(candidateAxes[xIndex], xSign);
+                    variant.yAxis = ScalePoint(candidateAxes[yIndex], ySign);
+                    variant.zAxis = CrossPoint(variant.xAxis, variant.yAxis);
+                    if (!NormalizePoint(variant.zAxis))
+                    {
+                        continue;
+                    }
+                    AppendUniqueRigidTransform(
+                        transforms,
+                        BuildReferenceToCandidateTransform(referenceFrame, variant));
+                }
+            }
+        }
+    }
+}
+
+bool ReadBodyPrincipalFrames(
+    tag_t bodyTag,
+    const Point3& centroid,
+    Frame3& rowFrame,
+    Frame3& columnFrame)
+{
+    double accuracyValues[11] = {0.99, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double massProps[47] = {};
+    double statistics[13] = {};
+    tag_t objects[1] = {bodyTag};
+    const int massPropsUnitsCode = GetMassPropsUnitsCode(AskOwningPartUnits(bodyTag));
+    if (UF_MODL_ask_mass_props_3d(
+            objects,
+            1,
+            1,
+            massPropsUnitsCode,
+            0.0,
+            1,
+            accuracyValues,
+            massProps,
+            statistics) != 0)
+    {
+        return false;
+    }
+
+    const bool rowReady = MakeRightHandedFrame(
+        centroid,
+        MakePoint3(massProps[22], massProps[23], massProps[24]),
+        MakePoint3(massProps[25], massProps[26], massProps[27]),
+        MakePoint3(massProps[28], massProps[29], massProps[30]),
+        rowFrame);
+    const bool columnReady = MakeRightHandedFrame(
+        centroid,
+        MakePoint3(massProps[22], massProps[25], massProps[28]),
+        MakePoint3(massProps[23], massProps[26], massProps[29]),
+        MakePoint3(massProps[24], massProps[27], massProps[30]),
+        columnFrame);
+    return rowReady && columnReady;
+}
+
+void CollectPrincipalAxisTransforms(
+    tag_t referenceBodyTag,
+    tag_t candidateBodyTag,
+    const Point3& referenceCentroid,
+    const Point3& candidateCentroid,
+    std::vector<RigidTransform3>& transforms)
+{
+    Frame3 referenceRows;
+    Frame3 referenceColumns;
+    Frame3 candidateRows;
+    Frame3 candidateColumns;
+    if (!ReadBodyPrincipalFrames(
+            referenceBodyTag,
+            referenceCentroid,
+            referenceRows,
+            referenceColumns) ||
+        !ReadBodyPrincipalFrames(
+            candidateBodyTag,
+            candidateCentroid,
+            candidateRows,
+            candidateColumns))
+    {
+        std::ostringstream line;
+        line << "Constellation principal frame failed reference=" << referenceBodyTag
+             << ", candidate=" << candidateBodyTag;
+        WritePreviewDebugLog(line.str());
+        return;
+    }
+
+    const std::size_t beforeCount = transforms.size();
+    AppendPrincipalAxisVariants(referenceRows, candidateRows, transforms);
+    AppendPrincipalAxisVariants(referenceColumns, candidateColumns, transforms);
+
+    std::ostringstream line;
+    line << "Constellation principal tag=" << candidateBodyTag
+         << ", added=" << (transforms.size() - beforeCount);
+    WritePreviewDebugLog(line.str());
+}
+
+void AppendConstellationSamplePoints(
+    std::vector<Point3>& samples,
+    const std::vector<Point3>& source,
+    std::size_t limit)
+{
+    for (std::size_t index = 0; index < source.size() && samples.size() < limit; ++index)
+    {
+        samples.push_back(source[index]);
+    }
+}
+
+double ScoreTransformedSamplePoints(
+    const RigidTransform3& transform,
+    const std::vector<Point3>& referencePoints,
+    const std::vector<Point3>& candidatePoints)
+{
+    if (referencePoints.empty() || candidatePoints.empty())
+    {
+        return 0.0;
+    }
+
+    double sum = 0.0;
+    for (std::size_t referenceIndex = 0;
+         referenceIndex < referencePoints.size();
+         ++referenceIndex)
+    {
+        const Point3 predicted = ApplyRigidTransform(
+            transform,
+            referencePoints[referenceIndex]);
+        double bestDistance = 1.0e30;
+        for (std::size_t candidateIndex = 0;
+             candidateIndex < candidatePoints.size();
+             ++candidateIndex)
+        {
+            const double distance = DistanceBetweenPoints(
+                predicted,
+                candidatePoints[candidateIndex]);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+            }
+        }
+        sum += bestDistance;
+    }
+    return sum / static_cast<double>(referencePoints.size());
+}
+
+Frame3 FlipFrameNormal(const Frame3& frame)
+{
+    Frame3 flipped = frame;
+    flipped.zAxis = ScalePoint(frame.zAxis, -1.0);
+    flipped.xAxis = ScalePoint(frame.xAxis, -1.0);
+    return flipped;
+}
+
+void CollectVertexAlignedFaceTransforms(
+    const BodyFingerprint& reference,
+    const BodyFingerprint& candidate,
+    const std::vector<Point3>& referencePoints,
+    const std::vector<Point3>& candidatePoints,
+    std::vector<RigidTransform3>& transforms)
+{
+    if (reference.planeFaces.empty() ||
+        candidate.planeFaces.empty() ||
+        referencePoints.empty() ||
+        candidatePoints.empty())
+    {
+        return;
+    }
+
+    std::vector<double> areas;
+    areas.reserve(reference.planeFaces.size());
+    for (std::size_t index = 0; index < reference.planeFaces.size(); ++index)
+    {
+        areas.push_back(reference.planeFaces[index].area);
+    }
+    std::sort(areas.begin(), areas.end());
+    const double minimumArea = areas.size() > 8
+        ? areas[areas.size() - 8]
+        : 0.0;
+    static const int zRotationVariants[] = {0, 3, 5, 6};
+    const std::size_t beforeCount = transforms.size();
+    int tested = 0;
+    double bestScore = 1.0e30;
+
+    for (std::size_t referenceIndex = 0;
+         referenceIndex < reference.planeFaces.size();
+         ++referenceIndex)
+    {
+        const PlaneFaceFeature& referenceFace = reference.planeFaces[referenceIndex];
+        if (referenceFace.area + 1.0e-6 < minimumArea)
+        {
+            continue;
+        }
+
+        for (std::size_t candidateIndex = 0;
+             candidateIndex < candidate.planeFaces.size();
+             ++candidateIndex)
+        {
+            const PlaneFaceFeature& candidateFace = candidate.planeFaces[candidateIndex];
+            const bool signatureMatches =
+                PlaneFaceSignatureMismatch(referenceFace, candidateFace).empty();
+            if (!signatureMatches &&
+                !FaceAreasNearlyEqual(referenceFace.area, candidateFace.area))
+            {
+                continue;
+            }
+
+            const Frame3 candidateFrames[2] = {
+                candidateFace.frame,
+                FlipFrameNormal(candidateFace.frame)};
+            for (int frameIndex = 0; frameIndex < 2; ++frameIndex)
+            {
+                for (std::size_t variant = 0;
+                     variant < sizeof(zRotationVariants) / sizeof(zRotationVariants[0]);
+                     ++variant)
+                {
+                    const RigidTransform3 transform = BuildReferenceToCandidateTransform(
+                        referenceFace.frame,
+                        ApplyFrameCoordinateVariant(
+                            candidateFrames[frameIndex],
+                            zRotationVariants[variant]));
+                    const double score = ScoreTransformedSamplePoints(
+                        transform,
+                        referencePoints,
+                        candidatePoints);
+                    ++tested;
+                    if (score < bestScore)
+                    {
+                        bestScore = score;
+                    }
+                    if (score <= 5.0)
+                    {
+                        AppendUniqueRigidTransform(transforms, transform);
+                    }
+                }
+            }
+        }
+    }
+
+    std::ostringstream line;
+    line << "Constellation face alignment tested=" << tested
+         << ", bestScore=" << FormatDouble(bestScore)
+         << ", added=" << (transforms.size() - beforeCount);
+    WritePreviewDebugLog(line.str());
 }
 
 bool CompareFingerprints(
@@ -5231,6 +6970,85 @@ SameBodySearchData BuildSameBodySearchData(
     return data;
 }
 
+std::vector<MatchedBodyGroup> SingletonBodyGroups(const std::vector<tag_t>& bodyTags)
+{
+    std::vector<MatchedBodyGroup> groups;
+    groups.reserve(bodyTags.size());
+    for (std::size_t index = 0; index < bodyTags.size(); ++index)
+    {
+        MatchedBodyInstance instance = {};
+        instance.bodyTag = bodyTags[index];
+        instance.transformFromReference = IdentityTransform();
+        MatchedBodyGroup group;
+        group.instances.push_back(instance);
+        groups.push_back(group);
+    }
+    return groups;
+}
+
+std::vector<MatchedBodyGroup> GroupBodiesByShape(const std::vector<tag_t>& bodyTags)
+{
+    if (bodyTags.size() < 2)
+    {
+        return SingletonBodyGroups(bodyTags);
+    }
+
+    std::vector<NXOpen::Body*> bodies;
+    bodies.reserve(bodyTags.size());
+    for (std::size_t index = 0; index < bodyTags.size(); ++index)
+    {
+        NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(
+            NXOpen::NXObjectManager::Get(bodyTags[index]));
+        if (body == NULL)
+        {
+            WritePreviewDebugLog("Shape grouping skipped: body is unavailable");
+            return SingletonBodyGroups(bodyTags);
+        }
+        bodies.push_back(body);
+    }
+
+    SameBodySearchData data;
+    try
+    {
+        data = BuildSameBodySearchData(bodies, NULL);
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        DeleteDebugCoordinateObjects(&data.activeDebugObjectTags);
+        WritePreviewDebugLog(
+            std::string("Shape grouping failed: ") + ex.Message());
+        return SingletonBodyGroups(bodyTags);
+    }
+    catch (...)
+    {
+        DeleteDebugCoordinateObjects(&data.activeDebugObjectTags);
+        WritePreviewDebugLog("Shape grouping failed");
+        return SingletonBodyGroups(bodyTags);
+    }
+    DeleteDebugCoordinateObjects(&data.activeDebugObjectTags);
+
+    std::size_t counted = 0;
+    for (std::size_t index = 0; index < data.assemblyGroups.size(); ++index)
+    {
+        counted += data.assemblyGroups[index].instances.size();
+    }
+    if (!data.failedTags.empty() || counted != bodyTags.size())
+    {
+        WritePreviewDebugLog("Shape grouping fell back to one part per body");
+        return SingletonBodyGroups(bodyTags);
+    }
+
+    std::ostringstream line;
+    line << "Shape groups=" << data.assemblyGroups.size();
+    for (std::size_t index = 0; index < data.assemblyGroups.size(); ++index)
+    {
+        line << " [" << (index + 1) << "]="
+             << data.assemblyGroups[index].instances.size();
+    }
+    WritePreviewDebugLog(line.str());
+    return data.assemblyGroups;
+}
+
 void OpenMatchDebugLog(
     std::ofstream& debugLog,
     const char* phase,
@@ -5357,6 +7175,9 @@ private:
     bool autoSelectingSameBodies;
     bool retainOriginalBodies;
     std::set<tag_t> lastAutoExpandedTags;
+    std::vector<tag_t> constellationTemplateTags;
+    std::set<tag_t> constellationSuppressedTags;
+    std::vector<PatternPlacement> constellationPlacements;
     std::vector<AssemblyPreviewRow> previewRows;
     std::vector<NXOpen::BlockStyler::Node*> previewNodes;
     std::vector<tag_t> previewSelectionTags;
@@ -5379,6 +7200,9 @@ private:
         autoSelectSameBodiesToggle = NULL;
         autoSelectingSameBodies = false;
         lastAutoExpandedTags.clear();
+        constellationTemplateTags.clear();
+        constellationSuppressedTags.clear();
+        constellationPlacements.clear();
         findSameBodiesButton = NULL;
         nameMode = NULL;
         nameCustomText = NULL;
@@ -5483,8 +7307,32 @@ private:
                     WriteDialogStateInt(
                         kAssemblyModeStateKey,
                         GetAssemblyOutputMode());
+                    ClearConstellationState();
+                    lastAutoExpandedTags.clear();
+                    previewSelectionTags.clear();
+                    if (gAutoSelectSameBodies && !autoSelectingSameBodies)
+                    {
+                        ExpandSelectionWithDisplayedSameBodies();
+                        const std::vector<tag_t> tags = GetCurrentSelectionTags();
+                        if (!tags.empty())
+                        {
+                            RefreshAssemblyPreview();
+                            HighlightPreviewRow(tags);
+                        }
+                        else
+                        {
+                            ClearAssemblyList();
+                        }
+                    }
+                    else
+                    {
+                        RefreshPreviewForAssemblyMode();
+                    }
                 }
-                RefreshPreviewForAssemblyMode();
+                else
+                {
+                    RefreshPreviewForAssemblyMode();
+                }
             }
             else if (block == findSameBodiesButton || blockName == kFindSameBodiesButtonBlockId)
             {
@@ -5580,6 +7428,7 @@ private:
                     if (!gAutoSelectSameBodies)
                     {
                         lastAutoExpandedTags.clear();
+                        ClearConstellationState();
                     }
                     else if (!autoSelectingSameBodies)
                     {
@@ -5615,6 +7464,7 @@ private:
                 if (selectedBodies.empty())
                 {
                     lastAutoExpandedTags.clear();
+                    ClearConstellationState();
                     ClearAssemblyList();
                     previewSelectionTags.clear();
                     ClearCachedSearchData();
@@ -5896,9 +7746,12 @@ private:
             assemblyMode->GetProperties();
         const int value = properties->GetEnum("Value");
         delete properties;
-        return value == AssemblyOutputModeAllBodiesInOnePart
-            ? AssemblyOutputModeAllBodiesInOnePart
-            : AssemblyOutputModeOnePartPerBodyGroup;
+        if (value == AssemblyOutputModeAllBodiesInOnePart ||
+            value == AssemblyOutputModeBodiesToAssemblyGroup)
+        {
+            return value;
+        }
+        return AssemblyOutputModeOnePartPerBodyGroup;
     }
 
     static void SetLogicalBlockValue(
@@ -5927,11 +7780,13 @@ private:
             {
                 NXOpen::BlockStyler::PropertyList* properties =
                     assemblyMode->GetProperties();
-                properties->SetEnum(
-                    "Value",
-                    rememberedAssemblyMode == AssemblyOutputModeAllBodiesInOnePart
-                        ? AssemblyOutputModeAllBodiesInOnePart
-                        : AssemblyOutputModeOnePartPerBodyGroup);
+                int restoredAssemblyMode = AssemblyOutputModeOnePartPerBodyGroup;
+                if (rememberedAssemblyMode == AssemblyOutputModeAllBodiesInOnePart ||
+                    rememberedAssemblyMode == AssemblyOutputModeBodiesToAssemblyGroup)
+                {
+                    restoredAssemblyMode = rememberedAssemblyMode;
+                }
+                properties->SetEnum("Value", restoredAssemblyMode);
                 delete properties;
             }
 
@@ -6483,10 +8338,51 @@ private:
         WritePreviewDebugLog("InitializeAssemblyList end");
     }
 
+    std::string ResolveAssemblyGroupParentName(
+        const std::vector<MatchedBodyGroup>& assemblyGroups) const
+    {
+        return BuildComponentNameForCurrentRule(
+            CombineMatchedBodyGroups(assemblyGroups),
+            1);
+    }
+
     void RefreshPreviewNamesFromNamingRule()
     {
         if (previewRows.empty())
         {
+            return;
+        }
+
+        if (GetAssemblyOutputMode() == AssemblyOutputModeBodiesToAssemblyGroup &&
+            IsConstellationAssemblyRequested() &&
+            !constellationPlacements.empty())
+        {
+            PopulateConstellationPreview();
+            return;
+        }
+
+        if (GetAssemblyOutputMode() == AssemblyOutputModeBodiesToAssemblyGroup)
+        {
+            std::vector<MatchedBodyGroup> bodyGroups;
+            bodyGroups.reserve(previewRows.size());
+            for (std::size_t index = 0; index < previewRows.size(); ++index)
+            {
+                bodyGroups.push_back(previewRows[index].group);
+            }
+            const std::string parentName = ResolveAssemblyGroupParentName(bodyGroups);
+            for (std::size_t index = 0; index < previewRows.size(); ++index)
+            {
+                previewRows[index].parentName = parentName;
+                if (previewRows[index].manuallyNamed)
+                {
+                    continue;
+                }
+                previewRows[index].componentName = BuildAssemblyGroupChildName(
+                    parentName,
+                    static_cast<int>(index + 1),
+                    GetCurrentSerialStart());
+            }
+            PopulateAssemblyList(previewRows);
             return;
         }
 
@@ -6787,7 +8683,9 @@ private:
                 NXOpen::NXString(row.parentName, NXOpen::NXString::UTF8));
 
             std::ostringstream quantity;
-            quantity << row.group.instances.size();
+            quantity << (row.displayQuantity > 0
+                ? row.displayQuantity
+                : static_cast<int>(row.group.instances.size()));
             node->SetColumnDisplayText(
                 kAssemblyQuantityColumnId,
                 NXOpen::NXString(quantity.str(), NXOpen::NXString::UTF8));
@@ -6829,9 +8727,49 @@ private:
         return rows;
     }
 
+    std::vector<AssemblyPreviewRow> BuildAssemblyGroupPreviewRows(
+        const std::vector<MatchedBodyGroup>& assemblyGroups)
+    {
+        const std::string parentName = ResolveAssemblyGroupParentName(assemblyGroups);
+        std::vector<AssemblyPreviewRow> rows;
+        rows.reserve(assemblyGroups.size());
+        for (std::size_t index = 0; index < assemblyGroups.size(); ++index)
+        {
+            AssemblyPreviewRow row = {};
+            row.group = assemblyGroups[index];
+            row.tags = ExtractGroupTags(assemblyGroups[index]);
+            row.displayQuantity = static_cast<int>(
+                assemblyGroups[index].instances.empty()
+                    ? 1
+                    : assemblyGroups[index].instances.size());
+            row.parentName = parentName;
+            const AssemblyPreviewRow* existingRow = FindExistingPreviewRow(row.tags);
+            if (existingRow != NULL && existingRow->manuallyNamed)
+            {
+                row.componentName = existingRow->componentName;
+                row.manuallyNamed = true;
+            }
+            else
+            {
+                row.componentName = BuildAssemblyGroupChildName(
+                    parentName,
+                    static_cast<int>(index + 1),
+                    GetCurrentSerialStart());
+                row.manuallyNamed = false;
+            }
+            rows.push_back(row);
+        }
+        return rows;
+    }
+
     std::vector<AssemblyPreviewRow> BuildPreviewRowsForAssemblyMode(
         const std::vector<MatchedBodyGroup>& assemblyGroups)
     {
+        if (GetAssemblyOutputMode() == AssemblyOutputModeBodiesToAssemblyGroup)
+        {
+            return BuildAssemblyGroupPreviewRows(assemblyGroups);
+        }
+
         if (GetAssemblyOutputMode() != AssemblyOutputModeAllBodiesInOnePart)
         {
             return BuildPreviewRows(assemblyGroups);
@@ -6915,6 +8853,18 @@ private:
             ClearCachedSearchData();
             WritePreviewDebugLog("RefreshAssemblyPreview stopped: empty selection");
             return;
+        }
+
+        if (IsConstellationAssemblyRequested())
+        {
+            const std::set<tag_t> selectionSet(selectionTags.begin(), selectionTags.end());
+            if (ConstellationStateMatchesSelection(selectionSet))
+            {
+                ClearCachedSearchData();
+                PopulateConstellationPreview();
+                WritePreviewDebugLog("RefreshAssemblyPreview constellation");
+                return;
+            }
         }
 
         if (CachedSearchMatchesSelection(selectionTags))
@@ -7052,9 +9002,48 @@ private:
         return names;
     }
 
+    std::vector<std::string> ResolveAssemblyGroupChildNames(
+        const std::vector<MatchedBodyGroup>& assemblyGroups)
+    {
+        HarvestPreviewNames();
+        const std::string parentName = ResolveAssemblyGroupParentName(assemblyGroups);
+        std::vector<std::string> names;
+        names.reserve(assemblyGroups.size());
+        for (std::size_t index = 0; index < assemblyGroups.size(); ++index)
+        {
+            const std::vector<tag_t> tags = ExtractGroupTags(assemblyGroups[index]);
+            const AssemblyPreviewRow* existingRow = FindExistingPreviewRow(tags);
+            if (existingRow != NULL &&
+                existingRow->manuallyNamed &&
+                !existingRow->componentName.empty())
+            {
+                names.push_back(existingRow->componentName);
+            }
+            else
+            {
+                names.push_back(BuildAssemblyGroupChildName(
+                    parentName,
+                    static_cast<int>(index + 1),
+                    GetCurrentSerialStart()));
+            }
+        }
+        return names;
+    }
+
+    std::string ResolveAssemblyGroupParentForConvert(
+        const std::vector<MatchedBodyGroup>& assemblyGroups) const
+    {
+        return ResolveAssemblyGroupParentName(assemblyGroups);
+    }
+
     std::vector<std::string> ResolveComponentNamesForAssemblyMode(
         const std::vector<MatchedBodyGroup>& assemblyGroups)
     {
+        if (GetAssemblyOutputMode() == AssemblyOutputModeBodiesToAssemblyGroup)
+        {
+            return ResolveAssemblyGroupChildNames(assemblyGroups);
+        }
+
         if (GetAssemblyOutputMode() != AssemblyOutputModeAllBodiesInOnePart)
         {
             return ResolveComponentNames(assemblyGroups);
@@ -7080,6 +9069,17 @@ private:
                 session,
                 assemblyGroups,
                 componentNames,
+                retainOriginalBodies);
+        }
+
+        if (GetAssemblyOutputMode() == AssemblyOutputModeBodiesToAssemblyGroup)
+        {
+            return ConvertBodiesToAssemblyGroup(
+                session,
+                assemblyGroups,
+                ResolveAssemblyGroupParentForConvert(assemblyGroups),
+                componentNames,
+                GetCurrentSerialStart(),
                 retainOriginalBodies);
         }
 
@@ -7147,8 +9147,10 @@ private:
         }
         try
         {
+            const int assemblyOutputMode = GetAssemblyOutputMode();
             const bool advanceSinglePartSerial =
-                GetAssemblyOutputMode() == AssemblyOutputModeAllBodiesInOnePart;
+                assemblyOutputMode == AssemblyOutputModeAllBodiesInOnePart ||
+                assemblyOutputMode == AssemblyOutputModeBodiesToAssemblyGroup;
             const int result = ConvertSelectedBodies();
             if (result == 0 && advanceSinglePartSerial && lastConversionCreatedPart)
             {
@@ -7310,8 +9312,14 @@ private:
 
             UpdateRetainBodiesOption();
             UpdateInheritAttributeOptions();
+            const bool useConstellation = PrepareConstellationForConvert();
+            std::vector<NXOpen::Body*> parameterBodies = selectedBodies;
+            if (useConstellation)
+            {
+                parameterBodies = BodiesFromConstellationPlacements();
+            }
             if (!retainOriginalBodies &&
-                !ConfirmAndDeleteFeatureParameters(selectedBodies))
+                !ConfirmAndDeleteFeatureParameters(parameterBodies))
             {
                 WritePreviewDebugLog("ConvertSelectedBodies stopped: delete parameters canceled");
                 return 1;
@@ -7319,8 +9327,13 @@ private:
             selectedBodies = GetSelectedBodies();
 
             UpdateSelectedOutputFolder();
-            const std::vector<tag_t> selectionTags = GetCurrentSelectionTags();
-            if (CachedSearchMatchesSelection(selectionTags))
+            if (useConstellation)
+            {
+                WritePreviewDebugLog("ConvertSelectedBodies using constellation pattern");
+                ExecuteConstellationConversion();
+                ClearCachedSearchData();
+            }
+            else if (CachedSearchMatchesSelection(GetCurrentSelectionTags()))
             {
                 WritePreviewDebugLog("ConvertSelectedBodies using cached search data");
                 ExecuteCachedSameBodySearch();
@@ -7506,6 +9519,994 @@ private:
         return matches;
     }
 
+    void ClearConstellationState()
+    {
+        constellationTemplateTags.clear();
+        constellationSuppressedTags.clear();
+        constellationPlacements.clear();
+    }
+
+    bool IsConstellationAssemblyRequested() const
+    {
+        if (!gAutoSelectSameBodies)
+        {
+            return false;
+        }
+
+        const int mode = GetAssemblyOutputMode();
+        return mode == AssemblyOutputModeAllBodiesInOnePart ||
+            mode == AssemblyOutputModeBodiesToAssemblyGroup;
+    }
+
+    bool ConstellationStateMatchesSelection(const std::set<tag_t>& selectionTags) const
+    {
+        if (constellationTemplateTags.size() < 2 || constellationPlacements.empty())
+        {
+            return false;
+        }
+
+        for (std::size_t index = 0; index < constellationTemplateTags.size(); ++index)
+        {
+            if (selectionTags.count(constellationTemplateTags[index]) == 0)
+            {
+                return false;
+            }
+        }
+
+        for (std::size_t placementIndex = 0;
+             placementIndex < constellationPlacements.size();
+             ++placementIndex)
+        {
+            const std::vector<tag_t>& bodyTags =
+                constellationPlacements[placementIndex].bodyTags;
+            if (bodyTags.empty())
+            {
+                return false;
+            }
+            for (std::size_t bodyIndex = 0; bodyIndex < bodyTags.size(); ++bodyIndex)
+            {
+                if (selectionTags.count(bodyTags[bodyIndex]) == 0)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    void FilterConstellationPlacements(const std::set<tag_t>& selectionTags)
+    {
+        std::vector<PatternPlacement> kept;
+        for (std::size_t placementIndex = 0;
+             placementIndex < constellationPlacements.size();
+             ++placementIndex)
+        {
+            const PatternPlacement& placement = constellationPlacements[placementIndex];
+            bool complete = !placement.bodyTags.empty();
+            for (std::size_t bodyIndex = 0;
+                 complete && bodyIndex < placement.bodyTags.size();
+                 ++bodyIndex)
+            {
+                if (selectionTags.count(placement.bodyTags[bodyIndex]) == 0)
+                {
+                    complete = false;
+                }
+            }
+            if (complete)
+            {
+                kept.push_back(placement);
+            }
+        }
+        constellationPlacements.swap(kept);
+    }
+
+    std::vector<tag_t> TagsFromPlacements(
+        const std::vector<PatternPlacement>& placements) const
+    {
+        std::vector<tag_t> tags;
+        std::set<tag_t> seen;
+        for (std::size_t placementIndex = 0; placementIndex < placements.size(); ++placementIndex)
+        {
+            const std::vector<tag_t>& bodyTags = placements[placementIndex].bodyTags;
+            for (std::size_t bodyIndex = 0; bodyIndex < bodyTags.size(); ++bodyIndex)
+            {
+                if (bodyTags[bodyIndex] != NULL_TAG &&
+                    seen.insert(bodyTags[bodyIndex]).second)
+                {
+                    tags.push_back(bodyTags[bodyIndex]);
+                }
+            }
+        }
+        return tags;
+    }
+
+    PatternPlacement MakeTemplatePlacement(const std::vector<tag_t>& bodyTags) const
+    {
+        PatternPlacement placement;
+        placement.bodyTags = bodyTags;
+        placement.transformFromTemplate = IdentityTransform();
+        return placement;
+    }
+
+    void SelectBodyTags(const std::vector<tag_t>& orderedTags)
+    {
+        if (bodySelection == NULL)
+        {
+            return;
+        }
+
+        std::vector<NXOpen::TaggedObject*> objects;
+        std::set<tag_t> seen;
+        objects.reserve(orderedTags.size());
+        for (std::size_t index = 0; index < orderedTags.size(); ++index)
+        {
+            if (!seen.insert(orderedTags[index]).second)
+            {
+                continue;
+            }
+
+            NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(
+                NXOpen::NXObjectManager::Get(orderedTags[index]));
+            if (body != NULL)
+            {
+                objects.push_back(body);
+            }
+        }
+
+        autoSelectingSameBodies = true;
+        try
+        {
+            bodySelection->SetSelectedObjects(objects);
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogCallbackError("Constellation select NXException", ex.Message());
+        }
+        catch (const std::exception& ex)
+        {
+            LogCallbackError("Constellation select exception", ex.what());
+        }
+        catch (...)
+        {
+            LogCallbackError("Constellation select exception", "Cannot select constellation bodies.");
+        }
+        autoSelectingSameBodies = false;
+    }
+
+    void RememberCurrentSelectionAsExpanded()
+    {
+        lastAutoExpandedTags.clear();
+        const std::vector<NXOpen::Body*> selectedBodies = GetSelectedBodies();
+        for (std::size_t index = 0; index < selectedBodies.size(); ++index)
+        {
+            if (selectedBodies[index] != NULL)
+            {
+                lastAutoExpandedTags.insert(selectedBodies[index]->Tag());
+            }
+        }
+    }
+
+    std::vector<PatternPlacement> FindConstellationPlacements(
+        const std::vector<NXOpen::Body*>& templateBodies)
+    {
+        std::vector<tag_t> templateTags;
+        templateTags.reserve(templateBodies.size());
+        for (std::size_t index = 0; index < templateBodies.size(); ++index)
+        {
+            if (templateBodies[index] != NULL)
+            {
+                templateTags.push_back(templateBodies[index]->Tag());
+            }
+        }
+
+        std::vector<PatternPlacement> placements;
+        placements.push_back(MakeTemplatePlacement(templateTags));
+        if (templateBodies.size() < 2 ||
+            templateTags.size() != templateBodies.size() ||
+            session == NULL ||
+            session->Parts() == NULL ||
+            session->Parts()->Work() == NULL ||
+            session->Parts()->Work()->Bodies() == NULL)
+        {
+            return placements;
+        }
+
+        std::vector<BodyFingerprint> fingerprints;
+        fingerprints.reserve(templateBodies.size());
+        for (std::size_t index = 0; index < templateBodies.size(); ++index)
+        {
+            try
+            {
+                fingerprints.push_back(BuildFingerprint(templateBodies[index]));
+            }
+            catch (...)
+            {
+                WritePreviewDebugLog("Constellation skipped: template fingerprint failed");
+                return placements;
+            }
+        }
+
+        struct CandidateMatch
+        {
+            tag_t bodyTag;
+            Point3 centroid;
+            std::vector<RigidTransform3> transforms;
+            std::vector<Point3> samplePoints;
+        };
+        std::vector<Point3> templateCentroids(templateTags.size());
+        for (std::size_t index = 0; index < templateTags.size(); ++index)
+        {
+            if (!TryAskBodyCentroid(templateTags[index], templateCentroids[index]))
+            {
+                WritePreviewDebugLog("Constellation skipped: template centroid failed");
+                return placements;
+            }
+        }
+
+        const double positionTolerance = 1.0;
+        std::vector<std::vector<CandidateMatch> > matches(templateBodies.size());
+        const std::set<tag_t> templateTagSet(templateTags.begin(), templateTags.end());
+        NXOpen::BodyCollection* bodies = session->Parts()->Work()->Bodies();
+        for (NXOpen::BodyCollection::iterator it = bodies->begin();
+             it != bodies->end();
+             ++it)
+        {
+            NXOpen::Body* candidate = *it;
+            if (candidate == NULL ||
+                templateTagSet.count(candidate->Tag()) != 0 ||
+                constellationSuppressedTags.count(candidate->Tag()) != 0 ||
+                !IsDisplayedSolidBody(candidate->Tag()))
+            {
+                continue;
+            }
+
+            BodyFingerprint candidateFingerprint;
+            try
+            {
+                candidateFingerprint = BuildFingerprint(candidate);
+            }
+            catch (...)
+            {
+                continue;
+            }
+
+            Point3 candidateCentroid;
+            bool centroidReady = false;
+            for (std::size_t templateIndex = 0;
+                 templateIndex < fingerprints.size();
+                 ++templateIndex)
+            {
+                std::string rejectReason;
+                BodyMatchInfo matchInfo = {};
+                int coordinateDebugStep = 0;
+                bool coordinateDebugCanceled = false;
+                bool matched = false;
+                try
+                {
+                    matched = CompareFingerprints(
+                        fingerprints[templateIndex],
+                        candidateFingerprint,
+                        NULL,
+                        &coordinateDebugStep,
+                        NULL,
+                        &coordinateDebugCanceled,
+                        &matchInfo,
+                        rejectReason);
+                }
+                catch (...)
+                {
+                    matched = false;
+                }
+                if (!matched)
+                {
+                    continue;
+                }
+                if (!centroidReady &&
+                    !TryAskBodyCentroid(candidate->Tag(), candidateCentroid))
+                {
+                    break;
+                }
+                centroidReady = true;
+
+                CandidateMatch candidateMatch;
+                candidateMatch.bodyTag = candidate->Tag();
+                candidateMatch.centroid = candidateCentroid;
+                candidateMatch.transforms.push_back(
+                    BuildReferenceToCandidateTransform(
+                        matchInfo.referenceFrame,
+                        matchInfo.candidateFrame));
+                AppendConstellationSamplePoints(
+                    candidateMatch.samplePoints,
+                    candidateFingerprint.vertexPoints,
+                    48);
+                AppendConstellationSamplePoints(
+                    candidateMatch.samplePoints,
+                    candidateFingerprint.circleCenterPoints,
+                    48);
+                std::vector<Point3> anchorReferencePoints;
+                AppendConstellationSamplePoints(
+                    anchorReferencePoints,
+                    fingerprints[templateIndex].vertexPoints,
+                    48);
+                AppendConstellationSamplePoints(
+                    anchorReferencePoints,
+                    fingerprints[templateIndex].circleCenterPoints,
+                    48);
+                CollectVertexAlignedFaceTransforms(
+                    fingerprints[templateIndex],
+                    candidateFingerprint,
+                    anchorReferencePoints,
+                    candidateMatch.samplePoints,
+                    candidateMatch.transforms);
+                const double rememberedScore = ScoreTransformedSamplePoints(
+                    candidateMatch.transforms.front(),
+                    anchorReferencePoints,
+                    candidateMatch.samplePoints);
+                std::ostringstream anchorLine;
+                anchorLine << "Constellation remembered orientation slot="
+                           << (templateIndex + 1)
+                           << ", tag=" << candidate->Tag()
+                           << ", score=" << FormatDouble(rememberedScore)
+                           << ", transforms="
+                           << candidateMatch.transforms.size();
+                WritePreviewDebugLog(anchorLine.str());
+                matches[templateIndex].push_back(candidateMatch);
+            }
+        }
+
+        for (std::size_t templateIndex = 0; templateIndex < matches.size(); ++templateIndex)
+        {
+            std::ostringstream shapeLine;
+            shapeLine << "Constellation shapeMatches slot=" << (templateIndex + 1)
+                      << ", templateBody=" << templateTags[templateIndex]
+                      << ", count=" << matches[templateIndex].size();
+            WritePreviewDebugLog(shapeLine.str());
+        }
+
+        std::vector<std::vector<Point3> > slotReferencePoints(fingerprints.size());
+        for (std::size_t slot = 0; slot < fingerprints.size(); ++slot)
+        {
+            AppendConstellationSamplePoints(
+                slotReferencePoints[slot],
+                fingerprints[slot].vertexPoints,
+                48);
+            AppendConstellationSamplePoints(
+                slotReferencePoints[slot],
+                fingerprints[slot].circleCenterPoints,
+                48);
+        }
+
+        std::vector<PatternPlacement> bestPlacements = placements;
+        double bestScoreSum = 1.0e30;
+        std::size_t chosenAnchorSlot = 0;
+        for (std::size_t anchorSlot = 0; anchorSlot < 1 && anchorSlot < matches.size(); ++anchorSlot)
+        {
+            std::vector<PatternPlacement> slotPlacements;
+            slotPlacements.push_back(placements.front());
+            double scoreSum = 0.0;
+            std::set<tag_t> usedBodies;
+            const std::vector<Point3>& referenceSamplePoints =
+                slotReferencePoints[anchorSlot];
+            for (std::size_t anchorIndex = 0;
+                 anchorIndex < matches[anchorSlot].size();
+                 ++anchorIndex)
+            {
+            const CandidateMatch& anchor = matches[anchorSlot][anchorIndex];
+            if (usedBodies.count(anchor.bodyTag) != 0 || anchor.transforms.empty())
+            {
+                continue;
+            }
+
+            bool completed = false;
+            std::vector<tag_t> chosen(templateBodies.size(), NULL_TAG);
+            RigidTransform3 chosenTransform = {};
+            double bestPlacementScore = 1.0e30;
+            double bestWorstCentroid = 1.0e30;
+            int acceptedTransforms = 0;
+            double missCentroidDelta = -1.0;
+            tag_t missNearest = NULL_TAG;
+            std::size_t missSlot = anchorSlot;
+            bool haveSlotMiss = false;
+            for (std::size_t transformIndex = 0;
+                 transformIndex < anchor.transforms.size();
+                 ++transformIndex)
+            {
+                const RigidTransform3& transform = anchor.transforms[transformIndex];
+                const bool singleBodyPose = transformIndex == 0;
+                const double placementScore = ScoreTransformedSamplePoints(
+                    transform,
+                    referenceSamplePoints,
+                    anchor.samplePoints);
+                if (!singleBodyPose && placementScore > 5.0)
+                {
+                    continue;
+                }
+
+                std::vector<tag_t> attempt(templateBodies.size(), NULL_TAG);
+                std::set<tag_t> localUsed;
+                attempt[anchorSlot] = anchor.bodyTag;
+                localUsed.insert(anchor.bodyTag);
+                bool complete = true;
+                double worstCentroid = 0.0;
+                for (std::size_t templateIndex = 0;
+                     templateIndex < templateBodies.size();
+                     ++templateIndex)
+                {
+                    if (templateIndex == anchorSlot)
+                    {
+                        continue;
+                    }
+
+                    const Point3 relative = SubtractPoints(
+                        templateCentroids[templateIndex],
+                        templateCentroids[anchorSlot]);
+                    const Point3 expectedCentroid = AddPoints(
+                        anchor.centroid,
+                        RotateByRigidTransform(transform, relative));
+                    int bestIndex = -1;
+                    double bestDistance = 0.0;
+                    for (std::size_t candidateIndex = 0;
+                         candidateIndex < matches[templateIndex].size();
+                         ++candidateIndex)
+                    {
+                        const CandidateMatch& candidateMatch =
+                            matches[templateIndex][candidateIndex];
+                        if (localUsed.count(candidateMatch.bodyTag) != 0 ||
+                            usedBodies.count(candidateMatch.bodyTag) != 0)
+                        {
+                            continue;
+                        }
+
+                        const double distance = DistanceBetweenPoints(
+                            candidateMatch.centroid,
+                            expectedCentroid);
+                        if (bestIndex < 0 || distance < bestDistance)
+                        {
+                            bestIndex = static_cast<int>(candidateIndex);
+                            bestDistance = distance;
+                        }
+                    }
+
+                    if (bestIndex < 0 || bestDistance > positionTolerance)
+                    {
+                        if (bestIndex >= 0 &&
+                            (!haveSlotMiss || bestDistance < missCentroidDelta))
+                        {
+                            haveSlotMiss = true;
+                            missCentroidDelta = bestDistance;
+                            missNearest =
+                                matches[templateIndex][static_cast<std::size_t>(bestIndex)].bodyTag;
+                            missSlot = templateIndex;
+                        }
+                        complete = false;
+                        break;
+                    }
+
+                    if (bestDistance > worstCentroid)
+                    {
+                        worstCentroid = bestDistance;
+                    }
+                    attempt[templateIndex] =
+                        matches[templateIndex][static_cast<std::size_t>(bestIndex)].bodyTag;
+                    localUsed.insert(attempt[templateIndex]);
+                }
+                if (!complete)
+                {
+                    continue;
+                }
+
+                ++acceptedTransforms;
+                const bool betterShape = placementScore + 0.05 < bestPlacementScore;
+                const bool sameShapeCloserGroup =
+                    std::fabs(placementScore - bestPlacementScore) <= 1.0 &&
+                    worstCentroid < bestWorstCentroid;
+                if (betterShape || sameShapeCloserGroup)
+                {
+                    bestPlacementScore = placementScore;
+                    bestWorstCentroid = worstCentroid;
+                    chosen = attempt;
+                    chosenTransform = transform;
+                    completed = true;
+                }
+            }
+
+            if (!completed)
+            {
+                std::ostringstream missLine;
+                missLine << "Constellation miss anchorSlot=" << (anchorSlot + 1)
+                         << ", anchor=" << anchor.bodyTag
+                         << ", variants=" << anchor.transforms.size()
+                         << ", slot=" << (missSlot + 1);
+                if (missNearest != NULL_TAG)
+                {
+                    missLine << ", nearest=" << missNearest
+                             << ", centroidDelta=" << FormatDouble(missCentroidDelta);
+                }
+                else
+                {
+                    missLine << ", nearest=0, centroidDelta=none";
+                }
+                WritePreviewDebugLog(missLine.str());
+                continue;
+            }
+
+            usedBodies.insert(chosen.begin(), chosen.end());
+            PatternPlacement placement;
+            placement.bodyTags = chosen;
+            placement.transformFromTemplate = chosenTransform;
+            slotPlacements.push_back(placement);
+            scoreSum += bestPlacementScore;
+            std::ostringstream hitLine;
+            hitLine << "Constellation hit anchorSlot=" << (anchorSlot + 1)
+                    << ", anchor=" << anchor.bodyTag << ", tags=";
+            for (std::size_t tagIndex = 0; tagIndex < chosen.size(); ++tagIndex)
+            {
+                if (tagIndex != 0)
+                {
+                    hitLine << ",";
+                }
+                hitLine << chosen[tagIndex];
+            }
+            hitLine << ", origin="
+                    << FormatDouble(chosenTransform.origin[0]) << ","
+                    << FormatDouble(chosenTransform.origin[1]) << ","
+                    << FormatDouble(chosenTransform.origin[2])
+                    << ", placementScore=" << FormatDouble(bestPlacementScore)
+                    << ", centroidDelta=" << FormatDouble(bestWorstCentroid)
+                    << ", acceptedTransforms=" << acceptedTransforms;
+            WritePreviewDebugLog(hitLine.str());
+            }
+            if (slotPlacements.size() > bestPlacements.size() ||
+                (slotPlacements.size() > 1 &&
+                 slotPlacements.size() == bestPlacements.size() &&
+                 scoreSum < bestScoreSum))
+            {
+                bestPlacements = slotPlacements;
+                bestScoreSum = scoreSum;
+                chosenAnchorSlot = anchorSlot;
+            }
+        }
+        placements = bestPlacements;
+
+        std::ostringstream line;
+        line << "Constellation template=" << templateTags.size()
+             << ", references=" << placements.size()
+             << ", anchorSlot=" << (chosenAnchorSlot + 1)
+             << ", positionTolerance=" << FormatDouble(positionTolerance);
+        WritePreviewDebugLog(line.str());
+        return placements;
+    }
+
+    std::vector<NXOpen::Body*> ResolveTemplateBodies() const
+    {
+        std::vector<NXOpen::Body*> bodies;
+        for (std::size_t index = 0; index < constellationTemplateTags.size(); ++index)
+        {
+            NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(
+                NXOpen::NXObjectManager::Get(constellationTemplateTags[index]));
+            if (body != NULL)
+            {
+                bodies.push_back(body);
+            }
+        }
+        return bodies;
+    }
+
+    void SearchConstellationFromTemplate()
+    {
+        const std::vector<NXOpen::Body*> templateBodies = ResolveTemplateBodies();
+        if (templateBodies.size() < 2)
+        {
+            ClearConstellationState();
+            RememberCurrentSelectionAsExpanded();
+            return;
+        }
+
+        try
+        {
+            constellationPlacements = FindConstellationPlacements(templateBodies);
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogCallbackError("Constellation search NXException", ex.Message());
+            constellationPlacements.clear();
+            constellationPlacements.push_back(MakeTemplatePlacement(constellationTemplateTags));
+        }
+        catch (const std::exception& ex)
+        {
+            LogCallbackError("Constellation search exception", ex.what());
+            constellationPlacements.clear();
+            constellationPlacements.push_back(MakeTemplatePlacement(constellationTemplateTags));
+        }
+        catch (...)
+        {
+            LogCallbackError("Constellation search exception", "Cannot find same constellations.");
+            constellationPlacements.clear();
+            constellationPlacements.push_back(MakeTemplatePlacement(constellationTemplateTags));
+        }
+
+        const std::vector<tag_t> expandedTags = TagsFromPlacements(constellationPlacements);
+        const std::set<tag_t> expandedSet(expandedTags.begin(), expandedTags.end());
+        const std::vector<tag_t> currentTags = GetCurrentSelectionTags();
+        const std::set<tag_t> currentSet(currentTags.begin(), currentTags.end());
+        if (expandedSet != currentSet)
+        {
+            SelectBodyTags(expandedTags);
+        }
+        RememberCurrentSelectionAsExpanded();
+    }
+
+    void ExpandConstellationSelection()
+    {
+        const std::vector<NXOpen::Body*> selectedBodies = GetSelectedBodies();
+        std::vector<tag_t> currentOrder;
+        std::set<tag_t> currentTags;
+        currentOrder.reserve(selectedBodies.size());
+        for (std::size_t index = 0; index < selectedBodies.size(); ++index)
+        {
+            if (selectedBodies[index] == NULL)
+            {
+                continue;
+            }
+            currentOrder.push_back(selectedBodies[index]->Tag());
+            currentTags.insert(selectedBodies[index]->Tag());
+        }
+        if (currentTags.empty())
+        {
+            ClearConstellationState();
+            lastAutoExpandedTags.clear();
+            return;
+        }
+
+        if (!lastAutoExpandedTags.empty() &&
+            currentTags.size() <= lastAutoExpandedTags.size())
+        {
+            bool subset = true;
+            for (std::set<tag_t>::const_iterator it = currentTags.begin();
+                 it != currentTags.end();
+                 ++it)
+            {
+                if (lastAutoExpandedTags.count(*it) == 0)
+                {
+                    subset = false;
+                    break;
+                }
+            }
+            if (subset && currentTags.size() == lastAutoExpandedTags.size())
+            {
+                return;
+            }
+            if (subset)
+            {
+                std::vector<tag_t> keptTemplate;
+                bool removedTemplateBody = false;
+                for (std::size_t index = 0; index < constellationTemplateTags.size(); ++index)
+                {
+                    if (currentTags.count(constellationTemplateTags[index]) != 0)
+                    {
+                        keptTemplate.push_back(constellationTemplateTags[index]);
+                    }
+                    else
+                    {
+                        removedTemplateBody = true;
+                    }
+                }
+
+                if (!removedTemplateBody)
+                {
+                    for (std::set<tag_t>::const_iterator it = lastAutoExpandedTags.begin();
+                         it != lastAutoExpandedTags.end();
+                         ++it)
+                    {
+                        if (currentTags.count(*it) == 0)
+                        {
+                            constellationSuppressedTags.insert(*it);
+                        }
+                    }
+                    constellationTemplateTags = keptTemplate;
+                    if (constellationTemplateTags.size() < 2)
+                    {
+                        ClearConstellationState();
+                        lastAutoExpandedTags = currentTags;
+                        return;
+                    }
+
+                    FilterConstellationPlacements(currentTags);
+                    const std::vector<tag_t> keptTags = TagsFromPlacements(constellationPlacements);
+                    const std::set<tag_t> keptSet(keptTags.begin(), keptTags.end());
+                    for (std::set<tag_t>::const_iterator it = currentTags.begin();
+                         it != currentTags.end();
+                         ++it)
+                    {
+                        if (keptSet.count(*it) == 0)
+                        {
+                            constellationSuppressedTags.insert(*it);
+                        }
+                    }
+                    if (keptSet != currentTags)
+                    {
+                        SelectBodyTags(keptTags);
+                    }
+                    RememberCurrentSelectionAsExpanded();
+                    return;
+                }
+
+                constellationTemplateTags = keptTemplate;
+                constellationSuppressedTags.clear();
+                if (constellationTemplateTags.size() < 2)
+                {
+                    ClearConstellationState();
+                    lastAutoExpandedTags = currentTags;
+                    return;
+                }
+                SearchConstellationFromTemplate();
+                return;
+            }
+        }
+
+        std::vector<tag_t> newTemplate;
+        if (constellationTemplateTags.empty() || lastAutoExpandedTags.empty())
+        {
+            newTemplate = currentOrder;
+        }
+        else
+        {
+            std::set<tag_t> seenTemplate;
+            for (std::size_t index = 0; index < constellationTemplateTags.size(); ++index)
+            {
+                const tag_t tag = constellationTemplateTags[index];
+                if (currentTags.count(tag) != 0 && seenTemplate.insert(tag).second)
+                {
+                    newTemplate.push_back(tag);
+                }
+            }
+            for (std::size_t index = 0; index < currentOrder.size(); ++index)
+            {
+                const tag_t tag = currentOrder[index];
+                if (lastAutoExpandedTags.count(tag) == 0 &&
+                    seenTemplate.insert(tag).second)
+                {
+                    newTemplate.push_back(tag);
+                }
+            }
+        }
+
+        constellationSuppressedTags.clear();
+        constellationTemplateTags = newTemplate;
+        if (constellationTemplateTags.size() < 2)
+        {
+            ClearConstellationState();
+            lastAutoExpandedTags = currentTags;
+            return;
+        }
+
+        SearchConstellationFromTemplate();
+    }
+
+    void PopulateConstellationPreview()
+    {
+        InitializeAssemblyList();
+        if (constellationPlacements.empty())
+        {
+            ClearAssemblyList();
+            return;
+        }
+
+        MatchedBodyGroup templateGroup;
+        const std::vector<tag_t>& templateTags = constellationPlacements[0].bodyTags;
+        for (std::size_t index = 0; index < templateTags.size(); ++index)
+        {
+            MatchedBodyInstance instance = {};
+            instance.bodyTag = templateTags[index];
+            instance.transformFromReference = IdentityTransform();
+            templateGroup.instances.push_back(instance);
+        }
+
+        AssemblyPreviewRow row = {};
+        row.group = templateGroup;
+        row.tags = TagsFromPlacements(constellationPlacements);
+        row.displayQuantity = static_cast<int>(constellationPlacements.size());
+        row.manuallyNamed = false;
+        const AssemblyPreviewRow* existingRow = FindExistingPreviewRow(row.tags);
+        if (existingRow != NULL)
+        {
+            row.componentName = existingRow->componentName;
+            row.manuallyNamed = existingRow->manuallyNamed;
+        }
+        if (row.componentName.empty())
+        {
+            row.componentName = BuildComponentNameForCurrentRule(templateGroup, 1);
+        }
+        row.parentName = GetParentAssemblyDisplayName();
+
+        if (GetAssemblyOutputMode() == AssemblyOutputModeBodiesToAssemblyGroup)
+        {
+            const std::string parentName = row.manuallyNamed && !row.componentName.empty()
+                ? row.componentName
+                : BuildComponentNameForCurrentRule(templateGroup, 1);
+            row.componentName = parentName;
+            std::vector<AssemblyPreviewRow> rows;
+            rows.push_back(row);
+            const std::vector<MatchedBodyGroup> shapeGroups =
+                GroupBodiesByShape(templateTags);
+            for (std::size_t index = 0; index < shapeGroups.size(); ++index)
+            {
+                AssemblyPreviewRow childRow = {};
+                childRow.group = shapeGroups[index];
+                childRow.tags = ExtractGroupTags(shapeGroups[index]);
+                childRow.displayQuantity = static_cast<int>(
+                    shapeGroups[index].instances.size());
+                childRow.parentName = parentName;
+                const AssemblyPreviewRow* existingChild = FindExistingPreviewRow(childRow.tags);
+                if (existingChild != NULL && existingChild->manuallyNamed)
+                {
+                    childRow.componentName = existingChild->componentName;
+                    childRow.manuallyNamed = true;
+                }
+                else
+                {
+                    childRow.componentName = BuildAssemblyGroupChildName(
+                        parentName,
+                        static_cast<int>(index + 1),
+                        GetCurrentSerialStart());
+                    childRow.manuallyNamed = false;
+                }
+                rows.push_back(childRow);
+            }
+            PopulateAssemblyList(rows);
+            return;
+        }
+
+        std::vector<AssemblyPreviewRow> rows(1, row);
+        PopulateAssemblyList(rows);
+    }
+
+    std::vector<NXOpen::Body*> BodiesFromConstellationPlacements() const
+    {
+        std::vector<NXOpen::Body*> bodies;
+        const std::vector<tag_t> tags = TagsFromPlacements(constellationPlacements);
+        for (std::size_t index = 0; index < tags.size(); ++index)
+        {
+            NXOpen::Body* body = dynamic_cast<NXOpen::Body*>(
+                NXOpen::NXObjectManager::Get(tags[index]));
+            if (body != NULL)
+            {
+                bodies.push_back(body);
+            }
+        }
+        return bodies;
+    }
+
+    bool PrepareConstellationForConvert()
+    {
+        if (!IsConstellationAssemblyRequested() || constellationTemplateTags.size() < 2)
+        {
+            return false;
+        }
+
+        const std::vector<tag_t> selectionTags = GetCurrentSelectionTags();
+        const std::set<tag_t> selection(selectionTags.begin(), selectionTags.end());
+        for (std::size_t index = 0; index < constellationTemplateTags.size(); ++index)
+        {
+            if (selection.count(constellationTemplateTags[index]) == 0)
+            {
+                return false;
+            }
+        }
+
+        if (constellationPlacements.empty())
+        {
+            const std::vector<NXOpen::Body*> templateBodies = ResolveTemplateBodies();
+            if (templateBodies.size() < 2)
+            {
+                return false;
+            }
+            constellationPlacements = FindConstellationPlacements(templateBodies);
+        }
+
+        FilterConstellationPlacements(selection);
+        return !constellationPlacements.empty();
+    }
+
+    void ExecuteConstellationConversion()
+    {
+        if (constellationPlacements.empty())
+        {
+            lastConversionFailureReason = "constellation pattern is empty";
+            return;
+        }
+
+        MatchedBodyGroup templateGroup;
+        for (std::size_t index = 0; index < constellationPlacements[0].bodyTags.size(); ++index)
+        {
+            MatchedBodyInstance instance = {};
+            instance.bodyTag = constellationPlacements[0].bodyTags[index];
+            instance.transformFromReference = IdentityTransform();
+            templateGroup.instances.push_back(instance);
+        }
+
+        std::string componentName;
+        if (!previewRows.empty() &&
+            previewRows[0].displayQuantity > 0 &&
+            !previewRows[0].componentName.empty())
+        {
+            componentName = previewRows[0].componentName;
+        }
+        else
+        {
+            componentName = BuildComponentNameForCurrentRule(templateGroup, 1);
+        }
+
+        if (gColorMatchedBodies && !retainOriginalBodies)
+        {
+            std::vector<std::vector<tag_t> > colorGroups;
+            colorGroups.reserve(constellationPlacements.size());
+            for (std::size_t index = 0; index < constellationPlacements.size(); ++index)
+            {
+                colorGroups.push_back(constellationPlacements[index].bodyTags);
+            }
+            std::vector<tag_t> colorFailedTags;
+            ColorMatchedGroups(session, colorGroups, colorFailedTags);
+        }
+
+        AssemblyConversionResult result = {};
+        if (GetAssemblyOutputMode() == AssemblyOutputModeBodiesToAssemblyGroup)
+        {
+            const std::vector<MatchedBodyGroup> shapeGroups =
+                GroupBodiesByShape(constellationPlacements[0].bodyTags);
+            std::vector<std::string> childNames;
+            childNames.reserve(shapeGroups.size());
+            for (std::size_t index = 0; index < shapeGroups.size(); ++index)
+            {
+                const std::vector<tag_t> childTags =
+                    ExtractGroupTags(shapeGroups[index]);
+                const AssemblyPreviewRow* existingChild = FindExistingPreviewRow(childTags);
+                if (existingChild != NULL &&
+                    existingChild->manuallyNamed &&
+                    !existingChild->componentName.empty())
+                {
+                    childNames.push_back(existingChild->componentName);
+                }
+                else
+                {
+                    childNames.push_back(BuildAssemblyGroupChildName(
+                        componentName,
+                        static_cast<int>(index + 1),
+                        GetCurrentSerialStart()));
+                }
+            }
+            result = ConvertConstellationToAssemblyGroup(
+                session,
+                constellationPlacements,
+                componentName,
+                childNames,
+                GetCurrentSerialStart(),
+                retainOriginalBodies);
+        }
+        else
+        {
+            result = ConvertConstellationToSinglePart(
+                session,
+                constellationPlacements,
+                componentName,
+                retainOriginalBodies);
+        }
+        lastConversionCreatedPart =
+            result.convertedGroups > 0 && result.failedGroups == 0;
+        if (!result.failureReasons.empty())
+        {
+            lastConversionFailureReason = result.failureReasons.front();
+        }
+
+        std::ostringstream line;
+        line << "Constellation conversion references=" << constellationPlacements.size()
+             << ", components=" << result.createdComponents
+             << ", deletedOriginalBodies=" << result.deletedOriginalBodies
+             << ", failedGroups=" << result.failedGroups;
+        WritePreviewDebugLog(line.str());
+    }
+
     void ExpandSelectionWithDisplayedSameBodies()
     {
         if (!gAutoSelectSameBodies ||
@@ -7514,6 +10515,14 @@ private:
         {
             return;
         }
+
+        if (IsConstellationAssemblyRequested())
+        {
+            ExpandConstellationSelection();
+            return;
+        }
+
+        ClearConstellationState();
 
         const std::vector<NXOpen::Body*> selectedBodies = GetSelectedBodies();
         std::set<tag_t> currentTags;

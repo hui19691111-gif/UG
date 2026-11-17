@@ -1,4 +1,8 @@
 #include "QiuMianZanKai.hpp"
+#include "../../common/ZhihuiContextHelp.hpp"
+#ifdef CreateDialog
+#undef CreateDialog
+#endif
 #include "SphereCustomFeature.hpp"
 #include <NXOpen/BlockStyler_PropertyList.hxx>
 #include <NXOpen/BlockStyler_Label.hxx>
@@ -45,6 +49,7 @@ struct QuietDisplay {
 };
 }
 QiuMianZanKaiDialog::QiuMianZanKaiDialog(){
+    zhihui_context_help::EnsureGlobalHelpLoaded();
     sphere_unfold::RequireFeatureClass();
     edited_=NXOpen::Session::GetSession()->CustomFeatureClassManager()->GetEditedCustomFeature();
     dialog_=NXOpen::UI::GetUI()->CreateDialog((ModuleDir()/"QiuMianZanKai.dlx").u8string().c_str());

@@ -152,6 +152,14 @@ private:
     NXOpen::Features::Feature* FindBodyInsertionFeature(
         const std::vector<NXOpen::Body*>& bodies) const;
     NXOpen::Face* FlatPatternUpwardFace(NXOpen::Features::Feature* feature) const;
+    NXOpen::Face* TryGetFlatPatternUpwardFace(
+        NXOpen::Features::Feature* feature) const;
+    NXOpen::Face* ResolveSameSkinWebFace(
+        NXOpen::Body* body, NXOpen::Face* seedFace) const;
+    bool RepairFlatPatternUpwardFace(
+        NXOpen::Features::Feature* flatPattern,
+        NXOpen::Body* body,
+        tag_t preferredWebFaceTag) const;
     int ProcessBody(NXOpen::Body* body, NXOpen::Face* upwardFace);
     NXOpen::Face* FindReferenceFace(NXOpen::Body* body) const;
     std::vector<BendRecord> CollectBends(NXOpen::Body* body,
@@ -211,4 +219,5 @@ private:
     NotchSettings cachedDown_;
     DialogSettings cachedDialog_;
     std::vector<tag_t> pendingInternalFeatureTags_;
+    std::size_t skippedBendCount_ = 0;
 };

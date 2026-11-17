@@ -47,6 +47,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <cstdarg>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #ifdef CreateDialog
@@ -347,6 +349,33 @@ static double boxOffsets[6] = { minBoxOffset, minBoxOffset, minBoxOffset, minBox
 static bool isUpdatingDimensionHandles = false;
 
 static bool IsCoordinateSystemObject(NXOpen::TaggedObject* selectedObject);
+
+static void WriteDebugLog(const char* format, ...)
+{
+    if (format == NULL)
+    {
+        return;
+    }
+
+    CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
+    FILE* fp = NULL;
+    if (_wfopen_s(&fp, L"D:\\UG智辉钣金插件\\logs\\BaoLonTiFenGe_debug.log", L"a, ccs=UTF-8") != 0 || fp == NULL)
+    {
+        return;
+    }
+
+    SYSTEMTIME st = { 0 };
+    GetLocalTime(&st);
+    char buffer[2048] = { 0 };
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer) - 1, format, args);
+    va_end(args);
+
+    fwprintf(fp, L"[%04u-%02u-%02u %02u:%02u:%02u.%03u] %S\n",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buffer);
+    fclose(fp);
+}
 
 static void ShowNonBlockingNotice(const char* description, bool throttle)
 {
@@ -681,6 +710,8 @@ static bool ApplyCoordinateSystemToOrientation(NXOpen::TaggedObject* selectedObj
     manipBlock->SetXAxis(xAxis);
     manipBlock->SetYAxis(yAxis);
     Point3d2 = csysOrigin;
+    WriteDebugLog("ApplyCoordinateSystemToOrientation: tag=%u origin=(%.4f, %.4f, %.4f)",
+        static_cast<unsigned int>(selectedObject->Tag()), csysOrigin.X, csysOrigin.Y, csysOrigin.Z);
     return true;
 }
 
@@ -964,14 +995,20 @@ int BaoLonTiFenGe::update_cb(NXOpen::BlockStyler::UIBlock* block)
                 return 0;
             }
 
-            tag_t objects_1 = Body2->Tag();
-            double acc_value_1[11] = { 0.01,0,0,0,0,0,0,0,0,0,0 };
-            double mass_props_1[47];
-            double statistics_1[13];
-            UF_MODL_ask_mass_props_3d(&objects_1, 1, 1, 3, 7.85, 1, acc_value_1, mass_props_1, statistics_1);
-            Point3d Point3d1 = { mass_props_1[3] * 10,mass_props_1[4] * 10,mass_props_1[5] * 10 };
-            manip0->SetOrigin(Point3d1);
-            ConfigureBoxDimensionHandles(Body2, manip0, linear_dim_x, linear_dim_x1, linear_dim_y, linear_dim_y1, linear_dim_z, linear_dim_z1);
+            NXOpen::Point3d boxCenter = manip0->Origin();
+            double halfDistances[3] = { 0.001, 0.001, 0.001 };
+            const bool gotCenter = AskBodyBoundingBoxCenter(Body2, boxCenter, boxCenter, halfDistances);
+            if (gotCenter)
+            {
+                manip0->SetOrigin(boxCenter);
+                Point3d2 = boxCenter;
+            }
+            WriteDebugLog("rebuildPreview: body2=%u gotCenter=%d center=(%.4f, %.4f, %.4f) half=(%.4f, %.4f, %.4f)",
+                static_cast<unsigned int>(Body2->Tag()), gotCenter ? 1 : 0,
+                boxCenter.X, boxCenter.Y, boxCenter.Z,
+                halfDistances[0], halfDistances[1], halfDistances[2]);
+            ConfigureDimensionHandlesAtBox(boxCenter, halfDistances[0], halfDistances[1], halfDistances[2],
+                linear_dim_x, linear_dim_x1, linear_dim_y, linear_dim_y1, linear_dim_z, linear_dim_z1);
             objects1.push_back(toolingBox1);
             UF_terminate();
             return 0;

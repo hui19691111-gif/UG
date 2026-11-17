@@ -22,6 +22,7 @@
 #include <uf_defs.h>
 #include <uf_ui_types.h>
 #include <iostream>
+#include <string>
 #include <NXOpen/Session.hxx>
 #include <NXOpen/UI.hxx>
 #include <NXOpen/NXMessageBox.hxx>
@@ -173,5 +174,10 @@ private:
     NXOpen::BlockStyler::SelectObject* selectionBatchComponents;
     bool assemblySelectionActive;
     std::vector<NXOpen::Part*> selectedAssemblyParts;
+    bool helpMapLoaded_;
+    bool helpUfInitialized_;
+    std::wstring helpMapPath_;
+    void InitializeContextHelp();
+    void UnloadContextHelp();
 };
 #endif //ZIDONFENCEN_H_INCLUDED

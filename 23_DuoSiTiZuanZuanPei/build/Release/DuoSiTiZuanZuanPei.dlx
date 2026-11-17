@@ -11,9 +11,9 @@
                 <Property ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" id="Title" name="Title" sname="Label" source="1" type="utfstring" value="装配方式"/>
                 <Property ClassID="UGS::UICOMP_enum" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="PresentationStyle" mask="16384" name="PresentationStyle" selected="1" sname="PresentationStyle" source="1" type="enum"><Option name="Option Menu" value="0"/><Option name="Radio Box" value="1"/><Option name="Pulldown" value="2"/></Property>
                 <Property ClassID="UGS::UICOMP_enum" brief="0" dynamic="0" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="RadioOrientation" mask="16386" name="RadioOrientation" selected="1" sname="Layout" source="1" type="enum"><Option name="Vertical" value="0"/><Option name="Horizontal" value="1"/></Property>
-                <Property ClassID="UGS::UICOMP_enum" data="@@1@@1" dtype="0" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="EnumSensitivity" mask="0" name="EnumSensitivity" size="2" sname="EnumSensitivity" source="1" type="stlvector"/>
-                <Property ClassID="UGS::UICOMP_enum" data="@@1@@1" dtype="0" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="EnumVisibility" mask="0" name="EnumVisibility" size="2" sname="EnumVisibility" source="1" type="stlvector"/>
-                <Property ClassID="UGS::UICOMP_enum" brief="0" dynamic="1" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="Titles_1" mask="256" name="Titles_1" selected="0" sname="Value" source="4" type="enum"><Option name="每个体装配对应PRT（相同体除外）" value="0"/><Option name="多实体装配1个PRT" value="1"/></Property>
+                <Property ClassID="UGS::UICOMP_enum" data="@@1@@1@@1" dtype="0" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="EnumSensitivity" mask="0" name="EnumSensitivity" size="3" sname="EnumSensitivity" source="1" type="stlvector"/>
+                <Property ClassID="UGS::UICOMP_enum" data="@@1@@1@@1" dtype="0" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="EnumVisibility" mask="0" name="EnumVisibility" size="3" sname="EnumVisibility" source="1" type="stlvector"/>
+                <Property ClassID="UGS::UICOMP_enum" brief="0" dynamic="1" group="Block Specific::" hierarchy="UGS::UICOMP_enum" id="Titles_1" mask="256" name="Titles_1" selected="0" sname="Value" source="4" type="enum"><Option name="每个体装配对应PRT（相同体除外）" value="0"/><Option name="多实体装配1个PRT" value="1"/><Option name="多实体转装配组" value="2"/></Property>
               </PropertyList>
             </item>
           </Property>
@@ -309,6 +309,34 @@
       <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Value" mask="0" name="Value" sname="Value" source="4" type="logical" value="True"/>
       <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="BitmapOnly" mask="16384" name="BitmapOnly" sname="BitmapOnly" source="1" type="logical" value="False"/>
       <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Tooltip" mask="0" name="Tooltip" sname="Tooltip" source="1" type="utfstring" value="勾选后，新组件部件继承当前工作部件的部件属性"/>
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Top" loc="1" mask="16384" name="Top" offset="0" sname="Top" source="3" target="Default" type="attachment"/>
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Left" loc="2" mask="16384" name="Left" offset="0" sname="Left" source="3" target="Default" type="attachment"/>
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment"/>
+      <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Bottom" loc="4" mask="16384" name="Bottom" offset="0" sname="Bottom" source="3" target="Default" type="attachment"/>
+    </PropertyList>
+  </item>
+          </Property>
+          <Property class="UICOMP_toggle" hierarchy="UGS::UICOMP_group" id="autoSelectSameBodiesToggle" mask="256" name="autoSelectSameBodiesToggle" presentation="Toggle" type="uicomp">
+            <item Expanded="1" SupportsDisablingLogic="1" class="UICOMP_toggle" hierarchy="" icon="styler_toggle.bmp" id="autoSelectSameBodiesToggle" name="autoSelectSameBodiesToggle" notes="" presentation="Toggle" type="uicomp">
+    <PropertyList id="id" mode="0">
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="API Name" mask="16656" name="API Name" sname="BlockID" source="3" type="string" value="autoSelectSameBodiesToggle"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Group" mask="16384" name="Group" sname="Group" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Expanded" mask="4" name="Expanded" sname="Expanded" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="HideGroup" mask="69636" name="HideGroup" sname="HideGroup" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Focus" mask="69636" name="Focus" sname="Focus" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="CanFocus" mask="69636" name="CanFocus" sname="CanFocus" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="KeyboardFocus" mask="69636" name="KeyboardFocus" sname="KeyboardFocus" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="CanKeyboardFocus" mask="69636" name="CanKeyboardFocus" sname="CanKeyboardFocus" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_toggle" id="ReadWrite" mask="0" name="ReadWrite" sname="RetainValue" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_toggle" id="UIOnly" mask="69636" name="UIOnly" sname="RetainValueInUIOnly" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP_widget" group="Other::" hierarchy="UGS::UICOMP_toggle" id="Translated" mask="16384" name="Translated" sname="Localize" source="1" type="logical" value="True"/>
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="自动选择相同体"/>
+      <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Icon" mask="128" name="Icon" sname="Bitmap" source="3" type="string" value=""/>
+      <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Value" mask="0" name="Value" sname="Value" source="4" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="BitmapOnly" mask="16384" name="BitmapOnly" sname="BitmapOnly" source="1" type="logical" value="False"/>
+      <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Tooltip" mask="0" name="Tooltip" sname="Tooltip" source="1" type="utfstring" value="勾选后，在未选中且可见的实体中查找相同体并选中高亮。多实体装配1个PRT时，以所选多个体为基准，查找形状相同且相对位置相同的其他组，生成同一个PRT的多个引用。多实体转装配组时，这些组成为父装配的多个引用，再在父装配内把形状相同的基准体做成同一个PRT并按位置引用"/>
       <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Top" loc="1" mask="16384" name="Top" offset="0" sname="Top" source="3" target="Default" type="attachment"/>
       <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Left" loc="2" mask="16384" name="Left" offset="0" sname="Left" source="3" target="Default" type="attachment"/>
       <Property ClassID="UGS::UIFW_dialog_layout" group="Other::Attachments::" hierarchy="UGS::UIFW_dialog_layout" id="Right" loc="3" mask="16384" name="Right" offset="0" sname="Right" source="3" target="Default" type="attachment"/>

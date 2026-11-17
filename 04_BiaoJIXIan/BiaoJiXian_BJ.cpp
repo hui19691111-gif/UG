@@ -22,6 +22,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <iomanip>
 #include <sstream>
 #include <unordered_map>
@@ -99,6 +100,7 @@
 #include <NXOpen/SketchCollection.hxx>
 #include <NXOpen/SketchInPlaceBuilder.hxx>
 #include <uf.h>
+#include <uf_help.h>
 #include <uf_assem.h>
 #include <uf_curve.h>
 #include <uf_disp.h>
@@ -6486,6 +6488,101 @@ int RunAssemblyShallowGrooveAutoTest(bool edgeMode)
     DebugLog("AutoTest assembly failed: no groove created");
     return 0;
 }
+
+std::wstring PluginDirectoryW()
+{
+    wchar_t modulePath[MAX_PATH] = {0};
+    HMODULE moduleHandle = NULL;
+    if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&PluginDirectoryW),
+            &moduleHandle))
+    {
+        return std::wstring();
+    }
+
+    const DWORD length = GetModuleFileNameW(moduleHandle, modulePath, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+    {
+        return std::wstring();
+    }
+
+    const std::wstring path(modulePath, length);
+    const std::wstring::size_type slash = path.find_last_of(L"\\/");
+    if (slash == std::wstring::npos)
+    {
+        return std::wstring();
+    }
+    return path.substr(0, slash);
+}
+
+bool FileExistsW(const std::wstring& path)
+{
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+std::string WideTextToUtf8(const std::wstring& value)
+{
+    if (value.empty())
+    {
+        return std::string();
+    }
+
+    const int length = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, NULL, 0, NULL, NULL);
+    if (length <= 0)
+    {
+        return std::string();
+    }
+
+    std::string result(static_cast<std::size_t>(length), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, &result[0], length, NULL, NULL);
+    if (!result.empty() && result[result.size() - 1] == '\0')
+    {
+        result.resize(result.size() - 1);
+    }
+    return result;
+}
+
+std::string WidePathToAnsi(const std::wstring& value)
+{
+    if (value.empty())
+    {
+        return std::string();
+    }
+
+    const int length = WideCharToMultiByte(CP_ACP, 0, value.c_str(), -1, NULL, 0, NULL, NULL);
+    if (length <= 0)
+    {
+        return std::string();
+    }
+
+    std::string result(static_cast<std::size_t>(length), '\0');
+    WideCharToMultiByte(CP_ACP, 0, value.c_str(), -1, &result[0], length, NULL, NULL);
+    if (!result.empty() && result[result.size() - 1] == '\0')
+    {
+        result.resize(result.size() - 1);
+    }
+    return result;
+}
+
+std::wstring HelpFileUrlBase(const std::wstring& directory)
+{
+    std::wstring value = directory;
+    for (std::size_t i = 0; i < value.size(); ++i)
+    {
+        if (value[i] == L'\\')
+        {
+            value[i] = L'/';
+        }
+    }
+    if (!value.empty() && value[value.size() - 1] != L'/')
+    {
+        value.push_back(L'/');
+    }
+    return L"file:/" + value;
+}
 }
 
 Session* BiaoJiXian_BJ::theSession = NULL;
@@ -6514,7 +6611,9 @@ BiaoJiXian_BJ::BiaoJiXian_BJ()
       CurveColorPicker(NULL),
       CurveLineFont(NULL),
       MarkFaceRecolor(NULL),
-      MarkFaceColorPicker(NULL)
+      MarkFaceColorPicker(NULL),
+      helpMapLoaded_(false),
+      helpUfInitialized_(false)
 {
     theSession = Session::GetSession();
     theUI = UI::GetUI();
@@ -6524,6 +6623,7 @@ BiaoJiXian_BJ::BiaoJiXian_BJ()
         throw std::runtime_error("BiaoJiXian dialog resource is missing.");
     }
     theDlxFileName = m_dlxPath.c_str();
+    InitializeContextHelp();
     theDialog = theUI->CreateDialog(theDlxFileName);
 
     theDialog->AddInitializeHandler(make_callback(this, &BiaoJiXian_BJ::initialize_cb));
@@ -6539,6 +6639,89 @@ BiaoJiXian_BJ::~BiaoJiXian_BJ()
     {
         delete theDialog;
         theDialog = NULL;
+    }
+    if (helpMapLoaded_ && !helpMapPath_.empty())
+    {
+        const std::string ansiMapPath = WidePathToAnsi(helpMapPath_);
+        std::vector<char> mapPath(ansiMapPath.begin(), ansiMapPath.end());
+        mapPath.push_back('\0');
+        const int unloadStatus = UF_HELP_unload_map_file(mapPath.data());
+        DebugLog(std::string("context help unload status=") + std::to_string(unloadStatus));
+        helpMapLoaded_ = false;
+    }
+    if (helpUfInitialized_)
+    {
+        UF_terminate();
+        helpUfInitialized_ = false;
+    }
+}
+
+void BiaoJiXian_BJ::InitializeContextHelp()
+{
+    try
+    {
+        const std::wstring pluginDirectory = PluginDirectoryW();
+        if (pluginDirectory.empty())
+        {
+            DebugLog("context help init failed reason=plugin-directory");
+            helpMapPath_.clear();
+            return;
+        }
+
+        const std::wstring helpDirectory = pluginDirectory + L"\\BiaoJiXianHelp";
+        const std::wstring helpIndex = helpDirectory + L"\\index.html";
+        helpMapPath_ = helpDirectory + L"\\BiaoJiXian.map";
+        const bool indexExists = FileExistsW(helpIndex);
+        const bool mapExists = FileExistsW(helpMapPath_);
+        if (!indexExists || !mapExists)
+        {
+            DebugLog(
+                std::string("context help init failed reason=missing-file index=[") +
+                WideTextToUtf8(helpIndex) + "] indexExists=" + (indexExists ? "1" : "0") +
+                " map=[" + WideTextToUtf8(helpMapPath_) + "] mapExists=" +
+                (mapExists ? "1" : "0"));
+            helpMapPath_.clear();
+            return;
+        }
+
+        const int ufInitStatus = UF_initialize();
+        if (ufInitStatus != 0)
+        {
+            DebugLog(std::string("context help init failed reason=uf-initialize status=") + std::to_string(ufInitStatus));
+            helpMapPath_.clear();
+            return;
+        }
+        helpUfInitialized_ = true;
+
+        const std::wstring helpUrlBase = HelpFileUrlBase(helpDirectory);
+        const BOOL environmentSet = SetEnvironmentVariableW(L"ZHIHUI_BIAOJI_HELP_PATH", helpUrlBase.c_str());
+        const std::string ansiMapPath = WidePathToAnsi(helpMapPath_);
+        if (ansiMapPath.empty())
+        {
+            DebugLog("context help init failed reason=map-path-conversion");
+            return;
+        }
+
+        std::vector<char> mapPath(ansiMapPath.begin(), ansiMapPath.end());
+        mapPath.push_back('\0');
+        const int helpLoadStatus = UF_HELP_load_map_file(mapPath.data());
+        helpMapLoaded_ = helpLoadStatus == 0;
+        DebugLog(
+            std::string("context help init map=[") + WideTextToUtf8(helpMapPath_) +
+            "] urlBase=[" + WideTextToUtf8(helpUrlBase) +
+            "] environmentSet=" + (environmentSet ? "1" : "0") +
+            " ufInitStatus=" + std::to_string(ufInitStatus) +
+            " loadStatus=" + std::to_string(helpLoadStatus));
+    }
+    catch (const std::exception& ex)
+    {
+        DebugLog(std::string("context help init failed message=") + ex.what());
+        helpMapPath_.clear();
+    }
+    catch (...)
+    {
+        DebugLog("context help init failed message=unknown");
+        helpMapPath_.clear();
     }
 }
 
@@ -6718,6 +6901,19 @@ void BiaoJiXian_BJ::initialize_cb()
 {
     try
     {
+    try
+    {
+        std::unique_ptr<NXOpen::BlockStyler::PropertyList> dialogProps(theDialog->TopBlock()->GetProperties());
+        dialogProps->SetString("HelpTag", "Zhihui_BiaoJiXian");
+    }
+    catch (const NXException& ex)
+    {
+        DebugLog(std::string("context help tag update failed: ") + ex.Message());
+    }
+    catch (...)
+    {
+        DebugLog("context help tag update failed: unknown exception");
+    }
     InputGroup = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("InputGroup"));
     SourceBody = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("SourceBody"));
     SourceEdges = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("SourceEdges"));

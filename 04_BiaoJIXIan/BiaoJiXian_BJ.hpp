@@ -187,6 +187,12 @@ private:
 
     // 标记面颜色。仅在改色开关勾选时显示，确定或应用时写到所有选择的面上。
     NXOpen::BlockStyler::ObjectColorPicker* MarkFaceColorPicker;
+
+    // 对话框问号帮助。打开对话框前加载 map，关闭后卸载。
+    bool helpMapLoaded_;
+    bool helpUfInitialized_;
+    std::wstring helpMapPath_;
+    void InitializeContextHelp();
 };
 
 #endif

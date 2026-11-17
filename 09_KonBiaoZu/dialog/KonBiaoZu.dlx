@@ -121,6 +121,25 @@
               </PropertyList>
             </item>
           </Property>
+          <Property id="marker_text_height" mask="256" name="marker_text_height" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
+            <item id="marker_text_height" icon="styler_double" name="marker_text_height" type="uicomp" class="UICOMP_double" notes="" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" mask="16400" name="API Name" type="string" group="General::" sname="BlockID" value="marker_text_height" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+                <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="孔标识字高" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+                <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+                <Property id="Sensitivity" mask="0" name="Sensitivity" type="logical" group="General::" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double"/>
+                <Property id="Value" mask="0" name="Value" type="double" group="Block Specific::" sname="Value" value="2.0" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+                <Property id="MinimumValue" mask="0" name="MinimumValue" type="double" group="Block Specific::" sname="MinimumValue" value="0.5" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+                <Property id="MaximumValue" mask="0" name="MaximumValue" type="double" group="Block Specific::" sname="MaximumValue" value="20" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+                <Property id="Increment" mask="0" name="Increment" type="double" group="Block Specific::" sname="Increment" value="0.5" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+                <Property id="VisibleDecimals" mask="0" name="VisibleDecimals" type="integer" group="Block Specific::" sname="VisibleDecimals" value="2" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double"/>
+                <Property id="Top" loc="1" mask="16384" name="Top" type="attachment" group="Other::Attachments::" sname="Top" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+                <Property id="Left" loc="2" mask="16384" name="Left" type="attachment" group="Other::Attachments::" sname="Left" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+                <Property id="Right" loc="3" mask="16384" name="Right" type="attachment" group="Other::Attachments::" sname="Right" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+                <Property id="Bottom" loc="4" mask="16384" name="Bottom" type="attachment" group="Other::Attachments::" sname="Bottom" offset="0" source="3" target="Default" ClassID="UGS::UIFW_dialog_layout" hierarchy="UGS::UIFW_dialog_layout"/>
+              </PropertyList>
+            </item>
+          </Property>
           <Property id="weld_nut_series" mask="256" name="weld_nut_series" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
             <item id="weld_nut_series" icon="styler_optionmenu.bmp" name="weld_nut_series" type="uicomp" class="UICOMP_enum" notes="" Expanded="1" hierarchy="UGS::UI::Comp::Container" presentation="Enumeration">
               <PropertyList id="id" mode="0">

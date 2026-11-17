@@ -678,6 +678,7 @@
       <Option name="Allow Resize" value="0" />
       <Option name="Follow Policy" value="1" />
     </Property>
+    <Property ClassID="UGS::UICOMP" group="General::Other::" hierarchy="UGS::Styler::DialogItem" id="HelpTag" mask="4096" name="HelpTag" sname="HelpTag" source="3" type="string" value="Zhihui_StandardPartsLibrary" />
     <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::Styler::DialogItem" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="选择体加入标准件库" />
   </PropertyList>
 </Dialog>

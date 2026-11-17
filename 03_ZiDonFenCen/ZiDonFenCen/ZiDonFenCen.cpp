@@ -92,7 +92,9 @@ UI *(ZiDonFenCen::theUI) = NULL;
 // Constructor for NX Styler class
 //------------------------------------------------------------------------------
 ZiDonFenCen::ZiDonFenCen()
-    : assemblySelectionActive(false)
+    : assemblySelectionActive(false),
+      helpMapLoaded_(false),
+      helpUfInitialized_(false)
 {
     try
     {
@@ -121,6 +123,7 @@ ZiDonFenCen::ZiDonFenCen()
         }
 
         theDlxFileName = NULL;
+        InitializeContextHelp();
 
         theDialog = ZiDonFenCen::theUI->CreateDialog(dlxPath.c_str());
         // Registration of callback functions
@@ -147,6 +150,7 @@ ZiDonFenCen::~ZiDonFenCen()
         delete theDialog;
         theDialog = NULL;
     }
+    UnloadContextHelp();
 }
 //------------------------------- DIALOG LAUNCHING ---------------------------------
 //
@@ -176,6 +180,8 @@ ZiDonFenCen::~ZiDonFenCen()
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <uf.h>
+#include <uf_help.h>
 #include <windows.h>
 #include <commctrl.h>
 #pragma comment(lib, "Comctl32.lib")
@@ -184,6 +190,86 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 namespace
 {
 bool PrepareZiDonFenCenAssemblySelection(NXOpen::Session* session, std::vector<NXOpen::Part*>& selectedParts);
+
+std::wstring PluginDirectoryW()
+{
+    wchar_t modulePath[MAX_PATH] = {0};
+    const DWORD length = GetModuleFileNameW(reinterpret_cast<HMODULE>(&__ImageBase), modulePath, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+    {
+        return std::wstring();
+    }
+    const std::wstring path(modulePath, length);
+    const std::wstring::size_type slash = path.find_last_of(L"\\/");
+    if (slash == std::wstring::npos)
+    {
+        return std::wstring();
+    }
+    return path.substr(0, slash);
+}
+
+bool HelpFileExistsW(const std::wstring& path)
+{
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+std::string HelpWideToUtf8(const std::wstring& value)
+{
+    if (value.empty())
+    {
+        return std::string();
+    }
+    const int length = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, NULL, 0, NULL, NULL);
+    if (length <= 0)
+    {
+        return std::string();
+    }
+    std::string result(static_cast<std::size_t>(length), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, &result[0], length, NULL, NULL);
+    if (!result.empty() && result[result.size() - 1] == '\0')
+    {
+        result.resize(result.size() - 1);
+    }
+    return result;
+}
+
+std::string HelpWideToAnsi(const std::wstring& value)
+{
+    if (value.empty())
+    {
+        return std::string();
+    }
+    const int length = WideCharToMultiByte(CP_ACP, 0, value.c_str(), -1, NULL, 0, NULL, NULL);
+    if (length <= 0)
+    {
+        return std::string();
+    }
+    std::string result(static_cast<std::size_t>(length), '\0');
+    WideCharToMultiByte(CP_ACP, 0, value.c_str(), -1, &result[0], length, NULL, NULL);
+    if (!result.empty() && result[result.size() - 1] == '\0')
+    {
+        result.resize(result.size() - 1);
+    }
+    return result;
+}
+
+std::wstring HelpFileUrlBase(const std::wstring& directory)
+{
+    std::wstring value = directory;
+    for (std::size_t i = 0; i < value.size(); ++i)
+    {
+        if (value[i] == L'\\')
+        {
+            value[i] = L'/';
+        }
+    }
+    if (!value.empty() && value[value.size() - 1] != L'/')
+    {
+        value.push_back(L'/');
+    }
+    return L"file:/" + value;
+}
 }
 
 namespace zhihui_license_guard
@@ -6602,10 +6688,104 @@ int ProcessBatchBodyQuantityInPart(
 //------------------------------------------------------------------------------
 //Callback Name: initialize_cb
 //------------------------------------------------------------------------------
+void ZiDonFenCen::InitializeContextHelp()
+{
+    try
+    {
+        const std::wstring pluginDirectory = PluginDirectoryW();
+        if (pluginDirectory.empty())
+        {
+            ZiDonFenCenDebugLog("context help init failed reason=plugin-directory");
+            helpMapPath_.clear();
+            return;
+        }
+        const std::wstring helpDirectory = pluginDirectory + L"\\ZiDonFenCenHelp";
+        const std::wstring helpIndex = helpDirectory + L"\\index.html";
+        helpMapPath_ = helpDirectory + L"\\ZiDonFenCen.map";
+        const bool indexExists = HelpFileExistsW(helpIndex);
+        const bool mapExists = HelpFileExistsW(helpMapPath_);
+        if (!indexExists || !mapExists)
+        {
+            ZiDonFenCenDebugLog(
+                std::string("context help init failed reason=missing-file indexExists=") +
+                (indexExists ? "1" : "0") + " mapExists=" + (mapExists ? "1" : "0") +
+                " index=" + HelpWideToUtf8(helpIndex));
+            helpMapPath_.clear();
+            return;
+        }
+        const int ufInitStatus = UF_initialize();
+        if (ufInitStatus != 0)
+        {
+            ZiDonFenCenDebugLog(std::string("context help init failed reason=uf-initialize status=") + std::to_string(ufInitStatus));
+            helpMapPath_.clear();
+            return;
+        }
+        helpUfInitialized_ = true;
+        const std::wstring helpUrlBase = HelpFileUrlBase(helpDirectory);
+        const BOOL environmentSet = SetEnvironmentVariableW(L"ZHIHUI_ZIDONFENCEN_HELP_PATH", helpUrlBase.c_str());
+        const std::string ansiMapPath = HelpWideToAnsi(helpMapPath_);
+        if (ansiMapPath.empty())
+        {
+            ZiDonFenCenDebugLog("context help init failed reason=map-path-conversion");
+            return;
+        }
+        std::vector<char> mapPath(ansiMapPath.begin(), ansiMapPath.end());
+        mapPath.push_back('\0');
+        const int helpLoadStatus = UF_HELP_load_map_file(mapPath.data());
+        helpMapLoaded_ = helpLoadStatus == 0;
+        ZiDonFenCenDebugLog(
+            std::string("context help init environmentSet=") + (environmentSet ? "1" : "0") +
+            " ufInitStatus=" + std::to_string(ufInitStatus) +
+            " loadStatus=" + std::to_string(helpLoadStatus) +
+            " urlBase=" + HelpWideToUtf8(helpUrlBase));
+    }
+    catch (const std::exception& ex)
+    {
+        ZiDonFenCenDebugLog(std::string("context help init failed message=") + ex.what());
+        helpMapPath_.clear();
+    }
+    catch (...)
+    {
+        ZiDonFenCenDebugLog("context help init failed message=unknown");
+        helpMapPath_.clear();
+    }
+}
+
+void ZiDonFenCen::UnloadContextHelp()
+{
+    if (helpMapLoaded_ && !helpMapPath_.empty())
+    {
+        const std::string ansiMapPath = HelpWideToAnsi(helpMapPath_);
+        std::vector<char> mapPath(ansiMapPath.begin(), ansiMapPath.end());
+        mapPath.push_back('\0');
+        const int unloadStatus = UF_HELP_unload_map_file(mapPath.data());
+        ZiDonFenCenDebugLog(std::string("context help unload status=") + std::to_string(unloadStatus));
+        helpMapLoaded_ = false;
+    }
+    if (helpUfInitialized_)
+    {
+        UF_terminate();
+        helpUfInitialized_ = false;
+    }
+}
+
 void ZiDonFenCen::initialize_cb()
 {
     try
     {
+        try
+        {
+            std::unique_ptr<NXOpen::BlockStyler::PropertyList> dialogProps(theDialog->TopBlock()->GetProperties());
+            dialogProps->SetString("HelpTag", "Zhihui_ZiDonFenCen");
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            ZiDonFenCenDebugLog(std::string("context help tag update failed: ") + ex.Message());
+        }
+        catch (...)
+        {
+            ZiDonFenCenDebugLog("context help tag update failed: unknown exception");
+        }
 		toggle03 = dynamic_cast<NXOpen::BlockStyler::Toggle*>(theDialog->TopBlock()->FindBlock("toggle03"));
 		selection0 = dynamic_cast<NXOpen::BlockStyler::SelectObject*>(theDialog->TopBlock()->FindBlock("selection0"));
 		group = dynamic_cast<NXOpen::BlockStyler::Group*>(theDialog->TopBlock()->FindBlock("group"));

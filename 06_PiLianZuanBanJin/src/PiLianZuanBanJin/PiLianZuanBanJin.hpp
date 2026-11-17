@@ -168,7 +168,9 @@ private:
     bool helpMapLoaded_;
     bool helpUfInitialized_;
     std::string helpMapPath_;
+    std::string dlxPath_;
 
+    bool CreateBlockDialog();
     void initialize_cb();
     int update_cb(NXOpen::BlockStyler::UIBlock* block);
     int ok_cb();

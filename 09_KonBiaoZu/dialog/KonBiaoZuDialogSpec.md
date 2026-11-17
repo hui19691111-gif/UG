@@ -18,6 +18,12 @@ Planned Block Styler dialog file: `KonBiaoZu.dlx`
   - logical toggle
   - title: 生成孔边 A/B/C 标识
 
+- `marker_text_height`
+  - double block
+  - title: 孔标识字高
+  - range 0.5 - 20, increment 0.5, default 2.0
+  - unit: drawing units (mm); applied as `SetGeneralTextSize` on the A/B/C marker note
+
 - `open_excel_button`
   - button title: 打开Excel规则表
 

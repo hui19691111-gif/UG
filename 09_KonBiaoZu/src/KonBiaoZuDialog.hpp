@@ -38,6 +38,7 @@ namespace KonBiaoZu
         AnnotationType GetSelectedType() const;
         bool GetLetterToggle() const;
         std::string GetMarkerStart() const;
+        double GetMarkerTextHeight() const;
         std::string GetSelectedSubtype() const;
         int GetLengthValue() const;
         NXOpen::TaggedObject* GetSelectedCircleObject() const;
@@ -61,6 +62,7 @@ namespace KonBiaoZu
         NXOpen::BlockStyler::UIBlock* annotationTypeBlock_;
         NXOpen::BlockStyler::UIBlock* letterToggleBlock_;
         NXOpen::BlockStyler::UIBlock* markerStartBlock_;
+        NXOpen::BlockStyler::UIBlock* markerTextHeightBlock_;
         NXOpen::BlockStyler::UIBlock* weldNutSeriesBlock_;
         NXOpen::BlockStyler::UIBlock* pemNutSeriesBlock_;
         NXOpen::BlockStyler::UIBlock* pemScrewSeriesBlock_;

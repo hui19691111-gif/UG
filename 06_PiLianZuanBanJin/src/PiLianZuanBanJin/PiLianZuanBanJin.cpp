@@ -12978,23 +12978,43 @@ PiLianZuanBanJinDialog::PiLianZuanBanJinDialog()
       manualButtonProcessedBodyTags_(),
       helpMapLoaded_(false),
       helpUfInitialized_(false),
-      helpMapPath_()
+      helpMapPath_(),
+      dlxPath_()
 {
     PiLianZuanBanJinDialog::theSession = Session::GetSession();
     PiLianZuanBanJinDialog::theUI = UI::GetUI();
-    const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(
+    dlxPath_ = zhihui_embedded_dialog::ExtractDlxToRandomPath(
         IDR_ZH_DLX_PILIANZUANBANJIN_DLX,
         L"PiLianZuanBanJin.dlx");
-    if (dlxPath.empty())
+    if (dlxPath_.empty())
     {
         throw std::runtime_error("Embedded DLX resource missing: PiLianZuanBanJin.dlx");
     }
     InitializeContextHelp();
-    theDialog = theUI->CreateDialog(dlxPath.c_str());
+}
+
+bool PiLianZuanBanJinDialog::CreateBlockDialog()
+{
+    if (theDialog != NULL)
+    {
+        return true;
+    }
+    if (theUI == NULL || dlxPath_.empty())
+    {
+        return false;
+    }
+
+    theDialog = theUI->CreateDialog(dlxPath_.c_str());
+    if (theDialog == NULL)
+    {
+        return false;
+    }
+
     theDialog->AddInitializeHandler(make_callback(this, &PiLianZuanBanJinDialog::initialize_cb));
     theDialog->AddUpdateHandler(make_callback(this, &PiLianZuanBanJinDialog::update_cb));
     theDialog->AddOkHandler(make_callback(this, &PiLianZuanBanJinDialog::ok_cb));
     theDialog->AddApplyHandler(make_callback(this, &PiLianZuanBanJinDialog::apply_cb));
+    return true;
 }
 
 PiLianZuanBanJinDialog::~PiLianZuanBanJinDialog()
@@ -13100,6 +13120,14 @@ int PiLianZuanBanJinDialog::Show()
         }
 
         assemblySelectionActive = true;
+    }
+
+    // The part picker pumps the UI thread. Create the Block Styler dialog only
+    // after that loop ends, so NX messages cannot free DialogCreator early.
+    if (!CreateBlockDialog())
+    {
+        ShowMessage(theUI, "\xE8\x87\xAA\xE5\x8A\xA8\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91 C++", NXMessageBox::DialogTypeError, "\xE6\x89\x93\xE5\xBC\x80\xE8\xBD\xAC\xE9\x92\xA3\xE9\x87\x91\xE5\xAF\xB9\xE8\xAF\x9D\xE6\xA1\x86\xE5\xA4\xB1\xE8\xB4\xA5\xE3\x80\x82");
+        return 1;
     }
 
     runAfterDialog_ = false;

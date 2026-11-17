@@ -173,6 +173,13 @@ namespace
         return L"D:\\UG智辉钣金插件\\logs\\Write_Prat_Attr.log";
     }
 
+    std::wstring OpenConfigLogFilePath()
+    {
+        CreateDirectoryW(L"D:\\UG智辉钣金插件", NULL);
+        CreateDirectoryW(L"D:\\UG智辉钣金插件\\logs", NULL);
+        return L"D:\\UG智辉钣金插件\\logs\\Write_Prat_Attr_open_config.log";
+    }
+
     std::string TimestampText()
     {
         std::time_t now = std::time(NULL);
@@ -656,16 +663,272 @@ namespace
         return block == NULL ? true : block->Value();
     }
 
+    void AppendOpenConfigLog(const std::string& message)
+    {
+        const std::wstring path = OpenConfigLogFilePath();
+        const bool existed = FileExistsW(path);
+        std::ofstream file(path, std::ios::app | std::ios::binary);
+        if (!file)
+        {
+            AppendDebugLog("open config log write failed path=" + WideTextToUtf8(path));
+            return;
+        }
+
+        if (!existed)
+        {
+            const unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
+            file.write(reinterpret_cast<const char*>(bom), sizeof(bom));
+        }
+
+        file << "[" << TimestampText() << "] " << message << "\r\n";
+    }
+
+    std::string OpenConfigFailureMessage()
+    {
+        return "无法打开配置文件。原因已写入日志：" + WideTextToUtf8(OpenConfigLogFilePath());
+    }
+
+    std::wstring RegistryString(HKEY root, const std::wstring& subkey, const wchar_t* valueName)
+    {
+        DWORD size = 0;
+        DWORD type = 0;
+        if (RegGetValueW(root, subkey.c_str(), valueName, RRF_RT_REG_SZ, &type, NULL, &size) != ERROR_SUCCESS ||
+            size < sizeof(wchar_t))
+        {
+            return std::wstring();
+        }
+
+        std::wstring value(size / sizeof(wchar_t), L'\0');
+        if (RegGetValueW(root, subkey.c_str(), valueName, RRF_RT_REG_SZ, &type, &value[0], &size) != ERROR_SUCCESS)
+        {
+            return std::wstring();
+        }
+
+        while (!value.empty() && value.back() == L'\0')
+        {
+            value.pop_back();
+        }
+        return value;
+    }
+
+    std::string YesNoText(bool value)
+    {
+        return value ? "是" : "否";
+    }
+
+    std::string FileStateText(const std::wstring& path)
+    {
+        WIN32_FILE_ATTRIBUTE_DATA data = {};
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data))
+        {
+            return "不存在，系统错误 " + std::to_string(GetLastError());
+        }
+
+        const unsigned long long size =
+            (static_cast<unsigned long long>(data.nFileSizeHigh) << 32) |
+            static_cast<unsigned long long>(data.nFileSizeLow);
+        std::ostringstream text;
+        text << "存在，大小 " << size << " 字节";
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_READONLY) != 0)
+        {
+            text << "，只读";
+        }
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        {
+            text << "，这是文件夹而不是文件";
+        }
+        return text.str();
+    }
+
+    const char* ShellExecuteCodeText(INT_PTR code)
+    {
+        switch (code)
+        {
+        case 0: return "系统没有给出原因";
+        case 2: return "找不到文件";
+        case 3: return "找不到路径";
+        case 5: return "拒绝访问。NX 以管理员身份运行时，经常无法启动当前用户的记事本";
+        case 8: return "内存不足";
+        case 11: return "程序格式无效";
+        case 26: return "文件正在被占用";
+        case 27: return "文件关联不完整";
+        case 28: return "打开方式响应超时";
+        case 29: return "打开方式启动失败";
+        case 30: return "打开方式正忙";
+        case 31: return "NX 里没有可用的打开方式。资源管理器能打开，不代表这个 NX 进程能用同一关联";
+        case 32: return "缺少关联程序需要的 DLL";
+        default: return "未知错误";
+        }
+    }
+
+    std::string Win32ErrorText(DWORD code)
+    {
+        wchar_t* buffer = NULL;
+        const DWORD length = FormatMessageW(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            NULL,
+            code,
+            0,
+            reinterpret_cast<wchar_t*>(&buffer),
+            0,
+            NULL);
+        std::string text = "系统错误 " + std::to_string(code);
+        if (length > 0 && buffer != NULL)
+        {
+            std::wstring message(buffer, length);
+            while (!message.empty() &&
+                (message.back() == L'\r' || message.back() == L'\n' || message.back() == L' '))
+            {
+                message.pop_back();
+            }
+            text += "，";
+            text += WideTextToUtf8(message);
+        }
+        if (buffer != NULL)
+        {
+            LocalFree(buffer);
+        }
+        return text;
+    }
+
+    void LogOpenConfigEnvironment(const std::wstring& path)
+    {
+        try
+        {
+            AppendOpenConfigLog("插件目录：" + WideTextToUtf8(PluginDirectory()));
+        }
+        catch (const std::exception& ex)
+        {
+            AppendOpenConfigLog(std::string("插件目录读取失败：") + ex.what());
+        }
+
+        AppendOpenConfigLog("配置文件：" + WideTextToUtf8(path));
+        AppendOpenConfigLog("配置文件状态：" + FileStateText(path));
+
+        wchar_t userName[256] = { 0 };
+        DWORD userNameSize = 256;
+        if (GetUserNameW(userName, &userNameSize))
+        {
+            AppendOpenConfigLog(std::string("当前用户：") + WideTextToUtf8(userName));
+        }
+        else
+        {
+            AppendOpenConfigLog("当前用户读取失败，" + Win32ErrorText(GetLastError()));
+        }
+
+        HANDLE token = NULL;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        {
+            TOKEN_ELEVATION elevation = {};
+            DWORD size = 0;
+            if (GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size))
+            {
+                AppendOpenConfigLog("NX 是否管理员身份：" + YesNoText(elevation.TokenIsElevated != 0));
+            }
+            else
+            {
+                AppendOpenConfigLog("管理员身份判断失败，" + Win32ErrorText(GetLastError()));
+            }
+            CloseHandle(token);
+        }
+        else
+        {
+            AppendOpenConfigLog("管理员身份判断失败，" + Win32ErrorText(GetLastError()));
+        }
+
+        const std::wstring progId = RegistryString(
+            HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.ini\\UserChoice",
+            L"ProgId");
+        AppendOpenConfigLog("当前用户的 .ini 打开方式：" + (progId.empty() ? std::string("未设置") : WideTextToUtf8(progId)));
+        if (!progId.empty())
+        {
+            const std::wstring command = RegistryString(
+                HKEY_CLASSES_ROOT, progId + L"\\shell\\open\\command", NULL);
+            const std::wstring delegateExecute = RegistryString(
+                HKEY_CLASSES_ROOT, progId + L"\\shell\\open\\command", L"DelegateExecute");
+            AppendOpenConfigLog("打开命令：" + (command.empty() ? std::string("未登记") : WideTextToUtf8(command)));
+            if (!delegateExecute.empty())
+            {
+                AppendOpenConfigLog("打开命令类型：应用激活 " + WideTextToUtf8(delegateExecute) +
+                    "。这种记事本由资源管理器启动，NX 直接打开经常失败");
+            }
+        }
+    }
+
+    bool TryOpenConfigAndLog(const char* action, const wchar_t* verb, const wchar_t* file, const wchar_t* params)
+    {
+        SetLastError(0);
+        const HINSTANCE result = ShellExecuteW(NULL, verb, file, params, NULL, SW_SHOWNORMAL);
+        const DWORD lastError = GetLastError();
+        const INT_PTR code = reinterpret_cast<INT_PTR>(result);
+
+        std::ostringstream line;
+        line << action << "：";
+        if (code > 32)
+        {
+            line << "成功";
+        }
+        else
+        {
+            line << "失败，代码 " << code << "，" << ShellExecuteCodeText(code);
+            if (lastError != 0)
+            {
+                line << "。" << Win32ErrorText(lastError);
+            }
+        }
+        AppendOpenConfigLog(line.str());
+        return code > 32;
+    }
+
     void OpenConfigFile()
     {
         const std::wstring path = ConfigFilePath();
-        EnsureDefaultConfigFile(path);
+        AppendOpenConfigLog("--------");
+        AppendOpenConfigLog("打开配置文件：开始");
+        LogOpenConfigEnvironment(path);
 
-        HINSTANCE result = ShellExecuteW(NULL, L"open", path.c_str(), NULL, NULL, SW_SHOWNORMAL);
-        if (reinterpret_cast<INT_PTR>(result) <= 32)
+        try
         {
-            throw std::runtime_error("无法打开配置文件。");
+            EnsureDefaultConfigFile(path);
         }
+        catch (const std::exception& ex)
+        {
+            AppendOpenConfigLog(std::string("创建配置文件失败：") + ex.what());
+            AppendOpenConfigLog("结果：没有打开");
+            AppendDebugLog("open config failed detail=" + WideTextToUtf8(OpenConfigLogFilePath()));
+            throw std::runtime_error(OpenConfigFailureMessage());
+        }
+
+        bool opened = false;
+        wchar_t systemDir[MAX_PATH] = { 0 };
+        if (GetSystemDirectoryW(systemDir, MAX_PATH) == 0)
+        {
+            AppendOpenConfigLog("系统目录获取失败，" + Win32ErrorText(GetLastError()));
+        }
+        else
+        {
+            const std::wstring notepad = std::wstring(systemDir) + L"\\notepad.exe";
+            AppendOpenConfigLog("系统记事本：" + WideTextToUtf8(notepad) + "，" + FileStateText(notepad));
+            const std::wstring quotedPath = L"\"" + path + L"\"";
+            opened = TryOpenConfigAndLog("启动系统记事本", L"open", notepad.c_str(), quotedPath.c_str());
+        }
+
+        if (!opened)
+        {
+            opened = TryOpenConfigAndLog("按文件关联打开", NULL, path.c_str(), NULL);
+        }
+
+        if (opened)
+        {
+            AppendOpenConfigLog("结果：已打开");
+            AppendDebugLog("open config ok detail=" + WideTextToUtf8(OpenConfigLogFilePath()));
+            return;
+        }
+
+        AppendOpenConfigLog("结果：没有打开");
+        AppendDebugLog("open config failed detail=" + WideTextToUtf8(OpenConfigLogFilePath()));
+        throw std::runtime_error(OpenConfigFailureMessage());
     }
 
     NXOpen::Part* CurrentWorkPart()
