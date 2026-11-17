@@ -8171,7 +8171,7 @@ namespace
         }
 
         std::string text = FormatDouble(flatCheck.flatSizeX, 1) + "*" + FormatDouble(flatCheck.flatSizeY, 1);
-        body->SetUserAttribute(u8"体展开尺寸", -1, text.c_str(), Update::OptionNow);
+        body->SetUserAttribute(u8"体展开尺寸", -1, text.c_str(), Update::OptionLater);
         return true;
     }
 
@@ -11398,23 +11398,41 @@ namespace
             }
 
             prefsBuilder = prefsManager->CreateSheetMetalPreferencesBuilder();
-            prefsBuilder->SetParameterEntryType(SheetMetalPreferencesBuilder::ParameterEntryTypesValue);
-            prefsBuilder->SetBendDefinitionMethod(SheetMetalPreferencesBuilder::BendDefinitionMethodOptionsNeutralFactorValue);
+            bool needsCommit = false;
+            if (prefsBuilder->ParameterEntryType() != SheetMetalPreferencesBuilder::ParameterEntryTypesValue)
+            {
+                prefsBuilder->SetParameterEntryType(SheetMetalPreferencesBuilder::ParameterEntryTypesValue);
+                needsCommit = true;
+            }
+            if (prefsBuilder->GetBendDefinitionMethod() != SheetMetalPreferencesBuilder::BendDefinitionMethodOptionsNeutralFactorValue)
+            {
+                prefsBuilder->SetBendDefinitionMethod(SheetMetalPreferencesBuilder::BendDefinitionMethodOptionsNeutralFactorValue);
+                needsCommit = true;
+            }
 
-            if (options.innerRadius > 0.0)
+            if (options.innerRadius > 0.0 &&
+                std::fabs(prefsBuilder->BendRadius()->Value() - options.innerRadius) > 1e-6)
             {
                 prefsBuilder->BendRadius()->SetFormula(FormatDouble(options.innerRadius, 12));
+                needsCommit = true;
             }
-            if (options.reliefDepth > 0.0)
+            if (options.reliefDepth > 0.0 &&
+                std::fabs(prefsBuilder->BendReliefDepth()->Value() - options.reliefDepth) > 1e-6)
             {
                 prefsBuilder->BendReliefDepth()->SetFormula(FormatDouble(options.reliefDepth, 12));
+                needsCommit = true;
             }
-            if (options.reliefWidth > 0.0)
+            if (options.reliefWidth > 0.0 &&
+                std::fabs(prefsBuilder->BendReliefWidth()->Value() - options.reliefWidth) > 1e-6)
             {
                 prefsBuilder->BendReliefWidth()->SetFormula(FormatDouble(options.reliefWidth, 12));
+                needsCommit = true;
             }
 
-            prefsBuilder->Commit();
+            if (needsCommit)
+            {
+                prefsBuilder->Commit();
+            }
             prefsBuilder->Destroy();
             prefsBuilder = NULL;
         }
@@ -13941,10 +13959,16 @@ void PiLianZuanBanJinDialog::Run(const AutoConvertOptions& options)
                     }
                     else
                     {
-                        UpdateBodyFlatPatternSizeAttribute(activeBody, flatCheck);
+                        if (UpdateBodyFlatPatternSizeAttribute(activeBody, flatCheck))
+                        {
+                            hasDeferredAttributeUpdates = true;
+                        }
                         if (flatCheck.flatBody != NULL && (activeBody == NULL || flatCheck.flatBody->Tag() != activeBody->Tag()))
                         {
-                            UpdateBodyFlatPatternSizeAttribute(flatCheck.flatBody, flatCheck);
+                            if (UpdateBodyFlatPatternSizeAttribute(flatCheck.flatBody, flatCheck))
+                            {
+                                hasDeferredAttributeUpdates = true;
+                            }
                         }
                     }
                 }

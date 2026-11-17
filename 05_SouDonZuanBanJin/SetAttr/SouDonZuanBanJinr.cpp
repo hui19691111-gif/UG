@@ -541,7 +541,7 @@ namespace
         }
 
         std::string text = FormatDouble(thickness, 1);
-        body->SetUserAttribute("Z", -1, text.c_str(), Update::OptionNow);
+        body->SetUserAttribute("Z", -1, text.c_str(), Update::OptionLater);
         if (thicknessText != NULL)
         {
             *thicknessText = text;
@@ -720,10 +720,10 @@ namespace
         }
 
         std::string text = FormatDouble(sizeX, 1) + "*" + FormatDouble(sizeY, 1);
-        targetBody->SetUserAttribute("\xE5\xB1\x95\xE5\xBC\x80\xE5\xB0\xBA\xE5\xAF\xB8", -1, text.c_str(), Update::OptionNow);
+        targetBody->SetUserAttribute("\xE5\xB1\x95\xE5\xBC\x80\xE5\xB0\xBA\xE5\xAF\xB8", -1, text.c_str(), Update::OptionLater);
         if (flatBody != targetBody)
         {
-            flatBody->SetUserAttribute("\xE5\xB1\x95\xE5\xBC\x80\xE5\xB0\xBA\xE5\xAF\xB8", -1, text.c_str(), Update::OptionNow);
+            flatBody->SetUserAttribute("\xE5\xB1\x95\xE5\xBC\x80\xE5\xB0\xBA\xE5\xAF\xB8", -1, text.c_str(), Update::OptionLater);
         }
         return true;
     }
@@ -1112,22 +1112,40 @@ namespace
             }
 
             prefsBuilder = prefsManager->CreateSheetMetalPreferencesBuilder();
-            prefsBuilder->SetParameterEntryType(NXOpen::Preferences::SheetMetalPreferencesBuilder::ParameterEntryTypesValue);
-            prefsBuilder->SetBendDefinitionMethod(NXOpen::Preferences::SheetMetalPreferencesBuilder::BendDefinitionMethodOptionsNeutralFactorValue);
-            if (options.innerRadius > 0.0)
+            bool needsCommit = false;
+            if (prefsBuilder->ParameterEntryType() != NXOpen::Preferences::SheetMetalPreferencesBuilder::ParameterEntryTypesValue)
+            {
+                prefsBuilder->SetParameterEntryType(NXOpen::Preferences::SheetMetalPreferencesBuilder::ParameterEntryTypesValue);
+                needsCommit = true;
+            }
+            if (prefsBuilder->GetBendDefinitionMethod() != NXOpen::Preferences::SheetMetalPreferencesBuilder::BendDefinitionMethodOptionsNeutralFactorValue)
+            {
+                prefsBuilder->SetBendDefinitionMethod(NXOpen::Preferences::SheetMetalPreferencesBuilder::BendDefinitionMethodOptionsNeutralFactorValue);
+                needsCommit = true;
+            }
+            if (options.innerRadius > 0.0 &&
+                std::fabs(prefsBuilder->BendRadius()->Value() - options.innerRadius) > 1e-6)
             {
                 prefsBuilder->BendRadius()->SetFormula(FormatDouble(options.innerRadius, 12));
+                needsCommit = true;
             }
-            if (options.reliefDepth > 0.0)
+            if (options.reliefDepth > 0.0 &&
+                std::fabs(prefsBuilder->BendReliefDepth()->Value() - options.reliefDepth) > 1e-6)
             {
                 prefsBuilder->BendReliefDepth()->SetFormula(FormatDouble(options.reliefDepth, 12));
+                needsCommit = true;
             }
-            if (options.reliefWidth > 0.0)
+            if (options.reliefWidth > 0.0 &&
+                std::fabs(prefsBuilder->BendReliefWidth()->Value() - options.reliefWidth) > 1e-6)
             {
                 prefsBuilder->BendReliefWidth()->SetFormula(FormatDouble(options.reliefWidth, 12));
+                needsCommit = true;
             }
 
-            prefsBuilder->Commit();
+            if (needsCommit)
+            {
+                prefsBuilder->Commit();
+            }
             prefsBuilder->Destroy();
             prefsBuilder = NULL;
         }
@@ -3281,16 +3299,16 @@ int SouDonZuanBanJin::apply_cb()
         if (!UpdateBodyZThicknessAttribute(workPart->Features()->SheetmetalManager(), Body1, &unfoldThickness) &&
             !unfoldThickness.empty())
         {
-            Body1->SetUserAttribute("Z", -1, unfoldThickness.c_str(), Update::OptionNow);
+            Body1->SetUserAttribute("Z", -1, unfoldThickness.c_str(), Update::OptionLater);
         }
 
         if (TheConCuan == true)
         {
-            Body1->SetUserAttribute("冲床", -1, "Y", Update::OptionNow);
+            Body1->SetUserAttribute("冲床", -1, "Y", Update::OptionLater);
         }
         else
         {
-            Body1->SetUserAttribute("冲床", -1, "", Update::OptionNow);
+            Body1->SetUserAttribute("冲床", -1, "", Update::OptionLater);
         }
 
 
@@ -3298,22 +3316,22 @@ int SouDonZuanBanJin::apply_cb()
 
         if (TheJiGuan == true)
         {
-            Body1->SetUserAttribute("激光", -1, "Y", Update::OptionNow);
+            Body1->SetUserAttribute("激光", -1, "Y", Update::OptionLater);
         }
         else
         {
-            Body1->SetUserAttribute("激光", -1, "", Update::OptionNow);
+            Body1->SetUserAttribute("激光", -1, "", Update::OptionLater);
         }
 
         //设置折弯属性
 
         if (TheZeWan == true)
         {
-            Body1->SetUserAttribute("折弯", -1, "Y", Update::OptionNow);
+            Body1->SetUserAttribute("折弯", -1, "Y", Update::OptionLater);
         }
         else
         {
-            Body1->SetUserAttribute("折弯", -1, "", Update::OptionNow);
+            Body1->SetUserAttribute("折弯", -1, "", Update::OptionLater);
         }
 
 
@@ -3321,13 +3339,32 @@ int SouDonZuanBanJin::apply_cb()
 
         if (TheHanJie == true)
         {
-            Body1->SetUserAttribute("焊接", -1, "Y", Update::OptionNow);
+            Body1->SetUserAttribute("焊接", -1, "Y", Update::OptionLater);
         }
         else
         {
-            Body1->SetUserAttribute("焊接", -1, "", Update::OptionNow);
+            Body1->SetUserAttribute("焊接", -1, "", Update::OptionLater);
         }
 
+        if (theSession != NULL && theSession->UpdateManager() != NULL)
+        {
+            NXOpen::Session::UndoMarkId attrMarkId = theSession->SetUndoMark(
+                NXOpen::Session::MarkVisibilityInvisible, "Update sheetmetal attributes");
+            try
+            {
+                theSession->UpdateManager()->DoUpdate(attrMarkId);
+            }
+            catch (...)
+            {
+            }
+            try
+            {
+                theSession->DeleteUndoMark(attrMarkId, "Update sheetmetal attributes");
+            }
+            catch (...)
+            {
+            }
+        }
     }
     catch(exception& ex)
     {
