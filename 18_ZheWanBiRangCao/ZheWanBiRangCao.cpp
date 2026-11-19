@@ -63,6 +63,7 @@
 #include <NXOpen/SmartObject.hxx>
 #include <NXOpen/UI.hxx>
 #include <NXOpen/UnitCollection.hxx>
+#include <NXOpen/Update.hxx>
 
 #include <uf.h>
 #include <uf_curve.h>
@@ -618,7 +619,10 @@ ZheWanBiRangCaoDialog::ZheWanBiRangCaoDialog()
       editedPickPoint_(0.0, 0.0, 0.0),
       slotRecords_(),
       hiddenTemporaryTags_(),
-      previewFeatureTags_()
+      previewFeatureTags_(),
+      previewUndoMark_(static_cast<NXOpen::Session::UndoMarkId>(0)),
+      hasPreviewUndoMark_(false),
+      customFeaturePreviewReady_(false)
 {
     const std::string dlxPath = zhihui_embedded_dialog::ExtractDlxToRandomPath(IDR_ZH_DLX_ZHEWANBIRANGCAO_DLX);
 
@@ -646,6 +650,7 @@ ZheWanBiRangCaoDialog::ZheWanBiRangCaoDialog()
 
 ZheWanBiRangCaoDialog::~ZheWanBiRangCaoDialog()
 {
+    RollbackCustomFeaturePreview();
     CleanupPreviewObjects();
     CleanupHiddenTemporaryObjects();
 
@@ -774,6 +779,12 @@ int ZheWanBiRangCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
     if (block == edgeSelectBlock_)
     {
         hasEditedPickPoint_ = false;
+        if (editedFeature_ == nullptr)
+        {
+            RollbackCustomFeaturePreview();
+            CleanupHiddenTemporaryObjects();
+            return GetSelectedFace() != nullptr ? PreviewAsCustomFeature() : 0;
+        }
         if (GetSelectedFace() != nullptr)
         {
             CleanupPreviewObjects();
@@ -787,6 +798,12 @@ int ZheWanBiRangCaoDialog::update_cb(NXOpen::BlockStyler::UIBlock* block)
         block == slotDepthBlock_)
     {
         SaveDialogState();
+        if (editedFeature_ == nullptr)
+        {
+            RollbackCustomFeaturePreview();
+            CleanupHiddenTemporaryObjects();
+            return GetSelectedFace() != nullptr ? PreviewAsCustomFeature() : 0;
+        }
         if (GetSelectedFace() != nullptr)
         {
             CleanupPreviewObjects();
@@ -805,6 +822,15 @@ int ZheWanBiRangCaoDialog::apply_cb()
 
     if (GetSelectedFace() != nullptr)
     {
+        if (editedFeature_ == nullptr && customFeaturePreviewReady_)
+        {
+            KeepCustomFeaturePreview();
+            CleanupHiddenTemporaryObjects();
+            ClearSelectedEdge();
+            return 0;
+        }
+
+        RollbackCustomFeaturePreview();
         CleanupPreviewObjects();
         CleanupHiddenTemporaryObjects();
         const int result = Execute();
@@ -815,6 +841,7 @@ int ZheWanBiRangCaoDialog::apply_cb()
         return result;
     }
 
+    RollbackCustomFeaturePreview();
     previewFeatureTags_.clear();
     CleanupHiddenTemporaryObjects();
     return 0;
@@ -827,6 +854,7 @@ int ZheWanBiRangCaoDialog::ok_cb()
 
 int ZheWanBiRangCaoDialog::cancel_cb()
 {
+    RollbackCustomFeaturePreview();
     CleanupPreviewObjects();
     CleanupHiddenTemporaryObjects();
     return 0;
@@ -2356,6 +2384,277 @@ int ZheWanBiRangCaoDialog::Preview()
         CleanupHiddenTemporaryObjects();
         return 0;
     }
+}
+
+namespace
+{
+const char* const kPreviewUndoMarkName = "ZheWanBiRangCao Preview";
+const char* const kPreviewCleanupMarkName = "ZheWanBiRangCao Preview Cleanup";
+
+void LogPreview(const std::string& message)
+{
+    std::string line = "ZheWanBiRangCao preview: " + message + "\n";
+    UF_print_syslog(line.data(), FALSE);
+}
+
+std::set<tag_t> CollectWorkPartFeatureTags(NXOpen::Part* workPart)
+{
+    std::set<tag_t> tags;
+    if (workPart == nullptr)
+    {
+        return tags;
+    }
+    for (NXOpen::Features::Feature* feature : *workPart->Features())
+    {
+        if (feature != nullptr)
+        {
+            tags.insert(feature->Tag());
+        }
+    }
+    return tags;
+}
+}
+
+int ZheWanBiRangCaoDialog::PreviewAsCustomFeature()
+{
+    gLastSlotFailure.clear();
+    customFeaturePreviewReady_ = false;
+    if (editedFeature_ != nullptr)
+    {
+        return 0;
+    }
+
+    try
+    {
+        NXOpen::Face* selectedFace = GetSelectedFace();
+        if (selectedFace == nullptr)
+        {
+            return 0;
+        }
+        const NXOpen::Point3d pickPoint = GetSelectionPickPoint();
+        NXOpen::Edge* edge = FindClosestLinearEdgeOnFace(selectedFace, pickPoint);
+        if (edge == nullptr || edge->SolidEdgeType() != NXOpen::Edge::EdgeTypeLinear)
+        {
+            return 0;
+        }
+
+        const SlotParameters parameters{GetSlotWidthY(), GetSlotDepthZ(), 0.5, 0.5, 6.0};
+        double selectedFaceBox[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        const NXOpen::Vector3d selectedFaceNormal = AskPlanarFaceNormal(selectedFace, selectedFaceBox);
+        const NXOpen::Point3d selectedPlanePoint = FaceBoxCenter(selectedFaceBox);
+        const std::vector<SlotReferenceEdge> referenceEdges =
+            FindInnerReferenceEdges(edge, selectedFace, selectedPlanePoint, selectedFaceNormal);
+        const std::vector<SlotEndCandidate> endCandidates =
+            BuildSlotEndCandidates(referenceEdges, pickPoint);
+        const double thickness = EstimateThickness(edge->GetBody(), selectedFace);
+
+        std::vector<SlotToolTransform> transforms;
+        transforms.reserve(endCandidates.size());
+        for (const SlotEndCandidate& candidate : endCandidates)
+        {
+            SlotToolTransform transform;
+            if (BuildSlotToolTransformAtEnd(edge,
+                                            selectedFace,
+                                            pickPoint,
+                                            candidate.endpoint,
+                                            candidate.otherEndpoint,
+                                            parameters.slotWidth,
+                                            parameters.slotDepth,
+                                            thickness,
+                                            transform))
+            {
+                transforms.push_back(transform);
+            }
+        }
+        if (transforms.empty())
+        {
+            LogPreview("no slot transform; nothing previewed");
+            return 0;
+        }
+
+        previewUndoMark_ = session_->SetUndoMark(
+            NXOpen::Session::MarkVisibilityVisible, kPreviewUndoMarkName);
+        hasPreviewUndoMark_ = true;
+        NXOpen::Part* workPart = session_->Parts()->Work();
+        const std::set<tag_t> featuresBefore = CollectWorkPartFeatureTags(workPart);
+
+        bool committed = false;
+        try
+        {
+            committed = CommitEditableCustomFeature(edge->GetBody(),
+                                                    selectedFace,
+                                                    edge,
+                                                    pickPoint,
+                                                    parameters.slotWidth,
+                                                    parameters.slotDepth,
+                                                    thickness,
+                                                    transforms);
+        }
+        catch (...)
+        {
+            committed = false;
+        }
+
+        previewFeatureTags_.clear();
+        if (workPart != nullptr)
+        {
+            for (NXOpen::Features::Feature* feature : *workPart->Features())
+            {
+                if (feature != nullptr &&
+                    featuresBefore.find(feature->Tag()) == featuresBefore.end() &&
+                    !feature->IsInternal())
+                {
+                    previewFeatureTags_.push_back(feature->Tag());
+                }
+            }
+        }
+
+        if (!committed)
+        {
+            LogPreview("commit failed: " + gLastSlotFailure + "; rolling back");
+            RollbackCustomFeaturePreview();
+            return 0;
+        }
+
+        customFeaturePreviewReady_ = true;
+        LogPreview("custom feature preview ready, tools=" + std::to_string(transforms.size()) +
+                   ", topFeatures=" + std::to_string(previewFeatureTags_.size()));
+        return 0;
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogPreview(std::string("NXException: ") + ex.Message());
+    }
+    catch (const std::exception& ex)
+    {
+        LogPreview(std::string("exception: ") + ex.what());
+    }
+    catch (...)
+    {
+        LogPreview("unknown exception");
+    }
+    RollbackCustomFeaturePreview();
+    return 0;
+}
+
+void ZheWanBiRangCaoDialog::RollbackCustomFeaturePreview()
+{
+    if (editedFeature_ != nullptr)
+    {
+        return;
+    }
+    customFeaturePreviewReady_ = false;
+    if (!hasPreviewUndoMark_ && previewFeatureTags_.empty())
+    {
+        return;
+    }
+
+    if (hasPreviewUndoMark_)
+    {
+        const NXOpen::Session::UndoMarkId markId = previewUndoMark_;
+        hasPreviewUndoMark_ = false;
+        previewUndoMark_ = static_cast<NXOpen::Session::UndoMarkId>(0);
+        try
+        {
+            if (session_->DoesUndoMarkExist(markId, kPreviewUndoMarkName))
+            {
+                session_->UndoToMark(markId, kPreviewUndoMarkName);
+                if (session_->DoesUndoMarkExist(markId, kPreviewUndoMarkName))
+                {
+                    session_->DeleteUndoMark(markId, kPreviewUndoMarkName);
+                }
+            }
+        }
+        catch (const NXOpen::NXException& ex)
+        {
+            LogPreview(std::string("rollback UndoToMark NXException: ") + ex.Message());
+        }
+        catch (...)
+        {
+        }
+    }
+
+    // UF_PART_close on the UDF template part recycles session undo marks, so
+    // check every top-level feature created by this preview and remove any
+    // survivors in one dependency-aware UpdateManager transaction.
+    try
+    {
+        std::vector<NXOpen::TaggedObject*> survivingFeatures;
+        std::set<tag_t> seen;
+        for (auto item = previewFeatureTags_.rbegin();
+             item != previewFeatureTags_.rend();
+             ++item)
+        {
+            const tag_t featureTag = *item;
+            if (featureTag == NULL_TAG || !seen.insert(featureTag).second ||
+                UF_OBJ_ask_status(featureTag) != UF_OBJ_ALIVE)
+            {
+                continue;
+            }
+            NXOpen::Features::Feature* feat =
+                dynamic_cast<NXOpen::Features::Feature*>(
+                    NXOpen::NXObjectManager::Get(featureTag));
+            if (feat != nullptr && feat->IsInternal())
+            {
+                continue;
+            }
+            NXOpen::TaggedObject* object =
+                dynamic_cast<NXOpen::TaggedObject*>(
+                    NXOpen::NXObjectManager::Get(featureTag));
+            if (object != nullptr)
+            {
+                survivingFeatures.push_back(object);
+            }
+        }
+
+        if (!survivingFeatures.empty() && session_->UpdateManager() != nullptr)
+        {
+            const NXOpen::Session::UndoMarkId cleanupMark =
+                session_->SetUndoMark(
+                    NXOpen::Session::MarkVisibilityInvisible,
+                    kPreviewCleanupMarkName);
+            NXOpen::Update* update = session_->UpdateManager();
+            update->ClearDeleteList();
+            update->ClearErrorList();
+            update->AddObjectsToDeleteList(survivingFeatures);
+            const int deleteErrors = update->DoUpdate(cleanupMark);
+            if (session_->DoesUndoMarkExist(cleanupMark, kPreviewCleanupMarkName))
+            {
+                session_->DeleteUndoMark(cleanupMark, kPreviewCleanupMarkName);
+            }
+            int stillAlive = 0;
+            for (tag_t tag : previewFeatureTags_)
+            {
+                if (tag != NULL_TAG && UF_OBJ_ask_status(tag) == UF_OBJ_ALIVE)
+                {
+                    ++stillAlive;
+                }
+            }
+            LogPreview("UpdateManager deleted preview survivors=" +
+                       std::to_string(survivingFeatures.size()) +
+                       ", deleteErrors=" + std::to_string(deleteErrors) +
+                       ", stillAlive=" + std::to_string(stillAlive));
+        }
+    }
+    catch (const NXOpen::NXException& ex)
+    {
+        LogPreview(std::string("UpdateManager cleanup NXException: ") + ex.Message());
+    }
+    catch (...)
+    {
+        LogPreview("UpdateManager cleanup unknown exception");
+    }
+
+    previewFeatureTags_.clear();
+}
+
+void ZheWanBiRangCaoDialog::KeepCustomFeaturePreview()
+{
+    hasPreviewUndoMark_ = false;
+    previewUndoMark_ = static_cast<NXOpen::Session::UndoMarkId>(0);
+    customFeaturePreviewReady_ = false;
+    previewFeatureTags_.clear();
+    LogPreview("preview kept as result (no rebuild)");
 }
 
 int ZheWanBiRangCaoDialog::Execute()

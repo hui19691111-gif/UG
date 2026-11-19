@@ -71,6 +71,7 @@
 #include <cstddef>
 #include <cstdarg>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <cstdlib>
 #include <cmath>
@@ -221,6 +222,36 @@ std::string WideToUtf8(const std::wstring& text)
     std::string result(static_cast<std::size_t>(needed - 1), '\0');
     WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &result[0], needed, NULL, NULL);
     return result;
+}
+
+std::wstring Utf8OrAnsiToWide(const std::string& text)
+{
+    if (text.empty())
+    {
+        return L"";
+    }
+    int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.c_str(), -1, NULL, 0);
+    UINT codePage = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    if (needed <= 0)
+    {
+        codePage = CP_ACP;
+        flags = 0;
+        needed = MultiByteToWideChar(codePage, flags, text.c_str(), -1, NULL, 0);
+    }
+    if (needed <= 0)
+    {
+        return L"";
+    }
+    std::wstring result(static_cast<std::size_t>(needed - 1), L'\0');
+    MultiByteToWideChar(codePage, flags, text.c_str(), -1, &result[0], needed);
+    return result;
+}
+
+void ShowWideMessageBox(const wchar_t* title, const std::string& message, UINT iconFlags)
+{
+    const std::wstring wideMessage = Utf8OrAnsiToWide(message);
+    MessageBoxW(NULL, wideMessage.c_str(), title != NULL ? title : L"选择管件", MB_OK | iconFlags);
 }
 
 std::string NxStringToUtf8(const NXOpen::NXString& text)
@@ -393,54 +424,65 @@ void AddFallbackTubeSpecs(std::set<std::pair<int, int> >& specs)
     }
 }
 
-std::string GetModuleDirectory()
+std::wstring GetModuleDirectoryW()
 {
     HMODULE selfModule = NULL;
     if (!GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCWSTR>(&GetModuleDirectory),
+            reinterpret_cast<LPCWSTR>(&GetModuleDirectoryW),
             &selfModule))
     {
-        return "";
+        return L"";
     }
 
     wchar_t widePath[MAX_PATH] = {0};
     const DWORD length = GetModuleFileNameW(selfModule, widePath, MAX_PATH);
     if (length == 0 || length >= MAX_PATH)
     {
-        return "";
+        return L"";
     }
 
-    char path[MAX_PATH] = {0};
-    WideCharToMultiByte(CP_ACP, 0, widePath, -1, path, MAX_PATH, NULL, NULL);
-    std::string directory(path);
-    const std::string::size_type slash = directory.find_last_of("\\/");
-    return slash == std::string::npos ? "" : directory.substr(0, slash);
+    std::wstring directory(widePath);
+    const std::wstring::size_type slash = directory.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? L"" : directory.substr(0, slash);
 }
 
-std::string SelectDebugLogPath()
+std::wstring PluginRootDirectoryW()
 {
-    const std::string moduleDirectory = GetModuleDirectory();
-    if (moduleDirectory.empty())
+    const std::wstring moduleDirectory = GetModuleDirectoryW();
+    if (!moduleDirectory.empty())
     {
-        return "";
+        const std::wstring::size_type slash = moduleDirectory.find_last_of(L"\\/");
+        if (slash != std::wstring::npos)
+        {
+            return moduleDirectory.substr(0, slash);
+        }
+    }
+    return L"D:\\UG智辉钣金插件";
+}
+
+std::wstring SelectDebugLogPathW()
+{
+    const std::wstring appRoot = PluginRootDirectoryW();
+    if (appRoot.empty())
+    {
+        return L"";
     }
 
-    const std::string appRoot = moduleDirectory + "\\..";
-    const std::string logDirectory = appRoot + "\\logs";
-    CreateDirectoryA(logDirectory.c_str(), NULL);
-    return logDirectory + "\\XuanZeGuanJian_select_debug.log";
+    const std::wstring logDirectory = appRoot + L"\\logs";
+    CreateDirectoryW(logDirectory.c_str(), NULL);
+    return logDirectory + L"\\XuanZeGuanJian_select_debug.log";
 }
 
 void AppendSelectDebugLog(const std::string& message)
 {
-    const std::string path = SelectDebugLogPath();
+    const std::wstring path = SelectDebugLogPathW();
     if (path.empty())
     {
         return;
     }
 
-    std::ofstream output(path.c_str(), std::ios::out | std::ios::app | std::ios::binary);
+    std::ofstream output(std::filesystem::path(path), std::ios::out | std::ios::app | std::ios::binary);
     if (!output)
     {
         return;
@@ -498,17 +540,23 @@ std::string TaggedObjectKindText(NXOpen::TaggedObject* object)
     return "TaggedObject";
 }
 
-void LoadTubeSpecsFromFile(const std::string& path, std::set<std::pair<int, int> >& specs)
+void LoadTubeSpecsFromFile(const std::wstring& path, std::set<std::pair<int, int> >& specs)
 {
-    std::ifstream input(path.c_str());
+    std::ifstream input(std::filesystem::path(path), std::ios::binary);
     if (!input)
     {
         return;
     }
 
+    bool firstLine = true;
     std::string line;
     while (std::getline(input, line))
     {
+        if (firstLine)
+        {
+            line = RemoveUtf8Bom(line);
+            firstLine = false;
+        }
         const std::string::size_type comment = line.find('#');
         if (comment != std::string::npos)
         {
@@ -533,23 +581,33 @@ void LoadTubeSpecsFromFile(const std::string& path, std::set<std::pair<int, int>
     }
 }
 
-std::string SharedSpecTablePath()
+std::wstring SharedSpecTablePathW()
 {
-    return "D:\\UG智辉钣金插件\\config\\FangTongKaKou_specs.txt";
+    const std::wstring candidate = PluginRootDirectoryW() + L"\\config\\FangTongKaKou_specs.txt";
+    if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        return candidate;
+    }
+    return L"D:\\UG智辉钣金插件\\config\\FangTongKaKou_specs.txt";
 }
 
-std::string MaterialConfigPath()
+std::wstring MaterialConfigPathW()
 {
-    return "D:\\UG智辉钣金插件\\config\\Write_Prat_Attr.ini";
+    const std::wstring candidate = PluginRootDirectoryW() + L"\\config\\Write_Prat_Attr.ini";
+    if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        return candidate;
+    }
+    return L"D:\\UG智辉钣金插件\\config\\Write_Prat_Attr.ini";
 }
 
 std::vector<std::string> LoadMaterialOptions()
 {
     std::vector<std::string> materials;
-    const std::string path = MaterialConfigPath();
+    const std::wstring path = MaterialConfigPathW();
     if (!path.empty())
     {
-        std::ifstream input(path.c_str(), std::ios::binary);
+        std::ifstream input(std::filesystem::path(path), std::ios::binary);
         if (input)
         {
             bool inMaterialSection = false;
@@ -598,7 +656,7 @@ const std::set<std::pair<int, int> >& GetTubeSpecs()
     }
 
     loaded = true;
-    LoadTubeSpecsFromFile(SharedSpecTablePath(), specs);
+    LoadTubeSpecsFromFile(SharedSpecTablePathW(), specs);
     if (specs.empty())
     {
         AddFallbackTubeSpecs(specs);
@@ -3921,24 +3979,24 @@ std::string BodyRecognitionDebugText(NXOpen::Body* body, double minimumRoundDiam
 
 void OpenSpecTable()
 {
-    const std::string path = SharedSpecTablePath();
+    const std::wstring path = SharedSpecTablePathW();
     if (path.empty())
     {
-        MessageBoxW(NULL, L"Could not resolve application directory.", L"XuanZeGuanJian", MB_ICONERROR);
+        MessageBoxW(NULL, L"无法定位插件目录。", L"选择管件", MB_OK | MB_ICONERROR);
         return;
     }
 
-    const DWORD attributes = GetFileAttributesA(path.c_str());
+    const DWORD attributes = GetFileAttributesW(path.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES)
     {
-        MessageBoxA(NULL, path.c_str(), "Tube spec table not found", MB_ICONERROR);
+        MessageBoxW(NULL, path.c_str(), L"未找到管材规格表", MB_OK | MB_ICONERROR);
         return;
     }
 
-    HINSTANCE result = ShellExecuteA(NULL, "open", path.c_str(), NULL, NULL, SW_SHOWNORMAL);
+    HINSTANCE result = ShellExecuteW(NULL, L"open", path.c_str(), NULL, NULL, SW_SHOWNORMAL);
     if (reinterpret_cast<INT_PTR>(result) <= 32)
     {
-        ShellExecuteA(NULL, "open", "notepad.exe", path.c_str(), NULL, SW_SHOWNORMAL);
+        ShellExecuteW(NULL, L"open", L"notepad.exe", path.c_str(), NULL, SW_SHOWNORMAL);
     }
 }
 
@@ -4440,12 +4498,12 @@ private:
         catch (const NXOpen::NXException& ex)
         {
             LogInternalError("export failed", ex.Message());
-            ui->NXMessageBox()->Show("导出表格", NXOpen::NXMessageBox::DialogTypeError, ex.Message());
+            ShowWideMessageBox(L"导出表格", ex.Message(), MB_ICONERROR);
         }
         catch (const std::exception& ex)
         {
             LogInternalError("export failed", ex.what());
-            ui->NXMessageBox()->Show("导出表格", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+            ShowWideMessageBox(L"导出表格", ex.what(), MB_ICONERROR);
         }
     }
 
@@ -4460,12 +4518,12 @@ private:
         catch (const NXOpen::NXException& ex)
         {
             LogInternalError("material usage failed", ex.Message());
-            ui->NXMessageBox()->Show("计算管材用量", NXOpen::NXMessageBox::DialogTypeError, ex.Message());
+            ShowWideMessageBox(L"计算管材用量", ex.Message(), MB_ICONERROR);
         }
         catch (const std::exception& ex)
         {
             LogInternalError("material usage failed", ex.what());
-            ui->NXMessageBox()->Show("计算管材用量", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+            ShowWideMessageBox(L"计算管材用量", ex.what(), MB_ICONERROR);
         }
     }
 
@@ -4478,12 +4536,12 @@ private:
         catch (const NXOpen::NXException& ex)
         {
             LogInternalError("same body search failed", ex.Message());
-            ui->NXMessageBox()->Show("找相同", NXOpen::NXMessageBox::DialogTypeError, ex.Message());
+            ShowWideMessageBox(L"找相同", ex.Message(), MB_ICONERROR);
         }
         catch (const std::exception& ex)
         {
             LogInternalError("same body search failed", ex.what());
-            ui->NXMessageBox()->Show("找相同", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+            ShowWideMessageBox(L"找相同", ex.what(), MB_ICONERROR);
         }
     }
 
@@ -4496,12 +4554,12 @@ private:
         catch (const NXOpen::NXException& ex)
         {
             LogInternalError("add manual row failed", ex.Message());
-            ui->NXMessageBox()->Show("增加", NXOpen::NXMessageBox::DialogTypeError, ex.Message());
+            ShowWideMessageBox(L"增加", ex.Message(), MB_ICONERROR);
         }
         catch (const std::exception& ex)
         {
             LogInternalError("add manual row failed", ex.what());
-            ui->NXMessageBox()->Show("增加", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+            ShowWideMessageBox(L"增加", ex.what(), MB_ICONERROR);
         }
     }
 
@@ -4514,12 +4572,12 @@ private:
         catch (const NXOpen::NXException& ex)
         {
             LogInternalError("delete row failed", ex.Message());
-            ui->NXMessageBox()->Show("删除", NXOpen::NXMessageBox::DialogTypeError, ex.Message());
+            ShowWideMessageBox(L"删除", ex.Message(), MB_ICONERROR);
         }
         catch (const std::exception& ex)
         {
             LogInternalError("delete row failed", ex.what());
-            ui->NXMessageBox()->Show("删除", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+            ShowWideMessageBox(L"删除", ex.what(), MB_ICONERROR);
         }
     }
 
@@ -5704,13 +5762,11 @@ private:
         HINSTANCE result = ShellExecuteW(NULL, L"open", outputPath.c_str(), NULL, NULL, SW_SHOWNORMAL);
         if (reinterpret_cast<INT_PTR>(result) <= 32)
         {
-            if (ui != NULL && ui->NXMessageBox() != NULL)
-            {
-                ui->NXMessageBox()->Show(
-                    "导出表格",
-                    NXOpen::NXMessageBox::DialogTypeInformation,
-                    "导出完成，但打开失败，请手动打开导出文件。");
-            }
+            MessageBoxW(
+                NULL,
+                L"导出完成，但打开失败，请手动打开导出文件。",
+                L"导出表格",
+                MB_OK | MB_ICONINFORMATION);
         }
     }
 
@@ -5767,7 +5823,7 @@ private:
 
     void WriteUtf8TextFileWithBom(const std::wstring& path, const std::string& text) const
     {
-        std::ofstream file(path.c_str(), std::ios::binary);
+        std::ofstream file(std::filesystem::path(path), std::ios::binary);
         if (!file)
         {
             throw std::runtime_error("无法创建管材用量文本文件");
@@ -6154,7 +6210,7 @@ extern "C" DllExport void ufusr(char* param, int* retcode, int param_len)
     }
     catch (const NXOpen::NXException& ex)
     {
-        NXOpen::UI::GetUI()->NXMessageBox()->Show("选择管件", NXOpen::NXMessageBox::DialogTypeError, ex.Message());
+        ShowWideMessageBox(L"选择管件", ex.Message(), MB_ICONERROR);
         if (retcode != NULL)
         {
             *retcode = ex.ErrorCode();
@@ -6163,7 +6219,7 @@ extern "C" DllExport void ufusr(char* param, int* retcode, int param_len)
     }
     catch (const std::exception& ex)
     {
-        NXOpen::UI::GetUI()->NXMessageBox()->Show("选择管件", NXOpen::NXMessageBox::DialogTypeError, ex.what());
+        ShowWideMessageBox(L"选择管件", ex.what(), MB_ICONERROR);
         if (retcode != NULL)
         {
             *retcode = 1;

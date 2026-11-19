@@ -596,6 +596,15 @@ namespace
     std::string QuantityFromPartAttribute(NXOpen::Part* workPart)
     {
         const NXOpen::NXString title("数量", NXOpen::NXString::UTF8);
+        if (workPart->HasUserAttribute(title, NXOpen::NXObject::AttributeType::AttributeTypeInteger, -1))
+        {
+            const int value = workPart->GetIntegerAttribute(title);
+            if (value > 0)
+            {
+                return std::to_string(value);
+            }
+        }
+
         if (workPart->HasUserAttribute(title, NXOpen::NXObject::AttributeType::AttributeTypeString, -1))
         {
             const std::string value = Trim(Utf8Text(workPart->GetUserAttributeAsString(title, NXOpen::NXObject::AttributeType::AttributeTypeString, -1)));
@@ -1263,9 +1272,183 @@ namespace
         SetOrCreateIntegerExpression(part, zSuLian, zSuLianRightHandSide);
     }
 
-    bool WriteQuantityExpression(NXOpen::Part* part, const std::string& quantityText)
+    void UnlockQuantityAttributeIfPossible(NXOpen::Part* part, NXOpen::NXObject::AttributeType type)
     {
-        return SetOrCreateIntegerExpression(part, "数量", quantityText.c_str());
+        if (part == NULL)
+        {
+            return;
+        }
+
+        const NXOpen::NXString title("数量", NXOpen::NXString::UTF8);
+        try
+        {
+            if (part->HasUserAttribute(title, type, -1))
+            {
+                part->SetUserAttributeLock(title, type, false);
+            }
+        }
+        catch (const NXOpen::NXException&)
+        {
+        }
+    }
+
+    void DeleteQuantityAttributeIfPresent(NXOpen::Part* part, NXOpen::NXObject::AttributeType type)
+    {
+        if (part == NULL)
+        {
+            return;
+        }
+
+        const NXOpen::NXString title("数量", NXOpen::NXString::UTF8);
+        try
+        {
+            if (part->HasUserAttribute(title, type, -1))
+            {
+                UnlockQuantityAttributeIfPossible(part, type);
+                part->DeleteUserAttribute(type, title, true, NXOpen::Update::OptionNow);
+            }
+        }
+        catch (const NXOpen::NXException&)
+        {
+        }
+    }
+
+    void DeleteNonIntegerQuantityAttributesIfPresent(NXOpen::Part* part)
+    {
+        DeleteQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeReal);
+        DeleteQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeString);
+        DeleteQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeBoolean);
+        DeleteQuantityAttributeIfPresent(part, NXOpen::NXObject::AttributeTypeTime);
+    }
+
+    bool HasQuantityIntegerAttribute(NXOpen::Part* part)
+    {
+        if (part == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            return part->HasUserAttribute(
+                NXOpen::NXString("数量", NXOpen::NXString::UTF8),
+                NXOpen::NXObject::AttributeTypeInteger,
+                -1);
+        }
+        catch (const NXOpen::NXException&)
+        {
+            return false;
+        }
+    }
+
+    bool IsQuantityPartAttributeExpression(NXOpen::Expression* expression)
+    {
+        if (expression == NULL)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!expression->HasReferencedAttribute())
+            {
+                return false;
+            }
+
+            NXOpen::NXObject::AttributeInformation info = expression->GetReferencedAttribute();
+            return Utf8Text(info.Title) == "数量" &&
+                info.Type == NXOpen::NXObject::AttributeTypeInteger;
+        }
+        catch (const NXOpen::NXException&)
+        {
+            return false;
+        }
+    }
+
+    void DeleteExpressionIfPresent(NXOpen::Part* part, NXOpen::Expression* expression)
+    {
+        if (part == NULL || expression == NULL)
+        {
+            return;
+        }
+
+        try
+        {
+            part->Expressions()->Delete(expression);
+        }
+        catch (const NXOpen::NXException&)
+        {
+        }
+    }
+
+    NXOpen::Expression* GetQuantityAttributeExpression(NXOpen::Part* part)
+    {
+        if (part == NULL)
+        {
+            return NULL;
+        }
+
+        try
+        {
+            return part->Expressions()->GetAttributeExpression(
+                part,
+                NXOpen::NXString("数量", NXOpen::NXString::UTF8),
+                NXOpen::NXObject::AttributeTypeInteger,
+                -1);
+        }
+        catch (const NXOpen::NXException&)
+        {
+            return NULL;
+        }
+    }
+
+    void SetQuantityIntegerAttribute(NXOpen::Part* part, int value)
+    {
+        if (part == NULL)
+        {
+            return;
+        }
+
+        part->SetUserAttribute(NXOpen::NXString("数量", NXOpen::NXString::UTF8), -1, value, NXOpen::Update::OptionNow);
+    }
+
+    NXOpen::Expression* EnsureQuantityAttributeExpression(NXOpen::Part* part)
+    {
+        NXOpen::Expression* namedExpression = FindExpressionIfExists(part, "\xE6\x95\xB0\xE9\x87\x8F");
+        if (IsQuantityPartAttributeExpression(namedExpression))
+        {
+            return namedExpression;
+        }
+
+        if (namedExpression != NULL)
+        {
+            DeleteExpressionIfPresent(part, namedExpression);
+        }
+
+        return GetQuantityAttributeExpression(part);
+    }
+
+    void WriteQuantityAttributeAndEnsureExpression(NXOpen::Part* part, int quantityValue)
+    {
+        if (part == NULL)
+        {
+            return;
+        }
+
+        NXOpen::Expression* namedExpression = FindExpressionIfExists(part, "\xE6\x95\xB0\xE9\x87\x8F");
+        if (IsQuantityPartAttributeExpression(namedExpression))
+        {
+            SetQuantityIntegerAttribute(part, quantityValue);
+            return;
+        }
+
+        if (!HasQuantityIntegerAttribute(part))
+        {
+            DeleteNonIntegerQuantityAttributesIfPresent(part);
+        }
+
+        SetQuantityIntegerAttribute(part, quantityValue);
+        EnsureQuantityAttributeExpression(part);
     }
 
     void ApplyBodyAttributes(NXOpen::Part* part, const std::vector<NXOpen::Body*>& bodies, const NXOpen::NXString& material, bool writeBodyQuantity, const std::string& quantityText)
@@ -1334,8 +1517,11 @@ namespace
         CommitStringAttribute(partBuilder.get(), "\xE6\x9D\x90\xE6\x96\x99", material);
         if (writePartQuantity)
         {
-            CommitStringAttribute(partBuilder.get(), "\xE6\x95\xB0\xE9\x87\x8F", NXOpen::NXString(partQuantityText, NXOpen::NXString::UTF8));
-            WriteQuantityExpression(part, partQuantityText);
+            const int partQuantityValue = partQuantityText.empty() ? 0 : std::atoi(partQuantityText.c_str());
+            if (partQuantityValue > 0)
+            {
+                WriteQuantityAttributeAndEnsureExpression(part, partQuantityValue);
+            }
         }
 
         std::vector<NXOpen::NXObject*> bodyObjects;

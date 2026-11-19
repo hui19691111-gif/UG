@@ -160,6 +160,9 @@ private:
     void CleanupHiddenTemporaryObjects();
     void CleanupPreviewObjects();
     int Preview();
+    int PreviewAsCustomFeature();
+    void RollbackCustomFeaturePreview();
+    void KeepCustomFeaturePreview();
     bool UpdateAllSlots();
     int Execute();
 
@@ -181,4 +184,7 @@ private:
     std::vector<SlotFeatureRecord> slotRecords_;
     std::vector<tag_t> hiddenTemporaryTags_;
     std::vector<tag_t> previewFeatureTags_;
+    NXOpen::Session::UndoMarkId previewUndoMark_;
+    bool hasPreviewUndoMark_;
+    bool customFeaturePreviewReady_;
 };

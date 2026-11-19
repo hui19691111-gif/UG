@@ -34,6 +34,9 @@
 #include <NXOpen/PointCollection.hxx>
 #include <NXOpen/Session.hxx>
 #include <NXOpen/SelectNXObjectList.hxx>
+#include <NXOpen/SmartObject.hxx>
+#include <NXOpen/Xform.hxx>
+#include <NXOpen/XformCollection.hxx>
 
 #include <uf.h>
 #include <uf_curve.h>
@@ -244,11 +247,20 @@ bool CreateUdfTool(tag_t definition,
     Features::DatumCsysBuilder* datumBuilder = nullptr;
     try
     {
+        const Point3d origin(transformValues[0], transformValues[1], transformValues[2]);
+        const Vector3d xDir(transformValues[3], transformValues[4], transformValues[5]);
+        const Vector3d yDir(transformValues[6], transformValues[7], transformValues[8]);
+        Xform* placementXform = workPart->Xforms()->CreateXform(
+            origin,
+            xDir,
+            yDir,
+            SmartObject::UpdateOptionWithinModeling,
+            1.0);
         CartesianCoordinateSystem* placementCsys =
-            workPart->CoordinateSystems()->CreateCoordinateSystem(
-                Point3d(transformValues[0], transformValues[1], transformValues[2]),
-                Vector3d(transformValues[3], transformValues[4], transformValues[5]),
-                Vector3d(transformValues[6], transformValues[7], transformValues[8]));
+            placementXform != nullptr
+                ? workPart->CoordinateSystems()->CreateCoordinateSystem(
+                      placementXform, SmartObject::UpdateOptionWithinModeling)
+                : workPart->CoordinateSystems()->CreateCoordinateSystem(origin, xDir, yDir);
         if (placementCsys == nullptr)
         {
             throw NXException::Create(1, "Failed to create the UDF placement coordinate system.");
@@ -517,7 +529,8 @@ bool UpdateMovePlacement(Features::MoveObject* move,
 }
 
 bool UpdateDatumCsysPlacement(Features::DatumCsys* datumCsys,
-                              const std::vector<double>& transforms)
+                              const std::vector<double>& transforms,
+                              bool commitBuilder = false)
 {
     Part* workPart = Session::GetSession()->Parts()->Work();
     if (datumCsys == nullptr || workPart == nullptr || transforms.empty() ||
@@ -537,7 +550,16 @@ bool UpdateDatumCsysPlacement(Features::DatumCsys* datumCsys,
             return false;
         }
 
-        const Point3d currentOrigin = csys->Origin();
+        Point3d currentOrigin = csys->Origin();
+        const tag_t xformTag = UF_MODL_ask_xform_tag_of_datum_csys(datumCsys->Tag());
+        Xform* xform = xformTag != NULL_TAG
+                           ? dynamic_cast<Xform*>(NXObjectManager::Get(xformTag))
+                           : nullptr;
+        if (xform != nullptr)
+        {
+            currentOrigin = xform->Origin();
+        }
+
         size_t bestOffset = 0;
         double bestDistanceSquared = std::numeric_limits<double>::max();
         for (size_t offset = 0; offset < transforms.size();
@@ -554,17 +576,50 @@ bool UpdateDatumCsysPlacement(Features::DatumCsys* datumCsys,
             }
         }
 
-        csys->SetOrigin(Point3d(transforms[bestOffset],
+        const Point3d newOrigin(transforms[bestOffset],
                                 transforms[bestOffset + 1],
-                                transforms[bestOffset + 2]));
-        csys->SetDirections(
-            Vector3d(transforms[bestOffset + 3],
-                     transforms[bestOffset + 4],
-                     transforms[bestOffset + 5]),
-            Vector3d(transforms[bestOffset + 6],
-                     transforms[bestOffset + 7],
-                     transforms[bestOffset + 8]));
-        builder->Commit();
+                                transforms[bestOffset + 2]);
+        const Vector3d xDir(transforms[bestOffset + 3],
+                            transforms[bestOffset + 4],
+                            transforms[bestOffset + 5]);
+        const Vector3d yDir(transforms[bestOffset + 6],
+                            transforms[bestOffset + 7],
+                            transforms[bestOffset + 8]);
+        const Vector3d zDir(transforms[bestOffset + 9],
+                            transforms[bestOffset + 10],
+                            transforms[bestOffset + 11]);
+
+        if (xform != nullptr)
+        {
+            xform->SetOrigin(newOrigin);
+            Matrix3x3 orientation{};
+            orientation.Xx = xDir.X;
+            orientation.Xy = xDir.Y;
+            orientation.Xz = xDir.Z;
+            orientation.Yx = yDir.X;
+            orientation.Yy = yDir.Y;
+            orientation.Yz = yDir.Z;
+            orientation.Zx = zDir.X;
+            orientation.Zy = zDir.Y;
+            orientation.Zz = zDir.Z;
+            xform->SetOrientation(orientation);
+        }
+        else
+        {
+            csys->SetOrigin(newOrigin);
+            csys->SetDirections(xDir, yDir);
+            builder->SetCsys(csys);
+        }
+        if (commitBuilder)
+        {
+            try
+            {
+                builder->CommitFeature();
+            }
+            catch (...)
+            {
+            }
+        }
         builder->Destroy();
         return true;
     }
@@ -703,6 +758,16 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
             for (size_t index = 0; index < constructionFeatures.size(); ++index)
             {
                 constructionFeatures[index]->SetShowInGraphicView(index % 3 == 2);
+                if (index % 3 == 0)
+                {
+                    if (Features::DatumCsys* datumCsys =
+                            dynamic_cast<Features::DatumCsys*>(
+                                constructionFeatures[index]->GetFeature()))
+                    {
+                        static_cast<void>(
+                            UpdateDatumCsysPlacement(datumCsys, transforms, true));
+                    }
+                }
             }
             event->SetConstructionFeatures(constructionFeatures);
             return 0;
@@ -713,6 +778,16 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
         for (size_t index = 0; index < constructionFeatures.size(); ++index)
         {
             constructionFeatures[index]->SetShowInGraphicView(index % 3 == 2);
+            if (index % 3 == 0)
+            {
+                if (Features::DatumCsys* datumCsys =
+                        dynamic_cast<Features::DatumCsys*>(
+                            constructionFeatures[index]->GetFeature()))
+                {
+                    static_cast<void>(
+                        UpdateDatumCsysPlacement(datumCsys, transforms, true));
+                }
+            }
         }
 
         // Match each retained placement feature to its nearest new transform.
@@ -780,6 +855,12 @@ int PreUpdateImpl(Features::CustomFeaturePreUpdateEvent* event)
         {
             transformIndicesToCreate.push_back(index);
         }
+    }
+
+    if (transformIndicesToCreate.empty())
+    {
+        event->SetConstructionFeatures(constructionFeatures);
+        return retainedToolCount > 0 ? 0 : 670030;
     }
 
     ExtractedTemplate extracted;
