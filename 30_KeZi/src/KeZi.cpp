@@ -1,4 +1,4 @@
-﻿#include <NXOpen/BasePart.hxx>
+#include <NXOpen/BasePart.hxx>
 #include <NXOpen/Body.hxx>
 #include <NXOpen/BodyCollection.hxx>
 #include <NXOpen/Arc.hxx>
@@ -141,6 +141,7 @@
 #include "../../../common/ZhihuiEmbeddedDialog.hpp"
 #include "../../../protection/native/ZhihuiLicenseGuard.hpp"
 #include "KeZiCustomFeatureShared.hpp"
+#include "KeZiCurvedSurface.hpp"
 #include "../resource.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -410,8 +411,8 @@ void ApplyPlanarFaceSelectionFilter(BlockStyler::SelectObject* selection)
     selection->AddFilter(BlockStyler::SelectObject::FilterTypeFaces);
 
     std::vector<NXOpen::Selection::MaskTriple> masks;
-    masks.emplace_back(UF_solid_type, UF_solid_body_subtype, UF_UI_SEL_FEATURE_PLANAR_FACE);
-    masks.emplace_back(UF_solid_type, UF_solid_face_subtype, UF_UI_SEL_FEATURE_PLANAR_FACE);
+    masks.emplace_back(UF_solid_type, UF_solid_body_subtype, UF_UI_SEL_FEATURE_ANY_FACE);
+    masks.emplace_back(UF_solid_type, UF_solid_face_subtype, UF_UI_SEL_FEATURE_ANY_FACE);
 
     std::unique_ptr<PropertyList> properties(selection->GetProperties());
     if (properties)
@@ -3161,6 +3162,57 @@ bool AskPlanarFaceData(Face* face, const Point3d* referencePoint, Point3d* point
     return true;
 }
 
+bool AskEngravingFaceData(Face* face,
+                          const Point3d* referencePoint,
+                          Point3d* point,
+                          Vector3d* normal,
+                          bool* isPlanarOut = nullptr,
+                          zhihui_kezi_curved::CurvedFaceInfo* curvedInfoOut = nullptr)
+{
+    if (AskPlanarFaceData(face, referencePoint, point, normal))
+    {
+        if (isPlanarOut != nullptr) *isPlanarOut = true;
+        if (curvedInfoOut != nullptr)
+        {
+            zhihui_kezi_curved::AskFaceInfo(face, referencePoint, curvedInfoOut);
+        }
+        return true;
+    }
+
+    zhihui_kezi_curved::CurvedFaceInfo info;
+    if (!zhihui_kezi_curved::AskFaceInfo(face, referencePoint, &info))
+    {
+        return false;
+    }
+    if (point != nullptr) *point = info.point;
+    if (normal != nullptr) *normal = info.normal;
+    if (isPlanarOut != nullptr) *isPlanarOut = false;
+    if (curvedInfoOut != nullptr) *curvedInfoOut = info;
+    return true;
+}
+
+bool EngravingFaceLongShortAxes(Face* face,
+                                const Point3d* referencePoint,
+                                const Vector3d& normal,
+                                Vector3d* longAxis,
+                                Vector3d* shortAxis)
+{
+    if (face == nullptr)
+    {
+        return false;
+    }
+    if (zhihui_kezi_curved::IsPlanarFaceTag(face->Tag()))
+    {
+        return FaceLongShortAxes(face, normal, longAxis, shortAxis);
+    }
+    zhihui_kezi_curved::CurvedFaceInfo info;
+    if (!zhihui_kezi_curved::AskFaceInfo(face, referencePoint, &info))
+    {
+        return false;
+    }
+    return zhihui_kezi_curved::AskCurvedFaceLongShortAxes(face, info, longAxis, shortAxis);
+}
+
 std::string SerialNumberText(const KeZiConfig& config)
 {
     int width = config.serialPad;
@@ -4436,7 +4488,7 @@ private:
                     {
                         Point3d candidatePoint;
                         Vector3d candidateNormal;
-                        if (!AskPlanarFaceData(candidate, &origin, &candidatePoint, &candidateNormal) ||
+                        if (!AskEngravingFaceData(candidate, &origin, &candidatePoint, &candidateNormal) ||
                             std::fabs(Dot(Normalize(candidateNormal, storedNormal), storedNormal)) < 0.999)
                         {
                             continue;
@@ -4992,7 +5044,7 @@ private:
                 {
                     Point3d candidatePoint;
                     Vector3d candidateNormal;
-                    if (!AskPlanarFaceData(candidate, &origin, &candidatePoint, &candidateNormal))
+                    if (!AskEngravingFaceData(candidate, &origin, &candidatePoint, &candidateNormal))
                     {
                         continue;
                     }
@@ -5603,7 +5655,7 @@ private:
         {
             Vector3d longAxis;
             Vector3d shortAxis;
-            if (FaceLongShortAxes(face, z, &longAxis, &shortAxis))
+            if (EngravingFaceLongShortAxes(face, nullptr, z, &longAxis, &shortAxis))
             {
                 x = settings.xShortSide ? shortAxis : longAxis;
                 Vector3d screenRight = CurrentScreenRightVector();
@@ -5696,6 +5748,17 @@ private:
             return origin;
         }
 
+        if (!zhihui_kezi_curved::IsPlanarFaceTag(face->Tag()))
+        {
+            zhihui_kezi_curved::CurvedFaceInfo info;
+            if (zhihui_kezi_curved::AskFaceInfo(face, &origin, &info))
+            {
+                return zhihui_kezi_curved::ApplyCurvedFaceCenterOptions(
+                    face, info, settings.centerLongSide, settings.centerShortSide);
+            }
+            return origin;
+        }
+
         const std::vector<Point3d> vertices = FaceVertices(face);
         if (vertices.empty())
         {
@@ -5705,7 +5768,7 @@ private:
         const Vector3d z = Normalize(faceNormal, Vector3d(0.0, 0.0, 1.0));
         Vector3d longAxis;
         Vector3d shortAxis;
-        if (!FaceLongShortAxes(face, z, &longAxis, &shortAxis))
+        if (!EngravingFaceLongShortAxes(face, nullptr, z, &longAxis, &shortAxis))
         {
             return origin;
         }
@@ -5764,6 +5827,20 @@ private:
                               std::to_string(modernPreviewCurveTags_.size()));
             modernPreviewCurveTags_.clear();
         }
+        for (auto it = curvedPreviewObjectTags_.rbegin(); it != curvedPreviewObjectTags_.rend(); ++it)
+        {
+            const tag_t objTag = *it;
+            if (objTag != NULL_TAG && UF_OBJ_ask_status(objTag) == UF_OBJ_ALIVE)
+            {
+                try { UF_OBJ_delete_object(objTag); } catch (...) {}
+            }
+        }
+        if (!curvedPreviewObjectTags_.empty())
+        {
+            Log(session_, std::string("ClearPreviewBuilder: 已删除曲面刻字预览对象，数量=") +
+                              std::to_string(curvedPreviewObjectTags_.size()));
+            curvedPreviewObjectTags_.clear();
+        }
         Log(session_, "ClearPreviewBuilder退出");
     }
 
@@ -5805,7 +5882,7 @@ private:
         Point3d pickedPoint = manualFace_ != nullptr ? manualFace_->PickPoint() : Point3d(0.0, 0.0, 0.0);
         Point3d facePoint;
         Vector3d faceNormal;
-        if (!AskPlanarFaceData(face, &pickedPoint, &facePoint, &faceNormal))
+        if (!AskEngravingFaceData(face, &pickedPoint, &facePoint, &faceNormal))
         {
             return;
         }
@@ -5833,7 +5910,7 @@ private:
         const Vector3d z = Normalize(faceNormal, Vector3d(0.0, 0.0, 1.0));
         Vector3d longAxis;
         Vector3d shortAxis;
-        if (!FaceLongShortAxes(face, z, &longAxis, &shortAxis))
+        if (!EngravingFaceLongShortAxes(face, nullptr, z, &longAxis, &shortAxis))
         {
             return;
         }
@@ -5873,7 +5950,7 @@ private:
         Point3d origin = orientation_->IsOriginSpecified() ? orientation_->Origin() : Point3d(0.0, 0.0, 0.0);
         Point3d facePoint;
         Vector3d faceNormal;
-        if (!AskPlanarFaceData(face, &origin, &facePoint, &faceNormal))
+        if (!AskEngravingFaceData(face, &origin, &facePoint, &faceNormal))
         {
             return;
         }
@@ -5905,8 +5982,22 @@ private:
         Point3d pickedPoint = orientation_->IsOriginSpecified() ? orientation_->Origin() : Point3d(0.0, 0.0, 0.0);
         Point3d facePoint;
         Vector3d faceNormal;
-        if (!AskPlanarFaceData(face, &pickedPoint, &facePoint, &faceNormal))
+        if (!AskEngravingFaceData(face, &pickedPoint, &facePoint, &faceNormal))
         {
+            return;
+        }
+
+        if (!zhihui_kezi_curved::IsPlanarFaceTag(face->Tag()))
+        {
+            zhihui_kezi_curved::CurvedFaceInfo info;
+            if (zhihui_kezi_curved::AskFaceInfo(face, &pickedPoint, &info))
+            {
+                const Point3d result = zhihui_kezi_curved::ApplyCurvedFaceCenterOptions(
+                    face, info, settings.centerLongSide, settings.centerShortSide);
+                orientation_->SetOriginSpecified(true);
+                orientation_->SetOrigin(result);
+                Log(session_, "按居中开关调整曲面方位原点");
+            }
             return;
         }
 
@@ -5919,7 +6010,7 @@ private:
         const Vector3d z = Normalize(faceNormal, Vector3d(0.0, 0.0, 1.0));
         Vector3d longAxis;
         Vector3d shortAxis;
-        if (!FaceLongShortAxes(face, z, &longAxis, &shortAxis))
+        if (!EngravingFaceLongShortAxes(face, nullptr, z, &longAxis, &shortAxis))
         {
             return;
         }
@@ -6526,6 +6617,256 @@ private:
         }
     }
 
+    void CreateCurvedSurfaceEngraving(Face* face,
+                                      const zhihui_kezi_curved::CurvedFaceInfo& faceInfo,
+                                      const Point3d& textOrigin,
+                                      const Matrix3x3& textMatrix,
+                                      const std::string& text,
+                                      const TextSettings& settings,
+                                      Part* workPart,
+                                      Body* targetBody,
+                                      const bool commitGeometry)
+    {
+        if (face == nullptr || workPart == nullptr || targetBody == nullptr)
+        {
+            throw std::runtime_error("Curved surface engraving requires a face, work part, and target body.");
+        }
+        if (commitGeometry)
+        {
+            modernConstructionFeatureTags_.clear();
+        }
+
+        zhihui_kezi_curved::CurvedEngravingParams params;
+        params.text = text;
+        params.fontName = settings.fontName;
+        params.height = settings.height;
+        params.depth = settings.depth;
+        params.widthScale = settings.widthScale;
+        params.shear = settings.shear;
+        params.vShapeWidth = settings.vShapeWidth;
+        params.lockAspect = settings.lockAspect;
+        params.embossed = settings.embossed;
+        params.vShape = settings.vShape;
+        params.layer = settings.layer;
+        NXColor* selectedTextColor = ReadColor(workPart, textColor_, 186);
+        params.colorId = selectedTextColor != nullptr ? selectedTextColor->Handle() : 186;
+
+        Log(session_, std::string("曲面/圆管刻字入口: text=") + text +
+                          ", cylindrical=" + (faceInfo.isCylindrical ? "1" : "0") +
+                          ", vShape=" + (params.vShape ? "1" : "0") +
+                          ", embossed=" + (params.embossed ? "1" : "0") +
+                          ", height=" + FormatNumber(params.height) +
+                          ", depth=" + FormatNumber(params.depth) +
+                          ", commit=" + (commitGeometry ? "1" : "0"));
+
+        auto logFn = [this](const std::string& msg) { Log(session_, msg); };
+
+        const Session::UndoMarkId curvedMark = session_->SetUndoMark(
+            Session::MarkVisibilityInvisible, "KeZi Curved Engraving");
+        Features::CustomFeatureBuilder* customBuilder = nullptr;
+        try
+        {
+            zhihui_kezi_curved::CurvedEngravingOutput output;
+            if (params.vShape)
+            {
+                const int modernFontIndex = workPart->Fonts()->AddFont(
+                    kVShapeNxCurveFontName, FontCollection::TypeNx);
+                if (modernFontIndex <= 0 || !workPart->Fonts()->DoesFontExist(modernFontIndex))
+                {
+                    throw std::runtime_error("Could not load the NX Modern single-line font (blockmod1.fnx).");
+                }
+                UF_DRF_draft_aid_text_info_t textInfo = {};
+                textInfo.text_type = UF_DRF_TEXT_APP_AT_CREATION;
+                textInfo.text_font = modernFontIndex;
+                textInfo.size = 1.0;
+                textInfo.height = 1.0;
+                textInfo.aspect_ratio = 1.0;
+                textInfo.gap = 1.0;
+                textInfo.line_spacing = 1.0;
+                textInfo.num_lines = 1;
+                std::vector<char> renderedText(text.begin(), text.end());
+                renderedText.push_back('\0');
+                char* textLines[1] = {renderedText.data()};
+                UF_DRF_draft_aid_text_t draftText = {};
+                const size_t textByteCount = renderedText.size() - 1;
+                draftText.num_chars = static_cast<int>(textByteCount);
+                draftText.num_ints = static_cast<int>(textByteCount);
+                draftText.full_num_chars = static_cast<int>(textByteCount);
+                draftText.full_string = renderedText.data();
+                strncpy_s(draftText.string, renderedText.data(), _TRUNCATE);
+                textInfo.text = &draftText;
+                NxFontRenderData renderData;
+                UF_DRF_render_table_t renderTable = {};
+                renderTable.begin_line = FontBeginLine;
+                renderTable.end_line = FontEndLine;
+                renderTable.set_to_position = FontSetPosition;
+                renderTable.draw_to_position = FontDrawPosition;
+                renderTable.draw_arc = FontDrawArc;
+                renderTable.draw_char = FontDrawChar;
+                renderTable.draw_standard_font_string = FontDrawStandard;
+                renderTable.draw_user_symbol = FontDrawSymbol;
+                renderTable.set_cfw = FontSetCfw;
+                renderTable.push_orientation = FontPushOrientation;
+                renderTable.pop_orientation = FontPopOrientation;
+                renderTable.fill_region = FontFillRegion;
+                renderTable.standardFontFunCharSize = 1.0;
+
+                tag_t renderContextNote = NULL_TAG;
+                double contextOrigin[3] = {0.0, 0.0, 0.0};
+                const int noteError = UF_DRF_create_note(1, textLines, contextOrigin, 0, &renderContextNote);
+                if (noteError != 0 || renderContextNote == NULL_TAG)
+                {
+                    throw std::runtime_error("Could not create temporary note context for curved single-line text.");
+                }
+                const int renderError = UF_DRF_render_text(
+                    workPart->Tag(), renderContextNote, 1, textLines, &textInfo, &renderTable, &renderData);
+                try { UF_OBJ_delete_object(renderContextNote); } catch (...) {}
+                if (renderError != 0 || (renderData.segments.empty() && renderData.arcs.empty()))
+                {
+                    throw std::runtime_error("NX Modern font rendering returned no stroke curves for curved surface.");
+                }
+                std::vector<zhihui_kezi_curved::CurvedStrokeSegment> segs;
+                segs.reserve(renderData.segments.size());
+                for (const RenderedFontSegment& s : renderData.segments)
+                {
+                    segs.push_back({s.start, s.end});
+                }
+                std::vector<zhihui_kezi_curved::CurvedStrokeArc> arcs;
+                arcs.reserve(renderData.arcs.size());
+                for (const RenderedFontArc& a : renderData.arcs)
+                {
+                    arcs.push_back({a.center, a.radius, a.startAngle, a.endAngle});
+                }
+                zhihui_kezi_curved::CreateCurvedSingleLineEngraving(
+                    session_, workPart, face, targetBody, faceInfo,
+                    textOrigin, textMatrix, segs, arcs, params,
+                    commitGeometry, logFn, &output);
+            }
+            else
+            {
+                zhihui_kezi_curved::CreateCurvedRegularTextEngraving(
+                    session_, workPart, face, targetBody, faceInfo,
+                    textOrigin, textMatrix, params,
+                    commitGeometry, logFn, &output);
+            }
+
+            if (!commitGeometry)
+            {
+                curvedPreviewObjectTags_ = output.previewObjectTags;
+                try { session_->DeleteUndoMark(curvedMark, "KeZi Curved Engraving"); } catch (...) {}
+                return;
+            }
+
+            // Package committed construction features into KeZi CustomFeature for double-click editing
+            modernConstructionFeatureTags_ = output.constructionFeatureTags;
+            if (!modernConstructionFeatureTags_.empty())
+            {
+                try
+                {
+                    Features::CustomFeatureClassManager* cfMgr = session_->CustomFeatureClassManager();
+                    Features::CustomFeatureClass* cfClass = cfMgr != nullptr
+                        ? cfMgr->GetClassFromName(zhihui_kezi_custom_feature::kFeatureClassName)
+                        : nullptr;
+                    if (cfClass != nullptr)
+                    {
+                        Features::CustomFeatureData* data = nullptr;
+                        if (editedFeature_ == nullptr)
+                        {
+                            Features::CustomAttributeCollection* attributes = workPart->Features()->CustomAttributeCollection();
+                            std::vector<Features::CustomAttribute*> attrs;
+                            attrs.push_back(CreateKeZiTagAttribute(attributes, zhihui_kezi_custom_feature::kAttrTargetBody, targetBody, true, true));
+                            attrs.push_back(attributes->CreateCustomTagAttribute(
+                                zhihui_kezi_custom_feature::kAttrFace,
+                                std::vector<Features::CustomAttribute::Property>()));
+                            attrs.push_back(CreateKeZiStringAttribute(attributes, zhihui_kezi_custom_feature::kAttrText, text));
+                            attrs.push_back(CreateKeZiDoubleAttribute(attributes, zhihui_kezi_custom_feature::kAttrHeight, settings.height));
+                            attrs.push_back(CreateKeZiDoubleAttribute(attributes, zhihui_kezi_custom_feature::kAttrDepth, settings.depth));
+                            attrs.push_back(CreateKeZiDoubleAttribute(attributes, zhihui_kezi_custom_feature::kAttrWidth, settings.vShapeWidth));
+                            attrs.push_back(CreateKeZiDoubleAttribute(attributes, zhihui_kezi_custom_feature::kAttrWidthScale, settings.widthScale));
+                            attrs.push_back(CreateKeZiDoubleAttribute(attributes, zhihui_kezi_custom_feature::kAttrShear, settings.shear));
+                            attrs.push_back(CreateKeZiDoubleAttribute(attributes, zhihui_kezi_custom_feature::kAttrOriginX, textOrigin.X));
+                            attrs.push_back(CreateKeZiDoubleAttribute(attributes, zhihui_kezi_custom_feature::kAttrOriginY, textOrigin.Y));
+                            attrs.push_back(CreateKeZiDoubleAttribute(attributes, zhihui_kezi_custom_feature::kAttrOriginZ, textOrigin.Z));
+                            const double matrixValues[9] = {
+                                textMatrix.Xx, textMatrix.Xy, textMatrix.Xz,
+                                textMatrix.Yx, textMatrix.Yy, textMatrix.Yz,
+                                textMatrix.Zx, textMatrix.Zy, textMatrix.Zz};
+                            for (int index = 0; index < 9; ++index)
+                            {
+                                const std::string name = std::string(zhihui_kezi_custom_feature::kAttrMatrixPrefix) + std::to_string(index);
+                                attrs.push_back(CreateKeZiDoubleAttribute(attributes, name.c_str(), matrixValues[index]));
+                            }
+                            attrs.push_back(CreateKeZiIntegerAttribute(attributes, zhihui_kezi_custom_feature::kAttrSchemaVersion, 1));
+                            data = workPart->Features()->CustomFeatureDataCollection()->CreateData(cfClass, attrs);
+                        }
+                        else
+                        {
+                            data = editedFeature_->FeatureData();
+                            data->CustomStringAttributeByName(zhihui_kezi_custom_feature::kAttrText)
+                                ->SetValue(NXString(text.c_str(), NXString::UTF8));
+                            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrHeight)->SetValue(settings.height);
+                            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrDepth)->SetValue(settings.depth);
+                            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrWidth)->SetValue(settings.vShapeWidth);
+                            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrWidthScale)->SetValue(settings.widthScale);
+                            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrShear)->SetValue(settings.shear);
+                            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrOriginX)->SetValue(textOrigin.X);
+                            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrOriginY)->SetValue(textOrigin.Y);
+                            data->CustomDoubleAttributeByName(zhihui_kezi_custom_feature::kAttrOriginZ)->SetValue(textOrigin.Z);
+                            const double matrixValues[9] = {
+                                textMatrix.Xx, textMatrix.Xy, textMatrix.Xz,
+                                textMatrix.Yx, textMatrix.Yy, textMatrix.Yz,
+                                textMatrix.Zx, textMatrix.Zy, textMatrix.Zz};
+                            for (int index = 0; index < 9; ++index)
+                            {
+                                const std::string name = std::string(zhihui_kezi_custom_feature::kAttrMatrixPrefix) + std::to_string(index);
+                                data->CustomDoubleAttributeByName(name.c_str())->SetValue(matrixValues[index]);
+                            }
+                        }
+                        const bool editingExisting = editedFeature_ != nullptr;
+                        customBuilder = workPart->Features()->CreateCustomFeatureBuilder(editedFeature_);
+                        buildingModernCustomFeature_ = true;
+                        customBuilder->SetFeatureData(data);
+                        Features::Feature* committed = customBuilder->CommitFeature();
+                        if (editingExisting)
+                        {
+                            UF_MODL_update();
+                        }
+                        buildingModernCustomFeature_ = false;
+                        customBuilder->Destroy();
+                        customBuilder = nullptr;
+                        if (Features::CustomFeature* cf = dynamic_cast<Features::CustomFeature*>(committed))
+                        {
+                            cf->SetName(zhihui_kezi_custom_feature::kFeatureDisplayName);
+                            if (editedFeature_ != nullptr) editedFeature_ = cf;
+                            Log(session_, std::string("曲面刻字自定义特征打包成功，tag=") + std::to_string(cf->Tag()));
+                        }
+                    }
+                }
+                catch (const NXException& ex)
+                {
+                    buildingModernCustomFeature_ = false;
+                    if (customBuilder != nullptr) { try { customBuilder->Destroy(); } catch (...) {} customBuilder = nullptr; }
+                    Log(session_, std::string("曲面刻字自定义特征打包跳过(保留已建实体): ") + ex.Message());
+                }
+                catch (...)
+                {
+                    buildingModernCustomFeature_ = false;
+                    if (customBuilder != nullptr) { try { customBuilder->Destroy(); } catch (...) {} customBuilder = nullptr; }
+                    Log(session_, "曲面刻字自定义特征打包跳过(保留已建实体)");
+                }
+            }
+            try { session_->DeleteUndoMark(curvedMark, "KeZi Curved Engraving"); } catch (...) {}
+        }
+        catch (...)
+        {
+            buildingModernCustomFeature_ = false;
+            if (customBuilder != nullptr) { try { customBuilder->Destroy(); } catch (...) {} }
+            try { session_->UndoToMark(curvedMark, "KeZi Curved Engraving"); } catch (...) {}
+            try { session_->DeleteUndoMark(curvedMark, "KeZi Curved Engraving"); } catch (...) {}
+            throw;
+        }
+    }
+
     Tooling::InsertTextBuilder* CreatePreparedBuilder(NXObject** textUdoOut,
                                                       Face* overrideSelectedFace = nullptr,
                                                       const Point3d* overrideOriginReference = nullptr,
@@ -6542,7 +6883,7 @@ private:
         TextSettings settings = executingDeferredEditedReplacement_
             ? deferredReplacementSettings_
             : ReadSettings();
-        if (settings.height <= 0.0 || settings.depth <= 0.0 || settings.widthScale <= 0.0 ||
+        if (settings.height <= 0.0 || settings.depth < 0.0 || settings.widthScale <= 0.0 ||
             (settings.vShape && settings.vShapeWidth <= 0.0))
         {
             throw std::runtime_error("Text height, depth, length, and width ratio must be greater than 0.");
@@ -6590,7 +6931,9 @@ private:
         {
             pickedPoint = ComponentPointToPrototype(selectedComponent, pickedPoint);
         }
-        if (!AskPlanarFaceData(face, hasPickedPoint ? &pickedPoint : nullptr, &facePoint, &faceNormal))
+        bool isPlanarFace = true;
+        zhihui_kezi_curved::CurvedFaceInfo curvedFaceInfo;
+        if (!AskEngravingFaceData(face, hasPickedPoint ? &pickedPoint : nullptr, &facePoint, &faceNormal, &isPlanarFace, &curvedFaceInfo))
         {
             throw std::runtime_error("Selected face is not a valid planar engraving face.");
         }
@@ -6610,7 +6953,22 @@ private:
                 originReference = ComponentPointToPrototype(selectedComponent, originReference);
             }
         }
-        const Point3d pickedOrigin = ProjectPointToFacePlane(facePoint, faceNormal, originReference);
+        Point3d pickedOrigin = ProjectPointToFacePlane(facePoint, faceNormal, originReference);
+        if (!isPlanarFace)
+        {
+            zhihui_kezi_curved::CurvedFaceInfo snappedInfo;
+            if (zhihui_kezi_curved::AskFaceInfo(face, &originReference, &snappedInfo))
+            {
+                pickedOrigin = snappedInfo.point;
+                facePoint = snappedInfo.point;
+                faceNormal = snappedInfo.normal;
+                curvedFaceInfo = snappedInfo;
+            }
+        }
+        else if (settings.depth <= 0.0)
+        {
+            throw std::runtime_error("Planar engraving depth must be greater than 0.");
+        }
 
         WorkContextGuard workContext(session_, selectedFace);
         Part* workPart = workContext.WorkPart();
@@ -6639,6 +6997,25 @@ private:
                                          : (executingDeferredEditedReplacement_
                                                 ? deferredReplacementMatrix_
                                                 : TextMatrixFromDialog(face, faceNormal, settings, selectedComponent));
+
+        // Non-planar (round tube / cylindrical / freeform surface) engraving route
+        if (!isPlanarFace)
+        {
+            zhihui_kezi_curved::CurvedFaceInfo finalCurvedInfo = curvedFaceInfo;
+            zhihui_kezi_curved::AskFaceInfo(face, &textOrigin, &finalCurvedInfo);
+            CreateCurvedSurfaceEngraving(
+                face,
+                finalCurvedInfo,
+                textOrigin,
+                textMatrix,
+                textRule,
+                settings,
+                workPart,
+                dynamic_cast<Body*>(body),
+                commitModernGeometry);
+            workContext.Restore();
+            return nullptr;
+        }
 
         // V mode never enters Moldwizard/InsertTextBuilder.  Preview displays
         // the MODERN center-line curves; commit extrudes every curve with a
@@ -7273,6 +7650,18 @@ private:
 
         if (elongatedPlanarFaceCount < 4 || choices.empty())
         {
+            zhihui_kezi_curved::RoundTubeAutoTarget roundTarget;
+            if (zhihui_kezi_curved::BuildAutomaticRoundTubeTarget(
+                    body, viewX, viewY, viewZ, settings.height, &roundTarget))
+            {
+                target->body = body;
+                target->face = roundTarget.face;
+                target->origin = roundTarget.origin;
+                target->matrix = roundTarget.matrix;
+                target->screenX = roundTarget.screenX;
+                target->screenY = roundTarget.screenY;
+                return true;
+            }
             return false;
         }
 
@@ -7507,7 +7896,7 @@ private:
                 {
                     Point3d referenceFacePoint;
                     Vector3d referenceFaceNormal;
-                    if (!AskPlanarFaceData(representative.face, &representative.origin, &referenceFacePoint, &referenceFaceNormal))
+                    if (!AskEngravingFaceData(representative.face, &representative.origin, &referenceFacePoint, &referenceFaceNormal))
                     {
                         throw std::runtime_error("无法获取自动基准刻字面数据。");
                     }
@@ -7817,6 +8206,8 @@ private:
         SameBodyLocalCoordinateSignature cachedReferenceBodySignature = {};
         bool hasReferenceBodySignature = false;
         bool hasSameBodyReference = false;
+        bool hasSameBodyCurvedReference = false;
+        zhihui_kezi_curved::CurvedFaceInfo cachedReferenceCurvedInfo;
         if (!executingDeferredEditedReplacement_ &&
             engraveSameBodies && preEngravingPrototypeFace != nullptr)
         {
@@ -7857,6 +8248,37 @@ private:
                     selectedComponent);
                 hasSameBodyReference = true;
                 Log(session_, "刻字前已缓存相同体参考面、文字位置和方向");
+            }
+            else if (zhihui_kezi_curved::AskFaceInfo(
+                         preEngravingPrototypeFace,
+                         &pickedPoint,
+                         &cachedReferenceCurvedInfo) &&
+                     cachedReferenceCurvedInfo.isCylindrical)
+            {
+                Point3d orientationOrigin = orientation_ != nullptr && orientation_->IsOriginSpecified()
+                    ? orientation_->Origin()
+                    : pickedPoint;
+                if (selectedComponent != nullptr)
+                {
+                    orientationOrigin = ComponentPointToPrototype(selectedComponent, orientationOrigin);
+                }
+                zhihui_kezi_curved::CurvedFaceInfo snappedInfo;
+                if (zhihui_kezi_curved::AskFaceInfo(preEngravingPrototypeFace, &orientationOrigin, &snappedInfo))
+                {
+                    cachedReferenceCurvedInfo = snappedInfo;
+                }
+                referenceOrigin = zhihui_kezi_curved::ApplyCurvedFaceCenterOptions(
+                    preEngravingPrototypeFace,
+                    cachedReferenceCurvedInfo,
+                    settings.centerLongSide,
+                    settings.centerShortSide);
+                referenceMatrix = TextMatrixFromDialog(
+                    preEngravingPrototypeFace,
+                    cachedReferenceCurvedInfo.normal,
+                    settings,
+                    selectedComponent);
+                hasSameBodyCurvedReference = true;
+                Log(session_, "刻字前已缓存相同圆管参考圆柱面、文字位置和方向");
             }
         }
 
@@ -7917,8 +8339,48 @@ private:
         std::vector<Body*> matchingBodies = preEngravingMatchingBodies;
         if (engraveSameBodies && !committedText.empty())
         {
+            Vector3d sameBodyViewX = CurrentScreenRightVector();
+            Vector3d sameBodyViewZ(0.0, 0.0, 1.0);
+            try
+            {
+                Part* dispPart = session_ != nullptr && session_->Parts() != nullptr
+                    ? dynamic_cast<Part*>(session_->Parts()->Display())
+                    : nullptr;
+                if (dispPart != nullptr && dispPart->Views() != nullptr && dispPart->Views()->WorkView() != nullptr)
+                {
+                    const Matrix3x3 vm = dispPart->Views()->WorkView()->Matrix();
+                    sameBodyViewZ = Normalize(Vector3d(vm.Zx, vm.Zy, vm.Zz), Vector3d(0.0, 0.0, 1.0));
+                }
+            }
+            catch (...) {}
             for (Body* sameBody : matchingBodies)
             {
+                if (hasSameBodyCurvedReference)
+                {
+                    Face* sameCylFace = nullptr;
+                    Point3d sameCylOrigin;
+                    Matrix3x3 sameCylMatrix;
+                    if (zhihui_kezi_curved::FindMatchingCylindricalFaceForSameBody(
+                            sameBody,
+                            cachedReferenceCurvedInfo,
+                            referenceOrigin,
+                            referenceMatrix,
+                            sameBodyViewX,
+                            sameBodyViewZ,
+                            &sameCylFace,
+                            &sameCylOrigin,
+                            &sameCylMatrix))
+                    {
+                        SameBodyEngravingTarget target;
+                        target.body = sameBody;
+                        target.face = sameCylFace;
+                        target.origin = sameCylOrigin;
+                        target.matrix = sameCylMatrix;
+                        sameBodyTargets.push_back(target);
+                        Log(session_, std::string("相同圆管文字变换: bodyTag=") + std::to_string(sameBody->Tag()));
+                    }
+                    continue;
+                }
                 Face* sameFace = nullptr;
                 Point3d sameFacePoint;
                 Vector3d sameFaceNormal;
@@ -8136,6 +8598,7 @@ private:
     Tooling::InsertTextBuilder* previewBuilder_ = nullptr;
     NXObject* previewUdo_ = nullptr;
     std::vector<tag_t> modernPreviewCurveTags_;
+    std::vector<tag_t> curvedPreviewObjectTags_;
     NXObject* lastBody_ = nullptr;
     Assemblies::Component* lastComponent_ = nullptr;
     Part* lastWorkPart_ = nullptr;

@@ -51,7 +51,9 @@ std::wstring g_lastCmdPath;
 FILETIME g_configMtime{};
 ShortcutConfig g_config;
 std::unordered_map<int, LastCommandInfo> g_buttonIdMap;
+std::unordered_map<std::wstring, std::wstring> g_buttonActionMap;
 bool g_buttonMapBuilt = false;
+bool g_actionMapBuilt = false;
 
 std::wstring g_buffer;
 std::wstring g_lastCommandId;
@@ -487,6 +489,98 @@ void PostExecuteCommand(const std::wstring& commandId, const std::wstring& displ
     }
 }
 
+void ScanMenuOrBtnForActions(const std::wstring& path)
+{
+    std::wstring text;
+    if (!ReadUtf8FileW(path, text))
+    {
+        return;
+    }
+    std::wstring currentBtn;
+    std::size_t pos = 0;
+    while (pos <= text.size())
+    {
+        std::size_t eol = text.find(L'\n', pos);
+        if (eol == std::wstring::npos) eol = text.size();
+        std::wstring line = TrimWide(text.substr(pos, eol - pos));
+        pos = eol + 1;
+        if (line.empty() || line[0] == L'!') continue;
+        if (line.rfind(L"BUTTON ", 0) == 0 || line.rfind(L"BUTTON\t", 0) == 0)
+        {
+            currentBtn = TrimWide(line.substr(6));
+            const std::size_t sp = currentBtn.find_first_of(L" \t");
+            if (sp != std::wstring::npos) currentBtn = currentBtn.substr(0, sp);
+        }
+        else if (!currentBtn.empty() && (line.rfind(L"ACTIONS ", 0) == 0 || line.rfind(L"ACTIONS\t", 0) == 0))
+        {
+            std::wstring act = TrimWide(line.substr(7));
+            const std::size_t sp = act.find_first_of(L" \t");
+            if (sp != std::wstring::npos) act = act.substr(0, sp);
+            if (!act.empty() && act != L"STANDARD")
+            {
+                g_buttonActionMap[currentBtn] = act;
+            }
+        }
+    }
+}
+
+void EnsureActionMapBuilt()
+{
+    if (g_actionMapBuilt)
+    {
+        return;
+    }
+    g_actionMapBuilt = true;
+    ScanMenuOrBtnForActions(g_pluginRoot + L"\\startup\\UGZH_design.men");
+
+    wchar_t ugiiDir[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"UGII_BASE_DIR", ugiiDir, MAX_PATH) > 0)
+    {
+        const std::wstring base(ugiiDir);
+        ScanMenuOrBtnForActions(base + L"\\GCTOOLKIT\\prc\\startup\\definitions_gctoolkit.btn");
+        ScanMenuOrBtnForActions(base + L"\\GCTOOLKIT\\prc\\startup\\nx_china_main_menu.men");
+    }
+}
+
+std::wstring ResolveActionDllPath(const std::wstring& commandId)
+{
+    EnsureActionMapBuilt();
+    std::wstring actionName = commandId;
+    const auto it = g_buttonActionMap.find(commandId);
+    if (it != g_buttonActionMap.end() && !it->second.empty())
+    {
+        actionName = it->second;
+    }
+    if (actionName.size() >= 4 &&
+        ToLowerAscii(actionName.substr(actionName.size() - 4)) == L".dll")
+    {
+        actionName = actionName.substr(0, actionName.size() - 4);
+    }
+
+    std::vector<std::wstring> searchDirs;
+    searchDirs.push_back(g_pluginRoot + L"\\application");
+    wchar_t ugiiDir[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"UGII_BASE_DIR", ugiiDir, MAX_PATH) > 0)
+    {
+        const std::wstring base(ugiiDir);
+        searchDirs.push_back(base + L"\\GCTOOLKIT\\prc\\gc_tools\\application");
+        searchDirs.push_back(base + L"\\GCTOOLKIT\\prc\\GearModeling\\application");
+        searchDirs.push_back(base + L"\\GCTOOLKIT\\prc\\application");
+        searchDirs.push_back(base + L"\\GCTOOLKIT\\prc\\startup");
+        searchDirs.push_back(base + L"\\NXBIN");
+    }
+
+    for (const auto& dir : searchDirs)
+    {
+        const std::wstring candidate = dir + L"\\" + actionName + L".dll";
+        if (FileExistsW(candidate))
+        {
+            return candidate;
+        }
+    }
+    return std::wstring();
+}
+
 void ExecuteCommandNow(const ExecPayload& payload)
 {
     if (g_executing)
@@ -496,12 +590,9 @@ void ExecuteCommandNow(const ExecPayload& payload)
     g_executing = true;
     ReloadConfigIfNeeded(false);
 
-    std::wstring dllCandidate = payload.commandId;
-    if (dllCandidate == L"BanJinCaiTu") dllCandidate = L"BanJinCaiTuDialog";
-    else if (dllCandidate == L"TwoPointSiBian") dllCandidate = L"TwoPointSiBianUI";
-
-    const std::wstring dllPath = g_pluginRoot + L"\\application\\" + dllCandidate + L".dll";
-    if (FileExistsW(dllPath))
+    const std::string cmdAnsi = WideToAnsi(payload.commandId);
+    const std::wstring dllPath = ResolveActionDllPath(payload.commandId);
+    if (!dllPath.empty())
     {
         using UfusrProc = void(*)(char*, int*, int);
         using AskUnloadProc = int(*)();
@@ -517,7 +608,9 @@ void ExecuteCommandNow(const ExecPayload& payload)
         const bool needUnlock = (lockStatus == UF_UI_LOCK_SET);
 
         HMODULE existingMod = GetModuleHandleW(dllPath.c_str());
-        HMODULE mod = existingMod ? existingMod : LoadLibraryW(dllPath.c_str());
+        HMODULE mod = existingMod ? existingMod
+            : LoadLibraryExW(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        const DWORD loadErr = mod ? 0 : GetLastError();
         if (mod)
         {
             auto ufusrFn = reinterpret_cast<UfusrProc>(GetProcAddress(mod, "ufusr"));
@@ -528,15 +621,17 @@ void ExecuteCommandNow(const ExecPayload& payload)
                 g_lastDisplayName = payload.displayName;
                 if (payload.commandId != L"KuaiJieJian" && !g_lastCmdPath.empty())
                 {
-                    SaveLastCommandW(g_lastCmdPath, {payload.commandId, payload.displayName, L"智辉插件"});
+                    SaveLastCommandW(g_lastCmdPath, {payload.commandId, payload.displayName, L"插件/工具箱"});
                 }
                 HideHud();
-                AppendDebugLogW(g_pluginRoot, L"Invoking native ufusr: " + dllPath);
-                char paramBuf[4]{};
+                AppendDebugLogW(g_pluginRoot,
+                    L"Invoking native ufusr: " + dllPath + L" param=" + payload.commandId);
+                std::vector<char> paramBuf(cmdAnsi.begin(), cmdAnsi.end());
+                paramBuf.push_back('\0');
                 int retCode = 0;
                 try
                 {
-                    ufusrFn(paramBuf, &retCode, 0);
+                    ufusrFn(paramBuf.data(), &retCode, static_cast<int>(cmdAnsi.size()));
                 }
                 catch (...)
                 {
@@ -562,10 +657,10 @@ void ExecuteCommandNow(const ExecPayload& payload)
         {
             UF_UI_unlock_ug_access(UF_UI_FROM_CUSTOM);
         }
-        AppendDebugLogW(g_pluginRoot, L"Native ufusr not found or LoadLibraryW failed: " + dllPath);
+        AppendDebugLogW(g_pluginRoot, L"Native ufusr not found or LoadLibraryExW failed (err=" +
+            std::to_wstring(loadErr) + L"): " + dllPath);
     }
 
-    const std::string cmdAnsi = WideToAnsi(payload.commandId);
     HWND mainHwnd = ResolveNxMainWindow();
     int buttonId = 0;
     const int askStatus = UF_MB_ask_button_id(const_cast<char*>(cmdAnsi.c_str()), &buttonId);

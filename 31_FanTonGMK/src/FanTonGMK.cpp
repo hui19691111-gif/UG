@@ -2938,9 +2938,26 @@ bool CreateAndUniteRectFromBevelEfFace(
 
     const CandidateEdge& baseEdge = candidates[bestFirst];
 
-    double p1[3] = {baseEdge.endpoints.first[0], baseEdge.endpoints.first[1], baseEdge.endpoints.first[2]};
+    // Cut 0.5 mm deeper past both R edges so the bevel tongue clears the mating tube inner R.
+    const double rEdgeInset = 0.5;
+    if (baseEdge.length <= rEdgeInset * 2.0 + 0.05)
+    {
+        return false;
+    }
 
-    double p2[3] = {baseEdge.endpoints.second[0], baseEdge.endpoints.second[1], baseEdge.endpoints.second[2]};
+    double p1[3] =
+    {
+        baseEdge.endpoints.first[0] + baseEdge.direction[0] * rEdgeInset,
+        baseEdge.endpoints.first[1] + baseEdge.direction[1] * rEdgeInset,
+        baseEdge.endpoints.first[2] + baseEdge.direction[2] * rEdgeInset
+    };
+
+    double p2[3] =
+    {
+        baseEdge.endpoints.second[0] - baseEdge.direction[0] * rEdgeInset,
+        baseEdge.endpoints.second[1] - baseEdge.direction[1] * rEdgeInset,
+        baseEdge.endpoints.second[2] - baseEdge.direction[2] * rEdgeInset
+    };
 
     double p3[3] =
 

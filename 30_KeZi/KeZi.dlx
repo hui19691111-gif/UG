@@ -3,7 +3,7 @@
   <item Expanded="1" class="UICOMP_toggle" hierarchy="" icon="styler_toggle.bmp" id="autoEngraveVisibleTubes" name="autoEngraveVisibleTubes" notes="" presentation="Toggle" type="uicomp">
     <PropertyList id="id" mode="0">
       <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="API Name" mask="16400" name="API Name" sname="BlockID" source="3" type="string" value="autoEngraveVisibleTubes" />
-      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="所有可见方通自动刻字" />
+      <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Title" mask="256" name="Title" sname="Label" source="1" type="utfstring" value="所有可见方通/圆管自动刻字" />
       <Property ClassID="UGS::UICOMP_toggle" group="Block Specific::" hierarchy="UGS::UICOMP_toggle" id="Value" mask="0" name="Value" sname="Value" source="4" type="logical" value="False" />
       <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Visibility" mask="0" name="Visibility" sname="Show" source="1" type="logical" value="True" />
       <Property ClassID="UGS::UICOMP" group="General::" hierarchy="UGS::UICOMP_toggle" id="Sensitivity" mask="0" name="Sensitivity" sname="Enable" source="1" type="logical" value="True" />
