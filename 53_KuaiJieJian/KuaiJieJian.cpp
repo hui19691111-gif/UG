@@ -8,6 +8,7 @@
 
 #include <CommCtrl.h>
 #include <cwchar>
+#include <share.h>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,7 @@ constexpr int IDC_BTN_DELETE = 1016;
 constexpr int IDC_BTN_RESET = 1017;
 constexpr int IDC_BTN_SAVE = 1018;
 constexpr int IDC_BTN_CLOSE = 1019;
+constexpr int IDC_BTN_HOTKEY = 1020;
 
 HMODULE g_hModule = nullptr;
 
@@ -108,6 +110,7 @@ struct DialogState
     HWND chkEnabled = nullptr;
     HWND chkRepeat = nullptr;
     HWND chkHud = nullptr;
+    HWND btnHotkey = nullptr;
     HWND edtSearch = nullptr;
     HWND cmbFilterMod = nullptr;
     HWND list = nullptr;
@@ -118,6 +121,9 @@ struct DialogState
     HWND cmbMod = nullptr;
     bool running = true;
     bool dirty = false;
+    bool capturingHotkey = false;
+    int sortColumn = -1;
+    bool sortAscending = true;
 };
 
 std::wstring GetControlText(HWND hwnd)
@@ -159,6 +165,25 @@ void SelectComboText(HWND cmb, const std::wstring& value, int defaultIndex)
     SendMessageW(cmb, CB_SETCURSEL, (found == CB_ERR) ? defaultIndex : static_cast<WPARAM>(found), 0);
 }
 
+void UpdateListHeaderSortIndicator(const DialogState& st)
+{
+    static const wchar_t* kBaseTitles[6] = {
+        L"简码", L"命令名称", L"命令ID (ButtonName)", L"分类", L"适用模块", L"状态"
+    };
+    for (int i = 0; i < 6; ++i)
+    {
+        std::wstring text = kBaseTitles[i];
+        if (i == st.sortColumn)
+        {
+            text += st.sortAscending ? L" ▲" : L" ▼";
+        }
+        LVCOLUMNW col{};
+        col.mask = LVCF_TEXT;
+        col.pszText = const_cast<wchar_t*>(text.c_str());
+        ListView_SetColumn(st.list, i, &col);
+    }
+}
+
 void PopulateList(DialogState& st, int selectConfigIdx = -1)
 {
     SendMessageW(st.list, WM_SETREDRAW, FALSE, 0);
@@ -167,7 +192,6 @@ void PopulateList(DialogState& st, int selectConfigIdx = -1)
 
     const std::wstring filter = ToLowerAscii(GetControlText(st.edtSearch));
     const std::wstring modFilter = GetComboSelectedText(st.cmbFilterMod, L"全部模块");
-    int rowToSelect = -1;
 
     for (std::size_t i = 0; i < st.config.entries.size(); ++i)
     {
@@ -190,9 +214,41 @@ void PopulateList(DialogState& st, int selectConfigIdx = -1)
                 continue;
             }
         }
-        const int row = static_cast<int>(st.visibleIndices.size());
         st.visibleIndices.push_back(i);
-        if (static_cast<int>(i) == selectConfigIdx)
+    }
+
+    if (st.sortColumn >= 0 && st.sortColumn < 6)
+    {
+        const int col = st.sortColumn;
+        const bool asc = st.sortAscending;
+        auto fieldOf = [&](std::size_t idx) -> std::wstring {
+            const auto& e = st.config.entries[idx];
+            switch (col)
+            {
+            case 0: return e.alias;
+            case 1: return e.displayName;
+            case 2: return e.commandId;
+            case 3: return e.category;
+            case 4: return e.module.empty() ? L"全部" : e.module;
+            case 5: return e.enabled ? L"启用" : L"禁用";
+            default: return L"";
+            }
+        };
+        std::stable_sort(st.visibleIndices.begin(), st.visibleIndices.end(),
+            [&](std::size_t a, std::size_t b) {
+                const int cmp = lstrcmpiW(fieldOf(a).c_str(), fieldOf(b).c_str());
+                return asc ? (cmp < 0) : (cmp > 0);
+            });
+    }
+    UpdateListHeaderSortIndicator(st);
+
+    int rowToSelect = -1;
+    for (int row = 0; row < static_cast<int>(st.visibleIndices.size()); ++row)
+    {
+        const std::size_t idx = st.visibleIndices[static_cast<std::size_t>(row)];
+        const auto& e = st.config.entries[idx];
+        const std::wstring eMod = e.module.empty() ? L"全部" : e.module;
+        if (static_cast<int>(idx) == selectConfigIdx)
         {
             rowToSelect = row;
         }
@@ -224,6 +280,62 @@ void SyncCheckboxesFromConfig(const DialogState& st)
     SendMessageW(st.chkEnabled, BM_SETCHECK, st.config.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(st.chkRepeat, BM_SETCHECK, st.config.repeatOnEmptySpace ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(st.chkHud, BM_SETCHECK, st.config.showHud ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (st.btnHotkey)
+    {
+        const std::wstring hk = st.config.toggleHotkey.empty() ? L"ALT+F1" : st.config.toggleHotkey;
+        SetWindowTextW(st.btnHotkey, hk.c_str());
+    }
+}
+
+std::wstring FormatCapturedHotkey(WPARAM vk, bool& valid)
+{
+    valid = false;
+    if (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU ||
+        vk == VK_LWIN || vk == VK_RWIN)
+    {
+        return L"";
+    }
+    const bool hasCtrl = (GetKeyState(VK_CONTROL) < 0);
+    const bool hasAlt = (GetKeyState(VK_MENU) < 0);
+    const bool hasShift = (GetKeyState(VK_SHIFT) < 0);
+
+    std::wstring keyName;
+    bool isFunctionOrTilde = false;
+    if (vk >= VK_F1 && vk <= VK_F12)
+    {
+        keyName = L"F" + std::to_wstring(static_cast<int>(vk - VK_F1 + 1));
+        isFunctionOrTilde = true;
+    }
+    else if (vk >= L'A' && vk <= L'Z')
+    {
+        keyName.push_back(static_cast<wchar_t>(vk));
+    }
+    else if (vk >= L'0' && vk <= L'9')
+    {
+        keyName.push_back(static_cast<wchar_t>(vk));
+    }
+    else if (vk == VK_OEM_3)
+    {
+        keyName = L"`";
+        isFunctionOrTilde = true;
+    }
+    else
+    {
+        return L"";
+    }
+
+    if (!isFunctionOrTilde && !hasCtrl && !hasAlt && !hasShift)
+    {
+        return L"";
+    }
+
+    std::wstring combo;
+    if (hasCtrl) combo += L"CTRL+";
+    if (hasAlt) combo += L"ALT+";
+    if (hasShift) combo += L"SHIFT+";
+    combo += keyName;
+    valid = true;
+    return combo;
 }
 
 int SelectedConfigIndex(const DialogState& st)
@@ -294,8 +406,48 @@ int FindDuplicateAliasIndex(const DialogState& st, const std::wstring& alias, co
     return -1;
 }
 
+bool CheckAllDuplicatesBeforeSave(HWND hwnd, const DialogState& st)
+{
+    std::wstring conflicts;
+    int conflictCount = 0;
+    for (std::size_t i = 0; i < st.config.entries.size(); ++i)
+    {
+        const auto& a = st.config.entries[i];
+        if (!a.enabled) continue;
+        const std::wstring aMod = a.module.empty() ? L"全部" : a.module;
+        for (std::size_t j = i + 1; j < st.config.entries.size(); ++j)
+        {
+            const auto& b = st.config.entries[j];
+            if (!b.enabled) continue;
+            const std::wstring bMod = b.module.empty() ? L"全部" : b.module;
+            if (a.alias == b.alias && aMod == bMod)
+            {
+                if (conflictCount < 8)
+                {
+                    conflicts += L"• 简码「" + a.alias + L"」(模块:" + aMod + L")：" +
+                        a.displayName + L" 与 " + b.displayName + L"\r\n";
+                }
+                ++conflictCount;
+            }
+        }
+    }
+    if (conflictCount > 0)
+    {
+        const std::wstring msg = L"检测到 " + std::to_wstring(conflictCount) +
+            L" 处重复快捷键（同一适用模块下简码相同）：\r\n\r\n" + conflicts +
+            L"\r\n请先修改或删除重复项后再保存。";
+        MessageBoxW(hwnd, msg.c_str(), L"快捷键重复提示", MB_OK | MB_ICONWARNING);
+        return false;
+    }
+    return true;
+}
+
 bool SaveAndNotifyLoader(DialogState& st, bool showSuccessPopup)
 {
+    if (!CheckAllDuplicatesBeforeSave(st.hwnd, st))
+    {
+        return false;
+    }
     st.config.enabled = (SendMessageW(st.chkEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED);
     st.config.repeatOnEmptySpace = (SendMessageW(st.chkRepeat, BM_GETCHECK, 0, 0) == BST_CHECKED);
     st.config.showHud = (SendMessageW(st.chkHud, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -315,6 +467,117 @@ bool SaveAndNotifyLoader(DialogState& st, bool showSuccessPopup)
         MessageBoxW(st.hwnd, L"快捷键配置已保存并立即生效！", L"快捷键", MB_OK | MB_ICONINFORMATION);
     }
     return true;
+}
+
+bool ReadLastCommandFromNxSyslog(const DialogState& st, LastCommandInfo& outInfo)
+{
+    std::wstring syslogPath;
+    try
+    {
+        auto* session = NXOpen::Session::GetSession();
+        if (session && session->LogFile())
+        {
+            const NXOpen::NXString fn = session->LogFile()->FileName();
+            if (fn.GetText())
+            {
+                syslogPath = Utf8ToWide(fn.GetText());
+            }
+        }
+    }
+    catch (...)
+    {
+        return false;
+    }
+    if (syslogPath.empty())
+    {
+        return false;
+    }
+
+    FILE* fp = _wfsopen(syslogPath.c_str(), L"rb", _SH_DENYNO);
+    if (!fp)
+    {
+        return false;
+    }
+    _fseeki64(fp, 0, SEEK_END);
+    const long long totalSize = _ftelli64(fp);
+    const long long chunkSize = 262144;
+    const long long startOffset = (totalSize > chunkSize) ? (totalSize - chunkSize) : 0;
+    _fseeki64(fp, startOffset, SEEK_SET);
+
+    std::string raw(static_cast<std::size_t>(totalSize - startOffset), '\0');
+    if (!raw.empty())
+    {
+        const std::size_t got = fread(raw.data(), 1, raw.size(), fp);
+        raw.resize(got);
+    }
+    fclose(fp);
+
+    std::vector<std::string> lines;
+    std::size_t pos = 0;
+    while (pos < raw.size())
+    {
+        std::size_t eol = raw.find('\n', pos);
+        if (eol == std::string::npos) eol = raw.size();
+        std::string line = raw.substr(pos, eol - pos);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        lines.push_back(std::move(line));
+        pos = eol + 1;
+    }
+
+    std::wstring recentDialogTitle;
+    const std::string menuPrefix = "&MACRO MENU, ";
+    const std::string dlgPrefix = "&MACRO DIALOG_BEGIN \"";
+
+    for (auto it = lines.rbegin(); it != lines.rend(); ++it)
+    {
+        const std::string& line = *it;
+        if (line.rfind(dlgPrefix, 0) == 0)
+        {
+            const std::size_t q2 = line.find('"', dlgPrefix.size());
+            if (q2 != std::string::npos)
+            {
+                const std::string title = line.substr(dlgPrefix.size(), q2 - dlgPrefix.size());
+                if (title != "Persistent Dialog" && !title.empty())
+                {
+                    recentDialogTitle = Utf8ToWide(title);
+                }
+            }
+            continue;
+        }
+        if (line.rfind(menuPrefix, 0) == 0)
+        {
+            const std::size_t comma2 = line.find(',', menuPrefix.size());
+            if (comma2 == std::string::npos) continue;
+            std::size_t p = comma2 + 1;
+            while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
+            std::size_t end = p;
+            while (end < line.size() && line[end] != ' ' && line[end] != '\t' && line[end] != '<') ++end;
+            if (end <= p) continue;
+            const std::wstring btnName = Utf8ToWide(line.substr(p, end - p));
+            if (btnName.empty() || btnName == L"KuaiJieJian")
+            {
+                recentDialogTitle.clear();
+                continue;
+            }
+
+            outInfo.commandId = btnName;
+            outInfo.displayName = recentDialogTitle.empty() ? btnName : recentDialogTitle;
+            outInfo.category = (btnName.rfind(L"UG_", 0) == 0 || btnName.rfind(L"NX_", 0) == 0)
+                ? L"NX原生" : L"智辉插件";
+
+            for (const auto& entry : st.config.entries)
+            {
+                if (entry.commandId == btnName)
+                {
+                    outInfo.displayName = entry.displayName;
+                    outInfo.category = entry.category;
+                    break;
+                }
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 HWND MakeCtrl(HWND parent, const wchar_t* cls, const wchar_t* text,
@@ -345,12 +608,17 @@ LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei UI");
 
-        st->chkEnabled = MakeCtrl(hwnd, L"BUTTON", L"启用快捷键（按空格执行）",
-            BS_AUTOCHECKBOX | WS_TABSTOP, 0, 16, 12, 220, 24, IDC_CHK_ENABLED, st->font);
-        st->chkRepeat = MakeCtrl(hwnd, L"BUTTON", L"空输入时按空格重复上一条命令",
-            BS_AUTOCHECKBOX | WS_TABSTOP, 0, 246, 12, 250, 24, IDC_CHK_REPEAT, st->font);
-        st->chkHud = MakeCtrl(hwnd, L"BUTTON", L"输入简码时显示悬浮提示框",
-            BS_AUTOCHECKBOX | WS_TABSTOP, 0, 508, 12, 220, 24, IDC_CHK_HUD, st->font);
+        st->chkEnabled = MakeCtrl(hwnd, L"BUTTON", L"启用快捷键(空格执行)",
+            BS_AUTOCHECKBOX | WS_TABSTOP, 0, 16, 12, 175, 24, IDC_CHK_ENABLED, st->font);
+        st->chkRepeat = MakeCtrl(hwnd, L"BUTTON", L"空输入按空格重复上条",
+            BS_AUTOCHECKBOX | WS_TABSTOP, 0, 198, 12, 180, 24, IDC_CHK_REPEAT, st->font);
+        st->chkHud = MakeCtrl(hwnd, L"BUTTON", L"显示悬浮提示框",
+            BS_AUTOCHECKBOX | WS_TABSTOP, 0, 386, 12, 130, 24, IDC_CHK_HUD, st->font);
+
+        MakeCtrl(hwnd, L"STATIC", L"监听开关热键:", 0, 0, 528, 16, 98, 22, 0, st->font);
+        st->btnHotkey = MakeCtrl(hwnd, L"BUTTON", L"ALT+F1",
+            WS_TABSTOP, 0, 628, 10, 132, 26, IDC_BTN_HOTKEY, st->font);
+        MakeCtrl(hwnd, L"STATIC", L"(点击录制)", 0, 0, 766, 16, 86, 22, 0, st->font);
 
         MakeCtrl(hwnd, L"STATIC", L"搜索:", 0, 0, 16, 46, 40, 22, 0, st->font);
         st->edtSearch = MakeCtrl(hwnd, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP,
@@ -367,7 +635,7 @@ LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         SendMessageW(st->cmbFilterMod, CB_SETCURSEL, 0, 0);
 
         MakeCtrl(hwnd, L"STATIC",
-            L"提示: 双击行可快速改简码；Alt+F1 可随时暂停/恢复监听",
+            L"提示: 双击行可快速改简码；原有 Ctrl/Shift/Alt 组合键保持有效",
             0, 0, 458, 46, 396, 22, 0, st->font);
 
         st->list = CreateWindowExW(
@@ -460,6 +728,21 @@ LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 SetFocus(st->edtAlias);
                 SendMessageW(st->edtAlias, EM_SETSEL, 0, -1);
             }
+            else if (nm->code == LVN_COLUMNCLICK)
+            {
+                auto* lvn = reinterpret_cast<NMLISTVIEW*>(lParam);
+                const int selIdx = SelectedConfigIndex(*st);
+                if (st->sortColumn == lvn->iSubItem)
+                {
+                    st->sortAscending = !st->sortAscending;
+                }
+                else
+                {
+                    st->sortColumn = lvn->iSubItem;
+                    st->sortAscending = true;
+                }
+                PopulateList(*st, selIdx);
+            }
         }
         break;
     }
@@ -485,19 +768,55 @@ LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         case IDC_CHK_HUD:
             st->dirty = true;
             return 0;
+        case IDC_BTN_HOTKEY:
+            st->capturingHotkey = true;
+            SetWindowTextW(st->btnHotkey, L"请按下组合键...");
+            return 0;
         case IDC_BTN_READ_LAST:
         {
             LastCommandInfo last{};
-            if (!LoadLastCommandW(st->lastCmdPath, last))
+            if (!ReadLastCommandFromNxSyslog(*st, last) && !LoadLastCommandW(st->lastCmdPath, last))
             {
                 MessageBoxW(hwnd,
                     L"暂未记录到上一步命令。\r\n请先在 NX 界面点击或运行任意命令后再打开本窗口读取。",
                     L"读取上个命令", MB_OK | MB_ICONINFORMATION);
                 return 0;
             }
-            SetWindowTextW(st->edtName, last.displayName.c_str());
-            SetWindowTextW(st->edtCmdId, last.commandId.c_str());
-            SelectComboText(st->cmbCat, last.category, 2);
+            int existingIdx = -1;
+            for (int i = 0; i < static_cast<int>(st->config.entries.size()); ++i)
+            {
+                if (st->config.entries[static_cast<std::size_t>(i)].commandId == last.commandId)
+                {
+                    existingIdx = i;
+                    break;
+                }
+            }
+            if (existingIdx >= 0)
+            {
+                const auto& e = st->config.entries[static_cast<std::size_t>(existingIdx)];
+                SetWindowTextW(st->edtAlias, e.alias.c_str());
+                SetWindowTextW(st->edtName, e.displayName.c_str());
+                SetWindowTextW(st->edtCmdId, e.commandId.c_str());
+                SelectComboText(st->cmbCat, e.category, 2);
+                SelectComboText(st->cmbMod, e.module.empty() ? L"全部" : e.module, 0);
+                for (int row = 0; row < static_cast<int>(st->visibleIndices.size()); ++row)
+                {
+                    if (static_cast<int>(st->visibleIndices[static_cast<std::size_t>(row)]) == existingIdx)
+                    {
+                        ListView_SetItemState(st->list, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                        ListView_EnsureVisible(st->list, row, FALSE);
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                SetWindowTextW(st->edtAlias, L"");
+                SetWindowTextW(st->edtName, last.displayName.c_str());
+                SetWindowTextW(st->edtCmdId, last.commandId.c_str());
+                SelectComboText(st->cmbCat, last.category, 2);
+                SelectComboText(st->cmbMod, L"全部", 0);
+            }
             SetFocus(st->edtAlias);
             SendMessageW(st->edtAlias, EM_SETSEL, 0, -1);
             return 0;
@@ -518,9 +837,12 @@ LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             const int dup = FindDuplicateAliasIndex(*st, updated.alias, updated.module, idx);
             if (dup >= 0)
             {
-                MessageBoxW(hwnd,
-                    L"同一适用模块下已存在相同简码，请更换简码或修改模块。",
-                    L"快捷键", MB_OK | MB_ICONWARNING);
+                const auto& other = st->config.entries[static_cast<std::size_t>(dup)];
+                const std::wstring msg =
+                    L"快捷键重复！\r\n\r\n简码「" + updated.alias + L"」在「" + updated.module +
+                    L"」模块下已被「" + other.displayName + L" (" + other.commandId +
+                    L")」占用。\r\n请更换简码或选择其他适用模块。";
+                MessageBoxW(hwnd, msg.c_str(), L"快捷键重复提示", MB_OK | MB_ICONWARNING);
                 return 0;
             }
             updated.enabled = st->config.entries[static_cast<std::size_t>(idx)].enabled;
@@ -539,9 +861,12 @@ LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             const int dup = FindDuplicateAliasIndex(*st, created.alias, created.module, -1);
             if (dup >= 0)
             {
-                MessageBoxW(hwnd,
-                    L"同一适用模块下已存在该简码，若要修改它请选中该行后点「修改选中」。",
-                    L"快捷键", MB_OK | MB_ICONWARNING);
+                const auto& other = st->config.entries[static_cast<std::size_t>(dup)];
+                const std::wstring msg =
+                    L"快捷键重复！\r\n\r\n简码「" + created.alias + L"」在「" + created.module +
+                    L"」模块下已被「" + other.displayName + L" (" + other.commandId +
+                    L")」占用。\r\n若要修改原命令请选中该行后点「修改选中」，或更换其他简码。";
+                MessageBoxW(hwnd, msg.c_str(), L"快捷键重复提示", MB_OK | MB_ICONWARNING);
                 return 0;
             }
             st->config.entries.push_back(created);
@@ -683,6 +1008,33 @@ void ShowConfigDialog()
     MSG msg{};
     while (st.running && GetMessageW(&msg, nullptr, 0, 0) > 0)
     {
+        if (st.capturingHotkey && (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN))
+        {
+            if (msg.wParam == VK_ESCAPE)
+            {
+                st.capturingHotkey = false;
+                SyncCheckboxesFromConfig(st);
+                continue;
+            }
+            bool valid = false;
+            const std::wstring captured = FormatCapturedHotkey(msg.wParam, valid);
+            if (valid)
+            {
+                st.config.toggleHotkey = captured;
+                st.dirty = true;
+                st.capturingHotkey = false;
+                SetWindowTextW(st.btnHotkey, captured.c_str());
+            }
+            else if (msg.wParam != VK_CONTROL && msg.wParam != VK_SHIFT && msg.wParam != VK_MENU)
+            {
+                MessageBoxW(dlg,
+                    L"请使用组合键（如 Alt+F1、Ctrl+Shift+K）或功能键（F1~F12 / `），避免与单字母简码冲突。",
+                    L"设置监听热键", MB_OK | MB_ICONINFORMATION);
+                st.capturingHotkey = false;
+                SyncCheckboxesFromConfig(st);
+            }
+            continue;
+        }
         if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE)
         {
             PostMessageW(dlg, WM_CLOSE, 0, 0);

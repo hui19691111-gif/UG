@@ -112,9 +112,20 @@ foreach ($file in $appArtifacts) {
     Copy-Item -LiteralPath (Join-Path $release $file) -Destination (Join-Path $application $file) -Force
 }
 foreach ($file in $startupArtifacts) {
-    Copy-Item -LiteralPath (Join-Path $release $file) -Destination (Join-Path $startup $file) -Force
+    $srcPath = Join-Path $release $file
+    $dstPath = Join-Path $startup $file
+    $needCopy = $true
+    if (Test-Path -LiteralPath $dstPath -PathType Leaf) {
+        if ((Get-FileHash -LiteralPath $srcPath -Algorithm SHA256).Hash -eq
+            (Get-FileHash -LiteralPath $dstPath -Algorithm SHA256).Hash) {
+            $needCopy = $false
+        }
+    }
+    if ($needCopy) {
+        Copy-Item -LiteralPath $srcPath -Destination $dstPath -Force
+    }
     $refStartup = Join-Path $repoRoot "deployment_reference\startup\$file"
-    Copy-Item -LiteralPath (Join-Path $release $file) -Destination $refStartup -Force
+    Copy-Item -LiteralPath $srcPath -Destination $refStartup -Force
 }
 foreach ($file in $registration) {
     Add-MenuButton (Join-Path $startup $file)

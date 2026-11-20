@@ -155,6 +155,7 @@ bool IsSafeInputContext()
         return false;
     }
     if (GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0 ||
+        GetKeyState(VK_SHIFT) < 0 ||
         GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0)
     {
         return false;
@@ -206,11 +207,15 @@ bool MatchesToggleHotkey(WPARAM vk)
             return vk == static_cast<WPARAM>(VK_F1 + (fnum - 1));
         }
     }
-    if (keyPart.size() == 1 && keyPart[0] >= L'A' && keyPart[0] <= L'Z')
+    if (keyPart.size() == 1 && ((keyPart[0] >= L'A' && keyPart[0] <= L'Z') || (keyPart[0] >= L'0' && keyPart[0] <= L'9')))
     {
         return vk == static_cast<WPARAM>(keyPart[0]);
     }
-    return vk == VK_F1 && hasAlt;
+    if (keyPart == L"`" || keyPart == L"~")
+    {
+        return vk == VK_OEM_3;
+    }
+    return vk == VK_F1 && hasAlt && !hasCtrl && !hasShift;
 }
 
 void ShowHud(const std::wstring& title, const std::wstring& sub, bool isError, UINT autoHideMs)
