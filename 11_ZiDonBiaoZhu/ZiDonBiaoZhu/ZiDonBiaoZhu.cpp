@@ -38,6 +38,7 @@
 #include "../../../common/ZhihuiEmbeddedDialog.hpp"
 #include "../embedded_dialog_resources.h"
 #include "ZiDonBiaoZhuDimension.hpp"
+#include <unordered_set>
 using namespace NXOpen;
 using namespace NXOpen::BlockStyler;
 
@@ -58,7 +59,13 @@ static NXOpen::Body* GetCurveParentBody(NXOpen::Drawings::DraftingCurve* draftin
 		return NULL;
 	}
 
-	std::vector<NXOpen::NXObject*> parents = draftingCurve->GetDraftingCurveInfo()->GetParents();
+	NXOpen::Drawings::DraftingCurveInfo* curveInfo = draftingCurve->GetDraftingCurveInfo();
+	if (curveInfo == NULL)
+	{
+		return NULL;
+	}
+	std::vector<NXOpen::NXObject*> parents = curveInfo->GetParents();
+	delete curveInfo;
 	for (size_t i = 0; i < parents.size(); i++)
 	{
 		if (parents[i] == NULL)
@@ -111,12 +118,84 @@ static NXOpen::Drawings::DraftingBody* FindDraftingBodyForModelBody(NXOpen::Draw
 	return NULL;
 }
 
-static std::vector<NXOpen::Drawings::DraftingCurve*> CollectDraftingCurves(NXOpen::Drawings::DraftingBody* draftingBody)
+static bool IsDraftingCurveDisplayedInView(
+	NXOpen::Drawings::DraftingView* draftingView,
+	NXOpen::Drawings::DraftingCurve* curve,
+	const std::unordered_set<tag_t>& erasedTags,
+	const std::unordered_set<tag_t>& visibleTags,
+	bool hasVisibleCurveFilter)
 {
-	std::vector<NXOpen::Drawings::DraftingCurve*> curves;
-	if (draftingBody == NULL)
+	if (draftingView == NULL || curve == NULL)
 	{
-		return curves;
+		return false;
+	}
+	if (curve->IsBlanked())
+	{
+		return false;
+	}
+	const tag_t curveTag = curve->Tag();
+	if (erasedTags.find(curveTag) != erasedTags.end())
+	{
+		return false;
+	}
+	if (hasVisibleCurveFilter && visibleTags.find(curveTag) == visibleTags.end())
+	{
+		return false;
+	}
+
+	UF_OBJ_disp_props_s dispProps;
+	if (UF_OBJ_ask_display_properties(curveTag, &dispProps) == 0)
+	{
+		if (dispProps.blank_status != UF_OBJ_NOT_BLANKED || dispProps.font == UF_OBJ_FONT_INVISIBLE)
+		{
+			return false;
+		}
+		int layerStatus = 0;
+		if (UF_LAYER_ask_status(dispProps.layer, &layerStatus) == 0)
+		{
+			if (layerStatus != UF_LAYER_WORK_LAYER &&
+				layerStatus != UF_LAYER_ACTIVE_LAYER &&
+				layerStatus != UF_LAYER_REFERENCE_LAYER)
+			{
+				return false;
+			}
+		}
+	}
+
+	int numEdits = 0;
+	UF_VIEW_vde_data_p_t vdeData = NULL;
+	if (UF_VIEW_ask_vde_data(curveTag, &numEdits, &vdeData) == 0 && vdeData != NULL)
+	{
+		bool fullyInvisible = false;
+		for (int e = 0; e < numEdits; ++e)
+		{
+			if (vdeData[e].view_tag == draftingView->Tag() &&
+				vdeData[e].font == UF_OBJ_FONT_INVISIBLE &&
+				vdeData[e].start_parameter <= 0.001 &&
+				vdeData[e].end_parameter >= 0.999)
+			{
+				fullyInvisible = true;
+				break;
+			}
+		}
+		UF_free(vdeData);
+		if (fullyInvisible)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static std::vector<NXOpen::Drawings::DraftingCurve*> CollectDisplayedDraftingCurves(
+	NXOpen::Drawings::DraftingView* draftingView,
+	NXOpen::Drawings::DraftingBody* draftingBody)
+{
+	std::vector<NXOpen::Drawings::DraftingCurve*> allCurves;
+	if (draftingView == NULL || draftingBody == NULL)
+	{
+		return allCurves;
 	}
 
 	NXOpen::Drawings::DraftingCurveCollection* curveCollection = draftingBody->DraftingCurves();
@@ -124,10 +203,89 @@ static std::vector<NXOpen::Drawings::DraftingCurve*> CollectDraftingCurves(NXOpe
 	{
 		if ((*it) != NULL)
 		{
-			curves.push_back(*it);
+			allCurves.push_back(*it);
 		}
 	}
-	return curves;
+
+	std::unordered_set<tag_t> erasedTags;
+	tag_t erasedObj = NULL_TAG;
+	while (UF_VIEW_cycle_objects(draftingView->Tag(), UF_VIEW_ERASED_OBJECTS, &erasedObj) == 0 && erasedObj != NULL_TAG)
+	{
+		erasedTags.insert(erasedObj);
+	}
+
+	std::unordered_set<tag_t> visibleTags;
+	int nVisible = 0;
+	int nClipped = 0;
+	tag_t* visibleObjs = NULL;
+	tag_t* clippedObjs = NULL;
+	if (UF_VIEW_ask_visible_objects(draftingView->Tag(), &nVisible, &visibleObjs, &nClipped, &clippedObjs) == 0)
+	{
+		for (int i = 0; i < nVisible; ++i)
+		{
+			visibleTags.insert(visibleObjs[i]);
+		}
+		for (int i = 0; i < nClipped; ++i)
+		{
+			visibleTags.insert(clippedObjs[i]);
+		}
+		if (visibleObjs != NULL)
+		{
+			UF_free(visibleObjs);
+		}
+		if (clippedObjs != NULL)
+		{
+			UF_free(clippedObjs);
+		}
+	}
+
+	bool hasVisibleCurveFilter = false;
+	for (size_t i = 0; i < allCurves.size(); ++i)
+	{
+		if (visibleTags.find(allCurves[i]->Tag()) != visibleTags.end())
+		{
+			hasVisibleCurveFilter = true;
+			break;
+		}
+	}
+
+	std::vector<NXOpen::Drawings::DraftingCurve*> displayedCurves;
+	displayedCurves.reserve(allCurves.size());
+	for (size_t i = 0; i < allCurves.size(); ++i)
+	{
+		if (IsDraftingCurveDisplayedInView(draftingView, allCurves[i], erasedTags, visibleTags, hasVisibleCurveFilter))
+		{
+			displayedCurves.push_back(allCurves[i]);
+		}
+	}
+
+	const bool isSectionOrDetail =
+		dynamic_cast<NXOpen::Drawings::SectionView*>(draftingView) != NULL ||
+		dynamic_cast<NXOpen::Drawings::DetailView*>(draftingView) != NULL;
+	if (isSectionOrDetail)
+	{
+		std::vector<NXOpen::Drawings::DraftingCurve*> sectionCurves;
+		for (size_t i = 0; i < displayedCurves.size(); ++i)
+		{
+			NXOpen::Drawings::DraftingCurveInfo* curveInfo = displayedCurves[i]->GetDraftingCurveInfo();
+			if (curveInfo == NULL)
+			{
+				continue;
+			}
+			const NXOpen::Drawings::DraftingCurveInfo::DraftingCurveType curveType = curveInfo->CurveType();
+			delete curveInfo;
+			if (curveType == NXOpen::Drawings::DraftingCurveInfo::DraftingCurveTypeSectionEdge)
+			{
+				sectionCurves.push_back(displayedCurves[i]);
+			}
+		}
+		if (!sectionCurves.empty())
+		{
+			return sectionCurves;
+		}
+	}
+
+	return displayedCurves;
 }
 
 static double AskBodyDrawingArea(tag_t viewTag, NXOpen::Body* body)
@@ -229,7 +387,7 @@ static double MeasureMinimumDistance(NXOpen::Part* part, NXOpen::DisplayableObje
 	return measureDistance == NULL ? 999999.0 : measureDistance->Value();
 }
 
-static bool AreModelPointsCoincidentInDrawing(NXOpen::Drawings::BaseView* baseView, const double firstPoint[3], const double secondPoint[3], double tolerance)
+static bool AreModelPointsCoincidentInDrawing(NXOpen::Drawings::DraftingView* baseView, const double firstPoint[3], const double secondPoint[3], double tolerance)
 {
 	if (baseView == NULL || firstPoint == NULL || secondPoint == NULL)
 	{
@@ -260,7 +418,7 @@ struct OuterRadiusFaceGroups
 static OuterRadiusFaceGroups ClassifyOuterRadiusFacesForView(
 	NXOpen::Part* part,
 	const std::vector<NXOpen::Face*>& outerRadiusFaces,
-	NXOpen::Drawings::BaseView* baseView)
+	NXOpen::Drawings::DraftingView* baseView)
 {
 	OuterRadiusFaceGroups groups;
 	if (part == NULL || baseView == NULL)
@@ -366,7 +524,7 @@ static NXOpen::Point3d BuildOffsetOriginFromDrawingPoint(const double drawingPoi
 	return originPoint;
 }
 
-static NXOpen::Point3d BuildOffsetOriginFromModelPoint(NXOpen::Drawings::BaseView* baseView, const double modelPoint[3], double centerX, double centerY, double offset)
+static NXOpen::Point3d BuildOffsetOriginFromModelPoint(NXOpen::Drawings::DraftingView* baseView, const double modelPoint[3], double centerX, double centerY, double offset)
 {
 	double drawingPoint[2] = { 0.0, 0.0 };
 	if (baseView == NULL || modelPoint == NULL)
@@ -729,22 +887,19 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 			delete selection0Props;
 			selection0Props = NULL;
 
+			if (View1Tag.empty() || View1Tag[0] == NULL)
+			{
+				UF_terminate();
+				return 0;
+			}
+
 			//获取视图
 			NXOpen::Drawings::DraftingView* draftingView1(dynamic_cast<NXOpen::Drawings::DraftingView*>(NXOpen::NXObjectManager::Get(View1Tag[0]->Tag())));
-
-			//显示所有视图里的隐藏线
-			std::vector<NXOpen::View*> views1(1);
-			NXOpen::Drawings::BaseView* baseView1(dynamic_cast<NXOpen::Drawings::BaseView*>(draftingView1));
-			views1[0] = baseView1;
-			NXOpen::Drawings::EditViewSettingsBuilder* editViewSettingsBuilder1;
-			editViewSettingsBuilder1 = workPart->SettingsManager()->CreateDrawingEditViewSettingsBuilder(views1);
-			std::vector<NXOpen::Drafting::BaseEditSettingsBuilder*> editsettingsbuilders1(1);
-			editsettingsbuilders1[0] = editViewSettingsBuilder1;
-			workPart->SettingsManager()->ProcessForMultipleObjectsSettings(editsettingsbuilders1);
-			editViewSettingsBuilder1->ViewStyle()->ViewStyleHiddenLines()->SetHiddenLine(false);
-			NXOpen::NXObject* nXObject1;
-			nXObject1 = editViewSettingsBuilder1->Commit();
-			editViewSettingsBuilder1->Destroy();
+			if (draftingView1 == NULL)
+			{
+				UF_terminate();
+				return 0;
+			}
 
 
 			//获取视图比例
@@ -839,46 +994,141 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				UF_terminate();
 				return 0;
 			}
-			NeiWaiRFace.push_back(NeiWaiRFace1[0]);
 
-			//按自动出图流程：先隐藏当前最大体的面，后面只恢复参与标注的曲线。
-			std::vector<NXOpen::DisplayableObject*> objects1;//声明一个显示对象容器
-			for (size_t i = 0; i < AllFaceVecotor.size(); i++)
-			{
-				objects1.push_back(AllFaceVecotor[i]);
-			}
-			draftingView1->DependentDisplay()->Erase(objects1);
 
-			//循环找到一个跟内R同心的外R，参考自动出图流程按板厚找外R。
-			int innerFaceType = 0;
-			int innerNormDir = 0;
-			double innerPoint[3], innerDir[3], innerBox[6], innerRadius = 0.0, innerRadData = 0.0;
-			UF_MODL_ask_face_data(NeiWaiRFace[0]->Tag(), &innerFaceType, innerPoint, innerDir, innerBox, &innerRadius, &innerRadData, &innerNormDir);
-			for (size_t i = 0; i < AllFaceVecotor.size(); i++)
+
+			//预收集当前视图中实际显示的模型面：合并同属 LargestViewBody 的所有 DraftingBody 曲线。
+			DraftingCurvevector1a.clear();
+			for (size_t dbIdx = 0; dbIdx < DraftingBodyVector.size(); dbIdx++)
 			{
-				int type1, norm_dir;
-				double point2[3], dir2[3], box[6], radius2, rad_data;
-				UF_MODL_ask_face_data(AllFaceVecotor[i]->Tag(), &type1, point2, dir2, box, &radius2, &rad_data, &norm_dir);
-				if (type1 != 16)
+				if (DraftingBodyVector[dbIdx] == NULL)
 				{
 					continue;
 				}
-				double distance1 = MeasureMinimumDistance(workPart, NeiWaiRFace[0], AllFaceVecotor[i]);
-				if (fabs(radius2 - innerRadius - BodyThicknes1) < 0.01 && fabs(distance1 - BodyThicknes1) < 0.01)
+				std::vector<NXOpen::Drawings::DraftingCurve*> bodyCurves =
+					CollectDisplayedDraftingCurves(draftingView1, DraftingBodyVector[dbIdx]);
+				NXOpen::Body* dbParentBody = NULL;
+				for (size_t cIdx = 0; cIdx < bodyCurves.size() && dbParentBody == NULL; cIdx++)
 				{
-					NeiWaiRFace.push_back(AllFaceVecotor[i]);
-					WaiRadius = radius2;
-					i = AllFaceVecotor.size();
+					dbParentBody = GetCurveParentBody(bodyCurves[cIdx]);
+				}
+				if (dbParentBody == LargestViewBody)
+				{
+					DraftingCurvevector1a.insert(DraftingCurvevector1a.end(), bodyCurves.begin(), bodyCurves.end());
 				}
 			}
-			if (WaiRadius <= 0.0)
+			if (DraftingCurvevector1a.empty())
 			{
-				WaiRadius = innerRadius + BodyThicknes1;
+				DraftingCurvevector1a = CollectDisplayedDraftingCurves(draftingView1, DraftingBody1);
+			}
+			std::unordered_set<tag_t> viewVisibleFaceTags;
+			for (size_t ic = 0; ic < DraftingCurvevector1a.size(); ic++)
+			{
+				NXOpen::Drawings::DraftingCurveInfo* curveInfo = DraftingCurvevector1a[ic]->GetDraftingCurveInfo();
+				if (curveInfo == NULL)
+				{
+					continue;
+				}
+				std::vector<NXObject*> parents = curveInfo->GetParents();
+				delete curveInfo;
+				for (size_t ip = 0; ip < parents.size(); ip++)
+				{
+					if (parents[ip] == NULL)
+					{
+						continue;
+					}
+					int pType = 0, pSubtype = 0;
+					UF_OBJ_ask_type_and_subtype(parents[ip]->Tag(), &pType, &pSubtype);
+					if (pSubtype == UF_solid_face_subtype)
+					{
+						viewVisibleFaceTags.insert(parents[ip]->Tag());
+					}
+					else if (pSubtype == UF_solid_edge_subtype)
+					{
+						NXOpen::Edge* pEdge = dynamic_cast<NXOpen::Edge*>(NXOpen::NXObjectManager::Get(parents[ip]->Tag()));
+						if (pEdge != NULL)
+						{
+							std::vector<NXOpen::Face*> pEdgeFaces = pEdge->GetFaces();
+							for (size_t ef = 0; ef < pEdgeFaces.size(); ef++)
+							{
+								if (pEdgeFaces[ef] != NULL)
+								{
+									viewVisibleFaceTags.insert(pEdgeFaces[ef]->Tag());
+								}
+							}
+						}
+					}
+				}
 			}
 
-			//找出钣金跟内外R相切的所有面。
+			//收集全部内R面及其对应外R面作为相切扩散种子，避免断开的折弯分支（如悬臂/止裂槽分隔折弯）被漏掉。
+			std::unordered_set<tag_t> seedFaceTags;
+			for (size_t k = 0; k < NeiWaiRFace1.size(); k++)
+			{
+				if (NeiWaiRFace1[k] == NULL)
+				{
+					continue;
+				}
+				if (seedFaceTags.insert(NeiWaiRFace1[k]->Tag()).second)
+				{
+					NeiWaiRFace.push_back(NeiWaiRFace1[k]);
+				}
+				int innerFaceType = 0;
+				int innerNormDir = 0;
+				double innerPoint[3], innerDir[3], innerBox[6], innerRadius = 0.0, innerRadData = 0.0;
+				UF_MODL_ask_face_data(NeiWaiRFace1[k]->Tag(), &innerFaceType, innerPoint, innerDir, innerBox, &innerRadius, &innerRadData, &innerNormDir);
+				for (size_t i = 0; i < AllFaceVecotor.size(); i++)
+				{
+					int type1, norm_dir;
+					double point2[3], dir2[3], box[6], radius2, rad_data;
+					UF_MODL_ask_face_data(AllFaceVecotor[i]->Tag(), &type1, point2, dir2, box, &radius2, &rad_data, &norm_dir);
+					if (type1 != 16)
+					{
+						continue;
+					}
+					double distance1 = MeasureMinimumDistance(workPart, NeiWaiRFace1[k], AllFaceVecotor[i]);
+					if (fabs(radius2 - innerRadius - BodyThicknes1) < 0.01 && fabs(distance1 - BodyThicknes1) < 0.01)
+					{
+						if (seedFaceTags.insert(AllFaceVecotor[i]->Tag()).second)
+						{
+							NeiWaiRFace.push_back(AllFaceVecotor[i]);
+						}
+						if (WaiRadius <= 0.0)
+						{
+							WaiRadius = radius2;
+						}
+						break;
+					}
+				}
+				if (k == 0 && WaiRadius <= 0.0)
+				{
+					WaiRadius = innerRadius + BodyThicknes1;
+				}
+			}
+			//同时把当前视图可见的圆柱面纳入种子，确保剖切到的非标准折弯也能参与相切收集。
+			for (size_t i = 0; i < AllFaceVecotor.size(); i++)
+			{
+				if (AllFaceVecotor[i] == NULL || viewVisibleFaceTags.find(AllFaceVecotor[i]->Tag()) == viewVisibleFaceTags.end())
+				{
+					continue;
+				}
+				int type1 = 0, norm_dir = 0;
+				double point2[3], dir2[3], box[6], radius2 = 0.0, rad_data = 0.0;
+				UF_MODL_ask_face_data(AllFaceVecotor[i]->Tag(), &type1, point2, dir2, box, &radius2, &rad_data, &norm_dir);
+				if (type1 == 16 && seedFaceTags.insert(AllFaceVecotor[i]->Tag()).second)
+				{
+					NeiWaiRFace.push_back(AllFaceVecotor[i]);
+				}
+			}
+
+			//找出钣金跟内外R相切的所有面（按已访问面去重，兼顾速度与多分支覆盖）。
+			std::unordered_set<tag_t> visitedTangentFaceTags;
 			for (size_t r = 0; r < NeiWaiRFace.size(); r++)
 			{
+				if (NeiWaiRFace[r] == NULL || visitedTangentFaceTags.find(NeiWaiRFace[r]->Tag()) != visitedTangentFaceTags.end())
+				{
+					continue;
+				}
 				std::vector<NXOpen::Face*> boundaryFaces1(0);
 				NXOpen::FaceTangentRule* faceTangentRule1;
 				faceTangentRule1 = workPart->ScRuleFactory()->CreateRuleFaceTangent(NeiWaiRFace[r], boundaryFaces1, 0.05);
@@ -890,6 +1140,10 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
 				for (int f = 0; f < BB.size(); f++)
 				{
+					if (BB[f] == NULL || !visitedTangentFaceTags.insert(BB[f]->Tag()).second)
+					{
+						continue;
+					}
 					int type1, norm_dir;
 					double point[3], dir[3], box[6], radius, rad_data;
 					UF_MODL_ask_face_data(BB[f]->Tag(), &type1, point, dir, box, &radius, &rad_data, &norm_dir);
@@ -901,6 +1155,7 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
 					if (type1 == 16)
 					{
+						bool isPerpendicularToView = false;
 						std::vector<Edge*> edge1 = FACE1->GetEdges();
 						for (size_t h = 0; h < edge1.size(); h++)
 						{
@@ -920,11 +1175,26 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 								UF_VIEW_map_model_to_drawing(View1Tag[0]->Tag(), endpoint, drafendpoint);
 								if (fabs(drafstartpoint[0] - drafendpoint[0]) < 0.01 && fabs(drafstartpoint[1] - drafendpoint[1]) < 0.01)
 								{
-									XingLinFace2.push_back(FACE1);
-									AllRFaceVecotor.push_back(FACE1);
-									h = edge1.size();
+									isPerpendicularToView = true;
+									break;
 								}
 							}
+						}
+						if (!isPerpendicularToView)
+						{
+							double axisEnd[3] = { point[0] + dir[0] * 10.0, point[1] + dir[1] * 10.0, point[2] + dir[2] * 10.0 };
+							double drawPt1[2] = { 0.0, 0.0 }, drawPt2[2] = { 0.0, 0.0 };
+							if (UF_VIEW_map_model_to_drawing(View1Tag[0]->Tag(), point, drawPt1) == 0 &&
+								UF_VIEW_map_model_to_drawing(View1Tag[0]->Tag(), axisEnd, drawPt2) == 0 &&
+								fabs(drawPt1[0] - drawPt2[0]) < 0.01 && fabs(drawPt1[1] - drawPt2[1]) < 0.01)
+							{
+								isPerpendicularToView = true;
+							}
+						}
+						if (isPerpendicularToView)
+						{
+							XingLinFace2.push_back(FACE1);
+							AllRFaceVecotor.push_back(FACE1);
 						}
 					}
 					else
@@ -953,13 +1223,14 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				}
 			}
 
-			//循环找出同心的外R面并从容器里删除保留长的一个
+			//循环找出同心的外R面并从容器里删除保留长的一个（剖视图/局部放大图优先保留当前视图可见的外R面）
 			for (size_t i = 0; i < WaiRFace.size();)
 			{
 				double point1[3], point2[3], dir[3], box[6], radius1, rad_data, Cenpoint1[2], Cenpoint2[2];
 				double len = 0.0;
 				double len1 = 0.0;
 				int type1, norm_dir, removedCurrent = 0;
+				const bool currentVisible = viewVisibleFaceTags.find(WaiRFace[i]->Tag()) != viewVisibleFaceTags.end();
 				UF_MODL_ask_face_data(WaiRFace[i]->Tag(), &type1, point1, dir, box, &radius1, &rad_data, &norm_dir);//得到R的数据
 				std::vector<NXOpen::Edge*> currentEdges = WaiRFace[i]->GetEdges();
 				for (size_t ia = 0; ia < currentEdges.size(); ia++)
@@ -975,6 +1246,7 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				for (size_t b = i + 1; b < WaiRFace.size();)
 				{
 					len1 = 0.0;
+					const bool compareVisible = viewVisibleFaceTags.find(WaiRFace[b]->Tag()) != viewVisibleFaceTags.end();
 					std::vector<NXOpen::Edge*> compareEdges = WaiRFace[b]->GetEdges();
 					for (size_t ib = 0; ib < compareEdges.size(); ib++)
 					{
@@ -991,7 +1263,8 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 					UF_VIEW_map_model_to_drawing(View1Tag[0]->Tag(), point2, Cenpoint2);//把边的起始点坐标的绝对坐标转为图纸坐标
 					if (fabs(Cenpoint1[0] - Cenpoint2[0]) < 0.01 && fabs(Cenpoint1[1] - Cenpoint2[1]) < 0.01)
 					{
-						if (len1 >= len)
+						const bool preferCompare = (compareVisible != currentVisible) ? compareVisible : (len1 >= len);
+						if (preferCompare)
 						{
 							WaiRFace.erase(WaiRFace.begin() + i);
 							b = WaiRFace.size();
@@ -1010,6 +1283,65 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 				if (removedCurrent == 0)
 				{
 					i++;
+				}
+			}
+
+			{
+				FILE* dbgFp = _wfopen(L"D:\\UG\u667a\u8f89\u94a3\u91d1\u63d2\u4ef6\\logs\\ZiDonBiaoZhu_debug.log", L"a");
+				if (dbgFp != NULL)
+				{
+					std::unordered_set<tag_t> allRSet, waiRSet, leiRSet;
+					for (size_t k = 0; k < AllRFaceVecotor.size(); ++k) allRSet.insert(AllRFaceVecotor[k]->Tag());
+					for (size_t k = 0; k < WaiRFace.size(); ++k) waiRSet.insert(WaiRFace[k]->Tag());
+					for (size_t k = 0; k < AllLeiRFace1.size(); ++k) leiRSet.insert(AllLeiRFace1[k]->Tag());
+					fprintf(dbgFp, "[ZiDonBiaoZhu] preDim view=%u body=%u totalCurves=%zu visibleFaces=%zu innerBends=%zu seeds=%zu visited=%zu allR=%zu waiR=%zu leiR=%zu\n",
+						static_cast<unsigned int>(draftingView1->Tag()),
+						static_cast<unsigned int>(LargestViewBody->Tag()),
+						DraftingCurvevector1a.size(),
+						viewVisibleFaceTags.size(),
+						NeiWaiRFace1.size(),
+						NeiWaiRFace.size(),
+						visitedTangentFaceTags.size(),
+						AllRFaceVecotor.size(),
+						WaiRFace.size(),
+						AllLeiRFace1.size());
+					for (std::unordered_set<tag_t>::const_iterator it = viewVisibleFaceTags.begin(); it != viewVisibleFaceTags.end(); ++it)
+					{
+						int ft = 0, nd = 0;
+						double pt[3] = { 0 }, dr[3] = { 0 }, bx[6] = { 0 }, rad = 0.0, rdat = 0.0;
+						UF_MODL_ask_face_data(*it, &ft, pt, dr, bx, &rad, &rdat, &nd);
+						if (ft != 22)
+						{
+							NXOpen::Face* fObj = dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(*it));
+							tag_t bTag = (fObj != NULL && fObj->GetBody() != NULL) ? fObj->GetBody()->Tag() : NULL_TAG;
+							fprintf(dbgFp, "  visNonPlanar face=%u body=%u type=%d r=%.3f seed=%d vis=%d allR=%d waiR=%d leiR=%d\n",
+								static_cast<unsigned int>(*it),
+								static_cast<unsigned int>(bTag),
+								ft,
+								rad,
+								seedFaceTags.count(*it) ? 1 : 0,
+								visitedTangentFaceTags.count(*it) ? 1 : 0,
+								allRSet.count(*it) ? 1 : 0,
+								waiRSet.count(*it) ? 1 : 0,
+								leiRSet.count(*it) ? 1 : 0);
+						}
+					}
+					for (size_t dbIdx = 0; dbIdx < DraftingBodyVector.size(); ++dbIdx)
+					{
+						if (DraftingBodyVector[dbIdx] == NULL) continue;
+						std::vector<NXOpen::Drawings::DraftingCurve*> dbCurves =
+							CollectDisplayedDraftingCurves(draftingView1, DraftingBodyVector[dbIdx]);
+						NXOpen::Body* dbBody = NULL;
+						for (size_t ci = 0; ci < dbCurves.size() && dbBody == NULL; ++ci)
+						{
+							dbBody = GetCurveParentBody(dbCurves[ci]);
+						}
+						fprintf(dbgFp, "  draftBody[%zu] body=%u displayedCurves=%zu\n",
+							dbIdx,
+							static_cast<unsigned int>(dbBody != NULL ? dbBody->Tag() : NULL_TAG),
+							dbCurves.size());
+					}
+					fclose(dbgFp);
 				}
 			}
 
@@ -1174,20 +1506,32 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
 			//按自动出图流程：先筛出当前视图里参与标注的曲线，后续尺寸只关联DraftingCurve。
 			std::vector<tag_t> allEdgeTags;
+			std::unordered_set<tag_t> xingLinFace2Tags;
 			for (size_t i = 0; i < XingLinFace2.size(); i++)
 			{
+				xingLinFace2Tags.insert(XingLinFace2[i]->Tag());
 				std::vector<Edge*> faceEdges = XingLinFace2[i]->GetEdges();
 				for (size_t ia = 0; ia < faceEdges.size(); ia++)
 				{
 					allEdgeTags.push_back(faceEdges[ia]->Tag());
 				}
 			}
-			DraftingCurvevector1a = CollectDraftingCurves(DraftingBody1);
+			DraftingCurvevector1a = CollectDisplayedDraftingCurves(draftingView1, DraftingBody1);
 			for (size_t i = 0; i < DraftingCurvevector1a.size(); i++)
 			{
-				std::vector<NXObject*> parents = DraftingCurvevector1a[i]->GetDraftingCurveInfo()->GetParents();
+				NXOpen::Drawings::DraftingCurveInfo* curveInfo = DraftingCurvevector1a[i]->GetDraftingCurveInfo();
+				if (curveInfo == NULL)
+				{
+					continue;
+				}
+				std::vector<NXObject*> parents = curveInfo->GetParents();
+				delete curveInfo;
 				for (size_t ib = 0; ib < parents.size(); ib++)
 				{
+					if (parents[ib] == NULL)
+					{
+						continue;
+					}
 					int type = 0, subtype = 0;
 					UF_OBJ_ask_type_and_subtype(parents[ib]->Tag(), &type, &subtype);
 					if (subtype == UF_solid_face_subtype)
@@ -1200,17 +1544,24 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 						double point[3], dir[3], box[6], radius1, rad_data;
 						int type1, norm_dir;
 						UF_MODL_ask_face_data(face1->Tag(), &type1, point, dir, box, &radius1, &rad_data, &norm_dir);
-						double param[2] = { 0.5, 0.5 }, point1[3], u1[3], v1[3], u2[3], v2[3], unit_norm[3], radii[2];
-						UF_MODL_ask_face_props(face1->Tag(), param, point1, u1, v1, u2, v2, unit_norm, radii);
-						double vce1[3] = { point[0] - point1[0], point[1] - point1[1], point[2] - point1[2] };
-						double med = vce1[0] * unit_norm[0] + vce1[1] * unit_norm[1] + vce1[2] * unit_norm[2];
-						if (med < 0)
+						if (type1 == UF_MODL_CYLINDRICAL_FACE)
+						{
+							double param[2] = { 0.5, 0.5 }, point1[3], u1[3], v1[3], u2[3], v2[3], unit_norm[3], radii[2];
+							UF_MODL_ask_face_props(face1->Tag(), param, point1, u1, v1, u2, v2, unit_norm, radii);
+							double vce1[3] = { point[0] - point1[0], point[1] - point1[1], point[2] - point1[2] };
+							double med = vce1[0] * unit_norm[0] + vce1[1] * unit_norm[1] + vce1[2] * unit_norm[2];
+							if (med < 0)
+							{
+								DraftingCurvevector1.push_back(DraftingCurvevector1a[i]);
+								DimensionDraftingCurves.push_back(DraftingCurvevector1a[i]);
+								TanFacevector.push_back(face1);
+								TanCurvevector1.push_back(DraftingCurvevector1a[i]);
+							}
+						}
+						else if (xingLinFace2Tags.find(face1->Tag()) != xingLinFace2Tags.end())
 						{
 							DraftingCurvevector1.push_back(DraftingCurvevector1a[i]);
 							DimensionDraftingCurves.push_back(DraftingCurvevector1a[i]);
-							TanFacevector.push_back(face1);
-							TanCurvevector1.push_back(DraftingCurvevector1a[i]);
-							objects2.push_back(DraftingCurvevector1a[i]);
 						}
 					}
 					if (subtype == UF_solid_edge_subtype)
@@ -1219,7 +1570,6 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 						{
 							DraftingCurvevector1.push_back(DraftingCurvevector1a[i]);
 							DimensionDraftingCurves.push_back(DraftingCurvevector1a[i]);
-							objects2.push_back(DraftingCurvevector1a[i]);
 						}
 					}
 				}
@@ -1340,17 +1690,36 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 					UF_EVAL_is_line(evaluator, &boolIsLine);
 					if (!boolIsLine)
 					{
+						UF_EVAL_free(evaluator);
 						continue;
 					}
-					std::vector<NXObject*> parents = DimensionDraftingCurves[ic]->GetDraftingCurveInfo()->GetParents();
+					NXOpen::Drawings::DraftingCurveInfo* curveInfo = DimensionDraftingCurves[ic]->GetDraftingCurveInfo();
+					if (curveInfo == NULL)
+					{
+						UF_EVAL_free(evaluator);
+						continue;
+					}
+					std::vector<NXObject*> parents = curveInfo->GetParents();
+					delete curveInfo;
 					for (size_t ib = 0; ib < parents.size(); ib++)
 					{
+						if (parents[ib] == NULL)
+						{
+							continue;
+						}
 						int type = 0, subtype = 0;
 						UF_OBJ_ask_type_and_subtype(parents[ib]->Tag(), &type, &subtype);
 						if (subtype == UF_solid_face_subtype)
 						{
 							NXOpen::Face* face1(dynamic_cast<NXOpen::Face*>(NXOpen::NXObjectManager::Get(parents[ib]->Tag())));
 							if (face1 == NULL)
+							{
+								continue;
+							}
+							int faceType1 = 0, normDir1 = 0;
+							double fPt[3], fDir[3], fBox[6], fRad = 0.0, fRadData = 0.0;
+							UF_MODL_ask_face_data(face1->Tag(), &faceType1, fPt, fDir, fBox, &fRad, &fRadData, &normDir1);
+							if (faceType1 != UF_MODL_CYLINDRICAL_FACE)
 							{
 								continue;
 							}
@@ -1375,6 +1744,7 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 							}
 						}
 					}
+					UF_EVAL_free(evaluator);
 				}
 				if (v0 == 0)
 				{
@@ -1459,11 +1829,16 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 						{
 							for (size_t ih = 0; ih < DraftingCurvevector1a.size(); ih++)
 							{
-								std::vector<NXObject*> parents = DraftingCurvevector1a[ih]->GetDraftingCurveInfo()->GetParents();
+								NXOpen::Drawings::DraftingCurveInfo* curveInfo = DraftingCurvevector1a[ih]->GetDraftingCurveInfo();
+								if (curveInfo == NULL)
+								{
+									continue;
+								}
+								std::vector<NXObject*> parents = curveInfo->GetParents();
+								delete curveInfo;
 								if (!parents.empty() && parents[0] != NULL && parents[0]->Tag() == Edge1[h]->Tag())
 								{
 									SecondDimCurve1.push_back(DraftingCurvevector1a[ih]);
-									objects2.push_back(DraftingCurvevector1a[ih]);
 									foundCurve = 1;
 									h = Edge1.size();
 									ih = DraftingCurvevector1a.size();
@@ -1479,6 +1854,7 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 							bool boolIsArc1;
 							UF_EVAL_initialize(Edge1[h]->Tag(), &evaluator1);
 							UF_EVAL_is_arc(evaluator1, &boolIsArc1);
+							UF_EVAL_free(evaluator1);
 							if (boolIsArc1)
 							{
 								UF_CURVE_arc_t arc_coords;
@@ -1487,11 +1863,17 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 								{
 									for (size_t ih = 0; ih < DraftingCurvevector1a.size(); ih++)
 									{
-										std::vector<NXObject*> parents = DraftingCurvevector1a[ih]->GetDraftingCurveInfo()->GetParents();
+										NXOpen::Drawings::DraftingCurveInfo* curveInfo = DraftingCurvevector1a[ih]->GetDraftingCurveInfo();
+										if (curveInfo == NULL)
+										{
+											continue;
+										}
+										std::vector<NXObject*> parents = curveInfo->GetParents();
+										delete curveInfo;
 										if (!parents.empty() && parents[0] != NULL && parents[0]->Tag() == Edge1[h]->Tag())
 										{
 											SecondDimCurve1.push_back(DraftingCurvevector1a[ih]);
-											objects2.push_back(DraftingCurvevector1a[ih]);
+											foundCurve = 1;
 											h = Edge1.size();
 											ih = DraftingCurvevector1a.size();
 										}
@@ -1500,6 +1882,33 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 							}
 						}
 					}
+					if (foundCurve == 0)
+					{
+						for (size_t ih = 0; ih < DraftingCurvevector1a.size(); ih++)
+						{
+							NXOpen::Drawings::DraftingCurveInfo* curveInfo = DraftingCurvevector1a[ih]->GetDraftingCurveInfo();
+							if (curveInfo == NULL)
+							{
+								continue;
+							}
+							std::vector<NXObject*> parents = curveInfo->GetParents();
+							delete curveInfo;
+							for (size_t ip = 0; ip < parents.size(); ip++)
+							{
+								if (parents[ip] != NULL && parents[ip]->Tag() == face1->Tag())
+								{
+									SecondDimCurve1.push_back(DraftingCurvevector1a[ih]);
+									foundCurve = 1;
+									ih = DraftingCurvevector1a.size();
+									break;
+								}
+							}
+						}
+					}
+					if (foundCurve == 0)
+					{
+						SecondDimCurve1.push_back(NULL);
+					}
 				}
 				else
 				{
@@ -1507,7 +1916,6 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 					if (curve1 != NULL)
 					{
 						SecondDimCurve1.push_back(curve1);
-						objects2.push_back(curve1);
 					}
 				}
 			}
@@ -1515,12 +1923,9 @@ int ZiDonBiaoZhu::update_cb(NXOpen::BlockStyler::UIBlock* block)
 
 
 
-			draftingView1->DependentDisplay()->RemoveErasureOnObjectAndSubobjects(objects2, true);
-			workPart->Views()->WorkView()->Regenerate();
-
 			AnnotateSideViewDimensionsFromAutomaticFlow(
 				workPart,
-				baseView1,
+				draftingView1,
 				WaiRFace,
 				XingLinFace1,
 				AllLeiRFace1,

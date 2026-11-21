@@ -1,0 +1,367 @@
+<Window x:Class="GonCaBiaoZuUI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="工程图公差标注"
+        Width="476" Height="680" MinWidth="456" MinHeight="580"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        ResizeMode="CanResizeWithGrip" WindowStartupLocation="Manual"
+        FontFamily="Microsoft YaHei UI, Segoe UI">
+    <Border CornerRadius="10" Background="{StaticResource BgCanvas}" BorderBrush="#CBD5E1" BorderThickness="1" Margin="8">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="14" ShadowDepth="2" Opacity="0.22" Color="#0F172A"/>
+        </Border.Effect>
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="44"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="34"/>
+            </Grid.RowDefinitions>
+
+            <!-- 1. 顶部自定义标题栏 -->
+            <Border Grid.Row="0" Background="#1E293B" CornerRadius="9,9,0,0" MouseLeftButtonDown="Header_MouseLeftButtonDown">
+                <Grid Margin="14,0,10,0">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Border Width="24" Height="24" CornerRadius="5" Background="#2563EB" Margin="0,0,9,0">
+                            <TextBlock Text="±" Foreground="White" FontWeight="Bold" FontSize="15" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-2,0,0"/>
+                        </Border>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="工程图公差标注" Foreground="White" FontSize="13.5" FontWeight="SemiBold"/>
+                            <TextBlock Text="智辉钣金 · GB/T 1800 / 1804 / 1184" Foreground="#94A3B8" FontSize="10"/>
+                        </StackPanel>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                        <ToggleButton x:Name="PinToggle" IsChecked="True" ToolTip="置顶悬浮" Click="PinToggle_Click"
+                                      Width="28" Height="26" Margin="0,0,4,0" Cursor="Hand" Background="Transparent" BorderThickness="0" Foreground="#CBD5E1">
+                            <TextBlock Text="📌" FontSize="12"/>
+                        </ToggleButton>
+                        <Button x:Name="CloseBtn" Content="✕" Width="28" Height="26" Click="CloseBtn_Click" Cursor="Hand"
+                                Background="Transparent" BorderThickness="0" Foreground="#CBD5E1" FontSize="13" FontWeight="Bold" ToolTip="关闭"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- 2. 顶部 3 段式现代 Tab 切换条 -->
+            <Border Grid.Row="1" Background="#E2E8F0" CornerRadius="8" Margin="12,10,12,6" Padding="2">
+                <UniformGrid Columns="3">
+                    <RadioButton x:Name="TabDim" Style="{StaticResource TopTabBtn}" GroupName="MainTabs" IsChecked="True" Checked="MainTab_Checked">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="±" FontWeight="Bold" Margin="0,0,5,0"/>
+                            <TextBlock Text="尺寸公差"/>
+                        </StackPanel>
+                    </RadioButton>
+                    <RadioButton x:Name="TabGdt" Style="{StaticResource TopTabBtn}" GroupName="MainTabs" Checked="MainTab_Checked">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="⊥" FontWeight="Bold" Margin="0,0,5,0"/>
+                            <TextBlock Text="形位公差"/>
+                        </StackPanel>
+                    </RadioButton>
+                    <RadioButton x:Name="TabDatum" Style="{StaticResource TopTabBtn}" GroupName="MainTabs" Checked="MainTab_Checked">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="▼" FontSize="10" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock Text="基准符号"/>
+                        </StackPanel>
+                    </RadioButton>
+                </UniformGrid>
+            </Border>
+
+            <!-- 3. 主内容滚动区 -->
+            <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="12,4,12,8">
+                <Grid>
+                    <!-- ==================== TAB 1: 尺寸公差 ==================== -->
+                    <StackPanel x:Name="PanelDim" Visibility="Visible">
+                        <!-- 所见即所得尺寸预览卡片 -->
+                        <Border Background="#0F172A" CornerRadius="8" Padding="14,10" Margin="0,0,0,8">
+                            <Grid>
+                                <TextBlock Text="实时预览" Foreground="#94A3B8" FontSize="11" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+                                <TextBlock x:Name="DimPreviewText" Text="∅25  ±0.10" Foreground="#38BDF8" FontSize="20" FontWeight="Bold"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,8,0,2"/>
+                            </Grid>
+                        </Border>
+
+                        <!-- 子模式选择 -->
+                        <Border Style="{StaticResource CardBorderStyle}">
+                            <StackPanel>
+                                <TextBlock Text="公差模式" Style="{StaticResource SectionTitle}"/>
+                                <WrapPanel x:Name="DimModePanel"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 快捷公差卡片墙 (Mode 0) -->
+                        <Border x:Name="DimQuickCard" Style="{StaticResource CardBorderStyle}">
+                            <StackPanel>
+                                <TextBlock Text="钣金 / 非标常用公差 (一键点选)" Style="{StaticResource SectionTitle}"/>
+                                <UniformGrid x:Name="DimPresetGrid" Columns="4"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 孔/轴配合与 GB/T 1804 / 手动输入面板 -->
+                        <Border x:Name="DimDetailCard" Style="{StaticResource CardBorderStyle}" Visibility="Collapsed">
+                            <StackPanel>
+                                <Grid x:Name="RowHoleFit" Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="74"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="孔代号" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <ComboBox x:Name="CmbHoleFit" Grid.Column="1" Height="28" SelectionChanged="DimParam_Changed"/>
+                                </Grid>
+                                <Grid x:Name="RowShaftFit" Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="74"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="轴代号" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <ComboBox x:Name="CmbShaftFit" Grid.Column="1" Height="28" SelectionChanged="DimParam_Changed"/>
+                                </Grid>
+                                <Grid x:Name="RowFitStyle" Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="74"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="显示样式" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <ComboBox x:Name="CmbFitStyle" Grid.Column="1" Height="28" SelectionChanged="DimParam_Changed">
+                                        <ComboBoxItem Content="仅上下偏差 (推荐)"/>
+                                        <ComboBoxItem Content="代号 + 上下偏差"/>
+                                        <ComboBoxItem Content="仅显示代号"/>
+                                        <ComboBoxItem Content="代号 + 极限尺寸"/>
+                                    </ComboBox>
+                                </Grid>
+                                <Grid x:Name="RowGb1804" Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="74"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="GB/T 1804" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <ComboBox x:Name="CmbGb1804" Grid.Column="1" Height="28" SelectionChanged="DimParam_Changed">
+                                        <ComboBoxItem Content="f 级 (精密)"/>
+                                        <ComboBoxItem Content="m 级 (中等 - 常用)"/>
+                                        <ComboBoxItem Content="c 级 (粗糙)"/>
+                                        <ComboBoxItem Content="v 级 (最粗)"/>
+                                    </ComboBox>
+                                </Grid>
+                                <Grid x:Name="RowManualTol">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="62"/><ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="12"/>
+                                        <ColumnDefinition Width="62"/><ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="上偏差" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <TextBox x:Name="TxtUpperTol" Grid.Column="1" Height="28" VerticalContentAlignment="Center" Padding="6,0" Text="0.10" TextChanged="DimManual_Changed"/>
+                                    <TextBlock Text="下偏差" Grid.Column="3" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <TextBox x:Name="TxtLowerTol" Grid.Column="4" Height="28" VerticalContentAlignment="Center" Padding="6,0" Text="-0.10" TextChanged="DimManual_Changed"/>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 前后缀与参考括号 -->
+                        <Border Style="{StaticResource CardBorderStyle}">
+                            <StackPanel>
+                                <Grid Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="52"/><ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="10"/>
+                                        <ColumnDefinition Width="52"/><ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="前缀" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <ComboBox x:Name="CmbPrefix" Grid.Column="1" Height="26" SelectionChanged="DimParam_Changed">
+                                        <ComboBoxItem Content="保持原样"/><ComboBoxItem Content="清空前缀"/>
+                                        <ComboBoxItem Content="2×"/><ComboBoxItem Content="4×"/>
+                                        <ComboBoxItem Content="6×"/><ComboBoxItem Content="8×"/><ComboBoxItem Content="□"/>
+                                    </ComboBox>
+                                    <TextBlock Text="后缀" Grid.Column="3" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <ComboBox x:Name="CmbSuffix" Grid.Column="4" Height="26" SelectionChanged="DimParam_Changed">
+                                        <ComboBoxItem Content="保持原样"/><ComboBoxItem Content="清空后缀"/>
+                                        <ComboBoxItem Content="THRU"/><ComboBoxItem Content="EQS"/>
+                                        <ComboBoxItem Content="TYP"/><ComboBoxItem Content="配作"/>
+                                    </ComboBox>
+                                </Grid>
+                                <CheckBox x:Name="ChkRefDim" Content="设为参考尺寸 (自动加括号)" Foreground="#334155" Checked="DimParam_Changed" Unchecked="DimParam_Changed"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 操作按钮 -->
+                        <Grid Margin="0,2,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.35*"/>
+                                <ColumnDefinition Width="8"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Button x:Name="BtnDimContinuous" Grid.Column="0" Style="{StaticResource PrimaryBtn}" Content="⚡ 连续点选尺寸赋公差" Click="BtnDimContinuous_Click"/>
+                            <Button x:Name="BtnDimBatch" Grid.Column="2" Style="{StaticResource SecondaryBtn}" Content="框选批量赋公差" Click="BtnDimBatch_Click"/>
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- ==================== TAB 2: 形位公差 (GD&T) ==================== -->
+                    <StackPanel x:Name="PanelGdt" Visibility="Collapsed">
+                        <!-- 所见即所得图形化公差框预览 -->
+                        <Border Background="#FFFFFF" BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="8" Padding="10,12" Margin="0,0,0,8">
+                            <Grid>
+                                <TextBlock x:Name="GdtPreviewInfo" Text="平面度 · 字高 3.5 mm" Foreground="#64748B" FontSize="11" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+                                <StackPanel x:Name="GdtGraphicFrame" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,16,0,2"/>
+                            </Grid>
+                        </Border>
+
+                        <!-- 14 个矢量几何符号 7x2 完整矩阵 -->
+                        <Border Style="{StaticResource CardBorderStyle}">
+                            <StackPanel>
+                                <Grid Margin="0,0,0,6">
+                                    <TextBlock Text="几何特征符号" Style="{StaticResource SectionTitle}" Margin="0"/>
+                                    <ComboBox x:Name="CmbGdtPreset" Width="210" Height="24" HorizontalAlignment="Right" FontSize="11.5" SelectionChanged="CmbGdtPreset_Changed"/>
+                                </Grid>
+                                <UniformGrid x:Name="GdtSymbolGrid" Columns="7"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 公差值与基准 -->
+                        <Border Style="{StaticResource CardBorderStyle}">
+                            <StackPanel>
+                                <Grid Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="52"/><ColumnDefinition Width="74"/>
+                                        <ColumnDefinition Width="8"/><ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="公差值" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <TextBox x:Name="TxtGdtVal" Grid.Column="1" Height="26" VerticalContentAlignment="Center" Padding="6,0" Text="0.1" TextChanged="GdtParam_Changed"/>
+                                    <StackPanel x:Name="GdtQuickValPanel" Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center"/>
+                                </Grid>
+                                <Grid Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="6"/>
+                                        <ColumnDefinition Width="*"/><ColumnDefinition Width="6"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ComboBox x:Name="CmbGdtZone" Grid.Column="0" Height="26" ToolTip="公差带形状" SelectionChanged="GdtParam_Changed">
+                                        <ComboBoxItem Content="无前导符"/><ComboBoxItem Content="∅ 直径"/>
+                                        <ComboBoxItem Content="S∅ 球径"/><ComboBoxItem Content="□ 正方形"/>
+                                    </ComboBox>
+                                    <ComboBox x:Name="CmbGdtMat" Grid.Column="2" Height="26" ToolTip="实体修饰" SelectionChanged="GdtParam_Changed">
+                                        <ComboBoxItem Content="无修饰"/><ComboBoxItem Content="Ⓜ 最大实体"/><ComboBoxItem Content="Ⓛ 最小实体"/>
+                                    </ComboBox>
+                                    <ComboBox x:Name="CmbGb1184" Grid.Column="4" Height="26" ToolTip="GB/T 1184 自动查表" SelectionChanged="GdtParam_Changed">
+                                        <ComboBoxItem Content="手动输入"/><ComboBoxItem Content="GB1184 H级"/>
+                                        <ComboBoxItem Content="GB1184 K级"/><ComboBoxItem Content="GB1184 L级"/>
+                                    </ComboBox>
+                                </Grid>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="52"/><ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="6"/><ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="6"/><ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="基准" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <ComboBox x:Name="CmbGdtD1" Grid.Column="1" Height="26" SelectionChanged="GdtParam_Changed"/>
+                                    <ComboBox x:Name="CmbGdtD2" Grid.Column="3" Height="26" SelectionChanged="GdtParam_Changed"/>
+                                    <ComboBox x:Name="CmbGdtD3" Grid.Column="5" Height="26" SelectionChanged="GdtParam_Changed"/>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 外框与字体样式 -->
+                        <Border Style="{StaticResource CardBorderStyle}">
+                            <StackPanel>
+                                <TextBlock Text="外框与字体样式 (自定义)" Style="{StaticResource SectionTitle}"/>
+                                <Grid Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="72"/><ColumnDefinition Width="66"/>
+                                        <ColumnDefinition Width="8"/><ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="字体高度" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <TextBox x:Name="TxtGdtHeight" Grid.Column="1" Height="26" VerticalContentAlignment="Center" Padding="6,0" Text="3.5" TextChanged="GdtStyle_Changed"/>
+                                    <StackPanel x:Name="GdtHeightChips" Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center"/>
+                                </Grid>
+                                <Grid Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="72"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="外框颜色" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <StackPanel x:Name="GdtFrameColorSwatches" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="TxtGdtFrameColor" Grid.Column="2" Height="24" FontSize="11" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Text="0" ToolTip="NX 颜色号 (0=随图面默认, 1-216)" TextChanged="GdtColorId_Changed"/>
+                                </Grid>
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="72"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="字体颜色" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <StackPanel x:Name="GdtTextColorSwatches" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="TxtGdtTextColor" Grid.Column="2" Height="24" FontSize="11" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Text="0" ToolTip="NX 颜色号 (0=随图面默认, 1-216)" TextChanged="GdtColorId_Changed"/>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 操作按钮 -->
+                        <Grid Margin="0,2,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.4*"/>
+                                <ColumnDefinition Width="8"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Button x:Name="BtnGdtPlace" Grid.Column="0" Style="{StaticResource PrimaryBtn}" Content="🎯 选边放点标注形位公差" Click="BtnGdtPlace_Click"/>
+                            <Button x:Name="BtnGdtUpdateLast" Grid.Column="2" Style="{StaticResource SecondaryBtn}" Content="↻ 刷新刚标公差" Click="BtnGdtUpdateLast_Click" IsEnabled="False"/>
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- ==================== TAB 3: 基准符号 (Datum) ==================== -->
+                    <StackPanel x:Name="PanelDatum" Visibility="Collapsed">
+                        <!-- 所见即所得图形化基准符号预览 -->
+                        <Border Background="#FFFFFF" BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="8" Padding="10,12" Margin="0,0,0,8">
+                            <Grid>
+                                <TextBlock x:Name="DatumPreviewInfo" Text="基准 A · 字高 3.5 mm" Foreground="#64748B" FontSize="11" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+                                <StackPanel x:Name="DatumGraphicPreview" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,12,0,0"/>
+                            </Grid>
+                        </Border>
+
+                        <!-- 基准字母选择 -->
+                        <Border Style="{StaticResource CardBorderStyle}">
+                            <StackPanel>
+                                <TextBlock Text="基准代号" Style="{StaticResource SectionTitle}"/>
+                                <Grid Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="62"/>
+                                        <ColumnDefinition Width="8"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="TxtDatumLetter" Height="28" FontSize="14" FontWeight="Bold" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Text="A" TextChanged="DatumParam_Changed"/>
+                                    <StackPanel x:Name="DatumLetterChips" Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"/>
+                                </Grid>
+                                <CheckBox x:Name="ChkDatumAutoInc" Content="标完自动递增字母 (A → B → C，自动跳过 I/O/Q)" IsChecked="True" Foreground="#334155" Checked="DatumParam_Changed" Unchecked="DatumParam_Changed"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 基准外框与字体样式 -->
+                        <Border Style="{StaticResource CardBorderStyle}">
+                            <StackPanel>
+                                <TextBlock Text="基准外框与字体样式 (自定义)" Style="{StaticResource SectionTitle}"/>
+                                <Grid Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="72"/><ColumnDefinition Width="66"/>
+                                        <ColumnDefinition Width="8"/><ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="基准字高" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <TextBox x:Name="TxtDatumHeight" Grid.Column="1" Height="26" VerticalContentAlignment="Center" Padding="6,0" Text="3.5" TextChanged="DatumStyle_Changed"/>
+                                    <StackPanel x:Name="DatumHeightChips" Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center"/>
+                                </Grid>
+                                <Grid Margin="0,0,0,6">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="72"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="外框/三角" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <StackPanel x:Name="DatumFrameColorSwatches" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="TxtDatumFrameColor" Grid.Column="2" Height="24" FontSize="11" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Text="0" ToolTip="NX 颜色号 (0=随图面默认, 1-216)" TextChanged="DatumColorId_Changed"/>
+                                </Grid>
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="72"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="字体颜色" VerticalAlignment="Center" Foreground="#475569"/>
+                                    <StackPanel x:Name="DatumTextColorSwatches" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="TxtDatumTextColor" Grid.Column="2" Height="24" FontSize="11" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Text="0" ToolTip="NX 颜色号 (0=随图面默认, 1-216)" TextChanged="DatumColorId_Changed"/>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 操作按钮 -->
+                        <Grid Margin="0,2,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.4*"/>
+                                <ColumnDefinition Width="8"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Button x:Name="BtnDatumPlace" Grid.Column="0" Style="{StaticResource PrimaryBtn}" Content="📌 选边放点标注基准符号" Click="BtnDatumPlace_Click"/>
+                            <Button x:Name="BtnDatumUpdateLast" Grid.Column="2" Style="{StaticResource SecondaryBtn}" Content="↻ 刷新刚标基准" Click="BtnDatumUpdateLast_Click" IsEnabled="False"/>
+                        </Grid>
+                    </StackPanel>
+                </Grid>
+            </ScrollViewer>
+
+            <!-- 4. 底部状态栏 -->
+            <Border Grid.Row="3" Background="#E2E8F0" CornerRadius="0,0,9,9" Padding="12,0">
+                <Grid>
+                    <TextBlock x:Name="StatusText" Text="就绪：选择参数后点击下方按钮在 NX 图面直接标注。" Foreground="#334155" FontSize="11.5" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,96,0"/>
+                    <Button x:Name="BtnOpenConfig" Content="预设配置 (.ini)" HorizontalAlignment="Right" VerticalAlignment="Center"
+                            Background="Transparent" BorderThickness="0" Foreground="#2563EB" FontSize="11.5" Cursor="Hand" Click="BtnOpenConfig_Click"/>
+                </Grid>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

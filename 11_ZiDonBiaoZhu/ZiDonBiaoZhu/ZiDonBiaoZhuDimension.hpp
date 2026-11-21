@@ -5,7 +5,7 @@
 
 void AnnotateSideViewDimensionsFromAutomaticFlow(
 	NXOpen::Part* workPart,
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* draftingView,
 	const std::vector<NXOpen::Face*>& outerRadiusFaces,
 	const std::vector<NXOpen::Face*>& adjacentPlanarFaces,
 	const std::vector<NXOpen::Face*>& innerRadiusFaces,

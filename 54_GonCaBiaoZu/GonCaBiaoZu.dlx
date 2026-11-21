@@ -1,0 +1,775 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Dialog NX="2412" id="Dialog" icon="GonCaBiaoZu.bmp" name="Dialog" type="uicomp" title="工程图公差标注" creator="Zhihui" version="2.0.0" Expanded="1" languageInfo="Language and Codeset: simplified chinese 936" ContainerItems="11">
+
+  <!-- 1. 顶部 3 列图标切换条（尺寸公差 / 形位公差 / 基准符号） -->
+  <item id="nav_group" icon="styler_block.bmp" name="nav_group" type="uicomp" class="UGS::UICOMP_group" Expanded="1" hierarchy="" presentation="Group" ContainerItems="1">
+    <PropertyList id="id" mode="0">
+      <Property id="API Name" name="API Name" type="string" sname="BlockID" value="nav_group" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Title" name="Title" type="utfstring" sname="Label" value="标注模式" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Group" name="Group" type="logical" sname="Group" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="True" source="2" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Column" name="Column" type="integer" sname="Column" value="3" source="1" ClassID="UGS::UICOMP_group" hierarchy="UGS::UICOMP_group" />
+      <Property id="Members" name="Members" type="array" class="UGS::UI::Comp::Container" group="Block Specific::" sname="Members" source="1" dynamic="1" hierarchy="UGS::UICOMP_group">
+        <PropertyList id="ContainerItems" icon="tiles_palette.bmp" mode="1" class="UGS::UI::Comp::Container" Expanded="1" hierarchy="UGS::UICOMP_group">
+          <Property id="tab_btn_dim" mask="256" name="tab_btn_dim" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button">
+            <item id="tab_btn_dim" icon="styler_button.bmp" name="tab_btn_dim" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="tab_btn_dim" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="尺寸公差" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_tab_dim.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" />
+                <Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" />
+                <Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="尺寸公差：钣金快捷公差、GB/T 1800 孔轴配合、GB/T 1804 自动查表" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="tab_btn_gdt" mask="256" name="tab_btn_gdt" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button">
+            <item id="tab_btn_gdt" icon="styler_button.bmp" name="tab_btn_gdt" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="tab_btn_gdt" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="形位公差" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_tab_gdt.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" />
+                <Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" />
+                <Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="形位公差 (GD&amp;T)：14种国标符号、常用模板、实时预览、颜色字高自定义" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="tab_btn_datum" mask="256" name="tab_btn_datum" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button">
+            <item id="tab_btn_datum" icon="styler_button.bmp" name="tab_btn_datum" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="tab_btn_datum" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="基准符号" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_tab_datum.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" />
+                <Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" />
+                <Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="基准符号 (Datum)：A/B/C自动递增、实时预览、字高与颜色自定义" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="tab_bar_dim" mask="256" name="tab_bar_dim" type="uicomp" class="UICOMP_label" hierarchy="UGS::UICOMP_group" presentation="Label">
+            <item id="tab_bar_dim" icon="styler_label.bmp" name="tab_bar_dim" type="uicomp" class="UICOMP_label" Expanded="1" hierarchy="UICOMP_label" presentation="Label">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="tab_bar_dim" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_tab_bar.bmp" source="3" ClassID="UGS::UICOMP_label" hierarchy="UGS::UICOMP_label" />
+                <Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_label" />
+                <Property id="DisplayBitmapLabel" name="DisplayBitmapLabel" type="logical" sname="DisplayBitmapLabel" value="False" source="1" ClassID="UGS::UICOMP_label" hierarchy="UGS::UICOMP_label" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="tab_bar_gdt" mask="256" name="tab_bar_gdt" type="uicomp" class="UICOMP_label" hierarchy="UGS::UICOMP_group" presentation="Label">
+            <item id="tab_bar_gdt" icon="styler_label.bmp" name="tab_bar_gdt" type="uicomp" class="UICOMP_label" Expanded="1" hierarchy="UICOMP_label" presentation="Label">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="tab_bar_gdt" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_tab_bar.bmp" source="3" ClassID="UGS::UICOMP_label" hierarchy="UGS::UICOMP_label" />
+                <Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_label" />
+                <Property id="DisplayBitmapLabel" name="DisplayBitmapLabel" type="logical" sname="DisplayBitmapLabel" value="False" source="1" ClassID="UGS::UICOMP_label" hierarchy="UGS::UICOMP_label" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="tab_bar_datum" mask="256" name="tab_bar_datum" type="uicomp" class="UICOMP_label" hierarchy="UGS::UICOMP_group" presentation="Label">
+            <item id="tab_bar_datum" icon="styler_label.bmp" name="tab_bar_datum" type="uicomp" class="UICOMP_label" Expanded="1" hierarchy="UICOMP_label" presentation="Label">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="tab_bar_datum" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_tab_bar.bmp" source="3" ClassID="UGS::UICOMP_label" hierarchy="UGS::UICOMP_label" />
+                <Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_label" />
+                <Property id="DisplayBitmapLabel" name="DisplayBitmapLabel" type="logical" sname="DisplayBitmapLabel" value="False" source="1" ClassID="UGS::UICOMP_label" hierarchy="UGS::UICOMP_label" />
+              </PropertyList>
+            </item>
+          </Property>
+        </PropertyList>
+      </Property>
+    </PropertyList>
+  </item>
+
+  <!-- 2. 尺寸公差主区 -->
+  <item id="dim_group" icon="styler_block_sc.bmp" name="dim_group" type="uicomp" class="UGS::UICOMP_group" Expanded="1" hierarchy="" presentation="Group" ContainerItems="1">
+    <PropertyList>
+      <Property id="Members" mask="0" name="Members" type="array" class="UGS::UI::Comp::Container" group="Block Specific::" sname="Members" source="1" dynamic="1" hierarchy="UGS::UICOMP_group">
+        <PropertyList id="ContainerItems" icon="tiles_palette.bmp" mode="1" class="UGS::UI::Comp::Container" Expanded="1" hierarchy="UGS::UICOMP_group">
+          <Property id="dim_select" mask="256" name="dim_select" type="uicomp" class="UICOMP_selection" hierarchy="UGS::UICOMP_group" presentation="Select Object">
+            <item id="dim_select" icon="selection_cursor.bmp" name="dim_select" type="uicomp" class="UICOMP_selection" Expanded="1" hierarchy="" presentation="Select Object">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_select" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Label" name="Label" type="utfstring" sname="LabelString" value="选择尺寸 (可框选)" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Cue" name="Cue" type="utfstring" sname="Cue" value="请选择或框选工程图中的尺寸" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+                <Property id="StepStatus" name="StepStatus" type="enum" sname="StepStatus" selected="1" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection">
+                  <Option name="Required" value="0" /><Option name="Optional" value="1" /><Option name="Satisfied" value="2" />
+                </Property>
+                <Property id="Many" name="Many" type="enum" sname="SelectMode" selected="1" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection">
+                  <Option name="Single" value="0" /><Option name="Multiple" value="1" />
+                </Property>
+                <Property id="MaximumScope" name="MaximumScope" type="enum" sname="MaximumScope" selected="10" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection">
+                  <Option name="Entire Assembly" value="3" /><Option name="Within Work Part Only" value="10" /><Option name="Within Work Part and Components" value="11" />
+                </Property>
+                <Property id="AutomaticProgression" name="AutomaticProgression" type="logical" sname="AutomaticProgression" value="False" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="dim_submode" mask="256" name="dim_submode" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="dim_submode" icon="styler_optionmenu.bmp" name="dim_submode" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_submode" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="公差类型" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="0" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="钣金/非标常用快捷公差" value="0" />
+                  <Option name="孔配合公差 (GB/T 1800)" value="1" />
+                  <Option name="轴配合公差 (GB/T 1800)" value="2" />
+                  <Option name="孔/轴装配配合 (H7/g6)" value="3" />
+                  <Option name="GB/T 1804 未注一般公差" value="4" />
+                  <Option name="手动输入上下偏差" value="5" />
+                  <Option name="清除公差" value="6" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="dim_sheet_preset" mask="256" name="dim_sheet_preset" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="dim_sheet_preset" icon="styler_optionmenu.bmp" name="dim_sheet_preset" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_sheet_preset" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="快捷公差" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="1" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="±0.05 (精密间距)" value="0" />
+                  <Option name="±0.10 (常用钣金孔距)" value="1" />
+                  <Option name="±0.15 (折弯内空/间距)" value="2" />
+                  <Option name="±0.20 (常规折弯尺寸)" value="3" />
+                  <Option name="±0.30 (一般外形尺寸)" value="4" />
+                  <Option name="±0.50 (大件自由公差)" value="5" />
+                  <Option name="+0.05 / 0 (精密销/底孔)" value="6" />
+                  <Option name="+0.10 / 0 (压铆/激光孔)" value="7" />
+                  <Option name="+0.15 / 0 (常规过孔)" value="8" />
+                  <Option name="+0.20 / 0 (宽松装配孔)" value="9" />
+                  <Option name="0 / -0.05 (精密外轴)" value="10" />
+                  <Option name="0 / -0.10 (插接公口)" value="11" />
+                  <Option name="0 / -0.20 (内嵌包边板)" value="12" />
+                  <Option name="0 / -0.50 (避空下偏门板)" value="13" />
+                  <Option name="+0.10 / -0.05 (非对称)" value="14" />
+                  <Option name="+0.20 / -0.10 (非对称)" value="15" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="dim_hole_fit" mask="256" name="dim_hole_fit" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="dim_hole_fit" icon="styler_optionmenu.bmp" name="dim_hole_fit" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_hole_fit" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="孔代号" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="1" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="H6 (精密基准孔)" value="0" />
+                  <Option name="H7 (常用定位销孔)" value="1" />
+                  <Option name="H8 (常规配合孔)" value="2" />
+                  <Option name="H9 (轴套滑动孔)" value="3" />
+                  <Option name="H10 (宽松装配孔)" value="4" />
+                  <Option name="H11 (钣金冲孔)" value="5" />
+                  <Option name="JS7 (对称过渡孔)" value="6" />
+                  <Option name="K7 (轴承外圈孔)" value="7" />
+                  <Option name="M7 (过渡配合孔)" value="8" />
+                  <Option name="N7 (轻过盈孔)" value="9" />
+                  <Option name="P7 (过盈压入孔)" value="10" />
+                  <Option name="G7 (精密间隙孔)" value="11" />
+                  <Option name="F8 (活动转动孔)" value="12" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="dim_shaft_fit" mask="256" name="dim_shaft_fit" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="dim_shaft_fit" icon="styler_optionmenu.bmp" name="dim_shaft_fit" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_shaft_fit" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="轴代号" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="5" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="h5 (高精基准轴)" value="0" />
+                  <Option name="h6 (常用基准轴)" value="1" />
+                  <Option name="h7 (常规基准轴)" value="2" />
+                  <Option name="h8 (一般配合轴)" value="3" />
+                  <Option name="h9 (宽松导轴)" value="4" />
+                  <Option name="g6 (常用滑动配合轴)" value="5" />
+                  <Option name="f6 (精密转动轴)" value="6" />
+                  <Option name="f7 (普通转动轴)" value="7" />
+                  <Option name="e8 (大间隙转动轴)" value="8" />
+                  <Option name="js6 (联轴器过渡轴)" value="9" />
+                  <Option name="k6 (轴承内圈轴)" value="10" />
+                  <Option name="m6 (紧过渡定位轴)" value="11" />
+                  <Option name="n6 (轻压入轴)" value="12" />
+                  <Option name="p6 (过盈压入轴)" value="13" />
+                  <Option name="s6 (重过盈热压轴)" value="14" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="dim_fit_style" mask="256" name="dim_fit_style" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="dim_fit_style" icon="styler_optionmenu.bmp" name="dim_fit_style" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_fit_style" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="显示样式" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="0" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="仅上下偏差 (推荐)" value="0" />
+                  <Option name="代号 + 上下偏差" value="1" />
+                  <Option name="仅显示代号" value="2" />
+                  <Option name="代号 + 极限尺寸" value="3" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="dim_gb1804_grade" mask="256" name="dim_gb1804_grade" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="dim_gb1804_grade" icon="styler_optionmenu.bmp" name="dim_gb1804_grade" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_gb1804_grade" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="GB/T 1804" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="1" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="f 级 (精密)" value="0" />
+                  <Option name="m 级 (中等 - 常用)" value="1" />
+                  <Option name="c 级 (粗糙)" value="2" />
+                  <Option name="v 级 (最粗)" value="3" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="dim_upper_tol" mask="256" name="dim_upper_tol" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
+            <item id="dim_upper_tol" icon="styler_double" name="dim_upper_tol" type="uicomp" class="UICOMP_double" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_upper_tol" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="上偏差 (mm)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Value" name="Value" type="double" sname="Value" value="0.1" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MinimumValue" name="MinimumValue" type="double" sname="MinimumValue" value="-100" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MaximumValue" name="MaximumValue" type="double" sname="MaximumValue" value="100" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="Increment" name="Increment" type="double" sname="Increment" value="0.01" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="dim_lower_tol" mask="256" name="dim_lower_tol" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
+            <item id="dim_lower_tol" icon="styler_double" name="dim_lower_tol" type="uicomp" class="UICOMP_double" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_lower_tol" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="下偏差 (mm)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Value" name="Value" type="double" sname="Value" value="-0.1" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MinimumValue" name="MinimumValue" type="double" sname="MinimumValue" value="-100" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MaximumValue" name="MaximumValue" type="double" sname="MaximumValue" value="100" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="Increment" name="Increment" type="double" sname="Increment" value="0.01" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="dim_auto_apply" mask="256" name="dim_auto_apply" type="uicomp" class="UICOMP_toggle" hierarchy="UGS::UICOMP_group" presentation="Toggle">
+            <item id="dim_auto_apply" icon="styler_toggle.bmp" name="dim_auto_apply" type="uicomp" class="UICOMP_toggle" Expanded="1" hierarchy="UICOMP_toggle" presentation="Toggle">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_auto_apply" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="连续格式刷 (点选尺寸即刻生效)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" />
+                <Property id="Value" name="Value" type="logical" sname="Value" value="True" source="4" ClassID="UGS::UICOMP_toggle" hierarchy="UGS::UICOMP_toggle" />
+              </PropertyList>
+            </item>
+          </Property>
+        </PropertyList>
+      </Property>
+      <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_group" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="True" source="2" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Title" name="Title" type="utfstring" sname="Label" value="尺寸公差设置" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Group" name="Group" type="logical" sname="Group" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+    </PropertyList>
+  </item>
+
+  <!-- 3. 尺寸前后缀与参考括号（默认折叠，清爽不占屏） -->
+  <item id="dim_extra_group" icon="styler_block_sc.bmp" name="dim_extra_group" type="uicomp" class="UGS::UICOMP_group" Expanded="0" hierarchy="" presentation="Group" ContainerItems="1">
+    <PropertyList>
+      <Property id="Members" mask="0" name="Members" type="array" class="UGS::UI::Comp::Container" group="Block Specific::" sname="Members" source="1" dynamic="1" hierarchy="UGS::UICOMP_group">
+        <PropertyList id="ContainerItems" icon="tiles_palette.bmp" mode="1" class="UGS::UI::Comp::Container" Expanded="1" hierarchy="UGS::UICOMP_group">
+          <Property id="dim_prefix_mod" mask="256" name="dim_prefix_mod" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="dim_prefix_mod" icon="styler_optionmenu.bmp" name="dim_prefix_mod" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_prefix_mod" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="附加前缀" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="0" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="保持原样" value="0" /><Option name="清空前缀" value="1" /><Option name="2×" value="2" /><Option name="4×" value="3" /><Option name="6×" value="4" /><Option name="8×" value="5" /><Option name="□ (正方形)" value="6" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="dim_suffix_mod" mask="256" name="dim_suffix_mod" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="dim_suffix_mod" icon="styler_optionmenu.bmp" name="dim_suffix_mod" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_suffix_mod" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="附加后缀" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="0" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="保持原样" value="0" /><Option name="清空后缀" value="1" /><Option name="THRU (通孔)" value="2" /><Option name="EQS (均布)" value="3" /><Option name="TYP (典型)" value="4" /><Option name="配作" value="5" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="dim_ref_flag" mask="256" name="dim_ref_flag" type="uicomp" class="UICOMP_toggle" hierarchy="UGS::UICOMP_group" presentation="Toggle">
+            <item id="dim_ref_flag" icon="styler_toggle.bmp" name="dim_ref_flag" type="uicomp" class="UICOMP_toggle" Expanded="1" hierarchy="UICOMP_toggle" presentation="Toggle">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_ref_flag" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="设为参考尺寸 (加括号)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" />
+                <Property id="Value" name="Value" type="logical" sname="Value" value="False" source="4" ClassID="UGS::UICOMP_toggle" hierarchy="UGS::UICOMP_toggle" />
+              </PropertyList>
+            </item>
+          </Property>
+        </PropertyList>
+      </Property>
+      <Property id="API Name" name="API Name" type="string" sname="BlockID" value="dim_extra_group" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="False" source="2" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Title" name="Title" type="utfstring" sname="Label" value="前后缀与参考括号 (可选)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Group" name="Group" type="logical" sname="Group" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+    </PropertyList>
+  </item>
+
+  <!-- 4. 形位公差 - 7列图标矩阵（14个国标图形符号，一眼识别） -->
+  <item id="gdt_sym_group" icon="styler_block.bmp" name="gdt_sym_group" type="uicomp" class="UGS::UICOMP_group" Expanded="1" hierarchy="" presentation="Group" ContainerItems="1">
+    <PropertyList id="id" mode="0">
+      <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_sym_group" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Title" name="Title" type="utfstring" sname="Label" value="几何特征符号 (点击图标选择)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Group" name="Group" type="logical" sname="Group" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="True" source="2" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Column" name="Column" type="integer" sname="Column" value="7" source="1" ClassID="UGS::UICOMP_group" hierarchy="UGS::UICOMP_group" />
+      <Property id="Members" name="Members" type="array" class="UGS::UI::Comp::Container" group="Block Specific::" sname="Members" source="1" dynamic="1" hierarchy="UGS::UICOMP_group">
+        <PropertyList id="ContainerItems" icon="tiles_palette.bmp" mode="1" class="UGS::UI::Comp::Container" Expanded="1" hierarchy="UGS::UICOMP_group">
+          <Property id="gdt_btn_00" mask="256" name="gdt_btn_00" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_00" icon="styler_button.bmp" name="gdt_btn_00" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_00" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_00.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="直线度" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_01" mask="256" name="gdt_btn_01" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_01" icon="styler_button.bmp" name="gdt_btn_01" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_01" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_01.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="平面度" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_02" mask="256" name="gdt_btn_02" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_02" icon="styler_button.bmp" name="gdt_btn_02" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_02" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_02.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="圆度" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_03" mask="256" name="gdt_btn_03" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_03" icon="styler_button.bmp" name="gdt_btn_03" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_03" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_03.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="圆柱度" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_04" mask="256" name="gdt_btn_04" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_04" icon="styler_button.bmp" name="gdt_btn_04" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_04" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_04.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="线轮廓度" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_05" mask="256" name="gdt_btn_05" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_05" icon="styler_button.bmp" name="gdt_btn_05" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_05" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_05.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="面轮廓度" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_06" mask="256" name="gdt_btn_06" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_06" icon="styler_button.bmp" name="gdt_btn_06" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_06" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_06.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="倾斜度" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_07" mask="256" name="gdt_btn_07" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_07" icon="styler_button.bmp" name="gdt_btn_07" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_07" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_07.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="垂直度" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_08" mask="256" name="gdt_btn_08" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_08" icon="styler_button.bmp" name="gdt_btn_08" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_08" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_08.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="平行度" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_09" mask="256" name="gdt_btn_09" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_09" icon="styler_button.bmp" name="gdt_btn_09" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_09" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_09.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="位置度" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_10" mask="256" name="gdt_btn_10" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_10" icon="styler_button.bmp" name="gdt_btn_10" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_10" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_10.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="同轴度/同心度" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_11" mask="256" name="gdt_btn_11" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_11" icon="styler_button.bmp" name="gdt_btn_11" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_11" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_11.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="对称度" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_12" mask="256" name="gdt_btn_12" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_12" icon="styler_button.bmp" name="gdt_btn_12" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_12" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_12.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="圆跳动" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+          <Property id="gdt_btn_13" mask="256" name="gdt_btn_13" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Button"><item id="gdt_btn_13" icon="styler_button.bmp" name="gdt_btn_13" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="UICOMP_button" presentation="Button"><PropertyList id="id" mode="0"><Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_btn_13" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Title" name="Title" type="utfstring" sname="Label" value="" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" /><Property id="Icon" name="Icon" type="string" sname="Bitmap" value="GonCaBiaoZu_gdt_13.bmp" source="3" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /><Property id="HQBitmap" name="HQBitmap" type="logical" sname="HighQualityBitmap" value="True" source="1" ClassID="UGS::UICOMP_widget" hierarchy="UGS::UICOMP_button" /><Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="全跳动" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" /></PropertyList></item></Property>
+        </PropertyList>
+      </Property>
+    </PropertyList>
+  </item>
+
+  <!-- 5. 形位公差 - 放置选边与选点（放最前，操作顺手） -->
+  <item id="gdt_pick_group" icon="styler_block_sc.bmp" name="gdt_pick_group" type="uicomp" class="UGS::UICOMP_group" Expanded="1" hierarchy="" presentation="Group" ContainerItems="1">
+    <PropertyList>
+      <Property id="Members" mask="0" name="Members" type="array" class="UGS::UI::Comp::Container" group="Block Specific::" sname="Members" source="1" dynamic="1" hierarchy="UGS::UICOMP_group">
+        <PropertyList id="ContainerItems" icon="tiles_palette.bmp" mode="1" class="UGS::UI::Comp::Container" Expanded="1" hierarchy="UGS::UICOMP_group">
+          <Property id="gdt_target_select" mask="256" name="gdt_target_select" type="uicomp" class="UICOMP_selection" hierarchy="UGS::UICOMP_group" presentation="Select Object">
+            <item id="gdt_target_select" icon="selection_cursor.bmp" name="gdt_target_select" type="uicomp" class="UICOMP_selection" Expanded="1" hierarchy="" presentation="Select Object">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_target_select" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Label" name="Label" type="utfstring" sname="LabelString" value="1. 选择边线或尺寸" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Cue" name="Cue" type="utfstring" sname="Cue" value="选边后自动跳到选点" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+                <Property id="StepStatus" name="StepStatus" type="enum" sname="StepStatus" selected="1" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"><Option name="Required" value="0" /><Option name="Optional" value="1" /><Option name="Satisfied" value="2" /></Property>
+                <Property id="Many" name="Many" type="enum" sname="SelectMode" selected="0" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"><Option name="Single" value="0" /><Option name="Multiple" value="1" /></Property>
+                <Property id="MaximumScope" name="MaximumScope" type="enum" sname="MaximumScope" selected="10" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"><Option name="Entire Assembly" value="3" /><Option name="Within Work Part Only" value="10" /><Option name="Within Work Part and Components" value="11" /></Property>
+                <Property id="PickPoint" name="PickPoint" type="point" sname="PickPoint" value="0.000000 0.000000 0.000000" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+                <Property id="AutomaticProgression" name="AutomaticProgression" type="logical" sname="AutomaticProgression" value="True" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="gdt_place_point" mask="256" name="gdt_place_point" type="uicomp" class="UICOMP_point" hierarchy="UGS::UICOMP_group" presentation="Specify Point">
+            <item id="gdt_place_point" icon="inferpoint.bmp" name="gdt_place_point" type="uicomp" class="UICOMP_point" Expanded="1" hierarchy="UICOMP_point" presentation="Specify Point">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_place_point" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_point" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_point" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_point" />
+                <Property id="LabelString" name="LabelString" type="utfstring" sname="LabelString" value="2. 指定放置位置 (出预览)" source="3" ClassID="UGS::UICOMP_point" hierarchy="UGS::UICOMP_point" />
+                <Property id="StepStatus" name="StepStatus" type="enum" sname="StepStatus" selected="1" source="1" ClassID="UGS::UICOMP_point" hierarchy="UGS::UICOMP_point"><Option name="Required" value="0" /><Option name="Optional" value="1" /><Option name="Satisfied" value="2" /></Property>
+                <Property id="Point" name="Point" type="point" sname="Point" value="0.000000 0.000000 0.000000" source="3" ClassID="UGS::UICOMP_point" hierarchy="UGS::UICOMP_point" />
+                <Property id="SnapMask" name="SnapMask" type="bits" sname="SnapPointTypesEnabled" value="0x4" source="1" ClassID="UGS::UICOMP_point" hierarchy="UGS::UICOMP_point" />
+                <Property id="ToolbarToggleMask" name="ToolbarToggleMask" type="bits" sname="SnapPointTypesOnByDefault" value="0x4" source="2" ClassID="UGS::UICOMP_point" hierarchy="UGS::UICOMP_point" />
+              </PropertyList>
+            </item>
+          </Property>
+        </PropertyList>
+      </Property>
+      <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_pick_group" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="True" source="2" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Title" name="Title" type="utfstring" sname="Label" value="引线与放置" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Group" name="Group" type="logical" sname="Group" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+    </PropertyList>
+  </item>
+
+  <!-- 6. 形位公差 - 数值与基准参数 -->
+  <item id="gdt_param_group" icon="styler_block_sc.bmp" name="gdt_param_group" type="uicomp" class="UGS::UICOMP_group" Expanded="1" hierarchy="" presentation="Group" ContainerItems="1">
+    <PropertyList>
+      <Property id="Members" mask="0" name="Members" type="array" class="UGS::UI::Comp::Container" group="Block Specific::" sname="Members" source="1" dynamic="1" hierarchy="UGS::UICOMP_group">
+        <PropertyList id="ContainerItems" icon="tiles_palette.bmp" mode="1" class="UGS::UI::Comp::Container" Expanded="1" hierarchy="UGS::UICOMP_group">
+          <Property id="gdt_preset" mask="256" name="gdt_preset" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="gdt_preset" icon="styler_optionmenu.bmp" name="gdt_preset" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_preset" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="快捷模板" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="2" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="— [手动自由组合]" value="0" />
+                  <Option name="▱ 平面度 0.05 (精密安装面)" value="1" />
+                  <Option name="▱ 平面度 0.10 (常规钣金底面)" value="2" />
+                  <Option name="▱ 平面度 0.20 (大板平面度)" value="3" />
+                  <Option name="⊥ 垂直度 0.10 | A (折弯边)" value="4" />
+                  <Option name="⊥ 垂直度 0.20 | A (大折弯)" value="5" />
+                  <Option name="⊥ 垂直度 ∅0.05 | A (孔轴线)" value="6" />
+                  <Option name="∥ 平行度 0.05 | A (精密对面)" value="7" />
+                  <Option name="∥ 平行度 0.10 | A (折弯对面)" value="8" />
+                  <Option name="⌖ 位置度 ∅0.10 | A | B (精密孔)" value="9" />
+                  <Option name="⌖ 位置度 ∅0.15 Ⓜ | A | B (压铆)" value="10" />
+                  <Option name="⌖ 位置度 ∅0.20 | A | B | C" value="11" />
+                  <Option name="◎ 同轴度 ∅0.02 | A (精密轴承)" value="12" />
+                  <Option name="◎ 同轴度 ∅0.05 | A (常规同轴)" value="13" />
+                  <Option name="≡ 对称度 0.10 | A (卡槽对称)" value="14" />
+                  <Option name="⌓ 面轮廓度 0.20 | A | B" value="15" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="gdt_value" mask="256" name="gdt_value" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
+            <item id="gdt_value" icon="styler_double" name="gdt_value" type="uicomp" class="UICOMP_double" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_value" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="公差值 (mm)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Value" name="Value" type="double" sname="Value" value="0.1" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MinimumValue" name="MinimumValue" type="double" sname="MinimumValue" value="0.001" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MaximumValue" name="MaximumValue" type="double" sname="MaximumValue" value="100" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="Increment" name="Increment" type="double" sname="Increment" value="0.01" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="gdt_zone_shape" mask="256" name="gdt_zone_shape" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="gdt_zone_shape" icon="styler_optionmenu.bmp" name="gdt_zone_shape" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_zone_shape" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="公差带 / 修饰" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="0" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="无前导符" value="0" /><Option name="∅ (直径)" value="1" /><Option name="S∅ (球径)" value="2" /><Option name="□ (正方形)" value="3" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="gdt_mat_mod" mask="256" name="gdt_mat_mod" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="gdt_mat_mod" icon="styler_optionmenu.bmp" name="gdt_mat_mod" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_mat_mod" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="实体修饰" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="0" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="无" value="0" /><Option name="Ⓜ 最大实体" value="1" /><Option name="Ⓛ 最小实体" value="2" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="gdt_gb1184_grade" mask="256" name="gdt_gb1184_grade" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="gdt_gb1184_grade" icon="styler_optionmenu.bmp" name="gdt_gb1184_grade" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_gb1184_grade" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="GB/T 1184" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="0" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="手动输入" value="0" /><Option name="H 级 (精密自动)" value="1" /><Option name="K 级 (中等自动)" value="2" /><Option name="L 级 (粗糙自动)" value="3" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="gdt_datum1" mask="256" name="gdt_datum1" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="gdt_datum1" icon="styler_optionmenu.bmp" name="gdt_datum1" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_datum1" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="第一基准" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="0" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="无" value="0" /><Option name="A" value="1" /><Option name="B" value="2" /><Option name="C" value="3" /><Option name="D" value="4" /><Option name="A-B" value="5" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="gdt_datum2" mask="256" name="gdt_datum2" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="gdt_datum2" icon="styler_optionmenu.bmp" name="gdt_datum2" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_datum2" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="第二基准" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="0" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="无" value="0" /><Option name="A" value="1" /><Option name="B" value="2" /><Option name="C" value="3" /><Option name="D" value="4" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="gdt_datum3" mask="256" name="gdt_datum3" type="uicomp" class="UICOMP_enum" hierarchy="UGS::UICOMP_group" presentation="Enumeration">
+            <item id="gdt_datum3" icon="styler_optionmenu.bmp" name="gdt_datum3" type="uicomp" class="UICOMP_enum" Expanded="1" hierarchy="UICOMP_enum" presentation="Enumeration">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_datum3" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="第三基准" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_enum" />
+                <Property id="Titles_1" name="Titles_1" type="enum" sname="Value" value="0" source="4" ClassID="UGS::UICOMP_enum" hierarchy="UGS::UICOMP_enum">
+                  <Option name="无" value="0" /><Option name="A" value="1" /><Option name="B" value="2" /><Option name="C" value="3" /><Option name="D" value="4" />
+                </Property>
+              </PropertyList>
+            </item>
+          </Property>
+        </PropertyList>
+      </Property>
+      <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_param_group" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="True" source="2" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Title" name="Title" type="utfstring" sname="Label" value="公差值与基准" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Group" name="Group" type="logical" sname="Group" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+    </PropertyList>
+  </item>
+
+  <!-- 7. 形位公差 - 独立外观样式组 -->
+  <item id="gdt_style_group" icon="styler_block_sc.bmp" name="gdt_style_group" type="uicomp" class="UGS::UICOMP_group" Expanded="1" hierarchy="" presentation="Group" ContainerItems="1">
+    <PropertyList>
+      <Property id="Members" mask="0" name="Members" type="array" class="UGS::UI::Comp::Container" group="Block Specific::" sname="Members" source="1" dynamic="1" hierarchy="UGS::UICOMP_group">
+        <PropertyList id="ContainerItems" icon="tiles_palette.bmp" mode="1" class="UGS::UI::Comp::Container" Expanded="1" hierarchy="UGS::UICOMP_group">
+          <Property id="gdt_text_height" mask="256" name="gdt_text_height" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
+            <item id="gdt_text_height" icon="styler_double" name="gdt_text_height" type="uicomp" class="UICOMP_double" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_text_height" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="字体高度 (mm)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Value" name="Value" type="double" sname="Value" value="3.5" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MinimumValue" name="MinimumValue" type="double" sname="MinimumValue" value="0.5" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MaximumValue" name="MaximumValue" type="double" sname="MaximumValue" value="50" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="Increment" name="Increment" type="double" sname="Increment" value="0.5" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="gdt_frame_color" mask="256" name="gdt_frame_color" type="uicomp" class="UGS::UI::Comp::ColorPicker" hierarchy="UGS::UICOMP_group" presentation="Object Color Picker">
+            <item id="gdt_frame_color" icon="color.bmp" name="gdt_frame_color" type="uicomp" class="UGS::UI::Comp::ColorPicker" Expanded="1" hierarchy="UICOMP_point" presentation="Object Color Picker">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" mask="16656" name="API Name" type="string" group="General::" sname="BlockID" value="gdt_frame_color" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="NumberSelectable" mask="16384" name="NumberSelectable" type="integer" group="Block Specific::" sname="NumberSelectable" value="1" source="1" ClassID="UGS::UI::Comp::ColorPicker" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="Value" data="@@216" mask="64" name="Value" size="1" type="stlvector" dtype="0" group="Block Specific::" sname="Value" source="4" ClassID="UGS::UI::Comp::ColorPicker" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="外框与引线颜色" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UI::Comp::ColorPicker" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="gdt_text_color" mask="256" name="gdt_text_color" type="uicomp" class="UGS::UI::Comp::ColorPicker" hierarchy="UGS::UICOMP_group" presentation="Object Color Picker">
+            <item id="gdt_text_color" icon="color.bmp" name="gdt_text_color" type="uicomp" class="UGS::UI::Comp::ColorPicker" Expanded="1" hierarchy="UICOMP_point" presentation="Object Color Picker">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" mask="16656" name="API Name" type="string" group="General::" sname="BlockID" value="gdt_text_color" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="NumberSelectable" mask="16384" name="NumberSelectable" type="integer" group="Block Specific::" sname="NumberSelectable" value="1" source="1" ClassID="UGS::UI::Comp::ColorPicker" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="Value" data="@@216" mask="64" name="Value" size="1" type="stlvector" dtype="0" group="Block Specific::" sname="Value" source="4" ClassID="UGS::UI::Comp::ColorPicker" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="字体颜色" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UI::Comp::ColorPicker" />
+              </PropertyList>
+            </item>
+          </Property>
+        </PropertyList>
+      </Property>
+      <Property id="API Name" name="API Name" type="string" sname="BlockID" value="gdt_style_group" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="True" source="2" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Title" name="Title" type="utfstring" sname="Label" value="外框与字体样式" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Group" name="Group" type="logical" sname="Group" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+    </PropertyList>
+  </item>
+
+  <!-- 8. 基准符号 - 选边与放置 -->
+  <item id="datum_group" icon="styler_block_sc.bmp" name="datum_group" type="uicomp" class="UGS::UICOMP_group" Expanded="1" hierarchy="" presentation="Group" ContainerItems="1">
+    <PropertyList>
+      <Property id="Members" mask="0" name="Members" type="array" class="UGS::UI::Comp::Container" group="Block Specific::" sname="Members" source="1" dynamic="1" hierarchy="UGS::UICOMP_group">
+        <PropertyList id="ContainerItems" icon="tiles_palette.bmp" mode="1" class="UGS::UI::Comp::Container" Expanded="1" hierarchy="UGS::UICOMP_group">
+          <Property id="datum_letter" mask="256" name="datum_letter" type="uicomp" class="UICOMP_string" hierarchy="UGS::UICOMP_group" presentation="String">
+            <item id="datum_letter" icon="styler_text" name="datum_letter" type="uicomp" class="UICOMP_string" Expanded="1" hierarchy="UICOMP_string" presentation="String">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="datum_letter" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_string" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="基准代号" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_string" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_string" />
+                <Property id="Value" name="Value" type="string" sname="Value" value="A" source="4" ClassID="UGS::UICOMP_string" hierarchy="UGS::UICOMP_string" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="datum_auto_inc" mask="256" name="datum_auto_inc" type="uicomp" class="UICOMP_toggle" hierarchy="UGS::UICOMP_group" presentation="Toggle">
+            <item id="datum_auto_inc" icon="styler_toggle.bmp" name="datum_auto_inc" type="uicomp" class="UICOMP_toggle" Expanded="1" hierarchy="UICOMP_toggle" presentation="Toggle">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="datum_auto_inc" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="标完自动递增字母 (A -&gt; B -&gt; C)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_toggle" />
+                <Property id="Value" name="Value" type="logical" sname="Value" value="True" source="4" ClassID="UGS::UICOMP_toggle" hierarchy="UGS::UICOMP_toggle" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="datum_target_select" mask="256" name="datum_target_select" type="uicomp" class="UICOMP_selection" hierarchy="UGS::UICOMP_group" presentation="Select Object">
+            <item id="datum_target_select" icon="selection_cursor.bmp" name="datum_target_select" type="uicomp" class="UICOMP_selection" Expanded="1" hierarchy="" presentation="Select Object">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="datum_target_select" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Label" name="Label" type="utfstring" sname="LabelString" value="1. 选择基准边线或尺寸" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+                <Property id="Cue" name="Cue" type="utfstring" sname="Cue" value="选边后自动跳到选点" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+                <Property id="StepStatus" name="StepStatus" type="enum" sname="StepStatus" selected="1" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"><Option name="Required" value="0" /><Option name="Optional" value="1" /><Option name="Satisfied" value="2" /></Property>
+                <Property id="Many" name="Many" type="enum" sname="SelectMode" selected="0" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"><Option name="Single" value="0" /><Option name="Multiple" value="1" /></Property>
+                <Property id="MaximumScope" name="MaximumScope" type="enum" sname="MaximumScope" selected="10" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection"><Option name="Entire Assembly" value="3" /><Option name="Within Work Part Only" value="10" /><Option name="Within Work Part and Components" value="11" /></Property>
+                <Property id="PickPoint" name="PickPoint" type="point" sname="PickPoint" value="0.000000 0.000000 0.000000" source="3" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+                <Property id="AutomaticProgression" name="AutomaticProgression" type="logical" sname="AutomaticProgression" value="True" source="1" ClassID="UGS::UICOMP_selection" hierarchy="UGS::UICOMP_selection" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="datum_place_point" mask="256" name="datum_place_point" type="uicomp" class="UICOMP_point" hierarchy="UGS::UICOMP_group" presentation="Specify Point">
+            <item id="datum_place_point" icon="inferpoint.bmp" name="datum_place_point" type="uicomp" class="UICOMP_point" Expanded="1" hierarchy="UICOMP_point" presentation="Specify Point">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="datum_place_point" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_point" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_point" />
+                <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_point" />
+                <Property id="LabelString" name="LabelString" type="utfstring" sname="LabelString" value="2. 指定基准位置 (出预览)" source="3" ClassID="UGS::UICOMP_point" hierarchy="UGS::UICOMP_point" />
+                <Property id="StepStatus" name="StepStatus" type="enum" sname="StepStatus" selected="1" source="1" ClassID="UGS::UICOMP_point" hierarchy="UGS::UICOMP_point"><Option name="Required" value="0" /><Option name="Optional" value="1" /><Option name="Satisfied" value="2" /></Property>
+                <Property id="Point" name="Point" type="point" sname="Point" value="0.000000 0.000000 0.000000" source="3" ClassID="UGS::UICOMP_point" hierarchy="UGS::UICOMP_point" />
+                <Property id="SnapMask" name="SnapMask" type="bits" sname="SnapPointTypesEnabled" value="0x4" source="1" ClassID="UGS::UICOMP_point" hierarchy="UGS::UICOMP_point" />
+                <Property id="ToolbarToggleMask" name="ToolbarToggleMask" type="bits" sname="SnapPointTypesOnByDefault" value="0x4" source="2" ClassID="UGS::UICOMP_point" hierarchy="UGS::UICOMP_point" />
+              </PropertyList>
+            </item>
+          </Property>
+        </PropertyList>
+      </Property>
+      <Property id="API Name" name="API Name" type="string" sname="BlockID" value="datum_group" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="True" source="2" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Title" name="Title" type="utfstring" sname="Label" value="基准符号标注" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Group" name="Group" type="logical" sname="Group" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+    </PropertyList>
+  </item>
+
+  <!-- 9. 基准符号 - 独立外观样式组（字高 / 外框颜色 / 字体颜色） -->
+  <item id="datum_style_group" icon="styler_block_sc.bmp" name="datum_style_group" type="uicomp" class="UGS::UICOMP_group" Expanded="1" hierarchy="" presentation="Group" ContainerItems="1">
+    <PropertyList>
+      <Property id="Members" mask="0" name="Members" type="array" class="UGS::UI::Comp::Container" group="Block Specific::" sname="Members" source="1" dynamic="1" hierarchy="UGS::UICOMP_group">
+        <PropertyList id="ContainerItems" icon="tiles_palette.bmp" mode="1" class="UGS::UI::Comp::Container" Expanded="1" hierarchy="UGS::UICOMP_group">
+          <Property id="datum_text_height" mask="256" name="datum_text_height" type="uicomp" class="UICOMP_double" hierarchy="UGS::UICOMP_group" presentation="Double">
+            <item id="datum_text_height" icon="styler_double" name="datum_text_height" type="uicomp" class="UICOMP_double" Expanded="1" hierarchy="UICOMP_double" presentation="Double">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="datum_text_height" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="基准字高 (mm)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_double" />
+                <Property id="Value" name="Value" type="double" sname="Value" value="3.5" source="4" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MinimumValue" name="MinimumValue" type="double" sname="MinimumValue" value="0.5" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="MaximumValue" name="MaximumValue" type="double" sname="MaximumValue" value="50" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+                <Property id="Increment" name="Increment" type="double" sname="Increment" value="0.5" source="1" ClassID="UGS::UICOMP_double" hierarchy="UGS::UICOMP_double" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="datum_frame_color" mask="256" name="datum_frame_color" type="uicomp" class="UGS::UI::Comp::ColorPicker" hierarchy="UGS::UICOMP_group" presentation="Object Color Picker">
+            <item id="datum_frame_color" icon="color.bmp" name="datum_frame_color" type="uicomp" class="UGS::UI::Comp::ColorPicker" Expanded="1" hierarchy="UICOMP_point" presentation="Object Color Picker">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" mask="16656" name="API Name" type="string" group="General::" sname="BlockID" value="datum_frame_color" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="NumberSelectable" mask="16384" name="NumberSelectable" type="integer" group="Block Specific::" sname="NumberSelectable" value="1" source="1" ClassID="UGS::UI::Comp::ColorPicker" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="Value" data="@@216" mask="64" name="Value" size="1" type="stlvector" dtype="0" group="Block Specific::" sname="Value" source="4" ClassID="UGS::UI::Comp::ColorPicker" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="基准外框与三角颜色" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UI::Comp::ColorPicker" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="datum_text_color" mask="256" name="datum_text_color" type="uicomp" class="UGS::UI::Comp::ColorPicker" hierarchy="UGS::UICOMP_group" presentation="Object Color Picker">
+            <item id="datum_text_color" icon="color.bmp" name="datum_text_color" type="uicomp" class="UGS::UI::Comp::ColorPicker" Expanded="1" hierarchy="UICOMP_point" presentation="Object Color Picker">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" mask="16656" name="API Name" type="string" group="General::" sname="BlockID" value="datum_text_color" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="Visibility" mask="0" name="Visibility" type="logical" group="General::" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="NumberSelectable" mask="16384" name="NumberSelectable" type="integer" group="Block Specific::" sname="NumberSelectable" value="1" source="1" ClassID="UGS::UI::Comp::ColorPicker" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="Value" data="@@216" mask="64" name="Value" size="1" type="stlvector" dtype="0" group="Block Specific::" sname="Value" source="4" ClassID="UGS::UI::Comp::ColorPicker" hierarchy="UGS::UI::Comp::ColorPicker" />
+                <Property id="Title" mask="256" name="Title" type="utfstring" group="General::" sname="Label" value="基准字体颜色" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UI::Comp::ColorPicker" />
+              </PropertyList>
+            </item>
+          </Property>
+        </PropertyList>
+      </Property>
+      <Property id="API Name" name="API Name" type="string" sname="BlockID" value="datum_style_group" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="False" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="True" source="2" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Title" name="Title" type="utfstring" sname="Label" value="基准外框与字体样式" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Group" name="Group" type="logical" sname="Group" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+    </PropertyList>
+  </item>
+
+  <!-- 10. 实时预览与快捷配置 -->
+  <item id="info_group" icon="styler_block_sc.bmp" name="info_group" type="uicomp" class="UGS::UICOMP_group" Expanded="1" hierarchy="" presentation="Group" ContainerItems="1">
+    <PropertyList>
+      <Property id="Members" mask="0" name="Members" type="array" class="UGS::UI::Comp::Container" group="Block Specific::" sname="Members" source="1" dynamic="1" hierarchy="UGS::UICOMP_group">
+        <PropertyList id="ContainerItems" icon="tiles_palette.bmp" mode="1" class="UGS::UI::Comp::Container" Expanded="1" hierarchy="UGS::UICOMP_group">
+          <Property id="preview_label" mask="256" name="preview_label" type="uicomp" class="UICOMP_label" hierarchy="UGS::UICOMP_group" presentation="Label">
+            <item id="preview_label" icon="styler_label.bmp" name="preview_label" type="uicomp" class="UICOMP_label" Expanded="1" hierarchy="" presentation="Label">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="preview_label" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="预览：25 ±0.10" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="status_label" mask="256" name="status_label" type="uicomp" class="UICOMP_label" hierarchy="UGS::UICOMP_group" presentation="Label">
+            <item id="status_label" icon="styler_label.bmp" name="status_label" type="uicomp" class="UICOMP_label" Expanded="1" hierarchy="" presentation="Label">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="status_label" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="点选或框选尺寸即可一键赋公差。" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_label" />
+              </PropertyList>
+            </item>
+          </Property>
+          <Property id="open_config_btn" mask="256" name="open_config_btn" type="uicomp" class="UICOMP_button" hierarchy="UGS::UICOMP_group" presentation="Action Button">
+            <item id="open_config_btn" icon="styler_browser_pushbutton.bmp" name="open_config_btn" type="uicomp" class="UICOMP_button" Expanded="1" hierarchy="" presentation="Action Button">
+              <PropertyList id="id" mode="0">
+                <Property id="API Name" name="API Name" type="string" sname="BlockID" value="open_config_btn" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Title" name="Title" type="utfstring" sname="Label" value="编辑公差预设配置 (.ini)" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_button" />
+                <Property id="Tooltip" name="Tooltip" type="utfstring" sname="Tooltip" value="打开 GonCaBiaoZu_Presets.ini 查看或维护常用公差预设" source="1" ClassID="UGS::UICOMP_button" hierarchy="UGS::UICOMP_button" />
+              </PropertyList>
+            </item>
+          </Property>
+        </PropertyList>
+      </Property>
+      <Property id="API Name" name="API Name" type="string" sname="BlockID" value="info_group" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="True" source="2" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Title" name="Title" type="utfstring" sname="Label" value="查表预览与状态" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+      <Property id="Group" name="Group" type="logical" sname="Group" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::UICOMP_group" />
+    </PropertyList>
+  </item>
+
+  <PropertyList id="id" mode="0">
+    <Property id="Visibility" name="Visibility" type="logical" sname="Show" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
+    <Property id="Sensitivity" name="Sensitivity" type="logical" sname="Enable" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
+    <Property id="Expanded" name="Expanded" type="logical" sname="Expanded" value="True" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
+    <Property id="HelpTag" name="HelpTag" type="string" sname="HelpTag" value="Zhihui_GonCaBiaoZu" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
+    <Property id="HideApply" name="HideApply" type="logical" sname="HideApply" value="False" source="3" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
+    <Property id="Title" name="Title" type="utfstring" sname="Label" value="工程图公差标注" source="1" ClassID="UGS::UICOMP" hierarchy="UGS::Styler::DialogItem" />
+  </PropertyList>
+</Dialog>

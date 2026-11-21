@@ -9,10 +9,19 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdarg>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 namespace
 {
@@ -40,16 +49,85 @@ NXOpen::Part* CurrentWorkPart()
 	return session == NULL ? NULL : session->Parts()->Work();
 }
 
-std::vector<NXOpen::Drawings::DraftingCurve*> CollectDraftingCurves(NXOpen::Drawings::BaseView* baseView)
+bool IsDraftingCurveDisplayedInView(
+	NXOpen::Drawings::DraftingView* view,
+	NXOpen::Drawings::DraftingCurve* curve,
+	const std::unordered_set<tag_t>& erasedTags,
+	const std::unordered_set<tag_t>& visibleTags,
+	bool hasVisibleCurveFilter)
 {
-	std::vector<NXOpen::Drawings::DraftingCurve*> curves;
-	NXOpen::Drawings::DraftingView* draftingView = dynamic_cast<NXOpen::Drawings::DraftingView*>(baseView);
-	if (draftingView == NULL)
+	if (view == NULL || curve == NULL)
 	{
-		return curves;
+		return false;
+	}
+	if (curve->IsBlanked())
+	{
+		return false;
+	}
+	const tag_t curveTag = curve->Tag();
+	if (erasedTags.find(curveTag) != erasedTags.end())
+	{
+		return false;
+	}
+	if (hasVisibleCurveFilter && visibleTags.find(curveTag) == visibleTags.end())
+	{
+		return false;
 	}
 
-	NXOpen::Drawings::DraftingBodyCollection* bodyCollection = draftingView->DraftingBodies();
+	UF_OBJ_disp_props_s dispProps;
+	if (UF_OBJ_ask_display_properties(curveTag, &dispProps) == 0)
+	{
+		if (dispProps.blank_status != UF_OBJ_NOT_BLANKED || dispProps.font == UF_OBJ_FONT_INVISIBLE)
+		{
+			return false;
+		}
+		int layerStatus = 0;
+		if (UF_LAYER_ask_status(dispProps.layer, &layerStatus) == 0)
+		{
+			if (layerStatus != UF_LAYER_WORK_LAYER &&
+				layerStatus != UF_LAYER_ACTIVE_LAYER &&
+				layerStatus != UF_LAYER_REFERENCE_LAYER)
+			{
+				return false;
+			}
+		}
+	}
+
+	int numEdits = 0;
+	UF_VIEW_vde_data_p_t vdeData = NULL;
+	if (UF_VIEW_ask_vde_data(curveTag, &numEdits, &vdeData) == 0 && vdeData != NULL)
+	{
+		bool fullyInvisible = false;
+		for (int e = 0; e < numEdits; ++e)
+		{
+			if (vdeData[e].view_tag == view->Tag() &&
+				vdeData[e].font == UF_OBJ_FONT_INVISIBLE &&
+				vdeData[e].start_parameter <= 0.001 &&
+				vdeData[e].end_parameter >= 0.999)
+			{
+				fullyInvisible = true;
+				break;
+			}
+		}
+		UF_free(vdeData);
+		if (fullyInvisible)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+std::vector<NXOpen::Drawings::DraftingCurve*> CollectDraftingCurves(NXOpen::Drawings::DraftingView* baseView)
+{
+	std::vector<NXOpen::Drawings::DraftingCurve*> allCurves;
+	if (baseView == NULL)
+	{
+		return allCurves;
+	}
+
+	NXOpen::Drawings::DraftingBodyCollection* bodyCollection = baseView->DraftingBodies();
 	for (NXOpen::Drawings::DraftingBodyCollection::iterator bodyIt = bodyCollection->begin(); bodyIt != bodyCollection->end(); ++bodyIt)
 	{
 		NXOpen::Drawings::DraftingBody* draftingBody = *bodyIt;
@@ -63,11 +141,319 @@ std::vector<NXOpen::Drawings::DraftingCurve*> CollectDraftingCurves(NXOpen::Draw
 		{
 			if (*curveIt != NULL)
 			{
-				curves.push_back(*curveIt);
+				allCurves.push_back(*curveIt);
 			}
 		}
 	}
-	return curves;
+
+	std::unordered_set<tag_t> erasedTags;
+	tag_t erasedObj = NULL_TAG;
+	while (UF_VIEW_cycle_objects(baseView->Tag(), UF_VIEW_ERASED_OBJECTS, &erasedObj) == 0 && erasedObj != NULL_TAG)
+	{
+		erasedTags.insert(erasedObj);
+	}
+
+	std::unordered_set<tag_t> visibleTags;
+	int nVisible = 0;
+	int nClipped = 0;
+	tag_t* visibleObjs = NULL;
+	tag_t* clippedObjs = NULL;
+	if (UF_VIEW_ask_visible_objects(baseView->Tag(), &nVisible, &visibleObjs, &nClipped, &clippedObjs) == 0)
+	{
+		for (int i = 0; i < nVisible; ++i)
+		{
+			visibleTags.insert(visibleObjs[i]);
+		}
+		for (int i = 0; i < nClipped; ++i)
+		{
+			visibleTags.insert(clippedObjs[i]);
+		}
+		if (visibleObjs != NULL)
+		{
+			UF_free(visibleObjs);
+		}
+		if (clippedObjs != NULL)
+		{
+			UF_free(clippedObjs);
+		}
+	}
+
+	bool hasVisibleCurveFilter = false;
+	for (size_t i = 0; i < allCurves.size(); ++i)
+	{
+		if (visibleTags.find(allCurves[i]->Tag()) != visibleTags.end())
+		{
+			hasVisibleCurveFilter = true;
+			break;
+		}
+	}
+
+	std::vector<NXOpen::Drawings::DraftingCurve*> displayedCurves;
+	displayedCurves.reserve(allCurves.size());
+	for (size_t i = 0; i < allCurves.size(); ++i)
+	{
+		if (IsDraftingCurveDisplayedInView(baseView, allCurves[i], erasedTags, visibleTags, hasVisibleCurveFilter))
+		{
+			displayedCurves.push_back(allCurves[i]);
+		}
+	}
+
+	if (dynamic_cast<NXOpen::Drawings::SectionView*>(baseView) != NULL ||
+		dynamic_cast<NXOpen::Drawings::DetailView*>(baseView) != NULL)
+	{
+		std::vector<NXOpen::Drawings::DraftingCurve*> sectionCurves;
+		for (size_t i = 0; i < displayedCurves.size(); ++i)
+		{
+			NXOpen::Drawings::DraftingCurveInfo* curveInfo = displayedCurves[i]->GetDraftingCurveInfo();
+			if (curveInfo == NULL)
+			{
+				continue;
+			}
+			const NXOpen::Drawings::DraftingCurveInfo::DraftingCurveType curveType = curveInfo->CurveType();
+			delete curveInfo;
+			if (curveType == NXOpen::Drawings::DraftingCurveInfo::DraftingCurveTypeSectionEdge)
+			{
+				sectionCurves.push_back(displayedCurves[i]);
+			}
+		}
+		if (!sectionCurves.empty())
+		{
+			return sectionCurves;
+		}
+	}
+
+	return displayedCurves;
+}
+
+bool IsSectionView(NXOpen::Drawings::DraftingView* view)
+{
+	return dynamic_cast<NXOpen::Drawings::SectionView*>(view) != NULL;
+}
+
+bool IsDetailView(NXOpen::Drawings::DraftingView* view)
+{
+	return dynamic_cast<NXOpen::Drawings::DetailView*>(view) != NULL;
+}
+
+bool IsSectionOrDetailView(NXOpen::Drawings::DraftingView* view)
+{
+	return IsSectionView(view) || IsDetailView(view);
+}
+
+void WriteDimDebugLog(const char* format, ...)
+{
+	CreateDirectoryW(L"D:\\UG\u667a\u8f89\u94a3\u91d1\u63d2\u4ef6\\logs", NULL);
+	FILE* fp = _wfopen(L"D:\\UG\u667a\u8f89\u94a3\u91d1\u63d2\u4ef6\\logs\\ZiDonBiaoZhu_debug.log", L"a");
+	if (fp == NULL)
+	{
+		return;
+	}
+	va_list args;
+	va_start(args, format);
+	vfprintf(fp, format, args);
+	va_end(args);
+	fprintf(fp, "\n");
+	fclose(fp);
+}
+
+bool IsDrawingPointInsideViewBorders(
+	NXOpen::Drawings::DraftingView* view,
+	double x,
+	double y,
+	double margin)
+{
+	if (view == NULL)
+	{
+		return false;
+	}
+	double borders[4] = { 0.0, 0.0, 0.0, 0.0 };
+	if (UF_DRAW_ask_view_borders(view->Tag(), borders) != 0)
+	{
+		return true;
+	}
+	return x >= borders[0] - margin && x <= borders[2] + margin &&
+		y >= borders[1] - margin && y <= borders[3] + margin;
+}
+
+bool DoesSegment2dIntersectBox(
+	double x1, double y1,
+	double x2, double y2,
+	double minX, double minY,
+	double maxX, double maxY)
+{
+	double t0 = 0.0;
+	double t1 = 1.0;
+	const double dx = x2 - x1;
+	const double dy = y2 - y1;
+	const double p[4] = { -dx, dx, -dy, dy };
+	const double q[4] = { x1 - minX, maxX - x1, y1 - minY, maxY - y1 };
+
+	for (int i = 0; i < 4; ++i)
+	{
+		if (std::fabs(p[i]) < 1e-12)
+		{
+			if (q[i] < 0.0)
+			{
+				return false;
+			}
+		}
+		else
+		{
+			const double t = q[i] / p[i];
+			if (p[i] < 0.0)
+			{
+				if (t > t1) return false;
+				if (t > t0) t0 = t;
+			}
+			else
+			{
+				if (t < t0) return false;
+				if (t < t1) t1 = t;
+			}
+		}
+	}
+	return t0 <= t1;
+}
+
+bool IsDraftingCurveInsideViewBorders(
+	NXOpen::Drawings::DraftingView* view,
+	NXOpen::Drawings::DraftingCurve* curve)
+{
+	if (view == NULL || curve == NULL)
+	{
+		return false;
+	}
+
+	double borders[4] = { 0.0, 0.0, 0.0, 0.0 };
+	if (UF_DRAW_ask_view_borders(view->Tag(), borders) != 0)
+	{
+		return true;
+	}
+	const double margin = 0.5;
+	const double minX = borders[0] - margin;
+	const double minY = borders[1] - margin;
+	const double maxX = borders[2] + margin;
+	const double maxY = borders[3] + margin;
+
+	UF_EVAL_p_t evaluator = NULL;
+	if (UF_EVAL_initialize(curve->Tag(), &evaluator) != 0)
+	{
+		return false;
+	}
+
+	logical isLine = false;
+	logical isArc = false;
+	UF_EVAL_is_line(evaluator, &isLine);
+	UF_EVAL_is_arc(evaluator, &isArc);
+
+	bool inside = false;
+	if (isLine)
+	{
+		UF_EVAL_line_t lineData;
+		if (UF_EVAL_ask_line(evaluator, &lineData) == 0)
+		{
+			double startPt[2] = { 0.0, 0.0 };
+			double endPt[2] = { 0.0, 0.0 };
+			if (UF_VIEW_map_model_to_drawing(view->Tag(), lineData.start, startPt) == 0 &&
+				UF_VIEW_map_model_to_drawing(view->Tag(), lineData.end, endPt) == 0)
+			{
+				inside = DoesSegment2dIntersectBox(startPt[0], startPt[1], endPt[0], endPt[1], minX, minY, maxX, maxY);
+			}
+		}
+	}
+	else if (isArc)
+	{
+		UF_EVAL_arc_t arcData;
+		if (UF_EVAL_ask_arc(evaluator, &arcData) == 0)
+		{
+			double centerPt[2] = { 0.0, 0.0 };
+			double edgeModelPt[3] = {
+				arcData.center[0] + arcData.x_axis[0] * arcData.radius,
+				arcData.center[1] + arcData.x_axis[1] * arcData.radius,
+				arcData.center[2] + arcData.x_axis[2] * arcData.radius
+			};
+			double edgePt[2] = { 0.0, 0.0 };
+			if (UF_VIEW_map_model_to_drawing(view->Tag(), arcData.center, centerPt) == 0)
+			{
+				double drawingRadius = 0.0;
+				if (UF_VIEW_map_model_to_drawing(view->Tag(), edgeModelPt, edgePt) == 0)
+				{
+					const double rx = edgePt[0] - centerPt[0];
+					const double ry = edgePt[1] - centerPt[1];
+					drawingRadius = std::sqrt(rx * rx + ry * ry);
+				}
+				inside = centerPt[0] >= minX - drawingRadius && centerPt[0] <= maxX + drawingRadius &&
+					centerPt[1] >= minY - drawingRadius && centerPt[1] <= maxY + drawingRadius;
+			}
+		}
+	}
+	else
+	{
+		inside = true;
+	}
+
+	UF_EVAL_free(evaluator);
+	return inside;
+}
+
+std::unordered_set<tag_t> CollectVisibleFaceTags(NXOpen::Drawings::DraftingView* view)
+{
+	std::unordered_set<tag_t> visibleFaceTags;
+	if (view == NULL)
+	{
+		return visibleFaceTags;
+	}
+
+	const std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(view);
+	for (size_t i = 0; i < curves.size(); ++i)
+	{
+		if (curves[i] == NULL)
+		{
+			continue;
+		}
+		NXOpen::Drawings::DraftingCurveInfo* curveInfo = curves[i]->GetDraftingCurveInfo();
+		if (curveInfo == NULL)
+		{
+			continue;
+		}
+		const std::vector<NXOpen::NXObject*> parents = curveInfo->GetParents();
+		delete curveInfo;
+		for (size_t j = 0; j < parents.size(); ++j)
+		{
+			if (parents[j] == NULL)
+			{
+				continue;
+			}
+			int type = 0;
+			int subtype = 0;
+			UF_OBJ_ask_type_and_subtype(parents[j]->Tag(), &type, &subtype);
+			if (subtype == UF_solid_face_subtype)
+			{
+				visibleFaceTags.insert(parents[j]->Tag());
+			}
+			else if (subtype == UF_solid_edge_subtype)
+			{
+				NXOpen::Edge* edge = dynamic_cast<NXOpen::Edge*>(NXOpen::NXObjectManager::Get(parents[j]->Tag()));
+				if (edge != NULL)
+				{
+					const std::vector<NXOpen::Face*> edgeFaces = edge->GetFaces();
+					for (size_t k = 0; k < edgeFaces.size(); ++k)
+					{
+						if (edgeFaces[k] != NULL)
+						{
+							visibleFaceTags.insert(edgeFaces[k]->Tag());
+						}
+					}
+				}
+			}
+		}
+	}
+	return visibleFaceTags;
+}
+
+bool IsFaceVisibleInView(NXOpen::Face* face, const std::unordered_set<tag_t>& visibleFaceTags)
+{
+	return face != NULL && visibleFaceTags.find(face->Tag()) != visibleFaceTags.end();
 }
 
 double MeasureMinimumDistance(NXOpen::Part* part, NXOpen::NXObject* firstObject, NXOpen::NXObject* secondObject)
@@ -83,7 +469,7 @@ double MeasureMinimumDistance(NXOpen::Part* part, NXOpen::NXObject* firstObject,
 }
 
 bool MapModelPointToDrawing(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	const double modelPoint[3],
 	double drawingPoint[2])
 {
@@ -97,7 +483,7 @@ bool MapModelPointToDrawing(
 }
 
 bool AreModelPointsCoincidentInDrawing(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	const double firstPoint[3],
 	const double secondPoint[3],
 	double tolerance)
@@ -180,7 +566,7 @@ bool SegmentsIntersect(const Segment2d& first, const Segment2d& second, double t
 }
 
 double ComputeObstaclePenalty(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	const double* drawingPoint,
 	const NXOpen::Point3d& candidateOrigin)
 {
@@ -223,7 +609,7 @@ double ComputeObstaclePenalty(
 }
 
 bool CandidateRouteIntersectsObstacle(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	const double* drawingPoint,
 	const NXOpen::Point3d& candidateOrigin)
 {
@@ -296,7 +682,13 @@ bool CurveReferencesFaceOrEdge(
 		return false;
 	}
 
-	const std::vector<NXOpen::NXObject*> parents = draftingCurve->GetDraftingCurveInfo()->GetParents();
+	NXOpen::Drawings::DraftingCurveInfo* curveInfo = draftingCurve->GetDraftingCurveInfo();
+	if (curveInfo == NULL)
+	{
+		return false;
+	}
+	const std::vector<NXOpen::NXObject*> parents = curveInfo->GetParents();
+	delete curveInfo;
 	for (size_t i = 0; i < parents.size(); ++i)
 	{
 		if (parents[i] == NULL)
@@ -314,7 +706,7 @@ bool CurveReferencesFaceOrEdge(
 }
 
 double ComputeDrawingCurveProjectedLength(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Drawings::DraftingCurve* draftingCurve)
 {
 	if (baseView == NULL || draftingCurve == NULL)
@@ -373,7 +765,7 @@ bool TryGetLineCurveAnchorPoint(
 }
 
 bool TryGetLineCurveData(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Drawings::DraftingCurve* draftingCurve,
 	UF_CURVE_line_t& lineData,
 	double startDrawingPoint[2],
@@ -445,7 +837,7 @@ void Normalize2d(double& x, double& y)
 }
 
 bool TryBuildInsideAnglePlacement(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Drawings::DraftingCurve* firstCurve,
 	NXOpen::Drawings::DraftingCurve* secondCurve,
 	NXOpen::Point3d& firstAnchorPoint,
@@ -508,7 +900,7 @@ bool TryBuildInsideAnglePlacement(
 }
 
 NXOpen::Drawings::DraftingCurve* FindRepresentativeLineCurveForFace(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Face* face)
 {
 	if (baseView == NULL || face == NULL)
@@ -538,7 +930,7 @@ NXOpen::Drawings::DraftingCurve* FindRepresentativeLineCurveForFace(
 		}
 
 		const double length = ComputeDrawingCurveProjectedLength(baseView, candidate);
-		if (length > bestLength && length > 0.5)
+		if (length > bestLength && length > 0.01)
 		{
 			bestLength = length;
 			bestCurve = candidate;
@@ -547,8 +939,91 @@ NXOpen::Drawings::DraftingCurve* FindRepresentativeLineCurveForFace(
 	return bestCurve;
 }
 
+NXOpen::Drawings::DraftingCurve* FindRepresentativeArcCurveForFace(
+	NXOpen::Drawings::DraftingView* baseView,
+	NXOpen::Face* face)
+{
+	if (baseView == NULL || face == NULL)
+	{
+		return NULL;
+	}
+
+	double facePoint[3] = { 0.0, 0.0, 0.0 };
+	double dir[3] = { 0.0, 0.0, 0.0 };
+	double box[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+	double radius = 0.0;
+	double radData = 0.0;
+	int faceType = 0;
+	int normDir = 0;
+	if (UF_MODL_ask_face_data(face->Tag(), &faceType, facePoint, dir, box, &radius, &radData, &normDir) != 0 ||
+		faceType != UF_MODL_CYLINDRICAL_FACE ||
+		radius <= 1e-6)
+	{
+		return NULL;
+	}
+
+	double drawingPoint[2] = { 0.0, 0.0 };
+	const bool hasMappedFacePoint = UF_VIEW_map_model_to_drawing(baseView->Tag(), facePoint, drawingPoint) == 0;
+
+	std::unordered_set<tag_t> edgeTags;
+	const std::vector<NXOpen::Edge*> edges = face->GetEdges();
+	for (size_t i = 0; i < edges.size(); ++i)
+	{
+		if (edges[i] != NULL)
+		{
+			edgeTags.insert(edges[i]->Tag());
+		}
+	}
+
+	NXOpen::Drawings::DraftingCurve* bestCurve = NULL;
+	double bestScore = 1e18;
+	const std::vector<NXOpen::Drawings::DraftingCurve*> curves = CollectDraftingCurves(baseView);
+	for (size_t i = 0; i < curves.size(); ++i)
+	{
+		NXOpen::Drawings::DraftingCurve* candidate = curves[i];
+		if (!IsArcDraftingCurve(candidate) || !CurveReferencesFaceOrEdge(candidate, face->Tag(), edgeTags))
+		{
+			continue;
+		}
+
+		if (!hasMappedFacePoint)
+		{
+			return candidate;
+		}
+
+		UF_EVAL_p_t evaluator = NULL;
+		if (UF_EVAL_initialize(candidate->Tag(), &evaluator) != 0)
+		{
+			continue;
+		}
+		UF_EVAL_arc_t arcData;
+		const int askStatus = UF_EVAL_ask_arc(evaluator, &arcData);
+		UF_EVAL_free(evaluator);
+		if (askStatus != 0)
+		{
+			continue;
+		}
+
+		double curveCenter[2] = { 0.0, 0.0 };
+		if (UF_VIEW_map_model_to_drawing(baseView->Tag(), arcData.center, curveCenter) != 0)
+		{
+			continue;
+		}
+
+		const double score =
+			std::fabs(curveCenter[0] - drawingPoint[0]) +
+			std::fabs(curveCenter[1] - drawingPoint[1]);
+		if (score < bestScore)
+		{
+			bestScore = score;
+			bestCurve = candidate;
+		}
+	}
+	return bestCurve;
+}
+
 bool TryBuildOuterTangentAssociativityForFace(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Face* face,
 	double centerX,
 	double centerY,
@@ -668,7 +1143,7 @@ NXOpen::Point3d CreateCandidateOrigin(
 }
 
 std::string BuildLayoutKey(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	const double* drawingPoint,
 	double centerX,
 	double centerY)
@@ -684,7 +1159,7 @@ std::string BuildLayoutKey(
 }
 
 double AcquireLayeredOffset(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	const double* drawingPoint,
 	double centerX,
 	double centerY,
@@ -702,7 +1177,7 @@ double AcquireLayeredOffset(
 }
 
 NXOpen::Point3d BuildOffsetOrigin(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	const double* drawingPoint,
 	double centerX,
 	double centerY,
@@ -765,7 +1240,7 @@ NXOpen::Point3d BuildOffsetOrigin(
 }
 
 NXOpen::Point3d BuildOffsetOriginFromModelPoint(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	const double* modelPoint,
 	double centerX,
 	double centerY,
@@ -805,13 +1280,32 @@ void ApplyDefaultRapidDimensionStyle(NXOpen::Annotations::RapidDimensionBuilder*
 	builder->Style()->DimensionStyle()->SetNarrowDisplayType(NXOpen::Annotations::NarrowDisplayOptionNone);
 }
 
-NXOpen::NXObject* CommitAndDestroyRapidDimension(NXOpen::Annotations::RapidDimensionBuilder* builder)
+NXOpen::NXObject* CommitAndDestroyRapidDimension(NXOpen::Annotations::RapidDimensionBuilder* builder, const char* tagName = "RapidDim")
 {
 	if (builder == NULL)
 	{
 		return NULL;
 	}
-	NXOpen::NXObject* object = builder->Commit();
+	NXOpen::NXObject* object = NULL;
+	try
+	{
+		object = builder->Commit();
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		WriteDimDebugLog("[ZiDonBiaoZhu] %s Commit NXException: %s", tagName, ex.Message());
+		object = NULL;
+	}
+	catch (const std::exception& ex)
+	{
+		WriteDimDebugLog("[ZiDonBiaoZhu] %s Commit std::exception: %s", tagName, ex.what());
+		object = NULL;
+	}
+	catch (...)
+	{
+		WriteDimDebugLog("[ZiDonBiaoZhu] %s Commit unknown exception", tagName);
+		object = NULL;
+	}
 	builder->Destroy();
 	return object;
 }
@@ -823,7 +1317,7 @@ void ResetDimensionLayoutState()
 }
 
 void RegisterDimensionLayoutObstacles(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	const std::vector<NXOpen::Drawings::DraftingCurve*>& draftingCurves)
 {
 	if (baseView == NULL)
@@ -881,7 +1375,7 @@ void RegisterDimensionLayoutObstacles(
 }
 
 bool TryGetOuterTangentAssociativityForFace(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Face* face,
 	double centerX,
 	double centerY,
@@ -892,7 +1386,7 @@ bool TryGetOuterTangentAssociativityForFace(
 }
 
 bool CreateCurvePairAngleDimensionFromModelPoint(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Drawings::DraftingCurve* firstCurve,
 	NXOpen::Drawings::DraftingCurve* secondCurve,
 	const double modelPoint[3],
@@ -947,13 +1441,25 @@ bool CreateCurvePairAngleDimensionFromModelPoint(
 		nullView,
 		hasInsidePlacement ? originPoint : BuildOffsetOriginFromModelPoint(baseView, modelPoint, centerX, centerY, 7.0));
 
-	NXOpen::NXObject* object = builder->Commit();
+	NXOpen::NXObject* object = NULL;
+	try
+	{
+		object = builder->Commit();
+	}
+	catch (const std::exception&)
+	{
+		object = NULL;
+	}
+	catch (...)
+	{
+		object = NULL;
+	}
 	builder->Destroy();
 	return object != NULL;
 }
 
 NXOpen::Annotations::IntersectionSymbol* CreateIntersectionSymbol(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Drawings::DraftingCurve* firstCurve,
 	NXOpen::Drawings::DraftingCurve* secondCurve)
 {
@@ -971,7 +1477,19 @@ NXOpen::Annotations::IntersectionSymbol* CreateIntersectionSymbol(
 	builder->SetColor(part->Colors()->Find("Black"));
 	builder->IntersectionObject1()->SetValue(firstCurve, baseView, origin);
 	builder->IntersectionObject2()->SetValue(secondCurve, baseView, origin);
-	NXOpen::NXObject* object = builder->Commit();
+	NXOpen::NXObject* object = NULL;
+	try
+	{
+		object = builder->Commit();
+	}
+	catch (const std::exception&)
+	{
+		object = NULL;
+	}
+	catch (...)
+	{
+		object = NULL;
+	}
 	builder->Destroy();
 	return dynamic_cast<NXOpen::Annotations::IntersectionSymbol*>(object);
 }
@@ -984,7 +1502,7 @@ bool IsValidIntersectionSymbol(
 }
 
 bool CreateCurveEndToSymbolDimensionFromDrawingPoint(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Drawings::DraftingCurve* curve,
 	NXOpen::Annotations::IntersectionSymbol* symbol,
 	const double drawingPoint[2],
@@ -992,6 +1510,11 @@ bool CreateCurveEndToSymbolDimensionFromDrawingPoint(
 	double centerY)
 {
 	if (baseView == NULL || curve == NULL || symbol == NULL || drawingPoint == NULL)
+	{
+		return false;
+	}
+
+	if (IsDetailView(baseView) && !IsDraftingCurveInsideViewBorders(baseView, curve))
 	{
 		return false;
 	}
@@ -1025,12 +1548,11 @@ bool CreateCurveEndToSymbolDimensionFromDrawingPoint(
 		NULL,
 		nullView,
 		BuildOffsetOrigin(baseView, drawingPoint, centerX, centerY, 8.0, 4.0));
-	CommitAndDestroyRapidDimension(builder);
-	return true;
+	return CommitAndDestroyRapidDimension(builder, "CurveEndToSymbol") != NULL;
 }
 
 bool CreateSymbolToSymbolDimensionFromModelPoint(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Annotations::IntersectionSymbol* firstSymbol,
 	NXOpen::Annotations::IntersectionSymbol* secondSymbol,
 	const double modelPoint[3],
@@ -1064,8 +1586,34 @@ bool CreateSymbolToSymbolDimensionFromModelPoint(
 	return true;
 }
 
+bool IsFaceReferenceInsideDetailView(
+	NXOpen::Drawings::DraftingView* view,
+	NXOpen::Face* face)
+{
+	if (view == NULL || face == NULL)
+	{
+		return false;
+	}
+	int faceType = 0;
+	int normDir = 0;
+	double pt[3] = { 0.0, 0.0, 0.0 };
+	double dir[3] = { 0.0, 0.0, 0.0 };
+	double box[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+	double radius = 0.0;
+	double radData = 0.0;
+	if (UF_MODL_ask_face_data(face->Tag(), &faceType, pt, dir, box, &radius, &radData, &normDir) == 0 &&
+		faceType == UF_MODL_CYLINDRICAL_FACE)
+	{
+		NXOpen::Drawings::DraftingCurve* arcCurve = FindRepresentativeArcCurveForFace(view, face);
+		return arcCurve != NULL && IsDraftingCurveInsideViewBorders(view, arcCurve);
+	}
+
+	NXOpen::Drawings::DraftingCurve* lineCurve = FindRepresentativeLineCurveForFace(view, face);
+	return lineCurve != NULL && IsDraftingCurveInsideViewBorders(view, lineCurve);
+}
+
 bool CreateFaceToSymbolDimensionFromModelPoint(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Face* face,
 	NXOpen::Annotations::IntersectionSymbol* symbol,
 	const double modelPoint[3],
@@ -1077,6 +1625,12 @@ bool CreateFaceToSymbolDimensionFromModelPoint(
 		return false;
 	}
 
+	const bool isDetail = IsDetailView(baseView);
+	if (isDetail && !IsFaceReferenceInsideDetailView(baseView, face))
+	{
+		return false;
+	}
+
 	NXOpen::Annotations::RapidDimensionBuilder* builder = CreateRapidDimensionBuilder();
 	if (builder == NULL)
 	{
@@ -1088,7 +1642,8 @@ bool CreateFaceToSymbolDimensionFromModelPoint(
 	ApplyDefaultRapidDimensionStyle(builder);
 	NXOpen::Drawings::DraftingCurve* tangentCurve = NULL;
 	NXOpen::Point3d tangentPoint(0.0, 0.0, 0.0);
-	if (TryGetOuterTangentAssociativityForFace(baseView, face, centerX, centerY, tangentCurve, tangentPoint))
+	const bool usedTangent = TryGetOuterTangentAssociativityForFace(baseView, face, centerX, centerY, tangentCurve, tangentPoint);
+	if (usedTangent)
 	{
 		builder->FirstAssociativity()->SetValue(
 			NXOpen::InferSnapType::SnapTypeDrfTangent, tangentCurve, baseView, tangentPoint, NULL, nullView, point);
@@ -1099,16 +1654,36 @@ bool CreateFaceToSymbolDimensionFromModelPoint(
 	}
 	builder->SecondAssociativity()->SetValue(
 		NXOpen::InferSnapType::SnapTypeExist, symbol, baseView, point, NULL, nullView, point);
-	builder->Origin()->Origin()->SetValue(
-		NULL,
-		nullView,
-		BuildOffsetOriginFromModelPoint(baseView, modelPoint, centerX, centerY, 5.0));
-	CommitAndDestroyRapidDimension(builder);
-	return true;
+	const NXOpen::Point3d originPoint = BuildOffsetOriginFromModelPoint(baseView, modelPoint, centerX, centerY, 5.0);
+	builder->Origin()->Origin()->SetValue(NULL, nullView, originPoint);
+	if (CommitAndDestroyRapidDimension(builder, "FaceToSymbol") != NULL)
+	{
+		return true;
+	}
+
+	if (!usedTangent && IsSectionOrDetailView(baseView))
+	{
+		NXOpen::Drawings::DraftingCurve* lineCurve = FindRepresentativeLineCurveForFace(baseView, face);
+		NXOpen::Point3d anchorPoint(0.0, 0.0, 0.0);
+		if (lineCurve != NULL && TryGetLineCurveAnchorPoint(lineCurve, anchorPoint))
+		{
+			NXOpen::Annotations::RapidDimensionBuilder* fallbackBuilder = CreateRapidDimensionBuilder();
+			if (fallbackBuilder != NULL)
+			{
+				ApplyDefaultRapidDimensionStyle(fallbackBuilder);
+				fallbackBuilder->FirstAssociativity()->SetValue(lineCurve, baseView, anchorPoint);
+				fallbackBuilder->SecondAssociativity()->SetValue(
+					NXOpen::InferSnapType::SnapTypeExist, symbol, baseView, point, NULL, nullView, point);
+				fallbackBuilder->Origin()->Origin()->SetValue(NULL, nullView, originPoint);
+				return CommitAndDestroyRapidDimension(fallbackBuilder, "FaceToSymbolFallback") != NULL;
+			}
+		}
+	}
+	return false;
 }
 
 bool CreateFaceToObjectDimensionFromModelPoint(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Face* firstFace,
 	NXOpen::DisplayableObject* secondObject,
 	const double modelPoint[3],
@@ -1120,6 +1695,31 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 		return false;
 	}
 
+	NXOpen::Face* secondFace = dynamic_cast<NXOpen::Face*>(secondObject);
+	const bool isDetail = IsDetailView(baseView);
+	if (isDetail)
+	{
+		if (!IsFaceReferenceInsideDetailView(baseView, firstFace))
+		{
+			return false;
+		}
+		if (secondFace != NULL)
+		{
+			if (!IsFaceReferenceInsideDetailView(baseView, secondFace))
+			{
+				return false;
+			}
+		}
+		else
+		{
+			NXOpen::Drawings::DraftingCurve* secondCurve = dynamic_cast<NXOpen::Drawings::DraftingCurve*>(secondObject);
+			if (secondCurve != NULL && !IsDraftingCurveInsideViewBorders(baseView, secondCurve))
+			{
+				return false;
+			}
+		}
+	}
+
 	NXOpen::Annotations::RapidDimensionBuilder* builder = CreateRapidDimensionBuilder();
 	if (builder == NULL)
 	{
@@ -1129,45 +1729,115 @@ bool CreateFaceToObjectDimensionFromModelPoint(
 	NXOpen::Point3d point(0.0, 0.0, 0.0);
 	NXOpen::View* nullView(NULL);
 	ApplyDefaultRapidDimensionStyle(builder);
-	NXOpen::Drawings::DraftingCurve* tangentCurve = NULL;
-	NXOpen::Point3d tangentPoint(0.0, 0.0, 0.0);
-	if (TryGetOuterTangentAssociativityForFace(baseView, firstFace, centerX, centerY, tangentCurve, tangentPoint))
+	NXOpen::Drawings::DraftingCurve* firstTangentCurve = NULL;
+	NXOpen::Point3d firstTangentPoint(0.0, 0.0, 0.0);
+	const bool firstUsedTangent = TryGetOuterTangentAssociativityForFace(baseView, firstFace, centerX, centerY, firstTangentCurve, firstTangentPoint);
+	if (firstUsedTangent)
 	{
 		builder->FirstAssociativity()->SetValue(
-			NXOpen::InferSnapType::SnapTypeDrfTangent, tangentCurve, baseView, tangentPoint, NULL, nullView, point);
+			NXOpen::InferSnapType::SnapTypeDrfTangent, firstTangentCurve, baseView, firstTangentPoint, NULL, nullView, point);
 	}
 	else
 	{
 		builder->FirstAssociativity()->SetValue(firstFace, baseView, point);
 	}
 
-	NXOpen::Face* secondFace = dynamic_cast<NXOpen::Face*>(secondObject);
-	if (secondFace != NULL &&
-		TryGetOuterTangentAssociativityForFace(baseView, secondFace, centerX, centerY, tangentCurve, tangentPoint))
+	NXOpen::Drawings::DraftingCurve* secondTangentCurve = NULL;
+	NXOpen::Point3d secondTangentPoint(0.0, 0.0, 0.0);
+	const bool secondUsedTangent = secondFace != NULL &&
+		TryGetOuterTangentAssociativityForFace(baseView, secondFace, centerX, centerY, secondTangentCurve, secondTangentPoint);
+	if (secondUsedTangent)
 	{
 		builder->SecondAssociativity()->SetValue(
-			NXOpen::InferSnapType::SnapTypeDrfTangent, tangentCurve, baseView, tangentPoint, NULL, nullView, point);
+			NXOpen::InferSnapType::SnapTypeDrfTangent, secondTangentCurve, baseView, secondTangentPoint, NULL, nullView, point);
 	}
 	else
 	{
 		builder->SecondAssociativity()->SetValue(
 			NXOpen::InferSnapType::SnapTypeExist, secondObject, baseView, point, NULL, nullView, point);
 	}
-	builder->Origin()->Origin()->SetValue(
-		NULL,
-		nullView,
-		BuildOffsetOriginFromModelPoint(baseView, modelPoint, centerX, centerY, 5.0));
-	CommitAndDestroyRapidDimension(builder);
-	return true;
+	const NXOpen::Point3d originPoint = BuildOffsetOriginFromModelPoint(baseView, modelPoint, centerX, centerY, 5.0);
+	builder->Origin()->Origin()->SetValue(NULL, nullView, originPoint);
+	if (CommitAndDestroyRapidDimension(builder, "FaceToObject") != NULL)
+	{
+		WriteDimDebugLog("[ZiDonBiaoZhu] FaceToObject OK (native Face) first=%u second=%u",
+			static_cast<unsigned int>(firstFace->Tag()), static_cast<unsigned int>(secondObject->Tag()));
+		return true;
+	}
+
+	if (IsSectionOrDetailView(baseView))
+	{
+		NXOpen::Annotations::RapidDimensionBuilder* fallbackBuilder = CreateRapidDimensionBuilder();
+		if (fallbackBuilder != NULL)
+		{
+			ApplyDefaultRapidDimensionStyle(fallbackBuilder);
+			if (firstUsedTangent)
+			{
+				fallbackBuilder->FirstAssociativity()->SetValue(
+					NXOpen::InferSnapType::SnapTypeDrfTangent, firstTangentCurve, baseView, firstTangentPoint, NULL, nullView, point);
+			}
+			else
+			{
+				NXOpen::Drawings::DraftingCurve* lineCurve1 = FindRepresentativeLineCurveForFace(baseView, firstFace);
+				NXOpen::Point3d anchor1(0.0, 0.0, 0.0);
+				if (lineCurve1 != NULL && TryGetLineCurveAnchorPoint(lineCurve1, anchor1))
+				{
+					fallbackBuilder->FirstAssociativity()->SetValue(lineCurve1, baseView, anchor1);
+				}
+				else
+				{
+					fallbackBuilder->FirstAssociativity()->SetValue(firstFace, baseView, point);
+				}
+			}
+
+			if (secondUsedTangent)
+			{
+				fallbackBuilder->SecondAssociativity()->SetValue(
+					NXOpen::InferSnapType::SnapTypeDrfTangent, secondTangentCurve, baseView, secondTangentPoint, NULL, nullView, point);
+			}
+			else if (secondFace != NULL)
+			{
+				NXOpen::Drawings::DraftingCurve* lineCurve2 = FindRepresentativeLineCurveForFace(baseView, secondFace);
+				NXOpen::Point3d anchor2(0.0, 0.0, 0.0);
+				if (lineCurve2 != NULL && TryGetLineCurveAnchorPoint(lineCurve2, anchor2))
+				{
+					fallbackBuilder->SecondAssociativity()->SetValue(lineCurve2, baseView, anchor2);
+				}
+				else
+				{
+					fallbackBuilder->SecondAssociativity()->SetValue(secondFace, baseView, point);
+				}
+			}
+			else
+			{
+				fallbackBuilder->SecondAssociativity()->SetValue(
+					NXOpen::InferSnapType::SnapTypeExist, secondObject, baseView, point, NULL, nullView, point);
+			}
+
+			fallbackBuilder->Origin()->Origin()->SetValue(NULL, nullView, originPoint);
+			const bool fallbackOk = CommitAndDestroyRapidDimension(fallbackBuilder, "FaceToObjectFallback") != NULL;
+			WriteDimDebugLog("[ZiDonBiaoZhu] FaceToObjectFallback %s first=%u second=%u",
+				fallbackOk ? "OK" : "FAIL",
+				static_cast<unsigned int>(firstFace->Tag()), static_cast<unsigned int>(secondObject->Tag()));
+			return fallbackOk;
+		}
+	}
+	return false;
 }
 
 bool CreateRadialDimensionAtDrawingPoint(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Face* face,
 	const double drawingPoint[2])
 {
 	NXOpen::Part* part = CurrentWorkPart();
 	if (part == NULL || baseView == NULL || face == NULL || drawingPoint == NULL)
+	{
+		return false;
+	}
+
+	const bool isDetail = IsDetailView(baseView);
+	if (isDetail && !IsFaceReferenceInsideDetailView(baseView, face))
 	{
 		return false;
 	}
@@ -1182,9 +1852,59 @@ bool CreateRadialDimensionAtDrawingPoint(
 
 	NXOpen::Point3d point(drawingPoint[0], drawingPoint[1], 0.0);
 	builder->FirstAssociativity()->SetValue(face, baseView, point);
-	NXOpen::NXObject* object = builder->Commit();
+	NXOpen::NXObject* object = NULL;
+	try
+	{
+		object = builder->Commit();
+	}
+	catch (const NXOpen::NXException& ex)
+	{
+		WriteDimDebugLog("[ZiDonBiaoZhu] RadialDim Commit NXException: %s", ex.Message());
+		object = NULL;
+	}
+	catch (const std::exception&)
+	{
+		object = NULL;
+	}
+	catch (...)
+	{
+		object = NULL;
+	}
 	builder->Destroy();
-	return object != NULL;
+	if (object != NULL)
+	{
+		return true;
+	}
+
+	if (IsSectionOrDetailView(baseView))
+	{
+		NXOpen::Drawings::DraftingCurve* arcCurve = FindRepresentativeArcCurveForFace(baseView, face);
+		if (arcCurve != NULL)
+		{
+			NXOpen::Annotations::RadialDimensionBuilder* fallbackBuilder =
+				part->Dimensions()->CreateRadialDimensionBuilder(nullDimension);
+			if (fallbackBuilder != NULL)
+			{
+				fallbackBuilder->FirstAssociativity()->SetValue(arcCurve, baseView, point);
+				try
+				{
+					object = fallbackBuilder->Commit();
+				}
+				catch (const NXOpen::NXException& ex)
+				{
+					WriteDimDebugLog("[ZiDonBiaoZhu] RadialDimFallback Commit NXException: %s", ex.Message());
+					object = NULL;
+				}
+				catch (...)
+				{
+					object = NULL;
+				}
+				fallbackBuilder->Destroy();
+				return object != NULL;
+			}
+		}
+	}
+	return false;
 }
 
 std::vector<NXOpen::Face*> CollectAdjacentFaces(
@@ -1249,7 +1969,7 @@ bool TryPromoteUniqueDimensionFace(
 OuterRadiusFaceGroups ClassifyOuterRadiusFacesForView(
 	NXOpen::Part* part,
 	const std::vector<NXOpen::Face*>& outerRadiusFaces,
-	NXOpen::Drawings::BaseView* baseView)
+	NXOpen::Drawings::DraftingView* baseView)
 {
 	OuterRadiusFaceGroups groups;
 	if (part == NULL || baseView == NULL)
@@ -1344,7 +2064,7 @@ void CollectFirstCutDimensionFacesForView(
 }
 
 NXOpen::Face* FindInnerRFaceSharingDrawingCenter(
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	NXOpen::Face* outerFace,
 	const std::vector<NXOpen::Face*>& innerRadiusFaces)
 {
@@ -1378,7 +2098,7 @@ std::vector<NXOpen::Annotations::IntersectionSymbol*> CreateNot90IntersectionSym
 	const std::vector<NXOpen::Face*>& waiRFaceNot90,
 	const std::vector<NXOpen::Face*>& xingLinFace,
 	const std::vector<NXOpen::Drawings::DraftingCurve*>& draftingCurves,
-	NXOpen::Drawings::BaseView* baseView)
+	NXOpen::Drawings::DraftingView* baseView)
 {
 	std::vector<NXOpen::Annotations::IntersectionSymbol*> symbols(waiRFaceNot90.size(), NULL);
 	NXOpen::Part* part = CurrentWorkPart();
@@ -1440,49 +2160,58 @@ std::vector<NXOpen::Annotations::IntersectionSymbol*> CreateNot90IntersectionSym
 					break;
 				}
 			}
-			if (!foundReferenceLine)
+			bool foundCurveForFace = false;
+			if (foundReferenceLine)
 			{
-				continue;
+				for (size_t b = 0; b < draftingCurves.size(); b++)
+				{
+					UF_EVAL_p_t evaluator = NULL;
+					logical isLine = false;
+					if (UF_EVAL_initialize(draftingCurves[b]->Tag(), &evaluator) != 0)
+					{
+						continue;
+					}
+					UF_EVAL_is_line(evaluator, &isLine);
+					UF_EVAL_free(evaluator);
+					if (!isLine)
+					{
+						continue;
+					}
+
+					UF_CURVE_line_t lineCoords;
+					UF_CURVE_ask_line_data(draftingCurves[b]->Tag(), &lineCoords);
+					double pointa1[2];
+					double pointa2[2];
+					if (!MapModelPointToDrawing(baseView, lineCoords.start_point, pointa1) ||
+						!MapModelPointToDrawing(baseView, lineCoords.end_point, pointa2))
+					{
+						continue;
+					}
+					const bool sameDirection =
+						std::fabs(firstLineStart[0] - pointa1[0]) < 0.001 &&
+						std::fabs(firstLineStart[1] - pointa1[1]) < 0.001 &&
+						std::fabs(firstLineEnd[0] - pointa2[0]) < 0.001 &&
+						std::fabs(firstLineEnd[1] - pointa2[1]) < 0.001;
+					const bool oppositeDirection =
+						std::fabs(firstLineStart[0] - pointa2[0]) < 0.001 &&
+						std::fabs(firstLineStart[1] - pointa2[1]) < 0.001 &&
+						std::fabs(firstLineEnd[0] - pointa1[0]) < 0.001 &&
+						std::fabs(firstLineEnd[1] - pointa1[1]) < 0.001;
+					if (sameDirection || oppositeDirection)
+					{
+						intersectionCurves.push_back(draftingCurves[b]);
+						foundCurveForFace = true;
+						break;
+					}
+				}
 			}
-
-			for (size_t b = 0; b < draftingCurves.size(); b++)
+			if (!foundCurveForFace && IsSectionOrDetailView(baseView))
 			{
-				UF_EVAL_p_t evaluator = NULL;
-				logical isLine = false;
-				if (UF_EVAL_initialize(draftingCurves[b]->Tag(), &evaluator) != 0)
+				NXOpen::Drawings::DraftingCurve* fallbackCurve = FindRepresentativeLineCurveForFace(baseView, xingLinFace[a]);
+				if (fallbackCurve != NULL &&
+					std::find(intersectionCurves.begin(), intersectionCurves.end(), fallbackCurve) == intersectionCurves.end())
 				{
-					continue;
-				}
-				UF_EVAL_is_line(evaluator, &isLine);
-				UF_EVAL_free(evaluator);
-				if (!isLine)
-				{
-					continue;
-				}
-
-				UF_CURVE_line_t lineCoords;
-				UF_CURVE_ask_line_data(draftingCurves[b]->Tag(), &lineCoords);
-				double pointa1[2];
-				double pointa2[2];
-				if (!MapModelPointToDrawing(baseView, lineCoords.start_point, pointa1) ||
-					!MapModelPointToDrawing(baseView, lineCoords.end_point, pointa2))
-				{
-					continue;
-				}
-				const bool sameDirection =
-					std::fabs(firstLineStart[0] - pointa1[0]) < 0.001 &&
-					std::fabs(firstLineStart[1] - pointa1[1]) < 0.001 &&
-					std::fabs(firstLineEnd[0] - pointa2[0]) < 0.001 &&
-					std::fabs(firstLineEnd[1] - pointa2[1]) < 0.001;
-				const bool oppositeDirection =
-					std::fabs(firstLineStart[0] - pointa2[0]) < 0.001 &&
-					std::fabs(firstLineStart[1] - pointa2[1]) < 0.001 &&
-					std::fabs(firstLineEnd[0] - pointa1[0]) < 0.001 &&
-					std::fabs(firstLineEnd[1] - pointa1[1]) < 0.001;
-				if (sameDirection || oppositeDirection)
-				{
-					intersectionCurves.push_back(draftingCurves[b]);
-					break;
+					intersectionCurves.push_back(fallbackCurve);
 				}
 			}
 		}
@@ -1490,6 +2219,24 @@ std::vector<NXOpen::Annotations::IntersectionSymbol*> CreateNot90IntersectionSym
 		if (intersectionCurves.size() < 2 || intersectionCurves[0] == NULL || intersectionCurves[1] == NULL)
 		{
 			continue;
+		}
+
+		if (IsDetailView(baseView))
+		{
+			UF_CURVE_line_t firstLineData;
+			UF_CURVE_line_t secondLineData;
+			double firstStart[2] = { 0.0, 0.0 };
+			double firstEnd[2] = { 0.0, 0.0 };
+			double secondStart[2] = { 0.0, 0.0 };
+			double secondEnd[2] = { 0.0, 0.0 };
+			double intersection[2] = { 0.0, 0.0 };
+			if (!TryGetLineCurveData(baseView, intersectionCurves[0], firstLineData, firstStart, firstEnd) ||
+				!TryGetLineCurveData(baseView, intersectionCurves[1], secondLineData, secondStart, secondEnd) ||
+				!TryIntersectDrawingLines(firstStart, firstEnd, secondStart, secondEnd, intersection) ||
+				!IsDrawingPointInsideViewBorders(baseView, intersection[0], intersection[1], 0.5))
+			{
+				continue;
+			}
 		}
 
 		double point1[3], dir[3], box[6], radius1, radData;
@@ -1517,7 +2264,7 @@ std::vector<NXOpen::Annotations::IntersectionSymbol*> CreateNot90IntersectionSym
 
 void AnnotateSideViewDimensionsFromAutomaticFlow(
 	NXOpen::Part* workPart,
-	NXOpen::Drawings::BaseView* baseView,
+	NXOpen::Drawings::DraftingView* baseView,
 	const std::vector<NXOpen::Face*>& outerRadiusFaces,
 	const std::vector<NXOpen::Face*>& adjacentPlanarFaces,
 	const std::vector<NXOpen::Face*>& innerRadiusFaces,
@@ -1538,10 +2285,43 @@ void AnnotateSideViewDimensionsFromAutomaticFlow(
 	ResetDimensionLayoutState();
 	RegisterDimensionLayoutObstacles(baseView, draftingCurves);
 
-	OuterRadiusFaceGroups outerRadiusGroups = ClassifyOuterRadiusFacesForView(workPart, outerRadiusFaces, baseView);
+	const bool isDetail = IsDetailView(baseView);
+	std::unordered_set<tag_t> visibleFaceTags = CollectVisibleFaceTags(baseView);
+	std::vector<NXOpen::Face*> activeOuterRadiusFaces;
+	for (size_t i = 0; i < outerRadiusFaces.size(); ++i)
+	{
+		if (!IsFaceVisibleInView(outerRadiusFaces[i], visibleFaceTags))
+		{
+			continue;
+		}
+		if (isDetail)
+		{
+			NXOpen::Drawings::DraftingCurve* arcCurve = FindRepresentativeArcCurveForFace(baseView, outerRadiusFaces[i]);
+			if (arcCurve == NULL || !IsDraftingCurveInsideViewBorders(baseView, arcCurve))
+			{
+				continue;
+			}
+		}
+		activeOuterRadiusFaces.push_back(outerRadiusFaces[i]);
+	}
+
+	OuterRadiusFaceGroups outerRadiusGroups = ClassifyOuterRadiusFacesForView(workPart, activeOuterRadiusFaces, baseView);
 	std::vector<NXOpen::Face*> waiRFace90 = outerRadiusGroups.rightAngleFaces;
 	std::vector<NXOpen::Face*> waiRFaceNot90 = outerRadiusGroups.notRightAngleFaces;
 	std::vector<NXOpen::Face*> waiRFace180 = outerRadiusGroups.straightAngleFaces;
+	WriteDimDebugLog(
+		"[ZiDonBiaoZhu] viewTag=%u kind=%s outerR=%zu activeOuterR=%zu r90=%zu rNot90=%zu r180=%zu firstCutR=%zu secondCurves=%zu draftCurves=%zu visibleFaces=%zu",
+		static_cast<unsigned int>(baseView->Tag()),
+		isDetail ? "DetailView" : (IsSectionView(baseView) ? "SectionView" : "OtherView"),
+		outerRadiusFaces.size(),
+		activeOuterRadiusFaces.size(),
+		waiRFace90.size(),
+		waiRFaceNot90.size(),
+		waiRFace180.size(),
+		firstCutRadiusFaces.size(),
+		secondDimensionCurves.size(),
+		draftingCurves.size(),
+		visibleFaceTags.size());
 	std::vector<NXOpen::Annotations::IntersectionSymbol*> symbols =
 		CreateNot90IntersectionSymbols(waiRFaceNot90, adjacentPlanarFaces, draftingCurves, baseView);
 
@@ -1557,7 +2337,12 @@ void AnnotateSideViewDimensionsFromAutomaticFlow(
 	{
 		for (size_t i = 0; i < firstDimensionFaces.size(); i++)
 		{
-			if (i >= firstCutRadiusFaces.size() || i >= secondDimensionCurves.size())
+			if (i >= firstCutRadiusFaces.size() || i >= secondDimensionCurves.size() || secondDimensionCurves[i] == NULL)
+			{
+				continue;
+			}
+			if (!IsFaceVisibleInView(firstCutRadiusFaces[i], visibleFaceTags) ||
+				!IsFaceVisibleInView(firstDimensionFaces[i], visibleFaceTags))
 			{
 				continue;
 			}
@@ -1603,15 +2388,15 @@ void AnnotateSideViewDimensionsFromAutomaticFlow(
 		}
 	}
 
-	for (size_t i = 0; i < outerRadiusFaces.size(); i++)
+	for (size_t i = 0; i < activeOuterRadiusFaces.size(); i++)
 	{
 		double point1a[3], dir[3], box[6], radius1, radData, drawingPoint[2];
 		int type1, normDir;
-		UF_MODL_ask_face_data(outerRadiusFaces[i]->Tag(), &type1, point1a, dir, box, &radius1, &radData, &normDir);
+		UF_MODL_ask_face_data(activeOuterRadiusFaces[i]->Tag(), &type1, point1a, dir, box, &radius1, &radData, &normDir);
 		UF_VIEW_map_model_to_drawing(baseView->Tag(), point1a, drawingPoint);
 		if (radius1 - 0.5 > bodyThickness)
 		{
-			CreateRadialDimensionAtDrawingPoint(baseView, outerRadiusFaces[i], drawingPoint);
+			CreateRadialDimensionAtDrawingPoint(baseView, activeOuterRadiusFaces[i], drawingPoint);
 		}
 	}
 
@@ -1629,7 +2414,9 @@ void AnnotateSideViewDimensionsFromAutomaticFlow(
 			int type1, normDir;
 			UF_MODL_ask_face_data(waiRFace90[i]->Tag(), &type1, point1, dir, box, &radius1, &radData, &normDir);
 			UF_MODL_ask_face_data(waiRFace90[q]->Tag(), &type1, point2, dir, box, &radius1, &radData, &normDir);
-			if (dimensionFaces.size() == 1 && secondAdjacent.size() == 1)
+			if (dimensionFaces.size() == 1 && secondAdjacent.size() == 1 &&
+				IsFaceVisibleInView(dimensionFaces[0], visibleFaceTags) &&
+				IsFaceVisibleInView(secondAdjacent[0], visibleFaceTags))
 			{
 				CreateFaceToObjectDimensionFromModelPoint(
 					baseView,
@@ -1661,7 +2448,9 @@ void AnnotateSideViewDimensionsFromAutomaticFlow(
 					for (size_t c = 0; c < secondAdjacent.size(); c++)
 					{
 						double distance1 = MeasureMinimumDistance(workPart, innerAdjacent[0], secondAdjacent[c]);
-						if (std::fabs(distance1 - bodyThickness) < 0.01)
+						if (std::fabs(distance1 - bodyThickness) < 0.01 &&
+							IsFaceVisibleInView(innerDimensionFaces[0], visibleFaceTags) &&
+							IsFaceVisibleInView(secondAdjacent[c], visibleFaceTags))
 						{
 							CreateFaceToObjectDimensionFromModelPoint(
 								baseView,
@@ -1758,7 +2547,8 @@ void AnnotateSideViewDimensionsFromAutomaticFlow(
 			int type1, normDir;
 			UF_MODL_ask_face_data(waiRFace90[i]->Tag(), &type1, point1, dir, box, &radius1, &radData, &normDir);
 			UF_MODL_ask_face_data(waiRFaceNot90[q]->Tag(), &type1, point2, dir, box, &radius1, &radData, &normDir);
-			if (secondAdjacent.size() == 1 && dimensionFaces.size() == 1)
+			if (secondAdjacent.size() == 1 && dimensionFaces.size() == 1 &&
+				IsFaceVisibleInView(dimensionFaces[0], visibleFaceTags))
 			{
 				if (!IsValidIntersectionSymbol(symbols, q))
 				{
@@ -1791,7 +2581,8 @@ void AnnotateSideViewDimensionsFromAutomaticFlow(
 					for (size_t c = 0; c < secondAdjacent.size(); c++)
 					{
 						double distance1 = MeasureMinimumDistance(workPart, innerAdjacent[0], secondAdjacent[c]);
-						if (std::fabs(distance1 - bodyThickness) < 0.01)
+						if (std::fabs(distance1 - bodyThickness) < 0.01 &&
+							IsFaceVisibleInView(innerDimensionFaces[0], visibleFaceTags))
 						{
 							if (!IsValidIntersectionSymbol(symbols, q))
 							{
@@ -1825,7 +2616,9 @@ void AnnotateSideViewDimensionsFromAutomaticFlow(
 			int type1, normDir;
 			UF_MODL_ask_face_data(waiRFace90[i]->Tag(), &type1, point1, dir, box, &radius1, &radData, &normDir);
 			UF_MODL_ask_face_data(waiRFace180[q]->Tag(), &type1, point2, dir, box, &radius1, &radData, &normDir);
-			if (secondAdjacent.size() == 1 && dimensionFaces.size() == 1)
+			if (secondAdjacent.size() == 1 && dimensionFaces.size() == 1 &&
+				IsFaceVisibleInView(dimensionFaces[0], visibleFaceTags) &&
+				IsFaceVisibleInView(waiRFace180[q], visibleFaceTags))
 			{
 				CreateFaceToObjectDimensionFromModelPoint(
 					baseView,
@@ -1854,7 +2647,9 @@ void AnnotateSideViewDimensionsFromAutomaticFlow(
 					for (size_t c = 0; c < secondAdjacent.size(); c++)
 					{
 						double distance1 = MeasureMinimumDistance(workPart, innerAdjacent[0], secondAdjacent[c]);
-						if (std::fabs(distance1 - bodyThickness) < 0.01)
+						if (std::fabs(distance1 - bodyThickness) < 0.01 &&
+							IsFaceVisibleInView(innerDimensionFaces[0], visibleFaceTags) &&
+							IsFaceVisibleInView(secondAdjacent[c], visibleFaceTags))
 						{
 							CreateFaceToObjectDimensionFromModelPoint(
 								baseView,

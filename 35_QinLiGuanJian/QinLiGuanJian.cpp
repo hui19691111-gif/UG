@@ -3188,9 +3188,14 @@ tag_t QinLiGuanJian::ApplySharpCornerBoundingSubtract(
         return finalBodyTag;
     }
 
+    double bodyCenter[3] = { 0.0, 0.0, 0.0 };
+    const bool hasBodyCenter = AskBodyBoxCenter(finalBodyTag, bodyCenter);
+
     std::vector<tag_t> toolBodyTags;
     std::vector<tag_t> toolFeatureTags;
-    const std::string offsetText = "0";
+    const std::string innerAxialOffsetText = "0";
+    const std::string outerAxialOffsetText = "10";
+    const std::string crossSectionOffsetText = "0.5";
     for (std::set<tag_t>::const_iterator bIt = bSurfaceSet.begin(); bIt != bSurfaceSet.end(); ++bIt)
     {
         NXOpen::Face* bFace =
@@ -3199,6 +3204,30 @@ tag_t QinLiGuanJian::ApplySharpCornerBoundingSubtract(
         {
             DebugLog("sharp corner tooling box skipped invalid B-surface=" + TagToString(*bIt));
             continue;
+        }
+
+        std::string positiveXOffsetText = outerAxialOffsetText;
+        std::string negativeXOffsetText = innerAxialOffsetText;
+        FaceData bFaceData;
+        if (hasBodyCenter && GetFaceData(*bIt, bFaceData))
+        {
+            const double bFaceCenter[3] =
+            {
+                (bFaceData.box[0] + bFaceData.box[3]) * 0.5,
+                (bFaceData.box[1] + bFaceData.box[4]) * 0.5,
+                (bFaceData.box[2] + bFaceData.box[5]) * 0.5
+            };
+            const double toEnd[3] =
+            {
+                bFaceCenter[0] - bodyCenter[0],
+                bFaceCenter[1] - bodyCenter[1],
+                bFaceCenter[2] - bodyCenter[2]
+            };
+            if (Dot3(toEnd, longDirection) < 0.0)
+            {
+                positiveXOffsetText = innerAxialOffsetText;
+                negativeXOffsetText = outerAxialOffsetText;
+            }
         }
 
         NXOpen::Features::ToolingBoxBuilder* builder =
@@ -3218,12 +3247,12 @@ tag_t QinLiGuanJian::ApplySharpCornerBoundingSubtract(
             builder->SetType(NXOpen::Features::ToolingBoxBuilder::TypesBoundedBlock);
             builder->SetShowDimension(false);
             builder->SetSingleOffset(false);
-            builder->OffsetPositiveX()->SetFormula(offsetText.c_str());
-            builder->OffsetNegativeX()->SetFormula(offsetText.c_str());
-            builder->OffsetPositiveY()->SetFormula(offsetText.c_str());
-            builder->OffsetNegativeY()->SetFormula(offsetText.c_str());
-            builder->OffsetPositiveZ()->SetFormula(offsetText.c_str());
-            builder->OffsetNegativeZ()->SetFormula(offsetText.c_str());
+            builder->OffsetPositiveX()->SetFormula(positiveXOffsetText.c_str());
+            builder->OffsetNegativeX()->SetFormula(negativeXOffsetText.c_str());
+            builder->OffsetPositiveY()->SetFormula(crossSectionOffsetText.c_str());
+            builder->OffsetNegativeY()->SetFormula(crossSectionOffsetText.c_str());
+            builder->OffsetPositiveZ()->SetFormula(crossSectionOffsetText.c_str());
+            builder->OffsetNegativeZ()->SetFormula(crossSectionOffsetText.c_str());
             builder->SetBoxMatrixAndPosition(boxMatrix, boxOrigin);
 
             NXOpen::SelectionIntentRuleOptions* ruleOptions =

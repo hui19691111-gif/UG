@@ -38,7 +38,22 @@ target_link_libraries(StandardPartsLibrary PRIVATE
 add_custom_command(TARGET StandardPartsLibrary POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/StandardPartsLibrary.bmp"
-        "$<TARGET_FILE_DIR:StandardPartsLibrary>/StandardPartsLibrary.bmp")
+        "$<TARGET_FILE_DIR:StandardPartsLibrary>/StandardPartsLibrary.bmp"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/ZH_StdPart_FaceCenter.bmp"
+        "$<TARGET_FILE_DIR:StandardPartsLibrary>/ZH_StdPart_FaceCenter.bmp"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/ZH_StdPart_ArcCenter.bmp"
+        "$<TARGET_FILE_DIR:StandardPartsLibrary>/ZH_StdPart_ArcCenter.bmp"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/ZH_StdPart_Point.bmp"
+        "$<TARGET_FILE_DIR:StandardPartsLibrary>/ZH_StdPart_Point.bmp"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/ZH_StdPart_FacePoint.bmp"
+        "$<TARGET_FILE_DIR:StandardPartsLibrary>/ZH_StdPart_FacePoint.bmp"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/ZH_StdPart_CsysPos.bmp"
+        "$<TARGET_FILE_DIR:StandardPartsLibrary>/ZH_StdPart_CsysPos.bmp")
 add_custom_command(TARGET StandardPartsLibrary POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/StandardPartsLibrary.dlx"

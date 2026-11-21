@@ -29,7 +29,7 @@ struct ShortcutEntry
 
 struct ShortcutConfig
 {
-    bool enabled = true;
+    bool enabled = false;
     bool repeatOnEmptySpace = true;
     bool showHud = true;
     std::wstring toggleHotkey = L"ALT+F1";
@@ -315,13 +315,14 @@ inline std::vector<ShortcutEntry> DefaultShortcuts()
         {L"tbfx",    L"填补缝隙",         L"TianFenXI",              L"智辉插件", L"全部", true},
         {L"gjxj",    L"管件斜接处理",     L"QinLiGuanJian",          L"智辉插件", L"全部", true},
         {L"kjj",     L"快捷键设置",       L"KuaiJieJian",            L"智辉插件", L"全部", true},
+        {L"gcbz",    L"公差标注",         L"GonCaBiaoZu",            L"智辉插件", L"制图", true},
     };
 }
 
 inline ShortcutConfig DefaultShortcutConfig()
 {
     ShortcutConfig cfg;
-    cfg.enabled = true;
+    cfg.enabled = false;
     cfg.repeatOnEmptySpace = true;
     cfg.showHud = true;
     cfg.toggleHotkey = L"ALT+F1";

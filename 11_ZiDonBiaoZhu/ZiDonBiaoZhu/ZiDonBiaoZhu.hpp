@@ -93,6 +93,7 @@
 #include <NXOpen/View.hxx>
 #include <NXOpen/Xform.hxx>
 #include <NXOpen/Drawings_SectionView.hxx>
+#include <NXOpen/Drawings_DetailView.hxx>
 #include <NXOpen/NXObjectManager.hxx>
 #include <uf_eval.h>
 #include <NXOpen/ListingWindow.hxx>
